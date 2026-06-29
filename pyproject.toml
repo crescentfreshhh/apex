@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peaks"
+version = "0.1.0"
+description = "Find and play back the moments you actually care about in a Stash library."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+]
+
+# ML / pipeline dependencies are kept optional so the GraphQL plumbing
+# (step 1) installs light. Install with:  pip install -e ".[ml]"
+[project.optional-dependencies]
+ml = [
+    "torch",          # DINOv2 / CLIP inference
+    "numpy",
+    "pillow",
+    "scikit-learn",   # the Tier-2 taste classifier
+    "tqdm",
+]
+label = [
+    "gradio",         # the rapid frame-rating tool (Tier 2)
+]
+
+[project.scripts]
+peaks = "peaks.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,29 @@
+# Copy this file to `config.toml` and fill in your details.
+# `config.toml` is gitignored so your API key never lands in the repo.
+#
+# You can also override any of these with environment variables:
+#   STASH_URL, STASH_API_KEY
+
+[stash]
+# Base URL of your Stash server (no trailing /graphql — the client adds it).
+url = "http://192.168.1.2:6969"
+
+# API key from Stash → Settings → Security → Authentication.
+# Leave empty ("") if your Stash has no authentication configured.
+api_key = ""
+
+# Seconds before a GraphQL request times out.
+timeout = 30
+
+
+[sampling]
+# How often to sample a frame from each video, in seconds.
+# Smaller = finer time resolution but more frames to embed (slower, more cache).
+# 2.0 is a good default on GPU; bump to 4-5 on CPU.
+interval_seconds = 2.0
+
+
+[markers]
+# The tag name written onto scene markers this tool generates.
+# This is your "taste profile" label — rename freely (e.g. "peak", "taste:angle-x").
+tag_name = "peak"
