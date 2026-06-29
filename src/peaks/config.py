@@ -32,7 +32,7 @@ class SamplingConfig:
 
 @dataclass
 class MarkersConfig:
-    tag_name: str = "peak"
+    tag_name: str = "apex"
 
 
 @dataclass

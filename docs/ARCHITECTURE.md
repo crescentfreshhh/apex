@@ -8,10 +8,10 @@ A large, highly-curated Stash library where most scenes contain only a few
 moments worth watching (specific positions, angles, framing). We want to:
 
 1. Learn the user's visual taste from examples.
-2. Locate the matching timestamp-segments ("peaks") across the whole library.
+2. Locate the matching timestamp-segments ("apexes") across the whole library.
 3. Surface them as Stash scene markers.
 4. Play them back — a queue, and a "megaboard" grid of simultaneously looping
-   clips that continuously cycles in new peaks.
+   clips that continuously cycles in new apexes.
 
 ## Why this shape
 
@@ -33,16 +33,29 @@ moments worth watching (specific positions, angles, framing). We want to:
 | Megaboard playback | **Live-stream** (`?start=` seeks) initially | Avoid disk usage; modest grid (e.g. 3×3), direct stream where codec allows |
 | Language | **Python** for the brain | Where the ML lives |
 | Accelerator | **Borrow an RTX 3080 Ti for a burst** | GPU only needed for the one-time embedding pass |
+| Naming | **Opus** = platform, **apex** = unit | Locked |
+| Embedding | **DINOv2 + CLIP ensemble** | Structure *and* nameable attributes — both wanted |
 
 ## Key decisions (open / deferred)
 
-- **Embedding model**: leaning **DINOv2** over CLIP. CLIP optimizes image↔text
-  matching (semantic), weaker on geometric/compositional similarity. DINOv2 is
-  self-supervised and captures visual *structure* (poses, angles, framing) —
-  better fit. May ensemble with CLIP, and optionally add pose keypoints later.
 - **Tier 1 vs Tier 2**: build Tier 1 first (validate), then Tier 2.
-- **Final term/taxonomy**: "peak" is the working unit name; the marker tag is
-  the user's "taste profile" label (configurable; can have multiple).
+- **Per-profile channel weighting**: how DINOv2 vs CLIP vs detector signals get
+  combined per taste profile — tune once we see real scores.
+
+## Naming
+
+**Locked:** **Opus** = the platform (the curated collection + megaboard).
+**apex** = the unit (one good timestamp-segment); default marker tag name.
+
+Shortlist we considered, for the record:
+
+- *Summit family:* apex ✅, crest, zenith, acme, pinnacle, summit, climax
+- *Music family:* opus ✅, crescendo, coda, hook, the drop, refrain
+- *Gold family:* gold, paydirt, gem, nugget, prime, choice cut
+- *Heat family:* heat, fire, fuel, the sauce, spark
+
+Per-profile tags extend the unit name: `apex:position`, `apex:heels`,
+`apex:bodytype`, etc.
 
 ## The two tiers of taste learning
 
@@ -57,6 +70,50 @@ taste; CPU-cheap to retrain.
 
 **Segment post-processing** (both tiers): frame scores → moving-average smooth →
 hysteresis threshold → merge into segments with min/max length.
+
+## Embedding channels: what each one captures
+
+We embed every sampled frame through **two** channels and cache both:
+
+- **DINOv2** (self-supervised, no text) — captures visual *structure*: poses,
+  positions, camera angle, framing, body type. The model's strong suit and the
+  primary channel for the user's #1 target (position/angle).
+- **CLIP** (image↔text) — open-vocabulary, so it scores *nameable* concepts
+  ("high heels", "latex", "three people"). The channel for outfits/accessories.
+
+A frame embedding captures the overall **gestalt** — big dominant things come
+through strongly, small details get drowned out. So attribute by attribute:
+
+| Target attribute | Captured? | Best channel | Notes |
+|---|---|---|---|
+| Sex position / pose | ✅ strong | DINOv2 | large, structural |
+| Camera angle / framing | ✅ strong | DINOv2 | it *is* the composition |
+| Body type | ✅ good | DINOv2 | overall shape is a big signal |
+| Number of performers | 🟡 rough | person detector | embeddings sense "how many" loosely; a YOLO-class detector *counts* reliably |
+| Specific clothing (heels) | 🟡 weak alone | CLIP / clothing detector | tiny fraction of pixels; global embedding barely weights it |
+
+**Handling fine detail / multiple attributes:**
+
+1. **Ensemble** DINOv2 (structure) + CLIP (nameable) so each attribute rides the
+   channel that sees it.
+2. **Detectors** (person/footwear/clothing) for countable or small, locatable
+   things the embeddings miss.
+3. **Multiple taste profiles**, not one god-model: a `apex:position` profile, an
+   `apex:heels` profile, an `apex:bodytype` profile — each its own
+   tag/classifier — then combine at query time (e.g. position AND heels). More
+   controllable, each dialed independently.
+
+**Confound warning.** A classifier learns whatever *statistically separates*
+the yes/no sets — possibly things you didn't intend (a studio's color grade,
+resolution, lighting). Mitigation: **diverse negatives**, so the only consistent
+thing about the "yes" pile is the actual target. Watch for this at Tier-1
+validation.
+
+**Reference-material guidance.** A "reference frame" is a single still. Tier 1
+wants ~10–30 good ones; Tier 2 ideally a few hundred yes + a few hundred no
+(start ~100 each, grow). Diversity/quality beats raw count. Start with **one
+profile for the #1 thing** (position/angle), validate, then add CLIP/detector
+profiles for outfits and counts.
 
 ## Compute notes
 
@@ -77,7 +134,7 @@ shouldn't leave the box anyway. Stash URL + API key live only in the gitignored
 ## Future directions
 
 - **Stash plugin**: thin task trigger to kick off scoring from the Tasks page.
-- **Pre-cut clips / culling**: an exporter that turns peaks into an ffmpeg
+- **Pre-cut clips / culling**: an exporter that turns apexes into an ffmpeg
   keep-list (EDL) — for smoother megaboards and, eventually, removing
   non-taste footage. Non-destructive until explicitly chosen.
 - **Multiple taste profiles**: separate tags/classifiers for different moods.
