@@ -143,10 +143,19 @@ shouldn't leave the box anyway. Stash URL + API key live only in the gitignored
 
 ```
 src/peaks/
-  config.py        # TOML + env config loading
-  models.py        # dataclasses mirroring the Stash schema slice we use
-  stash_client.py  # GraphQL client: version, scene iteration, marker writes
-  cli.py           # `peaks test | scenes | stats`
+  config.py        # TOML + env config (stash, sampling, embedding, scoring, markers)
+  models.py        # dataclasses mirroring the Stash schema slice (+ fingerprints)
+  stash_client.py  # GraphQL: version, scene iteration, marker writes, stream URLs
+  sampling.py      # ffmpeg frame sampler (+ pure plan_timestamps)
+  embedding.py     # Embedder ABC; DINOv2, CLIP (lazy torch), FakeEmbedder
+  cache.py         # resumable on-disk embedding cache (.npz per scene, by fingerprint)
+  scoring.py       # similarity scoring + hysteresis segment extraction (pure numpy)
+  pipeline.py      # embed_library / score_library orchestration
+  cli.py           # `peaks test | scenes | stats | embed | score`
+tests/             # offline suite (fake embedder; no torch/ffmpeg/Stash needed)
 config.example.toml
 docs/ARCHITECTURE.md
 ```
+
+Schema note: GraphQL queries were verified against the current `stashapp/stash`
+`develop` schema (VideoFile, SceneMarker, SceneMarkerCreateInput all confirmed).

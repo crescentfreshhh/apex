@@ -48,6 +48,14 @@ class SceneFile:
     frame_rate: float | None
     video_codec: str | None
     size: int | None
+    fingerprints: dict[str, str] = field(default_factory=dict)
+
+    def fingerprint(self, *preferred: str) -> str | None:
+        """Best stable fingerprint, trying `preferred` types in order then any."""
+        for t in (*preferred, "oshash", "md5", "phash"):
+            if t in self.fingerprints:
+                return self.fingerprints[t]
+        return next(iter(self.fingerprints.values()), None)
 
     @classmethod
     def from_dict(cls, d: dict) -> "SceneFile":
@@ -61,6 +69,9 @@ class SceneFile:
             ),
             video_codec=d.get("video_codec"),
             size=(int(d["size"]) if d.get("size") is not None else None),
+            fingerprints={
+                fp["type"]: fp["value"] for fp in (d.get("fingerprints") or [])
+            },
         )
 
 
@@ -84,6 +95,11 @@ class Scene:
     def duration(self) -> float | None:
         pf = self.primary_file
         return pf.duration if pf else None
+
+    @property
+    def fingerprint(self) -> str | None:
+        pf = self.primary_file
+        return pf.fingerprint() if pf else None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Scene":

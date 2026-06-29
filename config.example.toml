@@ -28,3 +28,31 @@ interval_seconds = 2.0
 # An "apex" is one good timestamp-segment. For multiple taste profiles, give
 # each its own tag (e.g. "apex:position", "apex:heels", "apex:bodytype").
 tag_name = "apex"
+
+
+[embedding]
+# Which frame embedder to use:
+#   "dino" — DINOv2, visual structure (positions, angles, body type)
+#   "clip" — OpenCLIP, nameable attributes (outfits, heels)
+#   "fake" — deterministic stub for testing without torch
+model = "dino"
+# Where cached frame vectors live (gitignored). Embed once; reuse forever.
+cache_dir = "cache/embeddings"
+# "" = auto (CUDA if available, else CPU). Or force "cuda" / "cpu".
+device = ""
+batch_size = 64
+
+
+[scoring]
+# Tier-1 similarity scoring + segment extraction. Tune `high`/`low` after you
+# see a dry run (`peaks score` without --write).
+reduce = "max"          # "max" (specific) | "mean" (broader)
+smooth_window = 3       # moving-average window over per-frame scores
+high = 0.45             # enter a segment at/above this similarity
+low = 0.35              # stay in it until similarity drops below this
+min_duration = 3.0      # discard segments shorter than this (seconds)
+merge_gap = 2.0         # merge neighbouring segments closer than this (seconds)
+max_duration = 30.0     # split anything longer than this (0 = no cap)
+pad = 0.5               # pad each segment edge by this many seconds
+# Directory of example stills you love (the Tier-1 references). Gitignored.
+references_dir = "references"

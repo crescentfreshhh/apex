@@ -1,0 +1,133 @@
+"""Orchestration glue, exercised offline with fakes (no ffmpeg/torch/Stash)."""
+
+import numpy as np
+
+from peaks.cache import EmbeddingCache
+from peaks.config import ScoringConfig
+from peaks.embedding import FakeEmbedder
+from peaks.models import Scene
+from peaks.pipeline import embed_library, score_library, scene_key
+
+
+class _StubImage:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def tobytes(self) -> bytes:
+        return self._payload
+
+    def copy(self):
+        return self
+
+
+class _StubSampler:
+    """Yields a fixed set of (timestamp, image) pairs, ignoring the path."""
+
+    interval = 2.0
+
+    def __init__(self, frames):
+        self._frames = frames
+
+    def iter_frames(self, path):
+        for ts, img in self._frames:
+            yield ts, img
+
+
+class _CapturingClient:
+    def __init__(self):
+        self.markers = []
+
+    def find_or_create_tag(self, name):
+        return type("Tag", (), {"id": "tag1", "name": name})()
+
+    def create_scene_marker(self, *, scene_id, seconds, primary_tag_id, title, end_seconds):
+        self.markers.append((scene_id, seconds, end_seconds, title))
+
+
+def _scene(id_, path):
+    return Scene.from_dict(
+        {
+            "id": id_,
+            "title": "",
+            "files": [{"path": path, "duration": 50.0, "fingerprints": [
+                {"type": "oshash", "value": f"fp{id_}"}]}],
+            "scene_markers": [],
+        }
+    )
+
+
+def test_scene_key_prefers_fingerprint():
+    s = _scene("1", "/m/1.mp4")
+    assert scene_key(s) == "fp1"
+
+
+def test_embed_library_populates_cache_and_is_resumable(tmp_path):
+    emb = FakeEmbedder(dim=16)
+    frames = [(i * 2.0, _StubImage(f"f{i}".encode())) for i in range(5)]
+    sampler = _StubSampler(frames)
+    cache = EmbeddingCache(tmp_path)
+    scenes = [_scene("1", "/m/1.mp4"), _scene("2", "/m/2.mp4")]
+
+    stats = embed_library(scenes, sampler, emb, cache, log=lambda *_: None)
+    assert stats["embedded"] == 2 and stats["frames"] == 10
+    assert cache.has("fp1", "fake") and cache.has("fp2", "fake")
+
+    # second run skips everything already cached
+    stats2 = embed_library(scenes, sampler, emb, cache, log=lambda *_: None)
+    assert stats2["embedded"] == 0 and stats2["skipped"] == 2
+
+
+def _populate_loved_scene(cache, emb, key, loved_img):
+    """Cache a scene whose middle frames equal the loved reference frame."""
+    frames = [_StubImage(f"noise{i}".encode()) for i in range(20)]
+    for i in range(8, 12):
+        frames[i] = loved_img
+    vecs = emb.embed_images(frames)
+    times = np.arange(20, dtype=np.float32) * 2.0
+    cache.save(key, emb.name, times, vecs)
+
+
+def test_score_library_dry_run_finds_segment_without_writing(tmp_path):
+    emb = FakeEmbedder(dim=24)
+    cache = EmbeddingCache(tmp_path)
+    loved = _StubImage(b"loved")
+    _populate_loved_scene(cache, emb, "fp1", loved)
+    references = emb.embed_images([loved])
+
+    scoring = ScoringConfig(high=0.9, low=0.7, min_duration=2.0, merge_gap=2.0, smooth_window=1, pad=0.0)
+    stats = score_library(
+        [_scene("1", "/m/1.mp4")], cache, emb.name, references, scoring,
+        write=False, log=lambda *_: None,
+    )
+    assert stats["scenes"] == 1
+    assert stats["segments"] == 1  # the loved stretch
+
+
+def test_score_library_write_creates_markers(tmp_path):
+    emb = FakeEmbedder(dim=24)
+    cache = EmbeddingCache(tmp_path)
+    loved = _StubImage(b"loved")
+    _populate_loved_scene(cache, emb, "fp1", loved)
+    references = emb.embed_images([loved])
+    client = _CapturingClient()
+
+    scoring = ScoringConfig(high=0.9, low=0.7, min_duration=2.0, merge_gap=2.0, smooth_window=1, pad=0.0)
+    score_library(
+        [_scene("1", "/m/1.mp4")], cache, emb.name, references, scoring,
+        client=client, tag_name="apex", write=True, log=lambda *_: None,
+    )
+    assert len(client.markers) == 1
+    scene_id, start, end, title = client.markers[0]
+    assert scene_id == "1" and title == "apex"
+    assert start == 16.0 and end == 22.0  # frames 8-11 -> times 16..22
+
+
+def test_score_library_skips_uncached_scene(tmp_path):
+    emb = FakeEmbedder(dim=8)
+    cache = EmbeddingCache(tmp_path)
+    references = emb.embed_images([_StubImage(b"x")])
+    stats = score_library(
+        [_scene("404", "/m/404.mp4")], cache, emb.name, references,
+        ScoringConfig(), write=False, log=lambda *_: None,
+    )
+    assert stats["skipped"] == 1 and stats["scenes"] == 0

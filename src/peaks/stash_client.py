@@ -46,6 +46,7 @@ query FindScenes($filter: FindFilterType) {
         frame_rate
         video_codec
         size
+        fingerprints { type value }
       }
       scene_markers {
         id
@@ -186,6 +187,25 @@ class StashClient:
             input_obj["end_seconds"] = end_seconds
         data = self.execute(_SCENE_MARKER_CREATE, {"input": input_obj})
         return data["sceneMarkerCreate"]
+
+    # --- playback helpers (used by the megaboard) ---------------------------
+
+    def stream_url(self, scene_id: str, start: float | None = None) -> str:
+        """Direct-stream URL for a scene, optionally seeked to `start` seconds.
+
+        The megaboard points <video> tiles at these. `apikey` is appended as a
+        query param because <video> tags can't send the ApiKey header.
+        """
+        url = f"{self.base_url}/scene/{scene_id}/stream"
+        params = []
+        if start is not None:
+            params.append(f"start={start:g}")
+        api_key = self.session.headers.get("ApiKey")
+        if api_key:
+            params.append(f"apikey={api_key}")
+        if params:
+            url += "?" + "&".join(params)
+        return url
 
     @classmethod
     def from_config(cls, cfg) -> "StashClient":

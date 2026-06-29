@@ -44,12 +44,16 @@ for *nameable* attributes (outfits, heels, etc.). See
 
 | Step | What | Status |
 |-----:|------|--------|
-| 1 | **Plumbing** — config + GraphQL client that reads scenes/markers | ✅ this scaffold |
-| 2 | Frame sampler + DINOv2 **and CLIP** embedders, resumable, on-disk cache | ⬜ |
-| 3 | Tier-1 similarity scorer → writes `apex` markers to Stash | ⬜ |
+| 1 | **Plumbing** — config + GraphQL client that reads scenes/markers | ✅ |
+| 2 | Frame sampler + DINOv2 **and CLIP** embedders, resumable, on-disk cache | ✅ built, offline-tested* |
+| 3 | Tier-1 similarity scorer → `apex` markers (with dry-run) | ✅ built, offline-tested* |
 | 4 | Tier-2 rapid frame-labeler + trained taste classifier | ⬜ |
 | 5 | Megaboard web app (live-stream grid) | ⬜ |
 | — | *(later)* Stash plugin trigger; pre-cut/cull exporter | ⬜ |
+
+\* Logic is unit-tested with a deterministic fake embedder (no torch/ffmpeg/Stash
+needed). The real DINOv2/CLIP run and live marker-writing await first contact
+with the server + a GPU burst — that's the validation milestone.
 
 ## Setup
 
@@ -70,8 +74,9 @@ peaks test
 > ML dependencies (torch, etc.) are installed separately when we reach step 2:
 > `pip install -e ".[ml]"`
 
-## Usage (step 1)
+## Usage
 
+**Connect & inspect (step 1 — no ML deps):**
 ```bash
 peaks test              # verify connection + print Stash version & scene count
 peaks scenes            # list scenes: id, duration, marker count, title/path
@@ -79,8 +84,21 @@ peaks scenes --limit 20 # ...just the first 20
 peaks stats             # library summary (scenes, total hours, markers)
 ```
 
+**Embed & score (steps 2–3 — needs `pip install -e ".[ml]"` + ffmpeg):**
+```bash
+# 1. The GPU pass: sample frames and embed the whole library into the cache.
+#    Resumable — re-running skips anything already cached.
+peaks embed                     # or --limit 20 to try a slice first
+
+# 2. Drop ~10-30 stills you love into ./references/, then preview matches.
+#    Dry-run prints the segments it WOULD create — tune thresholds in config.
+peaks score                     # dry run, writes nothing
+peaks score --write             # write the apex markers into Stash
+peaks score --tag apex:heels --references ./refs-heels   # a second profile
+```
+
 Config resolves from environment variables first (`STASH_URL`, `STASH_API_KEY`),
-then `config.toml`, then built-in defaults.
+then `config.toml`, then built-in defaults. Run the test suite with `pytest`.
 
 ## A note on the names
 

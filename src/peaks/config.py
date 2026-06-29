@@ -36,10 +36,33 @@ class MarkersConfig:
 
 
 @dataclass
+class EmbeddingConfig:
+    model: str = "dino"  # "dino" | "clip" | "fake"
+    cache_dir: str = "cache/embeddings"
+    device: str = ""  # "" = auto (cuda if available)
+    batch_size: int = 64
+
+
+@dataclass
+class ScoringConfig:
+    reduce: str = "max"  # "max" | "mean"
+    smooth_window: int = 3
+    high: float = 0.45  # tune after Tier-1 validation
+    low: float = 0.35
+    min_duration: float = 3.0
+    merge_gap: float = 2.0
+    max_duration: float = 30.0
+    pad: float = 0.5
+    references_dir: str = "references"
+
+
+@dataclass
 class Config:
     stash: StashConfig = field(default_factory=StashConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     markers: MarkersConfig = field(default_factory=MarkersConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -53,6 +76,8 @@ class Config:
         stash_raw = raw.get("stash", {})
         sampling_raw = raw.get("sampling", {})
         markers_raw = raw.get("markers", {})
+        embedding_raw = raw.get("embedding", {})
+        scoring_raw = raw.get("scoring", {})
 
         stash = StashConfig(
             url=os.environ.get("STASH_URL", stash_raw.get("url", StashConfig.url)),
@@ -69,4 +94,35 @@ class Config:
         markers = MarkersConfig(
             tag_name=markers_raw.get("tag_name", MarkersConfig.tag_name)
         )
-        return cls(stash=stash, sampling=sampling, markers=markers)
+        embedding = EmbeddingConfig(
+            model=embedding_raw.get("model", EmbeddingConfig.model),
+            cache_dir=embedding_raw.get("cache_dir", EmbeddingConfig.cache_dir),
+            device=embedding_raw.get("device", EmbeddingConfig.device),
+            batch_size=int(embedding_raw.get("batch_size", EmbeddingConfig.batch_size)),
+        )
+        scoring = ScoringConfig(
+            reduce=scoring_raw.get("reduce", ScoringConfig.reduce),
+            smooth_window=int(
+                scoring_raw.get("smooth_window", ScoringConfig.smooth_window)
+            ),
+            high=float(scoring_raw.get("high", ScoringConfig.high)),
+            low=float(scoring_raw.get("low", ScoringConfig.low)),
+            min_duration=float(
+                scoring_raw.get("min_duration", ScoringConfig.min_duration)
+            ),
+            merge_gap=float(scoring_raw.get("merge_gap", ScoringConfig.merge_gap)),
+            max_duration=float(
+                scoring_raw.get("max_duration", ScoringConfig.max_duration)
+            ),
+            pad=float(scoring_raw.get("pad", ScoringConfig.pad)),
+            references_dir=scoring_raw.get(
+                "references_dir", ScoringConfig.references_dir
+            ),
+        )
+        return cls(
+            stash=stash,
+            sampling=sampling,
+            markers=markers,
+            embedding=embedding,
+            scoring=scoring,
+        )
