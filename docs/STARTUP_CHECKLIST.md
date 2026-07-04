@@ -1,5 +1,9 @@
 # Server-up checklist
 
+> **Unraid/Docker install?** Phases 0–2 are replaced by
+> [`SIMPLE_GUIDE.md`](SIMPLE_GUIDE.md) Parts A–B (GPU handover + container
+> install). Phases 3+ apply as-is, run from the container console.
+
 Run top to bottom on the machine where Stash + the video files + the borrowed
 GPU live. Each phase has a "✅ expect" so you know it worked before moving on.
 The starred phase (6) is the real validation milestone — don't full-send before it.

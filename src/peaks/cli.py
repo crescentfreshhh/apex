@@ -309,7 +309,10 @@ def cmd_label(args) -> int:
         interval_seconds=cfg.sampling.interval_seconds,
         hwaccel=cfg.sampling.hwaccel,
     )
-    launch_labeler(cands, store, profile, sampler.grab_frame, server_port=args.port)
+    launch_labeler(
+        cands, store, profile, sampler.grab_frame,
+        server_port=args.port, host=args.host,
+    )
     return 0
 
 
@@ -417,6 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--model", help="Seed candidates via this trained model")
     lp.add_argument("--limit", type=int, default=200, help="Max candidates (default 200)")
     lp.add_argument("--port", type=int, default=7860, help="Gradio port (default 7860)")
+    lp.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (use 0.0.0.0 inside a container)",
+    )
     lp.set_defaults(func=cmd_label)
 
     cp = sub.add_parser("clear", help="Delete generated markers for a tag")

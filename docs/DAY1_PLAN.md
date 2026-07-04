@@ -1,5 +1,10 @@
 # Day 1 plan — server's up
 
+> **Unraid/Docker install?** Setup lives in [`SIMPLE_GUIDE.md`](SIMPLE_GUIDE.md)
+> (Parts A–B replace the install/venv steps below). The *strategy* here — the
+> blocks, gates, and contingencies — still applies; run the commands in the
+> peaks container's console instead of a shell.
+
 A time-blocked session plan for the first day back. The phase-by-phase command
 reference lives in [`STARTUP_CHECKLIST.md`](STARTUP_CHECKLIST.md); this is the
 *strategy* for the day: what order, what runs in parallel, where the decision

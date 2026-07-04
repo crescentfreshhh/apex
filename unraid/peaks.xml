@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>peaks</Name>
+  <Repository>ghcr.io/crescentfreshhh/stasssh:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/crescentfreshhh/stasssh</Support>
+  <Project>https://github.com/crescentfreshhh/stasssh</Project>
+  <Overview>Opus/peaks — learns your taste from example stills, finds the matching moments across a Stash library, writes them back as scene markers, and plays them on a continuously-cycling "megaboard" grid (port 8800). All other commands (embed, score, label, train) run from this container's console. Requires the Nvidia Driver plugin + --runtime=nvidia for GPU embedding. IMPORTANT: the Media path below must be mounted at the SAME container path your Stash container uses, so file paths reported by Stash resolve here.</Overview>
+  <Category>MediaApp:Video Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8800]</WebUI>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--runtime=nvidia</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+
+  <Config Name="Megaboard (WebUI)" Target="8800" Default="8800" Mode="tcp" Description="The megaboard grid web page." Type="Port" Display="always" Required="true" Mask="false">8800</Config>
+  <Config Name="Labeler" Target="7860" Default="7860" Mode="tcp" Description="The Tier-2 frame-rating page (only live while 'peaks label' runs)." Type="Port" Display="always" Required="true" Mask="false">7860</Config>
+
+  <Config Name="Config / data" Target="/config" Default="/mnt/user/appdata/peaks" Mode="rw" Description="Settings, embedding cache, models, labels, reference stills." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/peaks</Config>
+  <Config Name="Media (match Stash's container path!)" Target="/data" Default="" Mode="ro" Description="Your video library. CRITICAL: set the host path to the same share Stash uses, and edit the container path ('/data') to whatever path your STASH container mounts it at — check your Stash container's settings. Read-only is fine." Type="Path" Display="always" Required="true" Mask="false"></Config>
+
+  <Config Name="STASH_URL" Target="STASH_URL" Default="http://192.168.1.2:6969" Mode="" Description="Base URL of your Stash server." Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.2:6969</Config>
+  <Config Name="STASH_API_KEY" Target="STASH_API_KEY" Default="" Mode="" Description="Stash &gt; Settings &gt; Security &gt; API Key. Leave empty if Stash has no auth." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="PEAKS_DEVICE" Target="PEAKS_DEVICE" Default="cuda" Mode="" Description="cuda = use the GPU for embedding; cpu = no GPU." Type="Variable" Display="always" Required="false" Mask="false">cuda</Config>
+
+  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Which GPU(s) the container may use ('all', or a GPU UUID from Settings &gt; Nvidia Driver)." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="Leave as 'all' (compute for embedding + video for NVDEC decode)." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+</Container>

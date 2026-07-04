@@ -1,7 +1,7 @@
 """Configuration loading.
 
 Resolution order (highest priority first):
-    1. Environment variables (STASH_URL, STASH_API_KEY)
+    1. Environment variables (STASH_URL, STASH_API_KEY, PEAKS_DEVICE)
     2. A TOML file (default: ./config.toml)
     3. Built-in defaults
 
@@ -111,7 +111,9 @@ class Config:
         embedding = EmbeddingConfig(
             model=embedding_raw.get("model", EmbeddingConfig.model),
             cache_dir=embedding_raw.get("cache_dir", EmbeddingConfig.cache_dir),
-            device=embedding_raw.get("device", EmbeddingConfig.device),
+            device=os.environ.get(
+                "PEAKS_DEVICE", embedding_raw.get("device", EmbeddingConfig.device)
+            ),
             batch_size=int(embedding_raw.get("batch_size", EmbeddingConfig.batch_size)),
         )
         scoring = ScoringConfig(

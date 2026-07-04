@@ -27,6 +27,7 @@ def launch_labeler(
     grab_frame: Callable[[str, float], "object"],
     *,
     server_port: int = 7860,
+    host: str = "127.0.0.1",
     share: bool = False,
 ) -> None:
     """Open the labeling UI over `candidates`, persisting verdicts to `store`."""
@@ -99,4 +100,4 @@ def launch_labeler(
         skip_btn.click(lambda: _record(0), outputs=[image, caption, _])
         demo.load(lambda: _render(state["i"]), outputs=[image, caption, _])
 
-    demo.launch(server_port=server_port, share=share)
+    demo.launch(server_name=host, server_port=server_port, share=share)

@@ -57,6 +57,13 @@ with the server + a GPU burst — that's the validation milestone.
 
 ## Setup
 
+**Running on Unraid / Docker?** That's the intended deployment: a GitHub
+Action publishes the image to `ghcr.io/crescentfreshhh/stasssh:latest`, and
+`unraid/peaks.xml` is a ready-made Unraid template (GPU via the Nvidia Driver
+plugin + `--runtime=nvidia`). Follow **[docs/SIMPLE_GUIDE.md](docs/SIMPLE_GUIDE.md)**
+— it covers everything including moving the GPU off a VM. The steps below are
+for a bare-metal/manual install.
+
 Requires Python 3.11+.
 
 ```bash

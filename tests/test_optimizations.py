@@ -216,6 +216,17 @@ def test_train_profile_reports_cv_auc(tmp_path):
     assert stats["cv_auc"] > 0.9  # separable clusters -> near-perfect AUC
 
 
+def test_peaks_device_env_override(monkeypatch, tmp_path):
+    from peaks.config import Config
+
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[embedding]\ndevice = "cpu"\n')
+    monkeypatch.setenv("PEAKS_DEVICE", "cuda")
+    assert Config.load(cfg_file).embedding.device == "cuda"  # env beats file
+    monkeypatch.delenv("PEAKS_DEVICE")
+    assert Config.load(cfg_file).embedding.device == "cpu"
+
+
 def test_train_profile_skips_cv_when_too_few(tmp_path):
     cache = EmbeddingCache(tmp_path)
     vecs = np.array([[1.0] * 4, [-1.0] * 4], dtype=np.float32)
