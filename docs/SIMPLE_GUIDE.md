@@ -196,6 +196,58 @@ To borrow the GPU again later (new videos to embed): repeat Part A steps 1–3
 - **Updates:** when Claude pushes changes, Unraid's Docker tab will show an
   update for peaks — click Update, done.
 
+## Many apexes — build up profiles over time
+
+You're not limited to one taste. Each **profile** is its own tag, its own
+example pictures, and (if you train one) its own model. `apex` is just the
+first. Add as many as you want, whenever you want — a positions one, a heels
+one, an angles one...
+
+**Name them with hyphens** (`apex-heels`, `apex-pov`, `apex-bodytype`) — then
+the folder name matches the tag exactly.
+
+To add a profile, say `apex-heels`:
+
+1. **Make its picture folder** inside references, named after the tag:
+
+   ```
+   \\<unraid-name>\appdata\peaks\references\apex-heels
+   ```
+
+   Drop 10–30 stills of *that specific thing* in there. (Pictures loose in
+   the main `references` folder stay with plain `apex` — subfolders don't mix.)
+
+2. **Score with its tag** (it finds the folder by itself):
+
+   ```
+   peaks score --tag apex-heels            # preview
+   peaks score --tag apex-heels --write    # save markers
+   ```
+
+   In Stash, these show up as markers tagged `apex-heels`, living happily
+   alongside your `apex` ones.
+
+3. **Optionally train it smarter**, same as before but with the tag:
+
+   ```
+   peaks label --tag apex-heels --host 0.0.0.0
+   peaks train --tag apex-heels
+   ```
+
+4. **Mix profiles on the megaboard** — repeat `--tag` for every profile you
+   want in the grid:
+
+   ```
+   peaks playlist --tag apex --tag apex-heels
+   ```
+
+   Or just one profile for a themed board: `peaks playlist --tag apex-heels`.
+
+The one-time work (the big overnight `peaks embed`) is **shared by all
+profiles** — new profiles only need pictures and a scoring pass, which takes
+minutes. Delete one profile's markers without touching the others:
+`peaks clear --tag apex-heels --write`.
+
 ## Cheat sheet (in the container console)
 
 | I want to... | Type |
@@ -207,6 +259,8 @@ To borrow the GPU again later (new videos to embed): repeat Part A steps 1–3
 | Delete the saved moments | `peaks clear --tag apex --write` |
 | Teach it my taste | `peaks label --host 0.0.0.0` then `peaks train` |
 | Refresh the megaboard | `peaks playlist`, then reload the page |
+| Add a new profile | folder `references\apex-<thing>`, then `peaks score --tag apex-<thing> --write` |
+| Mix profiles on the board | `peaks playlist --tag apex --tag apex-<thing>` |
 
 Megaboard: `http://<unraid-ip>:8800` · Labeler: `http://<unraid-ip>:7860` ·
 References folder: `\\<unraid-name>\appdata\peaks\references`

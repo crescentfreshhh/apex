@@ -38,6 +38,35 @@ def scene_key(scene: Scene) -> str:
     return scene.fingerprint or path_key(scene.path or scene.id)
 
 
+def safe_tag(tag: str) -> str:
+    """Filesystem-safe name for a tag: 'apex:heels' -> 'apex_heels'. Used for
+    model filenames and per-profile reference folders (SMB-safe on Windows,
+    where ':' is forbidden). Hyphenated tags like 'apex-heels' pass through
+    unchanged, so they map 1:1 to folder names."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)
+
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def reference_files(references_dir: str | Path) -> list[Path]:
+    """Top-level images in a references dir. Deliberately NOT recursive:
+    subfolders hold other taste profiles' references and must not bleed in."""
+    return sorted(
+        p
+        for p in Path(references_dir).glob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    )
+
+
+def resolve_references_dir(base: str | Path, tag: str) -> Path:
+    """Per-profile references: use `<base>/<safe_tag>/` when it exists, else
+    the base dir itself. Lets each taste profile keep its own example stills
+    (references/apex-heels/...) with zero flags."""
+    sub = Path(base) / safe_tag(tag)
+    return sub if sub.is_dir() else Path(base)
+
+
 def embed_library(
     scenes: Iterable[Scene],
     sampler: FrameSampler,
@@ -127,13 +156,12 @@ def embed_library(
 
 
 def load_references(embedder: Embedder, references_dir: str | Path) -> np.ndarray:
-    """Embed every image in a directory into reference vectors (m, dim)."""
+    """Embed the top-level images in a directory into reference vectors
+    (m, dim). Subfolders are other profiles' references and are ignored —
+    resolve the right folder first with `resolve_references_dir`."""
     from PIL import Image as PILImage  # lazy
 
-    exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-    files = sorted(
-        p for p in Path(references_dir).glob("**/*") if p.suffix.lower() in exts
-    )
+    files = reference_files(references_dir)
     if not files:
         raise FileNotFoundError(f"no reference images found in {references_dir}")
     images = [PILImage.open(p).convert("RGB") for p in files]

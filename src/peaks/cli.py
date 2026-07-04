@@ -148,22 +148,18 @@ def cmd_embed(args) -> int:
     return 0
 
 
-def _safe_tag(tag: str) -> str:
-    """Filesystem-safe model filename stem for a tag (apex:heels -> apex_heels)."""
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)
-
-
 def _build_scorer(cfg, args, tag):
     """Return (score_frames, model_name, label) choosing Tier-2 model when a
     trained one exists (unless --references forces Tier-1 similarity)."""
     from pathlib import Path
 
     from .embedding import canonical_name
+    from .pipeline import safe_tag
 
     model_path = (
         Path(args.model)
         if getattr(args, "model", None)
-        else Path(cfg.modeling.dir) / f"{_safe_tag(tag)}.pkl"
+        else Path(cfg.modeling.dir) / f"{safe_tag(tag)}.pkl"
     )
     if model_path.exists() and not args.references:
         from .classifier import TasteClassifier
@@ -172,12 +168,15 @@ def _build_scorer(cfg, args, tag):
         model_name = clf.model_name or canonical_name(cfg.embedding.model)
         return clf.predict_proba, model_name, f"Tier-2 model {model_path}"
 
-    # Tier-1 similarity: embed reference stills
-    from .pipeline import load_references
+    # Tier-1 similarity: embed reference stills. Each profile can keep its own
+    # folder (references/<tag>/); falls back to the base references dir.
+    from .pipeline import load_references, resolve_references_dir
     from .scoring import make_similarity_scorer
 
     embedder = _build_embedder(cfg)
-    refs_dir = args.references or cfg.scoring.references_dir
+    refs_dir = args.references or resolve_references_dir(
+        cfg.scoring.references_dir, tag
+    )
     references = load_references(embedder, refs_dir)  # may raise FileNotFoundError
     label = f"Tier-1 similarity ({references.shape[0]} refs from {refs_dir}/)"
     return make_similarity_scorer(references, cfg.scoring.reduce), embedder.name, label
@@ -232,7 +231,7 @@ def cmd_train(args) -> int:
     from .cache import EmbeddingCache
     from .embedding import canonical_name
     from .labels import LabelStore
-    from .pipeline import train_profile
+    from .pipeline import safe_tag, train_profile
 
     profile = args.tag or cfg.markers.tag_name
     store = LabelStore(cfg.modeling.labels_path)
@@ -252,7 +251,7 @@ def cmd_train(args) -> int:
         print(f"✗ Training needs scikit-learn: {exc}", file=sys.stderr)
         print('  Install with:  pip install -e ".[ml]"', file=sys.stderr)
         return 2
-    out = Path(cfg.modeling.dir) / f"{_safe_tag(profile)}.pkl"
+    out = Path(cfg.modeling.dir) / f"{safe_tag(profile)}.pkl"
     clf.save(out)
     print(
         f"Trained {cfg.modeling.classifier} on {stats['samples']} frames "
@@ -344,13 +343,13 @@ def cmd_playlist(args) -> int:
     client = StashClient.from_config(cfg)
     from .playlist import build_playlist, write_playlist
 
-    tag = args.tag or cfg.markers.tag_name
-    pl = build_playlist(client, tag, limit=args.limit or None)
+    tags = args.tag or [cfg.markers.tag_name]
+    pl = build_playlist(client, tags, limit=args.limit or None)
     out = args.out or "webapp/playlist.json"
     write_playlist(pl, out)
-    print(f"Wrote {pl['count']} apex(es) for tag '{tag}' -> {out}")
+    print(f"Wrote {pl['count']} apex(es) for tag(s) '{pl['tag']}' -> {out}")
     if pl["count"] == 0:
-        print("  (no markers with that tag yet — run `peaks score --write` first)")
+        print("  (no markers with those tags yet — run `peaks score --write` first)")
     return 0
 
 
@@ -435,7 +434,12 @@ def build_parser() -> argparse.ArgumentParser:
     cp.set_defaults(func=cmd_clear)
 
     pp = sub.add_parser("playlist", help="Export marker apexes to webapp/playlist.json")
-    pp.add_argument("--tag", help="Marker tag to export (overrides config)")
+    pp.add_argument(
+        "--tag",
+        action="append",
+        help="Marker tag to export; repeat to mix several profiles into one "
+        "board (default: config tag)",
+    )
     pp.add_argument("--out", help="Output path (default: webapp/playlist.json)")
     pp.add_argument("--limit", type=int, default=0, help="Max apexes (0 = all)")
     pp.set_defaults(func=cmd_playlist)

@@ -101,7 +101,8 @@ peaks embed                     # or --limit 20 to try a slice first
 #    Dry-run prints the segments it WOULD create — tune thresholds in config.
 peaks score                     # dry run, writes nothing
 peaks score --write             # write the apex markers into Stash
-peaks score --tag apex:heels --references ./refs-heels   # a second profile
+peaks score --tag apex-heels --write   # a second profile: reads its stills
+                                       # from references/apex-heels/ automatically
 peaks clear --tag apex          # count our markers; --write deletes them
 ```
 Re-running `score --write` is idempotent: segments overlapping an existing
@@ -137,7 +138,10 @@ then `config.toml`, then built-in defaults. Run the test suite with `pytest`.
 - **apex** — one good timestamp-segment (the unit Opus finds). Used as the
   default marker **tag name**, configurable in `config.toml` (`markers.tag_name`).
 
-You can maintain more than one **taste profile**, each with its own tag — e.g.
-`apex:position`, `apex:heels`, `apex:bodytype` — and combine them when querying.
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the naming shortlist we
-considered and how attributes map to embedding channels.
+You can maintain any number of **taste profiles**, each with its own tag,
+reference folder (`references/<tag>/`), and trained model — e.g. `apex-position`,
+`apex-heels`, `apex-bodytype` — and mix them on one megaboard
+(`peaks playlist --tag apex --tag apex-heels`). Hyphenated tag names are
+recommended: they map 1:1 to folder names (Windows/SMB can't create folders
+containing `:`). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
+naming shortlist and how attributes map to embedding channels.

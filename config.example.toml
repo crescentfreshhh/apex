@@ -37,8 +37,10 @@ hwaccel = ""
 
 [markers]
 # The tag name written onto scene markers this tool generates.
-# An "apex" is one good timestamp-segment. For multiple taste profiles, give
-# each its own tag (e.g. "apex:position", "apex:heels", "apex:bodytype").
+# An "apex" is one good timestamp-segment. This is only the DEFAULT profile —
+# run any command with --tag to work on another (e.g. "apex-heels"), which
+# reads its reference stills from references/<tag>/ automatically. Hyphenated
+# names are recommended (they map 1:1 to folder names over SMB).
 tag_name = "apex"
 
 

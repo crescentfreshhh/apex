@@ -216,6 +216,72 @@ def test_train_profile_reports_cv_auc(tmp_path):
     assert stats["cv_auc"] > 0.9  # separable clusters -> near-perfect AUC
 
 
+# --- multi-profile support -------------------------------------------------------
+
+
+def test_safe_tag_mapping():
+    from peaks.pipeline import safe_tag
+
+    assert safe_tag("apex") == "apex"
+    assert safe_tag("apex-heels") == "apex-heels"  # hyphens map 1:1 to folders
+    assert safe_tag("apex:heels") == "apex_heels"  # ':' is illegal on SMB/Windows
+
+
+def test_reference_files_top_level_only(tmp_path):
+    from peaks.pipeline import reference_files
+
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    (tmp_path / "b.PNG").write_bytes(b"x")
+    (tmp_path / "notes.txt").write_bytes(b"x")
+    sub = tmp_path / "apex-heels"
+    sub.mkdir()
+    (sub / "other-profile.jpg").write_bytes(b"x")
+
+    names = [p.name for p in reference_files(tmp_path)]
+    assert names == ["a.jpg", "b.PNG"]  # no txt, nothing from the subfolder
+
+
+def test_resolve_references_dir_per_profile(tmp_path):
+    from peaks.pipeline import resolve_references_dir
+
+    sub = tmp_path / "apex-heels"
+    sub.mkdir()
+    assert resolve_references_dir(tmp_path, "apex-heels") == sub
+    assert resolve_references_dir(tmp_path, "apex") == tmp_path  # no subdir -> base
+    # colon tags resolve through the safe name
+    colon_sub = tmp_path / "apex_pov"
+    colon_sub.mkdir()
+    assert resolve_references_dir(tmp_path, "apex:pov") == colon_sub
+
+
+def test_playlist_multiple_tags_merged_and_deduped():
+    shared = {
+        "marker_id": "m-shared", "scene_id": "1", "seconds": 5.0,
+        "end_seconds": 15.0, "title": "apex 0.9", "primary_tag": "apex",
+    }
+    heels_only = {
+        "marker_id": "m-heels", "scene_id": "2", "seconds": 1.0,
+        "end_seconds": 9.0, "title": "apex-heels 0.8", "primary_tag": "apex-heels",
+    }
+
+    class _MultiTagClient(_MarkerClient):
+        def __init__(self):
+            pass
+
+        def iter_markers_by_tag(self, tag_name):
+            # the shared marker carries both tags, so both queries return it
+            if tag_name == "apex":
+                yield shared
+            else:
+                yield shared
+                yield heels_only
+
+    pl = build_playlist(_MultiTagClient(), ["apex", "apex-heels"])
+    assert pl["tag"] == "apex, apex-heels"
+    assert pl["count"] == 2  # shared marker not duplicated
+    assert {a["scene_id"] for a in pl["apexes"]} == {"1", "2"}
+
+
 def test_peaks_device_env_override(monkeypatch, tmp_path):
     from peaks.config import Config
 
