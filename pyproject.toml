@@ -25,7 +25,7 @@ ml = [
     "tqdm",
 ]
 label = [
-    "gradio",         # the rapid frame-rating tool (Tier 2)
+    "gradio>=4",      # the rapid frame-rating tool (Tier 2); >=4 for Blocks(js=...)
 ]
 dev = [
     "pytest>=7",      # the offline test suite (no torch/ffmpeg/Stash needed)

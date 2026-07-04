@@ -28,6 +28,8 @@ class StashConfig:
 @dataclass
 class SamplingConfig:
     interval_seconds: float = 2.0
+    mode: str = "interval"  # "interval" | "keyframes" (throughput fallback)
+    hwaccel: str = ""  # "" | "cuda" | "auto" — GPU-assisted decode
 
 
 @dataclass
@@ -99,7 +101,9 @@ class Config:
         sampling = SamplingConfig(
             interval_seconds=float(
                 sampling_raw.get("interval_seconds", SamplingConfig.interval_seconds)
-            )
+            ),
+            mode=sampling_raw.get("mode", SamplingConfig.mode),
+            hwaccel=sampling_raw.get("hwaccel", SamplingConfig.hwaccel),
         )
         markers = MarkersConfig(
             tag_name=markers_raw.get("tag_name", MarkersConfig.tag_name)

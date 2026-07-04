@@ -60,7 +60,19 @@ to decode. Rough planning bands for ~1000 scenes:
 |---|---|---|
 | < 1 min | < ~17 h | start full embed now, runs into the evening |
 | 1–3 min | ~17–50 h | start now, let it run overnight+; it's resumable |
-| > 3 min | days | **stop and ping me** — we bump `interval_seconds` to 3–4, and/or I add hw-accelerated decode / keyframe-only sampling same-day |
+| > 3 min | days | use the built-in speedups (below), re-measure on 5 scenes |
+
+**Built-in speedups, in escalation order** (`config.toml [sampling]`):
+1. `hwaccel = "cuda"` — NVDEC decode on the 3080 Ti. Try this first; often the
+   single biggest win and costs nothing in quality.
+2. `interval_seconds = 3` or `4` — proportionally less decode + embed.
+3. `mode = "keyframes"` — decodes ~1-5% of frames. Massive speedup; spacing
+   becomes irregular (typically every 2-10s, encode-dependent). Fine for
+   finding moments, coarser for exact segment edges.
+
+Changing any of these invalidates the affected cache entries — re-measure with
+`peaks embed --limit 5` before relaunching the full run. The `+ [n/total] ...
+eta ~X.Xh` log lines do the ETA math for you.
 
 **Kick off the full run in a way that survives your terminal closing:**
 
@@ -151,5 +163,5 @@ Drop them to me in the session and we plan day 2 from data.
 | torch can't see the GPU | `python3 -c "import torch; print(torch.cuda.is_available())"` — if False, reinstall torch with the CUDA build for your driver |
 | DINOv2 hub download fails | needs GitHub access once; retry or ping me for an offline path |
 | A scene fails to decode | it's logged and skipped, the run continues — collect them for me |
-| Embed ETA is absurd | bump `interval_seconds` to 3–4 (cache re-embeds at the new density), or ping me for hw-decode |
+| Embed ETA is absurd | `hwaccel = "cuda"` → longer `interval_seconds` → `mode = "keyframes"` (see Block B) |
 | Megaboard tiles all black | wrong `?start=` behavior is auto-detected, so check the browser console + that `playlist.json` URLs open directly in a tab |

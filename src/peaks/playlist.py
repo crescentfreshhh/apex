@@ -17,6 +17,18 @@ from pathlib import Path
 DEFAULT_CLIP_SECONDS = 20.0  # used when a marker has no end_seconds (point marker)
 
 
+def _title_score(title: str) -> float | None:
+    """Parse the peak score the scorer embeds in marker titles
+    ("apex 0.873" -> 0.873). None when the title carries no score."""
+    parts = title.rsplit(" ", 1)
+    if len(parts) == 2:
+        try:
+            return float(parts[1])
+        except ValueError:
+            pass
+    return None
+
+
 def build_playlist(
     client,
     tag_name: str,
@@ -34,16 +46,18 @@ def build_playlist(
         end = m["end_seconds"]
         if end is None or end <= start:
             end = start + default_clip_seconds
-        apexes.append(
-            {
-                "scene_id": m["scene_id"],
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "duration": round(end - start, 3),
-                "title": m["title"] or tag_name,
-                "url": client.stream_url(m["scene_id"], start=start),
-            }
-        )
+        apex = {
+            "scene_id": m["scene_id"],
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(end - start, 3),
+            "title": m["title"] or tag_name,
+            "url": client.stream_url(m["scene_id"], start=start),
+        }
+        score = _title_score(m["title"] or "")
+        if score is not None:
+            apex["score"] = score  # weights the megaboard's picker
+        apexes.append(apex)
         if limit and len(apexes) >= limit:
             break
     return {"tag": tag_name, "count": len(apexes), "apexes": apexes}

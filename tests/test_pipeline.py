@@ -121,7 +121,7 @@ def test_score_library_write_creates_markers(tmp_path):
     )
     assert len(client.markers) == 1
     scene_id, start, end, title = client.markers[0]
-    assert scene_id == "1" and title == "apex"
+    assert scene_id == "1" and title.startswith("apex ")  # "apex <peak score>"
     assert start == 16.0 and end == 22.0  # frames 8-11 -> times 16..22
 
 

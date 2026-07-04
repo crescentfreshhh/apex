@@ -47,8 +47,8 @@ def test_build_training_set_picks_nearest_frames(tmp_path):
 
     X, y = build_training_set(store, cache, "fake", "apex")
     assert X.shape == (2, 16)
-    np.testing.assert_array_equal(X[0], vecs[0])
-    np.testing.assert_array_equal(X[1], vecs[9])
+    np.testing.assert_allclose(X[0], vecs[0], atol=2e-3)  # cache stores float16
+    np.testing.assert_allclose(X[1], vecs[9], atol=2e-3)
     assert list(y) == [1, 0]
 
 

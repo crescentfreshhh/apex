@@ -135,6 +135,10 @@ function focusTile(tile) {
 
 // --- board layout ---------------------------------------------------------
 
+// Stagger tile (re)loads: every load is a fresh seek against Stash, and
+// firing 9-25 of them in the same instant stampedes the transcoder.
+const STAGGER_MS = 250;
+
 function buildBoard(n) {
   const board = document.getElementById("board");
   board.innerHTML = "";
@@ -142,11 +146,14 @@ function buildBoard(n) {
   board.style.gridTemplateRows = `repeat(${n}, 1fr)`;
   State.tiles = [];
   State.focused = null;
+  const generation = (State.boardGen = (State.boardGen || 0) + 1);
   for (let i = 0; i < n * n; i++) {
     const tile = makeTile();
     State.tiles.push(tile);
     board.appendChild(tile.el);
-    loadApex(tile);
+    setTimeout(() => {
+      if (State.boardGen === generation) loadApex(tile); // board not rebuilt since
+    }, i * STAGGER_MS);
   }
   updateStatus();
 }
@@ -163,7 +170,7 @@ function setPlaying(on) {
 }
 
 function reshuffle() {
-  for (const t of State.tiles) loadApex(t);
+  State.tiles.forEach((t, i) => setTimeout(() => loadApex(t), i * STAGGER_MS));
 }
 
 function updateStatus() {

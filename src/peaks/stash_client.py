@@ -11,6 +11,7 @@ authentication configured, leave the key empty.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Iterator
 
 import requests
@@ -104,6 +105,12 @@ mutation SceneMarkersDestroy($ids: [ID!]!) {
 
 
 class StashClient:
+    # transient network errors are retried with these sleeps between attempts;
+    # a multi-hour embed run pages the scene list lazily and shouldn't die at
+    # hour five because one request hit a blip. GraphQL/HTTP errors (bad auth,
+    # bad query) are NOT retried — those won't fix themselves.
+    RETRY_SLEEPS: tuple[float, ...] = (1.0, 4.0, 10.0)
+
     def __init__(self, url: str, api_key: str = "", timeout: int = 30):
         self.base_url = url.rstrip("/")
         self.graphql_url = f"{self.base_url}/graphql"
@@ -115,14 +122,21 @@ class StashClient:
     # --- core ----------------------------------------------------------------
 
     def execute(self, query: str, variables: dict | None = None) -> dict[str, Any]:
-        try:
-            resp = self.session.post(
-                self.graphql_url,
-                json={"query": query, "variables": variables or {}},
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise StashError(f"Could not reach Stash at {self.graphql_url}: {exc}") from exc
+        for attempt, sleep in enumerate((*self.RETRY_SLEEPS, None)):
+            try:
+                resp = self.session.post(
+                    self.graphql_url,
+                    json={"query": query, "variables": variables or {}},
+                    timeout=self.timeout,
+                )
+                break
+            except requests.RequestException as exc:
+                if sleep is None:
+                    raise StashError(
+                        f"Could not reach Stash at {self.graphql_url} "
+                        f"(after {attempt + 1} attempts): {exc}"
+                    ) from exc
+                time.sleep(sleep)
 
         if resp.status_code != 200:
             raise StashError(

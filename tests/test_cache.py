@@ -20,8 +20,9 @@ def test_roundtrip(tmp_path):
     assert cache.has("key1", "fake")
 
     lt, lv, meta = cache.load("key1", "fake")
-    np.testing.assert_array_equal(lt, times)
-    np.testing.assert_array_equal(lv, vecs)
+    np.testing.assert_array_equal(lt, times)  # times stay exact float32
+    np.testing.assert_allclose(lv, vecs, atol=2e-3)  # vecs stored float16
+    assert lv.dtype == np.float32
     assert meta["interval"] == 2.0 and meta["path"] == "/x.mp4"
 
 

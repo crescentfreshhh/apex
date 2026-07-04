@@ -62,13 +62,37 @@ def launch_labeler(
             state["i"] = i + 1
         return _render(state["i"])
 
-    with gr.Blocks(title=f"Opus labeler — {profile}") as demo:
-        gr.Markdown(f"### Opus labeler — profile `{profile}`\nRate each frame.")
+    # hotkeys: → / y = want it, ← / n = skip (rating hundreds of frames by
+    # mouse is misery). The JS just clicks the buttons, so both paths share
+    # the exact same handler.
+    hotkeys_js = """
+    () => {
+      const press = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        // elem_id may land on the <button> itself or a wrapper around it
+        (el.tagName === 'BUTTON' ? el : el.querySelector('button') || el).click();
+      };
+      document.addEventListener('keydown', (e) => {
+        if (e.target && /input|textarea/i.test(e.target.tagName)) return;
+        if (e.key === 'ArrowRight' || e.key === 'y') press('want-btn');
+        if (e.key === 'ArrowLeft' || e.key === 'n') press('skip-btn');
+      });
+    }
+    """
+
+    with gr.Blocks(title=f"Opus labeler — {profile}", js=hotkeys_js) as demo:
+        gr.Markdown(
+            f"### Opus labeler — profile `{profile}`\n"
+            "Rate each frame — **→ / y** = want it, **← / n** = skip."
+        )
         image = gr.Image(label="candidate", height=480)
         caption = gr.Markdown()
         with gr.Row():
-            skip_btn = gr.Button("✗ Skip (no)")
-            want_btn = gr.Button("✓ Want it (yes)", variant="primary")
+            skip_btn = gr.Button("✗ Skip (no)  [←]", elem_id="skip-btn")
+            want_btn = gr.Button(
+                "✓ Want it (yes)  [→]", variant="primary", elem_id="want-btn"
+            )
         _ = gr.Markdown()  # spacer
 
         want_btn.click(lambda: _record(1), outputs=[image, caption, _])

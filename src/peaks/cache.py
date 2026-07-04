@@ -29,8 +29,13 @@ def path_key(path: str) -> str:
 
 
 class EmbeddingCache:
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, dtype: str = "float16"):
+        """`dtype` is the on-disk storage type. float16 halves disk usage for
+        a relative error ~1e-3 — irrelevant to cosine similarity or the
+        classifier. `load` always returns float32 regardless of what was
+        stored, so old float32 caches remain readable."""
         self.root = Path(root)
+        self.dtype = np.dtype(dtype)
 
     def _file(self, key: str, model_name: str) -> Path:
         return self.root / model_name / f"{key}.npz"
@@ -60,7 +65,7 @@ class EmbeddingCache:
         meta: dict | None = None,
     ) -> Path:
         times = np.asarray(times, dtype=np.float32)
-        vecs = np.asarray(vecs, dtype=np.float32)
+        vecs = np.asarray(vecs, dtype=self.dtype)
         if times.shape[0] != vecs.shape[0]:
             raise ValueError("times and vecs must have matching first dimension")
         dest = self._file(key, model_name)
@@ -81,7 +86,7 @@ class EmbeddingCache:
     def load(self, key: str, model_name: str) -> tuple[np.ndarray, np.ndarray, dict]:
         with np.load(self._file(key, model_name), allow_pickle=False) as data:
             times = data["times"]
-            vecs = data["vecs"]
+            vecs = data["vecs"].astype(np.float32)  # regardless of storage dtype
             meta = json.loads(str(data["meta"]))
         return times, vecs, meta
 

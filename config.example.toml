@@ -22,6 +22,18 @@ timeout = 30
 # 2.0 is a good default on GPU; bump to 4-5 on CPU.
 interval_seconds = 2.0
 
+# "interval"  — every interval_seconds (streamed, no temp files). Default.
+# "keyframes" — decode only keyframes (~1-5% of the decode cost). The
+#   throughput escape hatch for huge libraries: spacing becomes irregular and
+#   encode-dependent (typically 2-10s), timestamps stay exact.
+# Changing mode or interval invalidates cache entries (they re-embed).
+mode = "interval"
+
+# GPU-assisted video decode: "" (CPU), "cuda" (NVDEC), or "auto".
+# Decode — not embedding — is the pipeline bottleneck; if the GPU is in the
+# box anyway, "cuda" is usually a large speedup on H.264/HEVC sources.
+hwaccel = ""
+
 
 [markers]
 # The tag name written onto scene markers this tool generates.

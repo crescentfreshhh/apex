@@ -113,21 +113,37 @@ def cmd_embed(args) -> int:
     from .pipeline import embed_library
     from .sampling import FrameSampler
 
-    sampler = FrameSampler(interval_seconds=cfg.sampling.interval_seconds)
+    sampler = FrameSampler(
+        interval_seconds=cfg.sampling.interval_seconds,
+        mode=cfg.sampling.mode,
+        hwaccel=cfg.sampling.hwaccel,
+    )
     embedder = _build_embedder(
         cfg, **({"device": cfg.embedding.device} if cfg.embedding.device else {})
     )
     cache = EmbeddingCache(cfg.embedding.cache_dir)
+    total = args.limit or client.scene_count()
     scenes = client.iter_scenes()
     if args.limit:
         scenes = itertools.islice(scenes, args.limit)
-    print(f"Embedding with '{embedder.name}' (dim={embedder.dim}) -> {cfg.embedding.cache_dir}")
+    extras = f", mode={cfg.sampling.mode}" if cfg.sampling.mode != "interval" else ""
+    extras += f", hwaccel={cfg.sampling.hwaccel}" if cfg.sampling.hwaccel else ""
+    print(
+        f"Embedding {total} scene(s) with '{embedder.name}' "
+        f"(dim={embedder.dim}{extras}) -> {cfg.embedding.cache_dir}"
+    )
     stats = embed_library(
-        scenes, sampler, embedder, cache, batch_size=cfg.embedding.batch_size
+        scenes, sampler, embedder, cache,
+        batch_size=cfg.embedding.batch_size, total=total,
+    )
+    rate = (
+        f" avg {stats['seconds_per_scene']}s/scene"
+        if "seconds_per_scene" in stats
+        else ""
     )
     print(
         f"\nDone. embedded={stats['embedded']} skipped(cached)={stats['skipped']} "
-        f"failed={stats['failed']} frames={stats['frames']}"
+        f"failed={stats['failed']} frames={stats['frames']}{rate}"
     )
     return 0
 
@@ -242,6 +258,16 @@ def cmd_train(args) -> int:
         f"Trained {cfg.modeling.classifier} on {stats['samples']} frames "
         f"({stats['positives']} positive) -> {out}"
     )
+    if "cv_auc" in stats:
+        auc = stats["cv_auc"]
+        verdict = (
+            "excellent separation" if auc >= 0.9
+            else "usable — more labels will sharpen it" if auc >= 0.75
+            else "weak — label more (especially diverse negatives) before trusting it"
+        )
+        print(f"Cross-validated AUC: {auc} over {stats['cv_folds']} folds ({verdict})")
+    else:
+        print("(too few labels per class for cross-validation — label more for a quality read)")
     return 0
 
 
@@ -279,7 +305,10 @@ def cmd_label(args) -> int:
         print("✗ No candidates — is the cache populated? Run `peaks embed` first.")
         return 1
     print(f"Launching labeler on {len(cands)} candidates (port {args.port}) ...")
-    sampler = FrameSampler(interval_seconds=cfg.sampling.interval_seconds)
+    sampler = FrameSampler(
+        interval_seconds=cfg.sampling.interval_seconds,
+        hwaccel=cfg.sampling.hwaccel,
+    )
     launch_labeler(cands, store, profile, sampler.grab_frame, server_port=args.port)
     return 0
 

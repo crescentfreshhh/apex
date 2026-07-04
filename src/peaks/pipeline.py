@@ -45,26 +45,34 @@ def embed_library(
     cache: EmbeddingCache,
     *,
     batch_size: int = 64,
+    total: int | None = None,
     log: Logger = print,
 ) -> dict:
     """Embed every scene not already cached. Resumable + idempotent.
 
     Frames are embedded in rolling batches as they stream off ffmpeg, so at
     most `batch_size` decoded frames are held in memory — not the whole scene.
-    Cache hits are only honoured when they were built at the same sampling
-    interval; changing the interval re-embeds instead of silently serving
-    stale, coarser samples.
+    Cache hits are only honoured when built with the same sampling settings
+    (interval, or keyframe mode); a config change re-embeds instead of
+    silently serving stale samples. Pass `total` for progress/ETA in the log.
     """
+    import time as _time
+
+    signature = getattr(sampler, "interval_signature", sampler.interval)
     stats = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
+    embed_seconds = 0.0
+    processed = 0
     for scene in scenes:
+        processed += 1
         key = scene_key(scene)
-        if cache.has(key, embedder.name, interval=sampler.interval):
+        if cache.has(key, embedder.name, interval=signature):
             stats["skipped"] += 1
             continue
         if not scene.path:
             log(f"  ! scene {scene.id} has no file; skipping")
             stats["failed"] += 1
             continue
+        started = _time.monotonic()
         try:
             times: list[float] = []
             batch: list = []
@@ -90,18 +98,31 @@ def embed_library(
                 meta={
                     "scene_id": scene.id,
                     "path": scene.path,
-                    "interval": sampler.interval,
+                    "interval": signature,
+                    "mode": getattr(sampler, "mode", "interval"),
                     "model": embedder.name,
                     "dim": embedder.dim,
                     "n_frames": len(times),
                 },
             )
+            dt = _time.monotonic() - started
+            embed_seconds += dt
             stats["embedded"] += 1
             stats["frames"] += len(times)
-            log(f"  + scene {scene.id}: {len(times)} frames -> cache")
+            progress = f"[{processed}/{total}] " if total else ""
+            eta = ""
+            if total and stats["embedded"]:
+                rate = embed_seconds / stats["embedded"]
+                eta = f", eta ~{rate * (total - processed) / 3600:.1f}h"
+            log(
+                f"  + {progress}scene {scene.id}: {len(times)} frames "
+                f"in {dt:.1f}s{eta}"
+            )
         except Exception as exc:  # keep the batch going; log the casualty
             log(f"  ! scene {scene.id} failed: {exc}")
             stats["failed"] += 1
+    if stats["embedded"]:
+        stats["seconds_per_scene"] = round(embed_seconds / stats["embedded"], 2)
     return stats
 
 
@@ -199,7 +220,9 @@ def score_library(
                     scene_id=scene.id,
                     seconds=s.start,
                     primary_tag_id=tag.id,
-                    title=tag_name,
+                    # peak score rides in the title: visible in Stash, and the
+                    # playlist parses it back to weight the megaboard picker
+                    title=f"{tag_name} {s.peak_score:.3f}",
                     end_seconds=s.end,
                 )
             else:
@@ -321,10 +344,29 @@ def gather_candidates(
 def train_profile(
     label_store, cache: EmbeddingCache, model_name: str, profile: str, kind: str = "logreg"
 ):
-    """Build the training set and fit a TasteClassifier for `profile`."""
+    """Build the training set and fit a TasteClassifier for `profile`.
+
+    When there are enough labels, stats include `cv_auc`: mean ROC-AUC over
+    stratified cross-validation folds — a quick "is this model any good"
+    signal (1.0 = perfect separation, 0.5 = coin flip) before trusting it on
+    the whole library.
+    """
     from .classifier import TasteClassifier
 
     X, y = build_training_set(label_store, cache, model_name, profile)
     clf = TasteClassifier(kind=kind, model_name=model_name, profile=profile)
     clf.train(X, y)
-    return clf, {"samples": int(X.shape[0]), "positives": int((y == 1).sum())}
+    stats = {"samples": int(X.shape[0]), "positives": int((y == 1).sum())}
+
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    folds = min(5, n_pos, n_neg)
+    if folds >= 2:
+        from sklearn.model_selection import cross_val_score
+
+        scores = cross_val_score(
+            clf._new_estimator(), X, y, cv=folds, scoring="roc_auc"
+        )
+        stats["cv_auc"] = round(float(scores.mean()), 3)
+        stats["cv_folds"] = folds
+    return clf, stats
