@@ -1,14 +1,24 @@
 # peaks (Opus) — container image for Unraid / Docker
 #
 # CUDA-enabled torch wheels are installed first (heavy, rarely change) so code
-# updates rebuild fast. ffmpeg comes from Debian (includes cuda/nvdec hwaccel).
-# Model weights (DINOv2/CLIP) download on first use into /config so they
-# persist across container recreates.
+# updates rebuild fast. ffmpeg is a static BtbN build that includes NVDEC/cuvid
+# so `hwaccel = "cuda"` decode works (the stock Debian build's nvidia support
+# is not guaranteed). The NVDEC driver libs are injected at runtime by the
+# nvidia container runtime (NVIDIA_DRIVER_CAPABILITIES must include "video").
+# Model weights (DINOv2/CLIP) download on first use into /config so they persist.
 
 FROM python:3.11-slim
 
+# static ffmpeg/ffprobe with full nvidia hwaccel (nvdec, cuvid, nvenc)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends wget xz-utils ca-certificates \
+    && wget -qO /tmp/ffmpeg.tar.xz \
+        https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
+    && mkdir -p /tmp/ff && tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 \
+    && cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ \
+    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ff /tmp/ffmpeg.tar.xz \
+    && apt-get purge -y wget xz-utils && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # heavy ML deps pinned to CUDA 12.4 wheels (work on any recent driver via the
