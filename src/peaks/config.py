@@ -2,7 +2,8 @@
 
 Resolution order (highest priority first):
     1. Environment variables (STASH_URL, STASH_API_KEY, PEAKS_DEVICE,
-       PEAKS_HWACCEL, PEAKS_LIBRARY_PATH)
+       PEAKS_HWACCEL, PEAKS_LIBRARY_PATH, PEAKS_SAMPLING_MODE,
+       PEAKS_INTERVAL_SECONDS)
     2. A TOML file (default: ./config.toml)
     3. Built-in defaults
 
@@ -110,9 +111,16 @@ class Config:
         )
         sampling = SamplingConfig(
             interval_seconds=float(
-                sampling_raw.get("interval_seconds", SamplingConfig.interval_seconds)
+                os.environ.get(
+                    "PEAKS_INTERVAL_SECONDS",
+                    sampling_raw.get(
+                        "interval_seconds", SamplingConfig.interval_seconds
+                    ),
+                )
             ),
-            mode=sampling_raw.get("mode", SamplingConfig.mode),
+            mode=os.environ.get(
+                "PEAKS_SAMPLING_MODE", sampling_raw.get("mode", SamplingConfig.mode)
+            ),
             hwaccel=os.environ.get(
                 "PEAKS_HWACCEL", sampling_raw.get("hwaccel", SamplingConfig.hwaccel)
             ),
