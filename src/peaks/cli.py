@@ -52,10 +52,29 @@ def cmd_test(args) -> int:
     return 0
 
 
+def _scenes_and_total(client, cfg, limit: int = 0):
+    """Return (scenes_iterable, total) honouring the library path filter.
+
+    With a path filter we materialize the matching scenes so the total (and
+    thus the ETA) reflects only that folder, not the whole library."""
+    prefix = cfg.library.path
+    if prefix:
+        scenes = list(client.iter_scenes(path_prefix=prefix))
+        if limit:
+            scenes = scenes[:limit]
+        return scenes, len(scenes)
+    total = limit or client.scene_count()
+    it = client.iter_scenes()
+    if limit:
+        it = itertools.islice(it, limit)
+    return it, total
+
+
 def cmd_scenes(args) -> int:
     client = _client(args)
+    cfg = Config.load(args.config)
     shown = 0
-    for scene in client.iter_scenes():
+    for scene in client.iter_scenes(path_prefix=cfg.library.path):
         dur = scene.duration
         dur_s = f"{dur/60:6.1f}m" if dur else "    ?  "
         title = (scene.title or scene.path or "<no title>")[:60]
@@ -69,11 +88,14 @@ def cmd_scenes(args) -> int:
 
 def cmd_stats(args) -> int:
     client = _client(args)
+    cfg = Config.load(args.config)
+    if cfg.library.path:
+        print(f"(scoped to library.path = {cfg.library.path})")
     n = 0
     total_dur = 0.0
     total_markers = 0
     no_file = 0
-    for scene in client.iter_scenes():
+    for scene in client.iter_scenes(path_prefix=cfg.library.path):
         n += 1
         if scene.duration:
             total_dur += scene.duration
@@ -122,12 +144,10 @@ def cmd_embed(args) -> int:
         cfg, **({"device": cfg.embedding.device} if cfg.embedding.device else {})
     )
     cache = EmbeddingCache(cfg.embedding.cache_dir)
-    total = args.limit or client.scene_count()
-    scenes = client.iter_scenes()
-    if args.limit:
-        scenes = itertools.islice(scenes, args.limit)
+    scenes, total = _scenes_and_total(client, cfg, args.limit)
     extras = f", mode={cfg.sampling.mode}" if cfg.sampling.mode != "interval" else ""
     extras += f", hwaccel={cfg.sampling.hwaccel}" if cfg.sampling.hwaccel else ""
+    extras += f", path={cfg.library.path}" if cfg.library.path else ""
     print(
         f"Embedding {total} scene(s) with '{embedder.name}' "
         f"(dim={embedder.dim}{extras}) -> {cfg.embedding.cache_dir}"
@@ -201,9 +221,7 @@ def cmd_score(args) -> int:
         return 1
 
     cache = EmbeddingCache(cfg.embedding.cache_dir)
-    scenes = client.iter_scenes()
-    if args.limit:
-        scenes = itertools.islice(scenes, args.limit)
+    scenes, _ = _scenes_and_total(client, cfg, args.limit)
     mode = "WRITING markers" if args.write else "dry run (no writes)"
     print(f"Scoring tag '{tag}' via {label} — {mode}\n")
     stats = score_library(

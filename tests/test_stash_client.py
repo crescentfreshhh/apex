@@ -48,6 +48,16 @@ def _scene(id_, *, markers=0, fp=True):
     }
 
 
+def _scene_at(id_, path):
+    return {
+        "id": id_,
+        "title": f"scene {id_}",
+        "files": [{"path": path, "duration": 600.0, "fingerprints": [
+            {"type": "oshash", "value": f"hash{id_}"}]}],
+        "scene_markers": [],
+    }
+
+
 def test_iter_scenes_paginates_until_count():
     page1 = {"findScenes": {"count": 3, "scenes": [_scene("1"), _scene("2")]}}
     page2 = {"findScenes": {"count": 3, "scenes": [_scene("3")]}}
@@ -59,6 +69,34 @@ def test_iter_scenes_paginates_until_count():
     assert len(client.calls) == 2
     assert client.calls[0][1]["filter"]["page"] == 1
     assert client.calls[1][1]["filter"]["page"] == 2
+
+
+def test_iter_scenes_path_filter_includes_subfolders():
+    page = {
+        "findScenes": {
+            "count": 4,
+            "scenes": [
+                _scene_at("1", "/data/Rando/a.mp4"),
+                _scene_at("2", "/data/Rando/sub/deep/b.mp4"),
+                _scene_at("3", "/data/VR/c.mp4"),
+                _scene_at("4", "/data/RandoVR/d.mp4"),  # sibling, must NOT match
+            ],
+        }
+    }
+    client = FakeClient([page])
+    ids = [s.id for s in client.iter_scenes(path_prefix="/data/Rando")]
+    assert ids == ["1", "2"]  # folder + subfolders only; not VR, not RandoVR
+
+
+def test_iter_scenes_no_filter_returns_all():
+    page = {
+        "findScenes": {
+            "count": 2,
+            "scenes": [_scene_at("1", "/data/VR/a.mp4"), _scene_at("2", "/x/b.mp4")],
+        }
+    }
+    client = FakeClient([page])
+    assert [s.id for s in client.iter_scenes(path_prefix="")] == ["1", "2"]
 
 
 def test_iter_scenes_stops_on_empty_page():

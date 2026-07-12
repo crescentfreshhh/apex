@@ -32,7 +32,16 @@ mode = "interval"
 # GPU-assisted video decode: "" (CPU), "cuda" (NVDEC), or "auto".
 # Decode — not embedding — is the pipeline bottleneck; if the GPU is in the
 # box anyway, "cuda" is usually a large speedup on H.264/HEVC sources.
+# (Env override: PEAKS_HWACCEL)
 hwaccel = ""
+
+
+[library]
+# Only work on scenes whose file path starts with this (blank = whole library).
+# Point it at a folder to exclude everything else — e.g. skip VR by scoping to
+# your non-VR folder. Must be the path as STASH sees it (the container path),
+# and it includes all subfolders. (Env override: PEAKS_LIBRARY_PATH)
+path = ""
 
 
 [markers]

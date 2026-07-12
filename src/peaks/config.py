@@ -1,7 +1,8 @@
 """Configuration loading.
 
 Resolution order (highest priority first):
-    1. Environment variables (STASH_URL, STASH_API_KEY, PEAKS_DEVICE)
+    1. Environment variables (STASH_URL, STASH_API_KEY, PEAKS_DEVICE,
+       PEAKS_HWACCEL, PEAKS_LIBRARY_PATH)
     2. A TOML file (default: ./config.toml)
     3. Built-in defaults
 
@@ -67,6 +68,13 @@ class ModelingConfig:
 
 
 @dataclass
+class LibraryConfig:
+    # Only work on scenes whose file path starts with this (empty = whole
+    # library). Point it at a folder to exclude everything else — e.g. skip VR.
+    path: str = ""
+
+
+@dataclass
 class Config:
     stash: StashConfig = field(default_factory=StashConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -74,6 +82,7 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     modeling: ModelingConfig = field(default_factory=ModelingConfig)
+    library: LibraryConfig = field(default_factory=LibraryConfig)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -90,6 +99,7 @@ class Config:
         embedding_raw = raw.get("embedding", {})
         scoring_raw = raw.get("scoring", {})
         modeling_raw = raw.get("modeling", {})
+        library_raw = raw.get("library", {})
 
         stash = StashConfig(
             url=os.environ.get("STASH_URL", stash_raw.get("url", StashConfig.url)),
@@ -103,7 +113,9 @@ class Config:
                 sampling_raw.get("interval_seconds", SamplingConfig.interval_seconds)
             ),
             mode=sampling_raw.get("mode", SamplingConfig.mode),
-            hwaccel=sampling_raw.get("hwaccel", SamplingConfig.hwaccel),
+            hwaccel=os.environ.get(
+                "PEAKS_HWACCEL", sampling_raw.get("hwaccel", SamplingConfig.hwaccel)
+            ),
         )
         markers = MarkersConfig(
             tag_name=markers_raw.get("tag_name", MarkersConfig.tag_name)
@@ -141,6 +153,11 @@ class Config:
             classifier=modeling_raw.get("classifier", ModelingConfig.classifier),
             labels_path=modeling_raw.get("labels_path", ModelingConfig.labels_path),
         )
+        library = LibraryConfig(
+            path=os.environ.get(
+                "PEAKS_LIBRARY_PATH", library_raw.get("path", LibraryConfig.path)
+            ),
+        )
         return cls(
             stash=stash,
             sampling=sampling,
@@ -148,4 +165,5 @@ class Config:
             embedding=embedding,
             scoring=scoring,
             modeling=modeling,
+            library=library,
         )

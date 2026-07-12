@@ -159,8 +159,23 @@ class StashClient:
         )
         return data["findScenes"]["count"]
 
-    def iter_scenes(self, page_size: int = 100) -> Iterator[Scene]:
-        """Yield every scene, transparently paginating."""
+    @staticmethod
+    def _under_path(scene: Scene, prefix: str) -> bool:
+        """True if the scene's file is inside `prefix` (folder, incl. subdirs).
+        Client-side so it works regardless of Stash's filter schema."""
+        if not prefix:
+            return True
+        p = scene.path
+        if not p:
+            return False
+        base = prefix.rstrip("/")
+        return p == base or p.startswith(base + "/")
+
+    def iter_scenes(
+        self, page_size: int = 100, path_prefix: str = ""
+    ) -> Iterator[Scene]:
+        """Yield every scene, transparently paginating. When `path_prefix` is
+        set, only scenes whose file lives under that folder are yielded."""
         page = 1
         seen = 0
         while True:
@@ -178,7 +193,9 @@ class StashClient:
             result = data["findScenes"]
             scenes = result["scenes"]
             for s in scenes:
-                yield Scene.from_dict(s)
+                scene = Scene.from_dict(s)
+                if self._under_path(scene, path_prefix):
+                    yield scene
             seen += len(scenes)
             if not scenes or seen >= result["count"]:
                 break
