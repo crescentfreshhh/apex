@@ -22,7 +22,7 @@ profiles. Those are day 2+ — don't rabbit-hole.
 ## Night before (or first 15 min) — no GPU needed
 
 ```bash
-git clone <repo> && cd stasssh          # or git pull
+git clone <repo> && cd apex             # or git pull
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[ml]"                  # big download (torch) — start it early
 pip install -e ".[label]"

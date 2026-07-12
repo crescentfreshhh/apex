@@ -12,7 +12,7 @@ The starred phase (6) is the real validation milestone — don't full-send befor
 
 ## 0. Get the code on the box
 - [ ] `git clone <repo>` (or `git pull` if already cloned) — everything is on `main`
-- [ ] `cd stasssh`
+- [ ] `cd apex`
 - [ ] Confirm `ffmpeg` and `ffprobe` are installed: `ffmpeg -version`
 - [ ] Confirm the GPU is visible: `nvidia-smi` shows the 3080 Ti
 

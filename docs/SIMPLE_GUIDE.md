@@ -38,7 +38,7 @@ reboots of the Unraid server, ~30 minutes.
 1. **Make the image reachable (one-time, on GitHub).** The container image is
    published automatically from this repo to GitHub's registry. If your GitHub
    repo is private, the image is too, and Unraid won't be able to pull it:
-   go to **github.com → your profile → Packages → `stasssh` → Package
+   go to **github.com → your profile → Packages → `apex` → Package
    settings → Change visibility → Public**. (If the Packages page is empty,
    the image hasn't built yet — repo → Actions tab → wait for
    "Build and publish Docker image" to go green, ~20 min.)
@@ -52,7 +52,7 @@ reboots of the Unraid server, ~30 minutes.
    Repositories** → add this line → Save:
 
    ```
-   https://github.com/crescentfreshhh/stasssh
+   https://github.com/crescentfreshhh/apex
    ```
 
    Then click **Add Container** and pick **peaks** from the Template dropdown.

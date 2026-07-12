@@ -1,13 +1,13 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>peaks</Name>
-  <Repository>ghcr.io/crescentfreshhh/stasssh:latest</Repository>
+  <Repository>ghcr.io/crescentfreshhh/apex:latest</Repository>
   <Registry>https://ghcr.io</Registry>
   <Network>bridge</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/crescentfreshhh/stasssh</Support>
-  <Project>https://github.com/crescentfreshhh/stasssh</Project>
+  <Support>https://github.com/crescentfreshhh/apex</Support>
+  <Project>https://github.com/crescentfreshhh/apex</Project>
   <Overview>Opus/peaks — learns your taste from example stills, finds the matching moments across a Stash library, writes them back as scene markers, and plays them on a continuously-cycling "megaboard" grid (port 8800). All other commands (embed, score, label, train) run from this container's console. Requires the Nvidia Driver plugin + --runtime=nvidia for GPU embedding. IMPORTANT: the Media path below must be mounted at the SAME container path your Stash container uses, so file paths reported by Stash resolve here.</Overview>
   <Category>MediaApp:Video Tools:</Category>
   <WebUI>http://[IP]:[PORT:8800]</WebUI>
