@@ -48,21 +48,41 @@ reboots of the Unraid server, ~30 minutes.
    for example host `/mnt/user/media/` ↔ container `/data`. peaks must use the
    **exact same pair**, or it can't find the files Stash points it at.
 
-3. **Add the template.** Docker tab → scroll to the bottom → **Template
-   Repositories** → add this line → Save:
+3. **Add the container.** Modern Unraid removed the old "Template
+   Repositories" box, so use one of these:
+
+   **Method A — drop in the template (recommended, pre-fills everything).**
+   From your PC, open the Unraid **flash** share in your file explorer:
 
    ```
-   https://github.com/crescentfreshhh/apex
+   \\<your-unraid-name>\flash\config\plugins\dockerMan\templates-user
    ```
 
-   Then click **Add Container** and pick **peaks** from the Template dropdown.
-   (If it doesn't appear there, choose any blank template and fill in the
-   fields by hand from `unraid/peaks.xml` in the repo.)
+   (Don't see a `flash` share? Enable it: Unraid → **Main** → click **Flash**
+   → set **Export** to Yes → it appears.) Download `unraid/peaks.xml` from the
+   repo (GitHub → the file → **Download raw file**) and copy it into that
+   folder, renamed to **`my-apex.xml`**.
 
-4. **Fill in the fields:**
-   - **Media** — the pair from step 2: host path = your media share,
-     container path = whatever Stash uses (edit it if it isn't `/data`).
-   - **STASH_URL** — pre-filled with `http://192.168.1.2:6969`; fix if needed.
+   Then: Docker tab → **Add Container** → the **Template** dropdown at the top
+   → under *User templates* pick **peaks**. Every field fills in for you.
+
+   **Method B — by hand (works everywhere, more typing).** Docker tab → **Add
+   Container**, leave Template blank, switch the toggle top-right to
+   **Advanced view**, and enter:
+   - **Repository:** `ghcr.io/crescentfreshhh/apex:latest`
+   - **Extra Parameters:** `--runtime=nvidia`
+   - **Add Port** ×2: `8800` and `7860` (both TCP)
+   - **Add Path** — Config: container `/config`, host
+     `/mnt/user/appdata/peaks`
+   - **Add Variable** ×5: `STASH_URL`, `STASH_API_KEY`, `PEAKS_DEVICE` (=`cuda`),
+     `NVIDIA_VISIBLE_DEVICES` (=`all`), `NVIDIA_DRIVER_CAPABILITIES` (=`all`)
+   - the **Media** path is step 4 below
+
+4. **Fill in / check these fields** (both methods):
+   - **Media path** — click **Add Path** (Method B) or edit the Media path
+     (Method A): container path = whatever your **Stash** container uses from
+     step 2, host path = your media share, access mode **Read Only**.
+   - **STASH_URL** — `http://192.168.1.2:6969` (fix if your address differs).
    - **STASH_API_KEY** — Stash → Settings → Security → copy the API key in.
      (No auth on your Stash? Leave empty.)
    - Everything else can stay at its defaults.
