@@ -292,7 +292,13 @@ class FrameSampler:
     def _iter_frames_keyframes(self, path: str) -> Iterator[tuple[float, "Image"]]:
         """Keyframe-only pass: `-skip_frame nokey` decodes ~1-5% of frames.
         Exact timestamps are parsed from showinfo output (which logs at info
-        level, hence `-v info` + post-run parse rather than streaming)."""
+        level, hence `-v info` + post-run parse rather than streaming).
+
+        Note: `-skip_frame nokey` is a *software* decoder feature; NVDEC/cuvid
+        ignores it and would decode every frame, defeating the whole point. So
+        this path deliberately does NOT use hwaccel — sparse I-frame decode on
+        the CPU is already cheap (it's skipping ~95% of frames), and the GPU is
+        still used for the embedding itself."""
         from PIL import Image as PILImage  # lazy
 
         tmpdir = Path(tempfile.mkdtemp(prefix="peaks-frames-"))
@@ -301,8 +307,7 @@ class FrameSampler:
                 self.ffmpeg,
                 "-v", "info",  # showinfo logs at info level
                 "-nostats",
-                *self._input_args(),
-                "-skip_frame", "nokey",
+                "-skip_frame", "nokey",  # CPU decoder skips non-key frames
                 "-i", path,
                 "-vf", self._vf(),
                 "-fps_mode", "passthrough",
