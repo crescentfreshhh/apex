@@ -29,10 +29,20 @@ if TYPE_CHECKING:  # pragma: no cover
 class Embedder(ABC):
     name: str
     dim: int
+    # raw-pipeline geometry: ffmpeg reproduces the model's preprocessing as
+    # "bicubic resize short side -> raw_resize, center crop -> raw_crop"
+    raw_resize: int = 256
+    raw_crop: int = 224
 
     @abstractmethod
     def embed_images(self, images: Sequence["Image"]) -> np.ndarray:
         """Embed a batch of PIL images → (len(images), dim) float32, normalized."""
+
+    def embed_array(self, frames: np.ndarray) -> np.ndarray:
+        """Embed (n, raw_crop, raw_crop, 3) uint8 frames from the raw
+        pipeline. Subclasses normalize on their own device (GPU when
+        available) — no PIL, no CPU resize."""
+        raise NotImplementedError(f"{self.name} has no raw-array path")
 
 
 # --- deterministic fake (tests / pipeline smoke) ----------------------------
@@ -64,6 +74,14 @@ class FakeEmbedder(Embedder):
             out[i] = self._vec_from_bytes(data)
         return out
 
+    def embed_array(self, frames: np.ndarray) -> np.ndarray:
+        if frames.shape[0] == 0:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        out = np.empty((frames.shape[0], self.dim), dtype=np.float32)
+        for i in range(frames.shape[0]):
+            out[i] = self._vec_from_bytes(frames[i].tobytes())
+        return out
+
 
 # --- real channels (lazy torch) ---------------------------------------------
 
@@ -72,6 +90,10 @@ class DinoV2Embedder(Embedder):
     """DINOv2 ViT features (CLS token). Defaults to the small backbone."""
 
     name = "dinov2"
+    raw_resize = 256  # matches transforms.Resize(256)
+    raw_crop = 224  # matches transforms.CenterCrop(224)
+    _MEAN = (0.485, 0.456, 0.406)
+    _STD = (0.229, 0.224, 0.225)
 
     def __init__(self, model_name: str = "dinov2_vits14", device: str | None = None):
         import torch  # lazy
@@ -82,6 +104,9 @@ class DinoV2Embedder(Embedder):
         self.model.eval().to(self.device)
         self.dim = int(self.model.embed_dim)
         self._build_transform()
+        # normalization constants resident on the device for the raw path
+        self._mean_t = torch.tensor(self._MEAN, device=self.device).view(1, 3, 1, 1)
+        self._std_t = torch.tensor(self._STD, device=self.device).view(1, 3, 1, 1)
 
     def _build_transform(self) -> None:
         from torchvision import transforms  # lazy
@@ -107,6 +132,20 @@ class DinoV2Embedder(Embedder):
         feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
+    def embed_array(self, frames: np.ndarray) -> np.ndarray:
+        """Raw path: uint8 (n, 224, 224, 3) → normalize on device → model."""
+        torch = self._torch
+        if frames.shape[0] == 0:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        t = torch.from_numpy(np.ascontiguousarray(frames))
+        with torch.no_grad():
+            t = t.to(self.device, non_blocking=True)
+            t = t.permute(0, 3, 1, 2).float().div_(255.0)
+            t = (t - self._mean_t) / self._std_t
+            feats = self.model(t)
+            feats = torch.nn.functional.normalize(feats, dim=1)
+        return feats.cpu().numpy().astype(np.float32)
+
 
 class ClipEmbedder(Embedder):
     """OpenCLIP image embedder. Also exposes text embedding for open-vocab
@@ -114,6 +153,10 @@ class ClipEmbedder(Embedder):
     """
 
     name = "clip"
+    raw_resize = 224  # open_clip preprocess: Resize(224) + CenterCrop(224)
+    raw_crop = 224
+    _MEAN = (0.48145466, 0.4578275, 0.40821073)  # CLIP normalization
+    _STD = (0.26862954, 0.26130258, 0.27577711)
 
     def __init__(
         self,
@@ -135,6 +178,8 @@ class ClipEmbedder(Embedder):
             # tokens must follow the model onto its device (CUDA crash otherwise)
             dummy = self.model.encode_text(self.tokenizer(["x"]).to(self.device))
         self.dim = int(dummy.shape[1])
+        self._mean_t = torch.tensor(self._MEAN, device=self.device).view(1, 3, 1, 1)
+        self._std_t = torch.tensor(self._STD, device=self.device).view(1, 3, 1, 1)
 
     def embed_images(self, images: Sequence["Image"]) -> np.ndarray:
         torch = self._torch
@@ -144,6 +189,20 @@ class ClipEmbedder(Embedder):
         with torch.no_grad():
             feats = self.model.encode_image(batch.to(self.device))
         feats = torch.nn.functional.normalize(feats, dim=1)
+        return feats.cpu().numpy().astype(np.float32)
+
+    def embed_array(self, frames: np.ndarray) -> np.ndarray:
+        """Raw path: uint8 (n, 224, 224, 3) → normalize on device → model."""
+        torch = self._torch
+        if frames.shape[0] == 0:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        t = torch.from_numpy(np.ascontiguousarray(frames))
+        with torch.no_grad():
+            t = t.to(self.device, non_blocking=True)
+            t = t.permute(0, 3, 1, 2).float().div_(255.0)
+            t = (t - self._mean_t) / self._std_t
+            feats = self.model.encode_image(t)
+            feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
     def embed_text(self, prompts: Sequence[str]) -> np.ndarray:

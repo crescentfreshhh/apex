@@ -87,6 +87,23 @@ def iter_jpegs(stream: IO[bytes], chunk_size: int = 65536) -> Iterator[bytes]:
             buf = buf[eoi + 2 :]
 
 
+def iter_fixed_chunks(stream: IO[bytes], chunk_size: int) -> Iterator[bytes]:
+    """Yield exact `chunk_size` slices from a stream (rawvideo framing).
+
+    Handles short reads; a trailing partial chunk (truncated stream) is
+    dropped rather than yielded corrupt.
+    """
+    buf = bytearray()
+    while True:
+        data = stream.read(chunk_size - len(buf) if len(buf) < chunk_size else chunk_size)
+        if not data:
+            break
+        buf.extend(data)
+        while len(buf) >= chunk_size:
+            yield bytes(buf[:chunk_size])
+            del buf[:chunk_size]
+
+
 _SHOWINFO_PTS = re.compile(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
 
 
@@ -109,14 +126,17 @@ class FrameSampler:
         mode: str = "interval",
         hwaccel: str = "",
         queue_frames: int = 256,
+        pipeline: str = "raw",
     ):
-        """`frame_size`: short-side pixels frames are downscaled to during
-        extraction (0 = original size). Embedders resize to ~224px anyway, so
-        decoding small keeps RAM/temp usage low while staying above model input
-        size. `queue_frames` bounds how far decode may run ahead of the
-        consumer in interval mode (~100MB at 256 frames of 288p)."""
+        """`frame_size`: short-side pixels for the JPEG pipeline (0 = original
+        size). `queue_frames` bounds how far decode runs ahead of the consumer.
+        `pipeline`: "raw" pipes raw RGB frames pre-sized to the model's input
+        straight to the embedder — no JPEG encode, no PIL decode, no CPU
+        resize (the fast path). "jpeg" is the legacy/escape-hatch path."""
         if mode not in ("interval", "keyframes"):
             raise ValueError(f"unknown sampling mode: {mode!r}")
+        if pipeline not in ("raw", "jpeg"):
+            raise ValueError(f"unknown pipeline: {pipeline!r}")
         self.interval = interval_seconds
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
@@ -124,6 +144,7 @@ class FrameSampler:
         self.mode = mode
         self.hwaccel = hwaccel
         self.queue_frames = queue_frames
+        self.pipeline = pipeline
 
     @property
     def interval_signature(self) -> float:
@@ -182,6 +203,17 @@ class FrameSampler:
             parts.append(scale)
         return ",".join(parts)
 
+    def _raw_vf(self, resize_short: int, crop: int) -> str:
+        """Filtergraph for the raw pipeline: sample, then reproduce the
+        model's preprocessing in ffmpeg (bicubic short-side resize + center
+        crop), so frames arrive at exactly the network's input size."""
+        return (
+            f"fps=1/{self.interval:g},"
+            f"scale=w={resize_short}:h={resize_short}"
+            ":force_original_aspect_ratio=increase:flags=bicubic,"
+            f"crop={crop}:{crop}"
+        )
+
     # --- single frame (labeler) ---------------------------------------------------
 
     def grab_frame(self, path: str, time: float) -> "Image":
@@ -223,6 +255,76 @@ class FrameSampler:
             yield from self._iter_frames_keyframes(path)
         else:
             yield from self._iter_frames_interval(path)
+
+    def iter_frames_raw(self, path: str, *, resize_short: int, crop: int):
+        """Fast path: yield (timestamp, HxWx3 uint8 numpy frame) with frames
+        already at the model's input geometry.
+
+        ffmpeg decodes (optionally NVDEC), resizes and crops, and writes raw
+        RGB24 to a pipe. Framing is trivial — every frame is exactly
+        crop*crop*3 bytes — so the Python side is a memcpy, not a JPEG decode.
+        A reader thread keeps decode running ahead of the consumer.
+        """
+        import numpy as np  # lazy: keeps module import light
+
+        if self.interval <= 0:
+            return
+        frame_bytes = crop * crop * 3
+        cmd = [
+            self.ffmpeg,
+            "-v", "error",
+            *self._input_args(),
+            "-i", path,
+            "-vf", self._raw_vf(resize_short, crop),
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-",
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except FileNotFoundError as exc:
+            raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
+
+        frames: Queue = Queue(maxsize=self.queue_frames)
+        stderr_buf = bytearray()
+
+        def _read_frames():
+            try:
+                for chunk in iter_fixed_chunks(proc.stdout, frame_bytes):
+                    frames.put(chunk)
+            finally:
+                frames.put(None)
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_buf.extend(line)
+
+        threading.Thread(target=_read_frames, daemon=True).start()
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+
+        i = 0
+        try:
+            while True:
+                chunk = frames.get()
+                if chunk is None:
+                    break
+                arr = np.frombuffer(chunk, dtype=np.uint8).reshape(crop, crop, 3)
+                yield round(i * self.interval, 3), arr
+                i += 1
+            rc = proc.wait()
+            if rc != 0:
+                raise SamplerError(
+                    f"ffmpeg failed for {path}: "
+                    f"{stderr_buf.decode(errors='replace')[:300]}"
+                )
+            if i == 0:
+                raise SamplerError(f"no frames decoded for {path}")
+        finally:
+            if proc.poll() is None:  # consumer bailed early: stop decoding
+                proc.kill()
+                proc.wait()
 
     def _iter_frames_interval(self, path: str) -> Iterator[tuple[float, "Image"]]:
         """Stream frames over a pipe: no temp files, and ffmpeg decodes ahead

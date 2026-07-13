@@ -35,6 +35,12 @@ mode = "interval"
 # (Env override: PEAKS_HWACCEL)
 hwaccel = ""
 
+# Frame delivery: "raw" (default) pipes raw frames from ffmpeg straight to the
+# GPU at the model's input size — no JPEG encode, no PIL decode, no CPU resize.
+# "jpeg" is the legacy path, kept as an escape hatch if raw misbehaves on some
+# files. (Env override: PEAKS_PIPELINE)
+pipeline = "raw"
+
 
 [library]
 # Only work on scenes whose file path starts with this (blank = whole library).

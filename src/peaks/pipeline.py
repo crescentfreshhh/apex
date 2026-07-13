@@ -101,19 +101,35 @@ def embed_library(
             log(f"  ! scene {scene.id} has no file; skipping")
             stats["failed"] += 1
             continue
+        # raw path: numpy frames straight from ffmpeg, normalized on the GPU —
+        # no JPEG/PIL round-trip. Only interval mode supports it.
+        use_raw = (
+            getattr(sampler, "pipeline", "jpeg") == "raw"
+            and getattr(sampler, "mode", "interval") == "interval"
+        )
         started = _time.monotonic()
         try:
             times: list[float] = []
             batch: list = []
             chunks: list[np.ndarray] = []
-            for ts, img in sampler.iter_frames(scene.path):
+            if use_raw:
+                frame_iter = sampler.iter_frames_raw(
+                    scene.path,
+                    resize_short=embedder.raw_resize,
+                    crop=embedder.raw_crop,
+                )
+                embed_batch = lambda b: embedder.embed_array(np.stack(b))  # noqa: E731
+            else:
+                frame_iter = sampler.iter_frames(scene.path)
+                embed_batch = embedder.embed_images
+            for ts, img in frame_iter:
                 times.append(ts)
                 batch.append(img)
                 if len(batch) >= batch_size:
-                    chunks.append(embedder.embed_images(batch))
+                    chunks.append(embed_batch(batch))
                     batch = []
             if batch:
-                chunks.append(embedder.embed_images(batch))
+                chunks.append(embed_batch(batch))
             vecs = (
                 np.concatenate(chunks, axis=0)
                 if chunks
@@ -129,6 +145,7 @@ def embed_library(
                     "path": scene.path,
                     "interval": signature,
                     "mode": getattr(sampler, "mode", "interval"),
+                    "pipeline": "raw" if use_raw else "jpeg",
                     "model": embedder.name,
                     "dim": embedder.dim,
                     "n_frames": len(times),

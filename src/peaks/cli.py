@@ -139,6 +139,7 @@ def cmd_embed(args) -> int:
         interval_seconds=cfg.sampling.interval_seconds,
         mode=cfg.sampling.mode,
         hwaccel=cfg.sampling.hwaccel,
+        pipeline=cfg.sampling.pipeline,
     )
     embedder = _build_embedder(
         cfg, **({"device": cfg.embedding.device} if cfg.embedding.device else {})
@@ -147,6 +148,7 @@ def cmd_embed(args) -> int:
     scenes, total = _scenes_and_total(client, cfg, args.limit)
     extras = f", mode={cfg.sampling.mode}" if cfg.sampling.mode != "interval" else ""
     extras += f", hwaccel={cfg.sampling.hwaccel}" if cfg.sampling.hwaccel else ""
+    extras += f", pipeline={cfg.sampling.pipeline}"
     extras += f", path={cfg.library.path}" if cfg.library.path else ""
     print(
         f"Embedding {total} scene(s) with '{embedder.name}' "

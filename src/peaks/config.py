@@ -32,6 +32,7 @@ class SamplingConfig:
     interval_seconds: float = 2.0
     mode: str = "interval"  # "interval" | "keyframes" (throughput fallback)
     hwaccel: str = ""  # "" | "cuda" | "auto" — GPU-assisted decode
+    pipeline: str = "raw"  # "raw" (fast: frames straight to GPU) | "jpeg"
 
 
 @dataclass
@@ -123,6 +124,10 @@ class Config:
             ),
             hwaccel=os.environ.get(
                 "PEAKS_HWACCEL", sampling_raw.get("hwaccel", SamplingConfig.hwaccel)
+            ),
+            pipeline=os.environ.get(
+                "PEAKS_PIPELINE",
+                sampling_raw.get("pipeline", SamplingConfig.pipeline),
             ),
         )
         markers = MarkersConfig(
