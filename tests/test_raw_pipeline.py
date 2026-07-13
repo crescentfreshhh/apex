@@ -167,6 +167,62 @@ def test_embed_library_raw_branch(tmp_path):
     assert meta["pipeline"] == "raw"
 
 
+def test_embed_library_parallel_workers(tmp_path):
+    """workers>1: concurrent decode, same results, cache complete."""
+    emb = FakeEmbedder(dim=10)
+    emb.raw_resize, emb.raw_crop = 32, 32
+    sampler = _RawStubSampler(n_frames=5)
+    cache = EmbeddingCache(tmp_path)
+    scenes = [_scene(str(i), f"k{i}") for i in range(7)]
+
+    stats = embed_library(
+        scenes, sampler, emb, cache, batch_size=3, workers=3, log=lambda *_: None
+    )
+    assert stats["embedded"] == 7 and stats["frames"] == 35
+    for i in range(7):
+        times, vecs, meta = cache.load(f"k{i}", "fake")
+        assert len(times) == 5 and vecs.shape == (5, 10)
+        assert meta["pipeline"] == "raw"
+
+
+def test_embed_library_parallel_skips_cached_and_survives_failures(tmp_path):
+    emb = FakeEmbedder(dim=8)
+    emb.raw_resize, emb.raw_crop = 16, 16
+
+    class _FlakySampler(_RawStubSampler):
+        def iter_frames_raw(self, path, *, resize_short, crop):
+            if "bad" in path:
+                raise RuntimeError("corrupt file")
+            yield from super().iter_frames_raw(
+                path, resize_short=resize_short, crop=crop
+            )
+
+    sampler = _FlakySampler(n_frames=4)
+    cache = EmbeddingCache(tmp_path)
+    good = _scene("1", "k1")
+    bad = Scene.from_dict(
+        {
+            "id": "2",
+            "title": "",
+            "files": [{"path": "/m/bad.mp4", "fingerprints": [
+                {"type": "oshash", "value": "k2"}]}],
+            "scene_markers": [],
+        }
+    )
+    # pre-cache one scene so skip logic is exercised too
+    embed_library([good], sampler, emb, cache, workers=1, log=lambda *_: None)
+
+    stats = embed_library(
+        [good, bad, _scene("3", "k3")], sampler, emb, cache,
+        workers=2, log=lambda *_: None,
+    )
+    assert stats["skipped"] == 1  # k1 already cached
+    assert stats["failed"] == 1  # the corrupt one
+    assert stats["embedded"] == 1  # k3
+    assert cache.has("k3", "fake")
+    assert not cache.has("k2", "fake")
+
+
 def test_embed_library_jpeg_branch_still_works(tmp_path):
     """Samplers without the raw attrs keep using the legacy path."""
 

@@ -50,6 +50,9 @@ class EmbeddingConfig:
     cache_dir: str = "cache/embeddings"
     device: str = ""  # "" = auto (cuda if available)
     batch_size: int = 64
+    # concurrent scene decodes (raw path). Sparse sampling is I/O-latency
+    # bound, so 3-4 workers is a big speedup. (Env override: PEAKS_WORKERS)
+    workers: int = 3
 
 
 @dataclass
@@ -144,6 +147,12 @@ class Config:
                 "PEAKS_DEVICE", embedding_raw.get("device", EmbeddingConfig.device)
             ),
             batch_size=int(embedding_raw.get("batch_size", EmbeddingConfig.batch_size)),
+            workers=int(
+                os.environ.get(
+                    "PEAKS_WORKERS",
+                    embedding_raw.get("workers", EmbeddingConfig.workers),
+                )
+            ),
         )
         scoring = ScoringConfig(
             reduce=scoring_raw.get("reduce", ScoringConfig.reduce),

@@ -75,6 +75,7 @@ def embed_library(
     *,
     batch_size: int = 64,
     total: int | None = None,
+    workers: int = 1,
     log: Logger = print,
 ) -> dict:
     """Embed every scene not already cached. Resumable + idempotent.
@@ -84,10 +85,30 @@ def embed_library(
     Cache hits are only honoured when built with the same sampling settings
     (interval, or keyframe mode); a config change re-embeds instead of
     silently serving stale samples. Pass `total` for progress/ETA in the log.
+
+    `workers` > 1 decodes that many scenes concurrently (raw path only) while
+    the main thread embeds — sparse sampling is seek/I-O-latency-bound, so
+    parallel decode is a near-linear speedup until the disks saturate.
     """
     import time as _time
 
     signature = getattr(sampler, "interval_signature", sampler.interval)
+    # raw path: numpy frames straight to the GPU — no JPEG/PIL round-trip.
+    # Samplers advertise it via wants_raw (sparse mode is always raw).
+    use_raw = getattr(sampler, "wants_raw", None)
+    if use_raw is None:  # older/stub samplers: infer from attrs
+        use_raw = (
+            getattr(sampler, "pipeline", "jpeg") == "raw"
+            and getattr(sampler, "mode", "interval") == "interval"
+        )
+
+    if workers > 1 and use_raw:
+        return _embed_library_parallel(
+            scenes, sampler, embedder, cache,
+            signature=signature, batch_size=batch_size, total=total,
+            workers=workers, log=log,
+        )
+
     stats = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
     embed_seconds = 0.0
     processed = 0
@@ -101,14 +122,6 @@ def embed_library(
             log(f"  ! scene {scene.id} has no file; skipping")
             stats["failed"] += 1
             continue
-        # raw path: numpy frames straight to the GPU — no JPEG/PIL round-trip.
-        # Samplers advertise it via wants_raw (sparse mode is always raw).
-        use_raw = getattr(sampler, "wants_raw", None)
-        if use_raw is None:  # older/stub samplers: infer from attrs
-            use_raw = (
-                getattr(sampler, "pipeline", "jpeg") == "raw"
-                and getattr(sampler, "mode", "interval") == "interval"
-            )
         started = _time.monotonic()
         try:
             times: list[float] = []
@@ -171,6 +184,122 @@ def embed_library(
             stats["failed"] += 1
     if stats["embedded"]:
         stats["seconds_per_scene"] = round(embed_seconds / stats["embedded"], 2)
+    return stats
+
+
+def _embed_library_parallel(
+    scenes: Iterable[Scene],
+    sampler: FrameSampler,
+    embedder: Embedder,
+    cache: EmbeddingCache,
+    *,
+    signature: float,
+    batch_size: int,
+    total: int | None,
+    workers: int,
+    log: Logger,
+) -> dict:
+    """Raw-path embed with `workers` scenes decoding concurrently.
+
+    Worker threads run the (I/O-latency-bound) seek+decode; the main thread
+    owns the GPU: it embeds and caches each finished scene. In-flight decode
+    is bounded to 2x workers so memory stays modest (a sparse scene's frames
+    are only tens of MB).
+    """
+    import time as _time
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    stats = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
+    started_all = _time.monotonic()
+    processed = 0
+
+    def _decode(scene: Scene):
+        times: list[float] = []
+        frames: list[np.ndarray] = []
+        for ts, arr in sampler.iter_frames_raw(
+            scene.path, resize_short=embedder.raw_resize, crop=embedder.raw_crop
+        ):
+            times.append(ts)
+            frames.append(arr)
+        stacked = (
+            np.stack(frames)
+            if frames
+            else np.zeros(
+                (0, embedder.raw_crop, embedder.raw_crop, 3), dtype=np.uint8
+            )
+        )
+        return np.asarray(times, dtype=np.float32), stacked
+
+    def _finish(entry) -> None:
+        nonlocal processed
+        scene, key, future = entry
+        processed += 1
+        try:
+            times, frames = future.result()
+            chunks = [
+                embedder.embed_array(frames[i : i + batch_size])
+                for i in range(0, len(frames), batch_size)
+            ]
+            vecs = (
+                np.concatenate(chunks, axis=0)
+                if chunks
+                else np.zeros((0, embedder.dim), dtype=np.float32)
+            )
+            cache.save(
+                key,
+                embedder.name,
+                times,
+                vecs,
+                meta={
+                    "scene_id": scene.id,
+                    "path": scene.path,
+                    "interval": signature,
+                    "mode": getattr(sampler, "mode", "interval"),
+                    "pipeline": "raw",
+                    "model": embedder.name,
+                    "dim": embedder.dim,
+                    "n_frames": len(times),
+                },
+            )
+            stats["embedded"] += 1
+            stats["frames"] += len(times)
+            elapsed = _time.monotonic() - started_all
+            rate = elapsed / stats["embedded"]
+            progress = f"[{processed}/{total}] " if total else ""
+            eta = (
+                f", eta ~{rate * (total - processed) / 3600:.1f}h" if total else ""
+            )
+            log(
+                f"  + {progress}scene {scene.id}: {len(times)} frames "
+                f"({rate:.1f}s/scene overall{eta})"
+            )
+        except Exception as exc:
+            log(f"  ! scene {scene.id} failed: {exc}")
+            stats["failed"] += 1
+
+    inflight: deque = deque()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for scene in scenes:
+            key = scene_key(scene)
+            if cache.has(key, embedder.name, interval=signature):
+                processed += 1
+                stats["skipped"] += 1
+                continue
+            if not scene.path:
+                processed += 1
+                log(f"  ! scene {scene.id} has no file; skipping")
+                stats["failed"] += 1
+                continue
+            inflight.append((scene, key, pool.submit(_decode, scene)))
+            if len(inflight) >= workers * 2:  # bound decoded-but-unembedded RAM
+                _finish(inflight.popleft())
+        while inflight:
+            _finish(inflight.popleft())
+
+    if stats["embedded"]:
+        elapsed = _time.monotonic() - started_all
+        stats["seconds_per_scene"] = round(elapsed / stats["embedded"], 2)
     return stats
 
 

@@ -159,6 +159,7 @@ def cmd_embed(args) -> int:
     extras = f", mode={cfg.sampling.mode}" if cfg.sampling.mode != "interval" else ""
     extras += f", hwaccel={cfg.sampling.hwaccel}" if cfg.sampling.hwaccel else ""
     extras += f", pipeline={cfg.sampling.pipeline}"
+    extras += f", workers={cfg.embedding.workers}" if cfg.embedding.workers > 1 else ""
     extras += f", path={cfg.library.path}" if cfg.library.path else ""
     print(
         f"Embedding {total} scene(s) with '{embedder.name}' "
@@ -167,6 +168,7 @@ def cmd_embed(args) -> int:
     stats = embed_library(
         scenes, sampler, embedder, cache,
         batch_size=cfg.embedding.batch_size, total=total,
+        workers=cfg.embedding.workers,
     )
     rate = (
         f" avg {stats['seconds_per_scene']}s/scene"
