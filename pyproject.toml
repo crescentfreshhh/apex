@@ -22,6 +22,7 @@ ml = [
     "torchvision",    # DINOv2 image transforms
     "pillow",
     "scikit-learn",   # the Tier-2 taste classifier
+    "av>=12",         # sparse (seek-based) sampling; bundles ffmpeg libs
     "tqdm",
 ]
 label = [
@@ -30,6 +31,7 @@ label = [
 dev = [
     "pytest>=7",      # the offline test suite (no torch/ffmpeg/Stash needed)
     "scikit-learn",   # classifier tests exercise the real sklearn estimators
+    "av>=12",         # sparse-sampler tests run against real generated video
 ]
 
 [project.scripts]

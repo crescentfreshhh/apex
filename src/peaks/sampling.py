@@ -1,23 +1,31 @@
-"""Frame sampling via ffmpeg.
+"""Frame sampling.
 
-Two modes:
+Three modes:
 
-  "interval"  — one frame every `interval_seconds`, streamed straight out of
-                ffmpeg over a pipe (no temp files) through a bounded queue, so
-                decode runs ahead while the consumer (the GPU embedder) works.
-                Frame i comes from source time ~`i * interval`.
+  "sparse"    — THE FAST PATH for long videos: seek to each sample time and
+                decode exactly one keyframe (PyAV, in-process). Cost scales
+                with the number of SAMPLES, not the video's duration — unlike
+                every other mode, which must decode/discard the whole file.
+                Timestamps are the decoded keyframe's exact pts, so samples
+                snap to keyframes (typically within a couple of seconds of the
+                grid). Requires the `av` package (bundled ffmpeg libs).
 
-  "keyframes" — decode only keyframes (`-skip_frame nokey`): ~1-5% of the
-                decode cost, at the price of irregular, encode-dependent
-                spacing (typically every 2-10s). Exact timestamps are parsed
-                from ffmpeg's showinfo output. The throughput escape hatch for
-                huge libraries.
+  "interval"  — one frame every `interval_seconds`, streamed out of ffmpeg
+                over a pipe through a bounded queue. Decodes the ENTIRE video
+                to keep a fraction of it — fine for short clips, brutal for
+                hour-long files. Frame i comes from source time ~i*interval.
 
-Optional `hwaccel` ("cuda"/"auto") offloads decode to the GPU (NVDEC) — decode,
-not embedding, is the pipeline bottleneck.
+  "keyframes" — decode only keyframes (`-skip_frame nokey`): far less decode
+                than interval, but still reads/parses the whole file and
+                yields every keyframe (dense-GOP files gain little).
 
-The pure helpers (`plan_timestamps`, `iter_jpegs`, `parse_showinfo_times`) are
-unit-tested offline; the ffmpeg calls themselves need a real box.
+Optional `hwaccel` ("cuda"/"auto") offloads interval-mode decode to the GPU
+(NVDEC). Sparse mode doesn't need it: it decodes ~one I-frame per sample.
+
+The pure helpers (`plan_timestamps`, `iter_jpegs`, `iter_fixed_chunks`,
+`parse_showinfo_times`) are unit-tested offline; sparse mode is tested against
+real generated video (PyAV bundles codecs); the ffmpeg-binary paths need a
+real box.
 """
 
 from __future__ import annotations
@@ -133,7 +141,7 @@ class FrameSampler:
         `pipeline`: "raw" pipes raw RGB frames pre-sized to the model's input
         straight to the embedder — no JPEG encode, no PIL decode, no CPU
         resize (the fast path). "jpeg" is the legacy/escape-hatch path."""
-        if mode not in ("interval", "keyframes"):
+        if mode not in ("sparse", "interval", "keyframes"):
             raise ValueError(f"unknown sampling mode: {mode!r}")
         if pipeline not in ("raw", "jpeg"):
             raise ValueError(f"unknown pipeline: {pipeline!r}")
@@ -150,8 +158,22 @@ class FrameSampler:
     def interval_signature(self) -> float:
         """Value stored/checked in the embedding cache so a sampling-config
         change invalidates old entries. Keyframe mode uses -1.0 (its spacing
-        is encode-dependent, not an interval)."""
-        return -1.0 if self.mode == "keyframes" else self.interval
+        is encode-dependent, not an interval); sparse encodes as -(100 +
+        interval) so each sparse grid is distinct from every interval grid."""
+        if self.mode == "keyframes":
+            return -1.0
+        if self.mode == "sparse":
+            return -(100.0 + self.interval)
+        return self.interval
+
+    @property
+    def wants_raw(self) -> bool:
+        """True when this sampler produces numpy frames for embed_array.
+        Sparse mode is always raw (it decodes straight to arrays); interval
+        mode honours the pipeline setting; keyframes stays on the PIL path."""
+        return self.mode == "sparse" or (
+            self.mode == "interval" and self.pipeline == "raw"
+        )
 
     # --- probing ---------------------------------------------------------------
 
@@ -257,6 +279,102 @@ class FrameSampler:
             yield from self._iter_frames_interval(path)
 
     def iter_frames_raw(self, path: str, *, resize_short: int, crop: int):
+        """Yield (timestamp, HxWx3 uint8 numpy frame) at the model's input
+        geometry — the raw path. Dispatches on mode: sparse seeks per sample;
+        interval streams a full decode over a pipe."""
+        if self.mode == "sparse":
+            yield from self._iter_frames_sparse(
+                path, resize_short=resize_short, crop=crop
+            )
+        else:
+            yield from self._iter_frames_raw_interval(
+                path, resize_short=resize_short, crop=crop
+            )
+
+    def _iter_frames_sparse(self, path: str, *, resize_short: int, crop: int):
+        """Seek-based sampling: for each grid time, seek to the prior keyframe
+        and decode just that one frame. Decodes ~one I-frame per sample, so a
+        56-minute file at interval=8 costs ~420 tiny decodes instead of a
+        ~100k-frame full decode. Timestamps are the keyframes' exact pts.
+
+        When the grid is finer than the keyframe spacing, consecutive seeks
+        land on the same keyframe — duplicates are skipped, so the effective
+        density is min(grid, GOP)."""
+        import numpy as np  # lazy
+
+        try:
+            import av  # lazy: the `av` extra dependency
+        except ImportError as exc:  # pragma: no cover - guarded in CLI too
+            raise SamplerError(
+                "sparse mode needs the 'av' package (pip install av)"
+            ) from exc
+
+        if self.interval <= 0:
+            return
+
+        with av.open(path) as container:
+            if not container.streams.video:
+                raise SamplerError(f"no video stream in {path}")
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            try:  # decode keyframes only — big speedup, and seeks land on them
+                stream.codec_context.skip_frame = "NONKEY"
+            except (AttributeError, ValueError):  # pragma: no cover
+                pass
+
+            tb = stream.time_base
+            if stream.duration and tb:
+                duration = float(stream.duration * tb)
+            elif container.duration:
+                duration = container.duration / av.time_base
+            else:
+                raise SamplerError(f"could not determine duration of {path}")
+
+            interp_kw: dict = {"interpolation": "BICUBIC"}
+            last_pts = None
+            yielded = 0
+            t = 0.0
+            while t < duration:
+                target = t
+                t += self.interval
+                try:
+                    container.seek(int(target / tb), stream=stream)
+                    frame = next(container.decode(stream), None)
+                except StopIteration:  # pragma: no cover
+                    break
+                except Exception:
+                    continue  # unseekable spot / decode hiccup: skip sample
+                if frame is None:
+                    break
+                if frame.pts is not None and last_pts is not None and frame.pts <= last_pts:
+                    continue  # same keyframe as the previous sample
+                last_pts = frame.pts
+                ts = frame.time if frame.time is not None else target
+
+                # reproduce the model preprocessing: bicubic short-side resize
+                # then center crop, all inside libswscale + numpy
+                scale = resize_short / min(frame.width, frame.height)
+                nw = max(crop, int(round(frame.width * scale)))
+                nh = max(crop, int(round(frame.height * scale)))
+                try:
+                    out = frame.reformat(
+                        width=nw, height=nh, format="rgb24", **interp_kw
+                    )
+                except TypeError:  # older PyAV without interpolation kwarg
+                    interp_kw = {}
+                    out = frame.reformat(width=nw, height=nh, format="rgb24")
+                arr = out.to_ndarray()
+                y0 = (nh - crop) // 2
+                x0 = (nw - crop) // 2
+                arr = np.ascontiguousarray(
+                    arr[y0 : y0 + crop, x0 : x0 + crop]
+                )
+                yield round(float(ts), 3), arr
+                yielded += 1
+            if yielded == 0:
+                raise SamplerError(f"no frames decoded for {path}")
+
+    def _iter_frames_raw_interval(self, path: str, *, resize_short: int, crop: int):
         """Fast path: yield (timestamp, HxWx3 uint8 numpy frame) with frames
         already at the model's input geometry.
 

@@ -101,12 +101,14 @@ def embed_library(
             log(f"  ! scene {scene.id} has no file; skipping")
             stats["failed"] += 1
             continue
-        # raw path: numpy frames straight from ffmpeg, normalized on the GPU —
-        # no JPEG/PIL round-trip. Only interval mode supports it.
-        use_raw = (
-            getattr(sampler, "pipeline", "jpeg") == "raw"
-            and getattr(sampler, "mode", "interval") == "interval"
-        )
+        # raw path: numpy frames straight to the GPU — no JPEG/PIL round-trip.
+        # Samplers advertise it via wants_raw (sparse mode is always raw).
+        use_raw = getattr(sampler, "wants_raw", None)
+        if use_raw is None:  # older/stub samplers: infer from attrs
+            use_raw = (
+                getattr(sampler, "pipeline", "jpeg") == "raw"
+                and getattr(sampler, "mode", "interval") == "interval"
+            )
         started = _time.monotonic()
         try:
             times: list[float] = []

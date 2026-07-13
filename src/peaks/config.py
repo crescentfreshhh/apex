@@ -29,9 +29,13 @@ class StashConfig:
 
 @dataclass
 class SamplingConfig:
-    interval_seconds: float = 2.0
-    mode: str = "interval"  # "interval" | "keyframes" (throughput fallback)
-    hwaccel: str = ""  # "" | "cuda" | "auto" — GPU-assisted decode
+    interval_seconds: float = 8.0
+    # "sparse": seek + decode one keyframe per sample — cost scales with
+    #   samples, not duration. The right choice for long videos.
+    # "interval": full decode, one frame kept per interval (short clips).
+    # "keyframes": full-file keyframe pass (legacy fallback).
+    mode: str = "sparse"
+    hwaccel: str = ""  # "" | "cuda" | "auto" — GPU decode for interval mode
     pipeline: str = "raw"  # "raw" (fast: frames straight to GPU) | "jpeg"
 
 

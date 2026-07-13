@@ -17,17 +17,21 @@ timeout = 30
 
 
 [sampling]
-# How often to sample a frame from each video, in seconds.
-# Smaller = finer time resolution but more frames to embed (slower, more cache).
-# 2.0 is a good default on GPU; bump to 4-5 on CPU.
-interval_seconds = 2.0
+# How often to sample, in seconds. In sparse mode every sample is one cheap
+# seek+decode, so this directly sets the cost: 8 is a good default for long
+# scenes. Smaller = finer time resolution, more samples.
+# (Env override: PEAKS_INTERVAL_SECONDS)
+interval_seconds = 8.0
 
-# "interval"  — every interval_seconds (streamed, no temp files). Default.
-# "keyframes" — decode only keyframes (~1-5% of the decode cost). The
-#   throughput escape hatch for huge libraries: spacing becomes irregular and
-#   encode-dependent (typically 2-10s), timestamps stay exact.
+# "sparse"    — DEFAULT, the fast path for long videos: seek to each sample
+#   time and decode exactly one keyframe. Cost scales with the number of
+#   samples, not the video's length. Samples snap to keyframes.
+# "interval"  — decode the ENTIRE file, keep one frame per interval. Precise
+#   grid, but brutal on hour-long files. For short clips.
+# "keyframes" — legacy full-file keyframe pass.
 # Changing mode or interval invalidates cache entries (they re-embed).
-mode = "interval"
+# (Env override: PEAKS_SAMPLING_MODE)
+mode = "sparse"
 
 # GPU-assisted video decode: "" (CPU), "cuda" (NVDEC), or "auto".
 # Decode — not embedding — is the pipeline bottleneck; if the GPU is in the

@@ -135,6 +135,16 @@ def cmd_embed(args) -> int:
     from .pipeline import embed_library
     from .sampling import FrameSampler
 
+    if cfg.sampling.mode == "sparse":
+        try:
+            import av  # noqa: F401
+        except ImportError:
+            print(
+                "✗ sparse mode needs the 'av' package.\n"
+                "  pip install av   (or update the container image)",
+                file=sys.stderr,
+            )
+            return 2
     sampler = FrameSampler(
         interval_seconds=cfg.sampling.interval_seconds,
         mode=cfg.sampling.mode,
@@ -335,6 +345,60 @@ def cmd_label(args) -> int:
     return 0
 
 
+def cmd_bench(args) -> int:
+    """Time the sampling modes on a few real scenes — ends the ETA guessing."""
+    import time as _time
+
+    cfg = Config.load(args.config)
+    client = StashClient.from_config(cfg)
+    from .sampling import FrameSampler
+
+    n = args.limit or 3
+    scenes, _ = _scenes_and_total(client, cfg, n)
+    scenes = [s for s in list(scenes)[:n] if s.path]
+    if not scenes:
+        print("✗ no scenes with files to bench", file=sys.stderr)
+        return 1
+    modes = [m.strip() for m in (args.modes or "sparse,interval").split(",")]
+    print(
+        f"Benching {len(scenes)} scene(s), interval={cfg.sampling.interval_seconds}s, "
+        f"hwaccel={cfg.sampling.hwaccel or 'off'} (decode+deliver only, no embedding)\n"
+    )
+    for mode in modes:
+        if mode == "sparse":
+            try:
+                import av  # noqa: F401
+            except ImportError:
+                print(f"{mode:>9}: skipped ('av' package not installed)")
+                continue
+        sampler = FrameSampler(
+            interval_seconds=cfg.sampling.interval_seconds,
+            mode=mode,
+            hwaccel=cfg.sampling.hwaccel,
+            pipeline="raw",
+        )
+        frames = 0
+        errors = 0
+        t0 = _time.monotonic()
+        for sc in scenes:
+            try:
+                for _ts, _arr in sampler.iter_frames_raw(
+                    sc.path, resize_short=256, crop=224
+                ):
+                    frames += 1
+            except Exception as exc:
+                errors += 1
+                print(f"  ! {mode} failed on scene {sc.id}: {exc}")
+        dt = _time.monotonic() - t0
+        sps = dt / len(scenes)
+        print(
+            f"{mode:>9}: {frames} frames in {dt:.1f}s -> {sps:.1f}s/scene"
+            f"{f'  ({errors} errors)' if errors else ''}"
+        )
+        print(f"           est. full run: N scenes x {sps:.1f}s / 3600 = hours")
+    return 0
+
+
 def cmd_clear(args) -> int:
     """Delete generated markers for a tag. Dry-run by default, like `score`."""
     cfg = Config.load(args.config)
@@ -445,6 +509,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bind address (use 0.0.0.0 inside a container)",
     )
     lp.set_defaults(func=cmd_label)
+
+    bp = sub.add_parser("bench", help="Time sampling modes on a few real scenes")
+    bp.add_argument("--limit", type=int, default=3, help="Scenes to bench (default 3)")
+    bp.add_argument("--modes", help="Comma list (default: sparse,interval)")
+    bp.set_defaults(func=cmd_bench)
 
     cp = sub.add_parser("clear", help="Delete generated markers for a tag")
     cp.add_argument("--tag", help="Tag whose markers to delete (overrides config)")
