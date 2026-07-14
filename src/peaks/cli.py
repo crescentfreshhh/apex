@@ -150,6 +150,7 @@ def cmd_embed(args) -> int:
         mode=cfg.sampling.mode,
         hwaccel=cfg.sampling.hwaccel,
         pipeline=cfg.sampling.pipeline,
+        scene_timeout=cfg.sampling.scene_timeout,
     )
     embedder = _build_embedder(
         cfg, **({"device": cfg.embedding.device} if cfg.embedding.device else {})
@@ -380,6 +381,7 @@ def cmd_bench(args) -> int:
             mode=mode,
             hwaccel=cfg.sampling.hwaccel,
             pipeline="raw",
+            scene_timeout=cfg.sampling.scene_timeout,
         )
         frames = 0
         errors = 0

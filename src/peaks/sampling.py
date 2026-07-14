@@ -124,6 +124,96 @@ class SamplerError(RuntimeError):
     pass
 
 
+def _sparse_extract_worker(
+    path: str, interval: float, resize_short: int, crop: int, out_path: str
+) -> None:
+    """Runs in a CHILD process: sparse-decode `path` and save (times, frames)
+    to `out_path` as an .npz. Kept at module level so it's importable by the
+    `spawn` start method. A non-zero exit / no output tells the parent the
+    scene failed; a hang is handled by the parent's kill-timeout.
+
+    In-worker guards (total-error cap, implausible-duration check) make it exit
+    fast on obviously-broken files without waiting for the parent timeout."""
+    import numpy as np
+    import av
+
+    try:
+        av.logging.set_level(av.logging.ERROR)  # mute per-seek decoder chatter
+    except Exception:
+        pass
+
+    max_total_errors = 60
+    max_scene_hours = 12.0
+
+    times: list[float] = []
+    frames: list = []
+    with av.open(path) as container:
+        if not container.streams.video:
+            raise RuntimeError(f"no video stream in {path}")
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        try:  # decode keyframes only — big speedup, and seeks land on them
+            stream.codec_context.skip_frame = "NONKEY"
+        except (AttributeError, ValueError):
+            pass
+
+        tb = stream.time_base
+        if stream.duration and tb:
+            duration = float(stream.duration * tb)
+        elif container.duration:
+            duration = container.duration / av.time_base
+        else:
+            raise RuntimeError(f"could not determine duration of {path}")
+        if duration <= 0 or duration > max_scene_hours * 3600:
+            raise RuntimeError(f"implausible duration {duration:.0f}s for {path}")
+
+        interp_kw: dict = {"interpolation": "BICUBIC"}
+        last_pts = None
+        total_errors = 0
+        t = 0.0
+        while t < duration:
+            target = t
+            t += interval
+            try:
+                container.seek(int(target / tb), stream=stream)
+                frame = next(container.decode(stream), None)
+            except StopIteration:
+                break
+            except Exception:
+                total_errors += 1
+                if total_errors >= max_total_errors:
+                    raise RuntimeError(f"{total_errors} decode errors in {path}")
+                continue
+            if frame is None:
+                break
+            if frame.pts is not None and last_pts is not None and frame.pts <= last_pts:
+                continue  # same keyframe as the previous sample
+            last_pts = frame.pts
+            ts = frame.time if frame.time is not None else target
+
+            scale = resize_short / min(frame.width, frame.height)
+            nw = max(crop, int(round(frame.width * scale)))
+            nh = max(crop, int(round(frame.height * scale)))
+            try:
+                out = frame.reformat(width=nw, height=nh, format="rgb24", **interp_kw)
+            except TypeError:  # older PyAV without the interpolation kwarg
+                interp_kw = {}
+                out = frame.reformat(width=nw, height=nh, format="rgb24")
+            arr = out.to_ndarray()
+            y0 = (nh - crop) // 2
+            x0 = (nw - crop) // 2
+            frames.append(np.ascontiguousarray(arr[y0 : y0 + crop, x0 : x0 + crop]))
+            times.append(round(float(ts), 3))
+
+    if not times:
+        raise RuntimeError(f"no frames decoded for {path}")
+    np.savez(
+        out_path,
+        times=np.asarray(times, dtype=np.float32),
+        frames=np.stack(frames),
+    )
+
+
 class FrameSampler:
     def __init__(
         self,
@@ -135,6 +225,7 @@ class FrameSampler:
         hwaccel: str = "",
         queue_frames: int = 256,
         pipeline: str = "raw",
+        scene_timeout: float = 180.0,
     ):
         """`frame_size`: short-side pixels for the JPEG pipeline (0 = original
         size). `queue_frames` bounds how far decode runs ahead of the consumer.
@@ -153,6 +244,9 @@ class FrameSampler:
         self.hwaccel = hwaccel
         self.queue_frames = queue_frames
         self.pipeline = pipeline
+        # hard ceiling on how long a single scene may spend sampling, so one
+        # corrupt/pathological file can never stall the whole run. 0 disables.
+        self.scene_timeout = scene_timeout
 
     @property
     def interval_signature(self) -> float:
@@ -292,109 +386,66 @@ class FrameSampler:
             )
 
     def _iter_frames_sparse(self, path: str, *, resize_short: int, crop: int):
-        """Seek-based sampling: for each grid time, seek to the prior keyframe
-        and decode just that one frame. Decodes ~one I-frame per sample, so a
-        56-minute file at interval=8 costs ~420 tiny decodes instead of a
-        ~100k-frame full decode. Timestamps are the keyframes' exact pts.
+        """Seek-based sampling, run in a CHILD PROCESS with a hard kill-timeout.
 
-        When the grid is finer than the keyframe spacing, consecutive seeks
-        land on the same keyframe — duplicates are skipped, so the effective
-        density is min(grid, GOP)."""
+        Decoding happens in `_sparse_extract_worker`; the frames come back via
+        a temp .npz. A corrupt file that wedges libav inside a C call can't be
+        interrupted from Python, so the parent simply kills the child after
+        `scene_timeout` seconds and the scene is marked failed. Isolation also
+        removes GIL contention so `workers` actually parallelize decode."""
+        import multiprocessing as mp
+        import os
+        import tempfile
+
         import numpy as np  # lazy
 
         try:
-            import av  # lazy: the `av` extra dependency
+            import av  # noqa: F401  (fail here with a clean message, not in child)
         except ImportError as exc:  # pragma: no cover - guarded in CLI too
             raise SamplerError(
                 "sparse mode needs the 'av' package (pip install av)"
             ) from exc
 
-        # Silence libav's per-seek decoder chatter ("Duplicate POC in a
-        # sequence", "co located POCs unavailable", ...). Sparse mode seeks
-        # heavily, so these are expected and harmless — but they flood the log.
-        try:
-            av.logging.set_level(av.logging.ERROR)
-        except Exception:  # pragma: no cover - never fatal
-            pass
-
         if self.interval <= 0:
             return
 
-        with av.open(path) as container:
-            if not container.streams.video:
-                raise SamplerError(f"no video stream in {path}")
-            stream = container.streams.video[0]
-            stream.thread_type = "AUTO"
-            try:  # decode keyframes only — big speedup, and seeks land on them
-                stream.codec_context.skip_frame = "NONKEY"
-            except (AttributeError, ValueError):  # pragma: no cover
-                pass
-
-            tb = stream.time_base
-            if stream.duration and tb:
-                duration = float(stream.duration * tb)
-            elif container.duration:
-                duration = container.duration / av.time_base
-            else:
-                raise SamplerError(f"could not determine duration of {path}")
-
-            # Bail out of a scene after a burst of consecutive decode errors:
-            # a corrupt file ("Invalid NAL unit size", ...) would otherwise
-            # error on every one of its hundreds of seeks. Give up fast and let
-            # the caller mark the scene failed instead of grinding on garbage.
-            max_consecutive_errors = 15
-
-            interp_kw: dict = {"interpolation": "BICUBIC"}
-            last_pts = None
-            yielded = 0
-            consecutive_errors = 0
-            t = 0.0
-            while t < duration:
-                target = t
-                t += self.interval
-                try:
-                    container.seek(int(target / tb), stream=stream)
-                    frame = next(container.decode(stream), None)
-                except StopIteration:  # pragma: no cover
-                    break
-                except Exception:
-                    consecutive_errors += 1
-                    if consecutive_errors >= max_consecutive_errors:
-                        raise SamplerError(
-                            f"{consecutive_errors} consecutive decode errors in "
-                            f"{path} (corrupt/damaged file?) — giving up"
-                        )
-                    continue  # unseekable spot / decode hiccup: skip sample
-                consecutive_errors = 0  # a clean decode resets the streak
-                if frame is None:
-                    break
-                if frame.pts is not None and last_pts is not None and frame.pts <= last_pts:
-                    continue  # same keyframe as the previous sample
-                last_pts = frame.pts
-                ts = frame.time if frame.time is not None else target
-
-                # reproduce the model preprocessing: bicubic short-side resize
-                # then center crop, all inside libswscale + numpy
-                scale = resize_short / min(frame.width, frame.height)
-                nw = max(crop, int(round(frame.width * scale)))
-                nh = max(crop, int(round(frame.height * scale)))
-                try:
-                    out = frame.reformat(
-                        width=nw, height=nh, format="rgb24", **interp_kw
-                    )
-                except TypeError:  # older PyAV without interpolation kwarg
-                    interp_kw = {}
-                    out = frame.reformat(width=nw, height=nh, format="rgb24")
-                arr = out.to_ndarray()
-                y0 = (nh - crop) // 2
-                x0 = (nw - crop) // 2
-                arr = np.ascontiguousarray(
-                    arr[y0 : y0 + crop, x0 : x0 + crop]
+        fd, out_path = tempfile.mkstemp(suffix=".npz", prefix="peaks-sparse-")
+        os.close(fd)
+        ctx = mp.get_context("spawn")  # fresh interpreter: no CUDA-fork hazards
+        proc = ctx.Process(
+            target=_sparse_extract_worker,
+            args=(path, self.interval, resize_short, crop, out_path),
+        )
+        try:
+            proc.start()
+            proc.join(self.scene_timeout if self.scene_timeout else None)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(5)
+                if proc.is_alive():  # pragma: no cover - stubborn C loop
+                    proc.kill()
+                    proc.join()
+                raise SamplerError(
+                    f"scene sampling exceeded {self.scene_timeout:.0f}s on "
+                    f"{path} (corrupt/pathological file?) — killed"
                 )
-                yield round(float(ts), 3), arr
-                yielded += 1
-            if yielded == 0:
-                raise SamplerError(f"no frames decoded for {path}")
+            if proc.exitcode != 0:
+                raise SamplerError(
+                    f"sparse extraction failed for {path} "
+                    f"(worker exit {proc.exitcode})"
+                )
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                raise SamplerError(f"no frames produced for {path}")
+            with np.load(out_path) as data:
+                times = data["times"]
+                frames = data["frames"]
+            for i in range(len(times)):
+                yield float(times[i]), frames[i]
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:  # pragma: no cover
+                pass
 
     def _iter_frames_raw_interval(self, path: str, *, resize_short: int, crop: int):
         """Fast path: yield (timestamp, HxWx3 uint8 numpy frame) with frames

@@ -37,6 +37,7 @@ class SamplingConfig:
     mode: str = "sparse"
     hwaccel: str = ""  # "" | "cuda" | "auto" — GPU decode for interval mode
     pipeline: str = "raw"  # "raw" (fast: frames straight to GPU) | "jpeg"
+    scene_timeout: float = 180.0  # per-scene sampling ceiling (s); 0 disables
 
 
 @dataclass
@@ -135,6 +136,12 @@ class Config:
             pipeline=os.environ.get(
                 "PEAKS_PIPELINE",
                 sampling_raw.get("pipeline", SamplingConfig.pipeline),
+            ),
+            scene_timeout=float(
+                os.environ.get(
+                    "PEAKS_SCENE_TIMEOUT",
+                    sampling_raw.get("scene_timeout", SamplingConfig.scene_timeout),
+                )
             ),
         )
         markers = MarkersConfig(

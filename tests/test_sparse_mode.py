@@ -122,15 +122,41 @@ def test_sparse_corrupt_file_fails_gracefully(video, tmp_path):
         list(s.iter_frames_raw(str(corrupt), resize_short=32, crop=32))
 
 
-def test_sparse_bailout_threshold_is_bounded(video):
-    """The consecutive-error guard exists and is a sane small number so a
-    corrupt file can't spew hundreds of errors before giving up."""
+def test_sparse_runs_in_killable_subprocess(video):
+    """The scene decode is isolated in a child process the parent can kill,
+    with in-worker guards a corrupt file can't defeat."""
     import inspect
 
     from peaks import sampling
 
-    src = inspect.getsource(sampling.FrameSampler._iter_frames_sparse)
-    assert "consecutive_errors" in src and "max_consecutive_errors" in src
+    orch = inspect.getsource(sampling.FrameSampler._iter_frames_sparse)
+    assert "get_context(\"spawn\")" in orch
+    assert ".terminate()" in orch and ".kill()" in orch
+    assert "scene_timeout" in orch
+
+    worker = inspect.getsource(sampling._sparse_extract_worker)
+    assert "total_errors" in worker and "max_total_errors" in worker
+    assert "implausible duration" in worker
+
+
+def test_sparse_timeout_kills_the_worker(video):
+    """An absurdly small timeout must trip the kill path and raise, proving the
+    parent can stop a child that isn't done (the corrupt-hang safety net)."""
+    s = FrameSampler(interval_seconds=4.0, mode="sparse", scene_timeout=0.001)
+    with pytest.raises(SamplerError, match="exceeded|killed"):
+        list(s.iter_frames_raw(video, resize_short=32, crop=32))
+
+
+def test_scene_timeout_default_and_env(monkeypatch, tmp_path):
+    from peaks.config import Config
+
+    assert Config.load(tmp_path / "none.toml").sampling.scene_timeout == 180.0
+    monkeypatch.setenv("PEAKS_SCENE_TIMEOUT", "45")
+    assert Config.load(tmp_path / "none.toml").sampling.scene_timeout == 45.0
+
+
+def test_scene_timeout_stored_on_sampler():
+    assert FrameSampler(mode="sparse", scene_timeout=30).scene_timeout == 30
 
 
 def test_sparse_feeds_embed_library(video, tmp_path):
