@@ -155,6 +155,8 @@ def cmd_embed(args) -> int:
         cfg, **({"device": cfg.embedding.device} if cfg.embedding.device else {})
     )
     cache = EmbeddingCache(cfg.embedding.cache_dir)
+    if cfg.library.path:
+        print(f"Fetching scene list (filtering to {cfg.library.path}) ...")
     scenes, total = _scenes_and_total(client, cfg, args.limit)
     extras = f", mode={cfg.sampling.mode}" if cfg.sampling.mode != "interval" else ""
     extras += f", hwaccel={cfg.sampling.hwaccel}" if cfg.sampling.hwaccel else ""
@@ -549,6 +551,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Line-buffer stdout so progress shows up live under `tail -f` / nohup,
+    # where stdout is otherwise block-buffered and looks frozen for minutes.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):  # pragma: no cover
+        pass
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
