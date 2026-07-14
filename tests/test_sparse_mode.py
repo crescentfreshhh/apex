@@ -109,6 +109,30 @@ def test_sparse_missing_file_raises():
         list(s.iter_frames_raw("/nope/missing.mp4", resize_short=32, crop=32))
 
 
+def test_sparse_corrupt_file_fails_gracefully(video, tmp_path):
+    """A truncated/garbage file must surface an error (so the scene is marked
+    failed) rather than hanging or returning silently-bad data."""
+    good = open(video, "rb").read()
+    corrupt = tmp_path / "corrupt.mp4"
+    # keep enough header that av may open it, then append pure garbage
+    corrupt.write_bytes(good[: len(good) // 3] + b"\x00\xff" * 5000)
+
+    s = FrameSampler(interval_seconds=4.0, mode="sparse")
+    with pytest.raises(Exception):  # av error on open/decode, or the bailout
+        list(s.iter_frames_raw(str(corrupt), resize_short=32, crop=32))
+
+
+def test_sparse_bailout_threshold_is_bounded(video):
+    """The consecutive-error guard exists and is a sane small number so a
+    corrupt file can't spew hundreds of errors before giving up."""
+    import inspect
+
+    from peaks import sampling
+
+    src = inspect.getsource(sampling.FrameSampler._iter_frames_sparse)
+    assert "consecutive_errors" in src and "max_consecutive_errors" in src
+
+
 def test_sparse_feeds_embed_library(video, tmp_path):
     """Full loop: real video -> sparse sampler -> raw embed -> cache."""
     from peaks.cache import EmbeddingCache

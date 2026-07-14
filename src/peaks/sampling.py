@@ -338,9 +338,16 @@ class FrameSampler:
             else:
                 raise SamplerError(f"could not determine duration of {path}")
 
+            # Bail out of a scene after a burst of consecutive decode errors:
+            # a corrupt file ("Invalid NAL unit size", ...) would otherwise
+            # error on every one of its hundreds of seeks. Give up fast and let
+            # the caller mark the scene failed instead of grinding on garbage.
+            max_consecutive_errors = 15
+
             interp_kw: dict = {"interpolation": "BICUBIC"}
             last_pts = None
             yielded = 0
+            consecutive_errors = 0
             t = 0.0
             while t < duration:
                 target = t
@@ -351,7 +358,14 @@ class FrameSampler:
                 except StopIteration:  # pragma: no cover
                     break
                 except Exception:
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        raise SamplerError(
+                            f"{consecutive_errors} consecutive decode errors in "
+                            f"{path} (corrupt/damaged file?) — giving up"
+                        )
                     continue  # unseekable spot / decode hiccup: skip sample
+                consecutive_errors = 0  # a clean decode resets the streak
                 if frame is None:
                     break
                 if frame.pts is not None and last_pts is not None and frame.pts <= last_pts:
