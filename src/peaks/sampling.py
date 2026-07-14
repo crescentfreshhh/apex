@@ -309,6 +309,14 @@ class FrameSampler:
                 "sparse mode needs the 'av' package (pip install av)"
             ) from exc
 
+        # Silence libav's per-seek decoder chatter ("Duplicate POC in a
+        # sequence", "co located POCs unavailable", ...). Sparse mode seeks
+        # heavily, so these are expected and harmless — but they flood the log.
+        try:
+            av.logging.set_level(av.logging.ERROR)
+        except Exception:  # pragma: no cover - never fatal
+            pass
+
         if self.interval <= 0:
             return
 
