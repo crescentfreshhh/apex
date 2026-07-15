@@ -44,6 +44,14 @@ button.primary:disabled { opacity: .5; cursor: default; }
 button.ghost { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
   padding: 8px 14px; border-radius: 8px; cursor: pointer; }
 button.ghost:hover { border-color: var(--accent); }
+
+.adv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px; margin-top: 12px; padding: 12px; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 8px; }
+.adv[hidden] { display: none; }  /* class display must not defeat the hidden attr */
+.adv label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+.adv select, .adv input { font-size: 13px; }
+.adv-hint { margin-top: 8px; font-size: 12px; }
 input, select { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px 10px; font-size: 14px; }
 

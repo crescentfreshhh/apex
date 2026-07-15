@@ -18,7 +18,7 @@ def _service(tmp_path):
     cfg.embedding.cache_dir = str(tmp_path / "cache" / "embeddings")
     cfg.embedding.model = "dino"
     svc = Service(cfg)
-    svc._embedder = lambda: _FakeEmbedder()  # no torch
+    svc._embedder = lambda model=None: _FakeEmbedder()  # no torch
     return svc, cfg
 
 
@@ -56,6 +56,70 @@ def test_run_fix_records_exhaustion(tmp_path, monkeypatch):
     assert result["fixed"] == 0 and result["failed"] == 1
     entry = {e["key"]: e for e in flog.entries()}["fp_bad"]
     assert entry["mode"] == "fix-exhausted"  # updated, still logged
+
+
+def test_run_embed_applies_overrides(tmp_path, monkeypatch):
+    import peaks.pipeline as pl
+    import peaks.sampling as smp
+    import peaks.web.service as svc_mod
+
+    svc, _ = _service(tmp_path)
+    cap = {}
+
+    def fake_embedder(model=None):
+        cap["model"] = model
+        return _FakeEmbedder()
+
+    class FakeSampler:
+        def __init__(self, **kw):
+            cap["sampler"] = kw
+            self.mode = kw.get("mode")
+            self.interval = kw.get("interval_seconds")
+            self.hwaccel = kw.get("hwaccel")
+
+    def fake_lib(*a, **k):
+        cap["workers"] = k.get("workers")
+        return {"embedded": 0}
+
+    svc._embedder = fake_embedder  # instance override that captures the model
+    monkeypatch.setattr(svc_mod.Service, "scenes", lambda self, limit=0: [])
+    monkeypatch.setattr(smp, "FrameSampler", FakeSampler)
+    monkeypatch.setattr(pl, "embed_library", fake_lib)
+
+    svc.run_embed(
+        model="clip", mode="interval", interval=4.0,
+        hwaccel="cuda", workers=2, scene_timeout=600.0,
+    )
+    assert cap["model"] == "clip"
+    assert cap["sampler"]["mode"] == "interval"
+    assert cap["sampler"]["interval_seconds"] == 4.0
+    assert cap["sampler"]["scene_timeout"] == 600.0
+    assert cap["workers"] == 2
+
+
+def test_run_embed_defaults_when_no_overrides(tmp_path, monkeypatch):
+    import peaks.pipeline as pl
+    import peaks.sampling as smp
+    import peaks.web.service as svc_mod
+
+    svc, cfg = _service(tmp_path)
+    cap = {}
+
+    class FakeSampler:
+        def __init__(self, **kw):
+            cap["sampler"] = kw
+            self.mode = kw.get("mode")
+            self.interval = kw.get("interval_seconds")
+            self.hwaccel = kw.get("hwaccel")
+
+    monkeypatch.setattr(svc_mod.Service, "scenes", lambda self, limit=0: [])
+    monkeypatch.setattr(smp, "FrameSampler", FakeSampler)
+    monkeypatch.setattr(pl, "embed_library", lambda *a, **k: {"embedded": 0})
+
+    svc.run_embed()
+    # falls back to configured sampling defaults
+    assert cap["sampler"]["mode"] == cfg.sampling.mode
+    assert cap["sampler"]["interval_seconds"] == cfg.sampling.interval_seconds
 
 
 def test_run_fix_empty_log(tmp_path):

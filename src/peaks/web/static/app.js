@@ -75,7 +75,42 @@ async function poll(id, statusEl, logEl, btn) {
     else { toast("Done: " + JSON.stringify(j.result || {})); refreshDashboard(); }
   } catch (e) { btn.disabled = false; toast(e.message, true); }
 }
-wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => api("/api/embed", { method: "POST" }));
+// --- embed advanced overrides (per-run model / sampling, no restart) --------
+let defaultsLoaded = false;
+(async () => {
+  try {
+    const d = await api("/api/defaults");
+    $("#adv-model").value = d.model;
+    $("#adv-mode").value = d.mode;
+    $("#adv-hwaccel").value = d.hwaccel || "";
+    $("#adv-interval").value = d.interval;
+    $("#adv-workers").value = d.workers;
+    $("#adv-timeout").value = d.timeout;
+    defaultsLoaded = true;
+  } catch {}
+})();
+$("#toggle-adv").addEventListener("click", () => {
+  const a = $("#embed-adv"), open = a.hidden;
+  a.hidden = !open; $("#adv-hint").hidden = !open;
+  $("#toggle-adv").textContent = open ? "Advanced ▴" : "Advanced ▾";
+});
+function embedQuery() {
+  // only override once we know the current defaults; selects (incl. hwaccel="")
+  // are always sent, numbers only when non-empty (avoids a 422 on blanks)
+  if (!defaultsLoaded) return "";
+  const qs = new URLSearchParams();
+  qs.set("model", $("#adv-model").value);
+  qs.set("mode", $("#adv-mode").value);
+  qs.set("hwaccel", $("#adv-hwaccel").value);
+  for (const [k, sel] of [["interval", "#adv-interval"], ["workers", "#adv-workers"], ["timeout", "#adv-timeout"]]) {
+    const v = $(sel).value; if (v !== "") qs.set(k, v);
+  }
+  return qs.toString();
+}
+wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => {
+  const q = embedQuery();
+  return api("/api/embed" + (q ? "?" + q : ""), { method: "POST" });
+});
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
   const prune = $("#sync-prune").checked;
   return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });

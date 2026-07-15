@@ -174,6 +174,56 @@ def test_fix_job_lifecycle(client, monkeypatch):
     assert j["status"] == "done" and j["result"]["fixed"] == 1
 
 
+def test_defaults_endpoint(client):
+    d = client.get("/api/defaults").json()
+    assert d["model"] == "dino"
+    assert "interval" in d and "workers" in d and "mode" in d
+
+
+def test_embed_forwards_advanced_overrides(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+
+    def fake_embed(self, job=None, limit=0, **kw):
+        seen.update(kw)
+        seen["limit"] = limit
+        return {"embedded": 0}
+
+    monkeypatch.setattr(svc.Service, "run_embed", fake_embed)
+    jid = client.post(
+        "/api/embed",
+        params={"model": "clip", "mode": "interval", "interval": 4,
+                "hwaccel": "", "workers": 2, "timeout": 600},
+    ).json()["id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert seen["model"] == "clip" and seen["mode"] == "interval"
+    assert seen["interval"] == 4 and seen["workers"] == 2
+    assert seen["scene_timeout"] == 600
+    assert seen["hwaccel"] == ""  # empty string forwarded (force CPU), not dropped
+
+
+def test_embed_without_overrides_stays_bare(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+
+    def fake_embed(self, job=None, limit=0, **kw):
+        seen["kw"] = kw
+        return {"embedded": 0}
+
+    monkeypatch.setattr(svc.Service, "run_embed", fake_embed)
+    jid = client.post("/api/embed").json()["id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert seen["kw"] == {}  # nothing forwarded → run_embed uses config defaults
+
+
 def test_scene_edit_endpoints(client, monkeypatch):
     from peaks.web import service as svc
 

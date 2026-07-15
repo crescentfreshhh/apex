@@ -208,6 +208,11 @@ To borrow the GPU again later (new videos to embed): repeat Part A steps 1–3
 
 ## Later, when you want more
 
+- **Add text search (CLIP):** on the Dashboard, hit **Embed → Advanced**, set
+  **Model = CLIP**, and run it — a second pass that builds the text-search
+  index alongside your DINOv2 one. No restart, no template edits; the model and
+  sampling knobs are all set per-run right there. When it finishes, the search
+  box in Explore comes alive.
 - **Make it smarter:** in the console run `peaks label --host 0.0.0.0`, then
   browse to `http://<unraid-ip>:7860`. It shows frames — press **→** for
   "want it," **←** for "no." A few hundred takes ~15 min. Then `peaks train`

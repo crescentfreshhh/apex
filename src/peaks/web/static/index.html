@@ -27,8 +27,36 @@
       <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
       <div class="row">
         <button id="btn-embed" class="primary">Embed new scenes</button>
+        <button id="toggle-adv" class="ghost" type="button">Advanced ▾</button>
         <span id="embed-status" class="dim"></span>
       </div>
+      <div id="embed-adv" class="adv" hidden>
+        <label>Model
+          <select id="adv-model">
+            <option value="dino">DINOv2 — structure</option>
+            <option value="clip">CLIP — text search</option>
+          </select>
+        </label>
+        <label>Sampling
+          <select id="adv-mode">
+            <option value="sparse">sparse (fast)</option>
+            <option value="interval">interval (linear)</option>
+            <option value="keyframes">keyframes</option>
+          </select>
+        </label>
+        <label>Interval (s)<input id="adv-interval" type="number" min="1" step="1" /></label>
+        <label>GPU decode
+          <select id="adv-hwaccel">
+            <option value="">off (CPU)</option>
+            <option value="cuda">cuda (NVDEC)</option>
+            <option value="auto">auto</option>
+          </select>
+        </label>
+        <label>Workers<input id="adv-workers" type="number" min="1" step="1" /></label>
+        <label>Timeout (s)<input id="adv-timeout" type="number" min="0" step="30" /></label>
+      </div>
+      <p id="adv-hint" class="dim adv-hint" hidden>Overrides apply to this run only —
+        no restart, nothing saved to the container.</p>
       <pre id="embed-log" class="log" hidden></pre>
     </div>
 

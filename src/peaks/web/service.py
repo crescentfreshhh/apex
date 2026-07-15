@@ -73,35 +73,59 @@ class Service:
             "failures": len(failure_log_for(self.cfg)),
         }
 
-    def _embedder(self):
+    def _embedder(self, model: str | None = None):
         from ..embedding import get_embedder
 
         kwargs = {"device": self.cfg.embedding.device} if self.cfg.embedding.device else {}
-        return get_embedder(self.cfg.embedding.model, **kwargs)
+        return get_embedder(model or self.cfg.embedding.model, **kwargs)
 
     # --- embed / score (job targets) ----------------------------------------
 
-    def run_embed(self, job=None, limit: int = 0) -> dict:
-        """One incremental embed pass (skips already-cached scenes)."""
+    def run_embed(
+        self,
+        job=None,
+        limit: int = 0,
+        *,
+        model: str | None = None,
+        mode: str | None = None,
+        interval: float | None = None,
+        hwaccel: str | None = None,
+        pipeline: str | None = None,
+        workers: int | None = None,
+        scene_timeout: float | None = None,
+    ) -> dict:
+        """One incremental embed pass (skips already-cached scenes).
+
+        Every keyword overrides the corresponding config value for this run
+        only — so the web UI can pick the model (e.g. a CLIP pass) or tweak
+        sampling without touching container env vars. `None` means "use the
+        configured default". An empty-string `hwaccel` explicitly forces CPU
+        decode (distinct from `None`)."""
+        from ..failures import failure_log_for
         from ..pipeline import embed_library
         from ..sampling import FrameSampler
 
+        s, e = self.cfg.sampling, self.cfg.embedding
         log = (job.log if job else print)
         sampler = FrameSampler(
-            interval_seconds=self.cfg.sampling.interval_seconds,
-            mode=self.cfg.sampling.mode,
-            hwaccel=self.cfg.sampling.hwaccel,
-            pipeline=self.cfg.sampling.pipeline,
-            scene_timeout=self.cfg.sampling.scene_timeout,
+            interval_seconds=(s.interval_seconds if interval is None else interval),
+            mode=(s.mode if mode is None else mode),
+            hwaccel=(s.hwaccel if hwaccel is None else hwaccel),
+            pipeline=(s.pipeline if pipeline is None else pipeline),
+            scene_timeout=(s.scene_timeout if scene_timeout is None else scene_timeout),
         )
-        from ..failures import failure_log_for
-
-        embedder = self._embedder()
-        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        embedder = self._embedder(model)
+        n_workers = e.workers if workers is None else workers
+        cache = EmbeddingCache(e.cache_dir)
         scenes = self.scenes(limit=limit)
         total = len(scenes)
         if job:
             job.progress = {"total": total, "done": 0}
+            log(
+                f"embed: {total} scene(s) · model={embedder.name} · mode={sampler.mode} "
+                f"· interval={sampler.interval:g}s · hwaccel={sampler.hwaccel or 'off'} "
+                f"· workers={n_workers}"
+            )
 
         def _log(msg):
             log(msg)
@@ -112,8 +136,8 @@ class Service:
 
         stats = embed_library(
             scenes, sampler, embedder, cache,
-            batch_size=self.cfg.embedding.batch_size,
-            workers=self.cfg.embedding.workers,
+            batch_size=e.batch_size,
+            workers=n_workers,
             total=total, log=_log,
             failure_log=failure_log_for(self.cfg),
         )

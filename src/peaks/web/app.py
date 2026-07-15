@@ -90,10 +90,46 @@ def create_app(cfg=None):
 
     # --- jobs ---------------------------------------------------------------
 
+    @app.get("/api/defaults")
+    def defaults():
+        """Current embed/sampling settings, so the Advanced form pre-fills to
+        what the container is configured with."""
+        s, e = service.cfg.sampling, service.cfg.embedding
+        return {
+            "model": e.model,
+            "mode": s.mode,
+            "interval": s.interval_seconds,
+            "hwaccel": s.hwaccel,
+            "pipeline": s.pipeline,
+            "workers": e.workers,
+            "timeout": s.scene_timeout,
+        }
+
     @app.post("/api/embed")
-    def start_embed(limit: int = Query(0)):
+    def start_embed(
+        limit: int = Query(0),
+        model: str | None = None,
+        mode: str | None = None,
+        interval: float | None = None,
+        hwaccel: str | None = None,
+        pipeline: str | None = None,
+        workers: int | None = None,
+        timeout: float | None = None,
+    ):
+        # only forward the knobs actually supplied; absent ones fall back to
+        # config inside run_embed (keeps the scheduler/tests calling it bare)
+        overrides = {
+            k: v
+            for k, v in dict(
+                model=model, mode=mode, interval=interval, hwaccel=hwaccel,
+                pipeline=pipeline, workers=workers, scene_timeout=timeout,
+            ).items()
+            if v is not None
+        }
         try:
-            job = jobs.start("embed", lambda j: service.run_embed(j, limit=limit))
+            job = jobs.start(
+                "embed", lambda j: service.run_embed(j, limit=limit, **overrides)
+            )
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()
