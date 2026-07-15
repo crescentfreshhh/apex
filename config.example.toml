@@ -54,6 +54,13 @@ pipeline = "raw"
 path = ""
 
 
+[schedule]
+# If > 0, the web app (`peaks web`) auto-embeds newly-added scenes every N
+# hours — handy for picking up new scenes on CPU after the GPU goes back to
+# the VM. 0 = manual only. (Env override: PEAKS_EMBED_EVERY_HOURS)
+embed_hours = 0.0
+
+
 [markers]
 # The tag name written onto scene markers this tool generates.
 # An "apex" is one good timestamp-segment. This is only the DEFAULT profile —
@@ -66,8 +73,10 @@ tag_name = "apex"
 [embedding]
 # Which frame embedder to use:
 #   "dino" — DINOv2, visual structure (positions, angles, body type)
-#   "clip" — OpenCLIP, nameable attributes (outfits, heels)
+#   "clip" — OpenCLIP, nameable attributes (outfits, heels) + enables text
+#            search in the web Explorer (run a second pass with model="clip")
 #   "fake" — deterministic stub for testing without torch
+# (Env override: PEAKS_MODEL)
 model = "dino"
 # Where cached frame vectors live (gitignored). Embed once; reuse forever.
 cache_dir = "cache/embeddings"

@@ -35,6 +35,18 @@ class Service:
 
         return StashClient.from_config(self.cfg)
 
+    def _meta_client(self):
+        """A short-timeout, no-retry client for NON-critical reads (metadata).
+        If Stash is slow/down, these fail fast and the UI degrades to blank
+        rather than blocking a search response behind retry backoff."""
+        from ..stash_client import StashClient
+
+        c = StashClient(
+            url=self.cfg.stash.url, api_key=self.cfg.stash.api_key, timeout=5
+        )
+        c.RETRY_SLEEPS = ()  # no retries for cosmetic data
+        return c
+
     def scenes(self, limit: int = 0):
         prefix = self.cfg.library.path
         it = self.client().iter_scenes(path_prefix=prefix)
@@ -183,7 +195,7 @@ class Service:
         missing = [s for s in want if s not in self._meta]
         if missing:
             try:
-                fetched = self.client().scene_details(missing)
+                fetched = self._meta_client().scene_details(missing)
             except Exception:
                 fetched = {}
             with self._meta_lock:
@@ -191,9 +203,28 @@ class Service:
                     self._meta[sid] = fetched.get(sid, {})
         return {s: self._meta.get(s, {}) for s in want}
 
-    def invalidate_meta(self) -> None:
+    def invalidate_meta(self, scene_id: str | None = None) -> None:
         with self._meta_lock:
-            self._meta.clear()
+            if scene_id is None:
+                self._meta.clear()
+            else:
+                self._meta.pop(str(scene_id), None)
+
+    def update_scene(self, scene_id: str, **fields) -> dict:
+        """Write editable fields to Stash, then return fresh metadata."""
+        self.client().update_scene(scene_id, **fields)
+        self.invalidate_meta(scene_id)
+        return self.scene_meta([scene_id]).get(str(scene_id), {})
+
+    def add_o(self, scene_id: str) -> int:
+        count = self.client().scene_add_o(scene_id)
+        self.invalidate_meta(scene_id)
+        return count
+
+    def remove_o(self, scene_id: str) -> int:
+        count = self.client().scene_delete_o(scene_id)
+        self.invalidate_meta(scene_id)
+        return count
 
     # --- thumbnails ----------------------------------------------------------
 

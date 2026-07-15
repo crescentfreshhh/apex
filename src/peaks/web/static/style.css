@@ -71,6 +71,18 @@ input, select { background: var(--panel2); color: var(--fg); border: 1px solid v
   cursor: pointer; text-decoration: none; }
 .tile .actions button:hover, .tile .actions a:hover { border-color: var(--accent); }
 
+.tile .edit { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.tile .rating { letter-spacing: 1px; }
+.tile .star { color: #3a3a42; cursor: pointer; font-size: 15px; }
+.tile .star.on { color: var(--accent); }
+.tile .star:hover { color: var(--accent); filter: brightness(1.2); }
+.tile .ospacer { flex: 1; }
+.tile .obtn, .tile .orgbtn { font-size: 12px; padding: 3px 8px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel2); color: var(--fg); cursor: pointer; }
+.tile .obtn:hover, .tile .orgbtn:hover { border-color: var(--accent); }
+.tile .orgbtn { color: var(--dim); }
+.tile .orgbtn.on { color: #1a1400; background: var(--ok); border-color: var(--ok); }
+
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
   padding: 10px 16px; border-radius: 8px; z-index: 50; }

@@ -86,6 +86,8 @@ query SceneDetails($ids: [ID!]) {
       date
       details
       rating100
+      o_counter
+      organized
       studio { name }
       performers { name gender }
       tags { name }
@@ -115,6 +117,18 @@ mutation SceneMarkerCreate($input: SceneMarkerCreateInput!) {
   sceneMarkerCreate(input: $input) { id seconds end_seconds title }
 }
 """
+
+_SCENE_UPDATE = """
+mutation SceneUpdate($input: SceneUpdateInput!) {
+  sceneUpdate(input: $input) {
+    id rating100 organized o_counter title date details
+  }
+}
+"""
+
+_SCENE_ADD_O = "mutation AddO($id: ID!) { sceneAddO(id: $id) { count } }"
+_SCENE_DELETE_O = "mutation DelO($id: ID!) { sceneDeleteO(id: $id) { count } }"
+_SCENE_RESET_O = "mutation ResetO($id: ID!) { sceneResetO(id: $id) }"
 
 _SCENE_MARKERS_DESTROY = """
 mutation SceneMarkersDestroy($ids: [ID!]!) {
@@ -220,6 +234,31 @@ class StashClient:
                 break
             page += 1
 
+    # --- scene writes (two-way sync with Stash) -----------------------------
+
+    _EDITABLE = ("rating100", "organized", "title", "date", "details")
+
+    def update_scene(self, scene_id: str, **fields) -> dict:
+        """Update editable scene fields in Stash (only the ones passed).
+        Returns the updated scene dict."""
+        inp: dict = {"id": str(scene_id)}
+        for k in self._EDITABLE:
+            if k in fields and fields[k] is not None:
+                inp[k] = fields[k]
+        data = self.execute(_SCENE_UPDATE, {"input": inp})
+        return data["sceneUpdate"]
+
+    def scene_add_o(self, scene_id: str) -> int:
+        """Record one O; returns the new count."""
+        return self.execute(_SCENE_ADD_O, {"id": str(scene_id)})["sceneAddO"]["count"]
+
+    def scene_delete_o(self, scene_id: str) -> int:
+        """Remove the most recent O; returns the new count."""
+        return self.execute(_SCENE_DELETE_O, {"id": str(scene_id)})["sceneDeleteO"]["count"]
+
+    def scene_reset_o(self, scene_id: str) -> int:
+        return int(self.execute(_SCENE_RESET_O, {"id": str(scene_id)})["sceneResetO"])
+
     def scene_details(self, ids: list[str]) -> dict[str, dict]:
         """Fetch display metadata for scene ids → {id: {title, performers,
         studio, date, tags, rating, cover, duration}}. Empty ids → {}."""
@@ -237,6 +276,8 @@ class StashClient:
                 "date": s.get("date") or "",
                 "details": s.get("details") or "",
                 "rating100": s.get("rating100"),
+                "o_counter": s.get("o_counter") or 0,
+                "organized": bool(s.get("organized")),
                 "studio": (s.get("studio") or {}).get("name") or "",
                 "performers": [p.get("name", "") for p in (s.get("performers") or [])],
                 "tags": [t.get("name", "") for t in (s.get("tags") or [])],

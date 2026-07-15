@@ -18,6 +18,24 @@ from .service import Service
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _scene_edit_model():
+    """Request body for scene edits (module-level so FastAPI resolves it as a
+    body, not a query param)."""
+    from pydantic import BaseModel
+
+    class SceneEdit(BaseModel):
+        rating100: int | None = None
+        organized: bool | None = None
+        title: str | None = None
+        date: str | None = None
+        details: str | None = None
+
+    return SceneEdit
+
+
+SceneEdit = _scene_edit_model()
+
+
 def _hit_payload(service: Service, hits) -> list[dict]:
     meta = service.scene_meta([h.scene_id for h in hits if h.scene_id])
     out = []
@@ -38,6 +56,9 @@ def _hit_payload(service: Service, hits) -> list[dict]:
                 "performers": m.get("performers", []),
                 "date": m.get("date", ""),
                 "tags": m.get("tags", []),
+                "rating100": m.get("rating100"),
+                "o_counter": m.get("o_counter", 0),
+                "organized": m.get("organized", False),
             }
         )
     return out
@@ -124,6 +145,36 @@ def create_app(cfg=None):
         except ImportError as exc:
             raise HTTPException(500, f"CLIP unavailable: {exc}")
         return _hit_payload(service, hits)
+
+    # --- scene metadata (two-way sync with Stash) ---------------------------
+
+    @app.get("/api/scene/{scene_id}")
+    def get_scene(scene_id: str):
+        return service.scene_meta([scene_id]).get(scene_id, {})
+
+    @app.patch("/api/scene/{scene_id}")
+    def edit_scene(scene_id: str, body: SceneEdit):
+        fields = body.model_dump(exclude_none=True)
+        if not fields:
+            raise HTTPException(400, "no fields to update")
+        try:
+            return service.update_scene(scene_id, **fields)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash update failed: {exc}")
+
+    @app.post("/api/scene/{scene_id}/o")
+    def add_o(scene_id: str):
+        try:
+            return {"o_counter": service.add_o(scene_id)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash update failed: {exc}")
+
+    @app.delete("/api/scene/{scene_id}/o")
+    def remove_o(scene_id: str):
+        try:
+            return {"o_counter": service.remove_o(scene_id)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash update failed: {exc}")
 
     # --- thumbnails ---------------------------------------------------------
 

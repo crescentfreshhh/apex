@@ -61,12 +61,13 @@ def test_capabilities_reports_index(client):
 
 
 def test_similarity_search_returns_hits_with_thumb_urls(client, monkeypatch):
-    # avoid hitting Stash for the stream URL
+    # avoid hitting Stash for the stream URL / metadata (no network in tests)
     from peaks.web import service as svc
 
     monkeypatch.setattr(
         svc.Service, "stream_url", lambda self, sid, start=None: f"stream/{sid}@{start}"
     )
+    monkeypatch.setattr(svc.Service, "scene_meta", lambda self, ids: {})
     r = client.get("/api/search/similar", params={"key": "k1", "t": 0.0, "top_k": 5})
     assert r.status_code == 200
     hits = r.json()
@@ -116,6 +117,44 @@ def test_embed_job_lifecycle(client, monkeypatch):
         time.sleep(0.02)
     assert j["status"] == "done"
     assert j["result"] == {"embedded": 1, "skipped": 0}
+
+
+def test_scene_edit_endpoints(client, monkeypatch):
+    from peaks.web import service as svc
+
+    calls = {}
+
+    def fake_update(self, sid, **f):
+        calls["update"] = (sid, f)
+        return {"rating100": f.get("rating100"), "organized": f.get("organized")}
+
+    monkeypatch.setattr(svc.Service, "update_scene", fake_update)
+    monkeypatch.setattr(svc.Service, "add_o", lambda self, sid: 5)
+    monkeypatch.setattr(svc.Service, "remove_o", lambda self, sid: 4)
+
+    r = client.patch("/api/scene/7", json={"rating100": 80, "organized": True})
+    assert r.status_code == 200 and r.json()["rating100"] == 80
+    assert calls["update"] == ("7", {"rating100": 80, "organized": True})
+
+    assert client.post("/api/scene/7/o").json() == {"o_counter": 5}
+    assert client.delete("/api/scene/7/o").json() == {"o_counter": 4}
+
+
+def test_scene_edit_empty_body_400(client):
+    assert client.patch("/api/scene/7", json={}).status_code == 400
+
+
+def test_hits_include_editable_metadata(client, monkeypatch):
+    from peaks.web import service as svc
+
+    monkeypatch.setattr(svc.Service, "stream_url", lambda self, sid, start=None: "s")
+    monkeypatch.setattr(
+        svc.Service, "scene_meta",
+        lambda self, ids: {i: {"title": "T", "rating100": 40, "o_counter": 2, "organized": True} for i in map(str, ids)},
+    )
+    hits = client.get("/api/search/similar", params={"key": "k1", "t": 0.0}).json()
+    assert hits[0]["rating100"] == 40 and hits[0]["o_counter"] == 2
+    assert hits[0]["organized"] is True
 
 
 # --- JobManager unit tests ----------------------------------------------------

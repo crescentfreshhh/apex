@@ -79,6 +79,13 @@ wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
 });
 
 // --- explore / search -------------------------------------------------------
+function stars(rating100) {
+  const filled = Math.round((rating100 || 0) / 20);
+  let s = "";
+  for (let i = 1; i <= 5; i++)
+    s += `<span class="star ${i <= filled ? "on" : ""}" data-r="${i * 20}">★</span>`;
+  return s;
+}
 function renderHits(hits) {
   const g = $("#results");
   if (!hits.length) { g.innerHTML = '<p class="dim">No results.</p>'; return; }
@@ -86,7 +93,8 @@ function renderHits(hits) {
     const perf = (h.performers || []).slice(0, 3).join(", ");
     const sub = [h.studio, perf].filter(Boolean).join(" · ") || `scene ${h.scene_id ?? "?"}`;
     const title = h.title || `scene ${h.scene_id ?? "?"}`;
-    return `<div class="tile">
+    const sid = h.scene_id ?? "";
+    return `<div class="tile" data-sid="${sid}">
       <div class="thumbwrap">
         <img loading="lazy" src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
         <span class="score">${(h.score * 100).toFixed(0)}%</span>
@@ -95,6 +103,12 @@ function renderHits(hits) {
       <div class="meta">
         <div class="title" title="${esc(title)}">${esc(title)}</div>
         <div class="sub" title="${esc(sub)}">${esc(sub)}</div>
+        <div class="edit">
+          <span class="rating" title="rating">${stars(h.rating100)}</span>
+          <span class="ospacer"></span>
+          <button class=" obtn" title="O-count (click +, shift-click −)">⊙ ${h.o_counter ?? 0}</button>
+          <button class="orgbtn ${h.organized ? "on" : ""}" title="organized">✓</button>
+        </div>
       </div>
       <div class="actions">
         <button data-key="${h.key}" data-t="${h.time}">Find similar</button>
@@ -104,6 +118,44 @@ function renderHits(hits) {
   }).join("");
   g.querySelectorAll("button[data-key]").forEach((b) =>
     b.addEventListener("click", () => similar(b.dataset.key, b.dataset.t)));
+  g.querySelectorAll(".tile").forEach(wireTileEdits);
+}
+
+async function patchScene(sid, body) {
+  return api(`/api/scene/${sid}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+function wireTileEdits(tile) {
+  const sid = tile.dataset.sid;
+  if (!sid) return;
+  // rating stars
+  tile.querySelectorAll(".star").forEach((s) =>
+    s.addEventListener("click", async () => {
+      const r = +s.dataset.r;
+      try {
+        const m = await patchScene(sid, { rating100: r });
+        tile.querySelector(".rating").innerHTML = stars(m.rating100);
+        wireTileEdits(tile); toast("rating saved");
+      } catch (e) { toast(e.message, true); }
+    }));
+  // organized toggle
+  const org = tile.querySelector(".orgbtn");
+  org.addEventListener("click", async () => {
+    try {
+      const m = await patchScene(sid, { organized: !org.classList.contains("on") });
+      org.classList.toggle("on", !!m.organized); toast("organized " + (m.organized ? "on" : "off"));
+    } catch (e) { toast(e.message, true); }
+  });
+  // O-count: click +, shift-click −
+  const ob = tile.querySelector(".obtn");
+  ob.addEventListener("click", async (e) => {
+    try {
+      const r = await api(`/api/scene/${sid}/o`, { method: e.shiftKey ? "DELETE" : "POST" });
+      ob.textContent = `⊙ ${r.o_counter}`;
+    } catch (err) { toast(err.message, true); }
+  });
 }
 async function similar(key, t) {
   setActiveView("explore");

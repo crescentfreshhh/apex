@@ -154,6 +154,47 @@ def test_create_scene_marker_omits_end_when_none():
     assert "end_seconds" not in client.calls[0][1]["input"]
 
 
+def test_update_scene_only_sends_provided_fields():
+    client = FakeClient([{"sceneUpdate": {"id": "5", "rating100": 80, "organized": True}}])
+    client.update_scene("5", rating100=80, organized=True, title=None)
+    _, variables = client.calls[0]
+    inp = variables["input"]
+    assert inp == {"id": "5", "rating100": 80, "organized": True}  # title omitted (None)
+
+
+def test_update_scene_allows_false_and_zero():
+    client = FakeClient([{"sceneUpdate": {"id": "5"}}])
+    client.update_scene("5", organized=False, rating100=0)
+    inp = client.calls[0][1]["input"]
+    assert inp["organized"] is False and inp["rating100"] == 0  # not dropped
+
+
+def test_o_counter_mutations_return_counts():
+    client = FakeClient([
+        {"sceneAddO": {"count": 3}},
+        {"sceneDeleteO": {"count": 2}},
+        {"sceneResetO": 0},
+    ])
+    assert client.scene_add_o("5") == 3
+    assert client.scene_delete_o("5") == 2
+    assert client.scene_reset_o("5") == 0
+
+
+def test_scene_details_parses_editable_fields():
+    payload = {
+        "findScenes": {"scenes": [{
+            "id": "7", "title": "T", "rating100": 60, "o_counter": 4,
+            "organized": True, "studio": {"name": "S"},
+            "performers": [{"name": "A"}], "tags": [{"name": "x"}],
+            "files": [{"path": "/p.mp4", "duration": 10}], "paths": {"screenshot": "u"},
+        }]}
+    }
+    client = FakeClient([payload])
+    d = client.scene_details(["7"])["7"]
+    assert d["rating100"] == 60 and d["o_counter"] == 4 and d["organized"] is True
+    assert d["studio"] == "S" and d["performers"] == ["A"]
+
+
 @pytest.mark.parametrize(
     "start,expected_contains",
     [(None, "/scene/5/stream"), (42.0, "start=42"), (12.5, "start=12.5")],
