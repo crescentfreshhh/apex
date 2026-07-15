@@ -77,6 +77,7 @@ def embed_library(
     total: int | None = None,
     workers: int = 1,
     log: Logger = print,
+    failure_log=None,
 ) -> dict:
     """Embed every scene not already cached. Resumable + idempotent.
 
@@ -102,11 +103,24 @@ def embed_library(
             and getattr(sampler, "mode", "interval") == "interval"
         )
 
+    pipeline_name = "raw" if use_raw else "jpeg"
+
+    def _record_failure(scene: Scene, key: str, exc) -> None:
+        if failure_log is not None:
+            failure_log.record(
+                key, scene.id, scene.path,
+                error=str(exc),
+                mode=getattr(sampler, "mode", "interval"),
+                hwaccel=getattr(sampler, "hwaccel", ""),
+                pipeline=pipeline_name,
+                model=embedder.name,
+            )
+
     if workers > 1 and use_raw:
         return _embed_library_parallel(
             scenes, sampler, embedder, cache,
             signature=signature, batch_size=batch_size, total=total,
-            workers=workers, log=log,
+            workers=workers, log=log, failure_log=failure_log,
         )
 
     stats = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
@@ -170,6 +184,8 @@ def embed_library(
             embed_seconds += dt
             stats["embedded"] += 1
             stats["frames"] += len(times)
+            if failure_log is not None:
+                failure_log.resolve(key)  # a prior casualty that now succeeds
             progress = f"[{processed}/{total}] " if total else ""
             eta = ""
             if total and stats["embedded"]:
@@ -182,6 +198,7 @@ def embed_library(
         except Exception as exc:  # keep the batch going; log the casualty
             log(f"  ! scene {scene.id} failed: {exc}")
             stats["failed"] += 1
+            _record_failure(scene, key, exc)
     if stats["embedded"]:
         stats["seconds_per_scene"] = round(embed_seconds / stats["embedded"], 2)
     return stats
@@ -198,6 +215,7 @@ def _embed_library_parallel(
     total: int | None,
     workers: int,
     log: Logger,
+    failure_log=None,
 ) -> dict:
     """Raw-path embed with `workers` scenes decoding concurrently.
 
@@ -264,6 +282,8 @@ def _embed_library_parallel(
             )
             stats["embedded"] += 1
             stats["frames"] += len(times)
+            if failure_log is not None:
+                failure_log.resolve(key)
             elapsed = _time.monotonic() - started_all
             rate = elapsed / stats["embedded"]
             progress = f"[{processed}/{total}] " if total else ""
@@ -277,6 +297,15 @@ def _embed_library_parallel(
         except Exception as exc:
             log(f"  ! scene {scene.id} failed: {exc}")
             stats["failed"] += 1
+            if failure_log is not None:
+                failure_log.record(
+                    key, scene.id, scene.path,
+                    error=str(exc),
+                    mode=getattr(sampler, "mode", "interval"),
+                    hwaccel=getattr(sampler, "hwaccel", ""),
+                    pipeline="raw",
+                    model=embedder.name,
+                )
 
     inflight: deque = deque()
     with ThreadPoolExecutor(max_workers=workers) as pool:

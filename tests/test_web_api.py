@@ -143,6 +143,37 @@ def test_sync_job_lifecycle(client, monkeypatch):
     assert seen["prune"] is False  # query param threaded through
 
 
+def test_failures_endpoint_lists_log(cfg):
+    from peaks.failures import failure_log_for
+
+    failure_log_for(cfg).record(
+        "fp9", "9", "/data/Rando/x.mp4", error="Invalid NAL unit size",
+        mode="sparse", hwaccel="cuda", pipeline="raw", model="dinov2",
+    )
+    c = TestClient(create_app(cfg))
+    body = c.get("/api/failures").json()
+    assert len(body["failures"]) == 1
+    assert body["failures"][0]["scene_id"] == "9"
+    assert c.get("/api/stats").json()["failures"] == 1
+
+
+def test_fix_job_lifecycle(client, monkeypatch):
+    from peaks.web import service as svc
+
+    def fake_fix(self, job=None, limit=0, dry_run=False):
+        job.log("  ✓ scene 9: fixed via interval/off/jpeg")
+        return {"fixed": 1, "failed": 0, "total": 1}
+
+    monkeypatch.setattr(svc.Service, "run_fix", fake_fix)
+    jid = client.post("/api/fix").json()["id"]
+    for _ in range(50):
+        j = client.get(f"/api/jobs/{jid}").json()
+        if j["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert j["status"] == "done" and j["result"]["fixed"] == 1
+
+
 def test_scene_edit_endpoints(client, monkeypatch):
     from peaks.web import service as svc
 

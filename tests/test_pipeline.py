@@ -125,6 +125,48 @@ def test_score_library_write_creates_markers(tmp_path):
     assert start == 16.0 and end == 22.0  # frames 8-11 -> times 16..22
 
 
+class _FlakySampler:
+    """interval=2.0; raises for scenes whose path contains 'bad'."""
+
+    interval = 2.0
+
+    def __init__(self, frames):
+        self._frames = frames
+
+    def iter_frames(self, path):
+        if "bad" in path:
+            raise RuntimeError("Invalid NAL unit size")
+        for ts, img in self._frames:
+            yield ts, img
+
+
+def test_embed_library_records_and_clears_failures(tmp_path):
+    from peaks.failures import FailureLog
+
+    emb = FakeEmbedder(dim=8)
+    frames = [(0.0, _StubImage(b"f0")), (2.0, _StubImage(b"f1"))]
+    sampler = _FlakySampler(frames)
+    cache = EmbeddingCache(tmp_path)
+    flog = FailureLog(tmp_path / "failures.json")
+    scenes = [_scene("1", "/m/good.mp4"), _scene("2", "/m/bad.mp4")]
+
+    stats = embed_library(
+        scenes, sampler, emb, cache, log=lambda *_: None, failure_log=flog
+    )
+    assert stats["embedded"] == 1 and stats["failed"] == 1
+    assert flog.keys() == {"fp2"}  # the 'bad' scene got logged
+    entry = flog.entries()[0]
+    assert entry["scene_id"] == "2" and "NAL" in entry["error"]
+
+    # a later pass where the same scene now succeeds clears its entry
+    good_sampler = _StubSampler(frames)
+    embed_library(
+        [_scene("2", "/m/bad.mp4")], good_sampler, emb, cache,
+        log=lambda *_: None, failure_log=flog,
+    )
+    assert flog.keys() == set()
+
+
 def _cache_scene(cache, key, scene_id, path, model="fake"):
     t = np.array([0.0], dtype=np.float32)
     v = np.zeros((1, 4), dtype=np.float32)

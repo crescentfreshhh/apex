@@ -116,6 +116,20 @@ def create_app(cfg=None):
             raise HTTPException(409, str(exc))
         return job.as_dict()
 
+    @app.get("/api/failures")
+    def failures():
+        from ..failures import failure_log_for
+
+        return {"failures": failure_log_for(service.cfg).entries()}
+
+    @app.post("/api/fix")
+    def start_fix(limit: int = Query(0)):
+        try:
+            job = jobs.start("fix", lambda j: service.run_fix(j, limit=limit))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
     @app.get("/api/jobs")
     def list_jobs():
         return [j.as_dict(log_tail=1) for j in jobs.list()]

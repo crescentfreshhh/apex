@@ -40,8 +40,13 @@ async function refreshDashboard() {
       ["Model", stats.model],
       ["Device", stats.device],
       ["CLIP / text search", caps.has_clip ? "ready" : "not yet"],
+      ["Failed scenes", stats.failures || 0],
       ["Library", stats.library_path],
     ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+    // surface the failures panel only when there are casualties to retry
+    const nf = stats.failures || 0;
+    $("#fail-panel").hidden = nf === 0;
+    $("#fail-count").textContent = nf ? `· ${nf}` : "";
   } catch (e) {
     $("#conn").textContent = "disconnected"; toast("Cannot reach backend: " + e.message, true);
   }
@@ -74,6 +79,18 @@ wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => api("/api/em
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
   const prune = $("#sync-prune").checked;
   return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });
+});
+wireJob($("#btn-fix"), $("#fix-status"), $("#fix-log"), () => api("/api/fix", { method: "POST" }));
+$("#btn-fail-list").addEventListener("click", async () => {
+  const el = $("#fail-list");
+  if (!el.hidden) { el.hidden = true; return; }
+  try {
+    const { failures } = await api("/api/failures");
+    el.textContent = failures.length
+      ? failures.map((f) => `scene ${f.scene_id}  [${f.mode}/${f.hwaccel || "off"}/${f.pipeline}]  ${f.path}\n    ${f.error}`).join("\n\n")
+      : "(none)";
+    el.hidden = false;
+  } catch (e) { toast(e.message, true); }
 });
 wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
   const tag = $("#score-tag").value.trim();

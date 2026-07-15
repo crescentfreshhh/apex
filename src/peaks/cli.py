@@ -14,6 +14,7 @@ Usage:
     peaks web             # full control-panel + explorer web app
     peaks watch           # recurring incremental embed passes
     peaks sync            # reconcile cache with Stash (moves + deletions)
+    peaks fix             # retry scenes that failed to embed (fallback decode)
 
 Run `python -m peaks <cmd>` if you haven't installed the console script.
 """
@@ -171,10 +172,13 @@ def cmd_embed(args) -> int:
         f"Embedding {total} scene(s) with '{embedder.name}' "
         f"(dim={embedder.dim}{extras}) -> {cfg.embedding.cache_dir}"
     )
+    from .failures import failure_log_for
+
     stats = embed_library(
         scenes, sampler, embedder, cache,
         batch_size=cfg.embedding.batch_size, total=total,
         workers=cfg.embedding.workers,
+        failure_log=failure_log_for(cfg),
     )
     rate = (
         f" avg {stats['seconds_per_scene']}s/scene"
@@ -527,6 +531,47 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def cmd_fix(args) -> int:
+    """Retry scenes that failed to embed, through a fallback decode ladder."""
+    cfg = Config.load(args.config)
+    from .failures import failure_log_for
+
+    flog = failure_log_for(cfg)
+    if args.clear:
+        n = flog.clear()
+        print(f"Cleared {n} entr(y/ies) from the failure log.")
+        return 0
+    if args.list or args.dry_run:
+        entries = flog.entries()
+        if not entries:
+            print("Failure log is empty.")
+            return 0
+        print(f"{len(entries)} recorded failure(s):\n")
+        for e in entries:
+            print(
+                f"  scene {e.get('scene_id'):>6}  "
+                f"[{e.get('mode')}/{e.get('hwaccel') or 'off'}/{e.get('pipeline')}]  "
+                f"{e.get('path')}\n      {e.get('error')}"
+            )
+        if args.list:
+            return 0
+
+    from .web.service import Service
+
+    service = Service(cfg)
+    print("fix: retrying failed scenes (sparse w/o NVDEC → full linear decode)\n")
+    stats = service.run_fix(limit=args.limit, dry_run=args.dry_run)
+    if args.dry_run:
+        return 0
+    print(
+        f"\nDone. fixed={stats['fixed']} still_failing={stats['failed']} "
+        f"of {stats['total']}"
+    )
+    if stats["failed"]:
+        print("  (survivors kept in the log — inspect with `peaks fix --list`)")
+    return 0
+
+
 def cmd_serve(args) -> int:
     import functools
     import http.server
@@ -650,6 +695,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sync every cached model (dino + clip); on by default",
     )
     syp.set_defaults(func=cmd_sync)
+
+    fxp = sub.add_parser(
+        "fix", help="Retry scenes that failed to embed (fallback decode ladder)"
+    )
+    fxp.add_argument("--list", action="store_true", help="Just list recorded failures")
+    fxp.add_argument(
+        "--dry-run", action="store_true", help="Show what would be retried, don't embed"
+    )
+    fxp.add_argument("--clear", action="store_true", help="Empty the failure log and exit")
+    fxp.add_argument("--limit", type=int, default=0, help="Max scenes to retry (0 = all)")
+    fxp.set_defaults(func=cmd_fix)
 
     svp = sub.add_parser("serve", help="Serve the megaboard webapp locally")
     svp.add_argument("--port", type=int, default=8800, help="Port (default: 8800)")

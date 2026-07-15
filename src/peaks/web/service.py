@@ -58,6 +58,8 @@ class Service:
         return out
 
     def stats(self) -> dict:
+        from ..failures import failure_log_for
+
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         model = canonical_name(self.cfg.embedding.model)
         cached = len(cache.keys(model))
@@ -68,7 +70,14 @@ class Service:
             "device": self.cfg.embedding.device or "auto",
             "interval": self.cfg.sampling.interval_seconds,
             "mode": self.cfg.sampling.mode,
+            "failures": len(failure_log_for(self.cfg)),
         }
+
+    def _embedder(self):
+        from ..embedding import get_embedder
+
+        kwargs = {"device": self.cfg.embedding.device} if self.cfg.embedding.device else {}
+        return get_embedder(self.cfg.embedding.model, **kwargs)
 
     # --- embed / score (job targets) ----------------------------------------
 
@@ -85,10 +94,9 @@ class Service:
             pipeline=self.cfg.sampling.pipeline,
             scene_timeout=self.cfg.sampling.scene_timeout,
         )
-        from ..embedding import get_embedder
+        from ..failures import failure_log_for
 
-        kwargs = {"device": self.cfg.embedding.device} if self.cfg.embedding.device else {}
-        embedder = get_embedder(self.cfg.embedding.model, **kwargs)
+        embedder = self._embedder()
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         scenes = self.scenes(limit=limit)
         total = len(scenes)
@@ -107,6 +115,7 @@ class Service:
             batch_size=self.cfg.embedding.batch_size,
             workers=self.cfg.embedding.workers,
             total=total, log=_log,
+            failure_log=failure_log_for(self.cfg),
         )
         self.invalidate_index(embedder.name)
         return stats
@@ -177,6 +186,93 @@ class Service:
         self.invalidate_meta()
         total["models"] = len(models)
         return total
+
+    def run_fix(self, job=None, limit: int = 0, dry_run: bool = False) -> dict:
+        """Retry scenes recorded in the failure log through a fallback ladder.
+
+        Most sparse-mode casualties are seek/NVDEC quirks, not broken files, so
+        we re-attempt each: first sparse with NVDEC off, then a full LINEAR
+        decode (the path VLC/Stash use) which tolerates awkward seek tables.
+        A scene that embeds under any strategy is cleared from the log; one that
+        exhausts them stays, its entry updated with the last error."""
+        from ..failures import failure_log_for
+        from ..pipeline import embed_library
+        from ..sampling import FrameSampler
+
+        log = (job.log if job else print)
+        flog = failure_log_for(self.cfg)
+        entries = flog.entries()
+        if limit:
+            entries = entries[:limit]
+        result = {"fixed": 0, "failed": 0, "total": len(entries)}
+        if not entries:
+            log("no recorded failures — nothing to fix")
+            return result
+        if job:
+            job.progress = {"total": len(entries), "done": 0}
+
+        # (mode, hwaccel, pipeline): distinct decode strategies, cheap → tolerant
+        ladder = [
+            ("sparse", "", "raw"),      # sparse seek, no NVDEC
+            ("interval", "", "jpeg"),   # full linear decode, most forgiving
+        ]
+        if dry_run:
+            for e in entries:
+                log(f"  · would retry scene {e.get('scene_id')} ({e.get('path')})")
+            return result
+
+        import os
+
+        embedder = self._embedder()
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        iv = self.cfg.sampling.interval_seconds
+        to = self.cfg.sampling.scene_timeout
+        for e in entries:
+            key = e["key"]
+            scene = _scene_from_entry(e)
+            if not scene.path or not os.path.exists(scene.path):
+                log(f"  ? scene {e.get('scene_id')}: file missing at {scene.path} "
+                    "(moved/deleted? run sync) — skipped")
+                result["failed"] += 1
+            else:
+                ok = False
+                last = ""
+                for mode, hw, pipe in ladder:
+                    sampler = FrameSampler(
+                        interval_seconds=iv, mode=mode, hwaccel=hw,
+                        pipeline=pipe, scene_timeout=to,
+                    )
+                    lines: list[str] = []
+                    try:
+                        st = embed_library(
+                            [scene], sampler, embedder, cache,
+                            batch_size=self.cfg.embedding.batch_size,
+                            total=1, log=lines.append,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st = {"embedded": 0}
+                        lines.append(f"failed: {exc}")
+                    if st.get("embedded") == 1:
+                        ok = True
+                        log(f"  ✓ scene {scene.id}: fixed via "
+                            f"{mode}/hwaccel={hw or 'off'}/{pipe}")
+                        break
+                    last = next((ln for ln in lines if "fail" in ln.lower()), "")
+                    log(f"    · {mode}/{hw or 'off'}/{pipe} didn't work")
+                if ok:
+                    flog.resolve(key)
+                    result["fixed"] += 1
+                    self.invalidate_index(embedder.name)
+                else:
+                    flog.record(
+                        key, e.get("scene_id"), scene.path,
+                        error=last or "all fallback strategies failed",
+                        mode="fix-exhausted", model=embedder.name,
+                    )
+                    result["failed"] += 1
+            if job:
+                job.progress["done"] = result["fixed"] + result["failed"]
+        return result
 
     # --- search index --------------------------------------------------------
 
@@ -278,6 +374,25 @@ class Service:
 
     def stream_url(self, scene_id: str, start: float | None = None) -> str:
         return self.client().stream_url(scene_id, start=start)
+
+
+def _scene_from_entry(entry: dict):
+    """Rebuild a minimal Scene from a failure-log record so it can be re-fed to
+    embed_library. The cache key is the file fingerprint (unless it was a
+    path-derived fallback key), so reconstructing it here keeps the retry
+    writing to the same cache entry."""
+    from ..models import Scene
+
+    key = entry.get("key", "")
+    fps = [] if key.startswith("path-") else [{"type": "oshash", "value": key}]
+    return Scene.from_dict(
+        {
+            "id": entry.get("scene_id") or "",
+            "title": "",
+            "files": [{"path": entry.get("path") or "", "fingerprints": fps}],
+            "scene_markers": [],
+        }
+    )
 
 
 def get_embedder_for_references(cfg: Config):

@@ -32,6 +32,20 @@
       <pre id="embed-log" class="log" hidden></pre>
     </div>
 
+    <div class="panel" id="fail-panel" hidden>
+      <h2>Failed scenes <span id="fail-count" class="dim"></span></h2>
+      <p class="dim">Scenes that failed to embed (usually a seek/decode quirk,
+        not a bad file). Retry runs a fallback ladder: sparse without NVDEC,
+        then a full linear decode like VLC uses.</p>
+      <div class="row">
+        <button id="btn-fix" class="primary">Retry failed</button>
+        <button id="btn-fail-list" class="ghost">Show list</button>
+        <span id="fix-status" class="dim"></span>
+      </div>
+      <pre id="fail-list" class="log" hidden></pre>
+      <pre id="fix-log" class="log" hidden></pre>
+    </div>
+
     <div class="panel">
       <h2>Sync library</h2>
       <p class="dim">Reconcile the cache with Stash: refresh scenes that moved

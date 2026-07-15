@@ -38,7 +38,7 @@ import tempfile
 import threading
 from io import BytesIO
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from typing import IO, TYPE_CHECKING, Iterator
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -495,10 +495,21 @@ class FrameSampler:
         threading.Thread(target=_read_frames, daemon=True).start()
         threading.Thread(target=_drain_stderr, daemon=True).start()
 
+        # inactivity timeout: a healthy decode (even of a long file) emits
+        # frames steadily, so a gap this long means ffmpeg has wedged on a
+        # pathological file — kill it rather than hang the run. Not a
+        # total-scene cap, so legit long files decode fine.
+        stall = self.scene_timeout or None
         i = 0
         try:
             while True:
-                chunk = frames.get()
+                try:
+                    chunk = frames.get(timeout=stall)
+                except Empty:
+                    raise SamplerError(
+                        f"no frame for {stall:.0f}s on {path} "
+                        "(stalled/pathological decode?) — killed"
+                    )
                 if chunk is None:
                     break
                 arr = np.frombuffer(chunk, dtype=np.uint8).reshape(crop, crop, 3)
@@ -560,10 +571,17 @@ class FrameSampler:
         threading.Thread(target=_read_frames, daemon=True).start()
         threading.Thread(target=_drain_stderr, daemon=True).start()
 
+        stall = self.scene_timeout or None  # inactivity cap (see raw path)
         i = 0
         try:
             while True:
-                jpg = frames.get()
+                try:
+                    jpg = frames.get(timeout=stall)
+                except Empty:
+                    raise SamplerError(
+                        f"no frame for {stall:.0f}s on {path} "
+                        "(stalled/pathological decode?) — killed"
+                    )
                 if jpg is None:
                     break
                 with PILImage.open(BytesIO(jpg)) as im:

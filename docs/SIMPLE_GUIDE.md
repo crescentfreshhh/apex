@@ -218,6 +218,14 @@ To borrow the GPU again later (new videos to embed): repeat Part A steps 1–3
   refresh moved paths and drop cache entries for scenes you deleted from Stash.
   If you set `PEAKS_EMBED_EVERY_HOURS`, this reconcile runs automatically after
   each recurring pass (moves always; deletions only if you set `PEAKS_PRUNE=true`).
+- **A few scenes failed to embed?** They're logged automatically (a "Failed
+  scenes" panel appears on the Dashboard, and `peaks fix --list` shows them).
+  A failure is usually a seek/decode quirk, not a bad file — the same clip
+  plays fine in VLC because VLC decodes linearly while our fast path seeks.
+  Hit **Retry failed** (or run `peaks fix`) to re-attempt them through a
+  fallback ladder: sparse without NVDEC, then a full linear decode. Anything
+  that embeds is cleared from the log; stubborn survivors stay listed with the
+  error so you can dig in.
 - **Start fresh:** `peaks clear --tag apex --write`, then score again.
 - **Updates:** when Claude pushes changes, Unraid's Docker tab will show an
   update for peaks — click Update, done.
@@ -286,6 +294,7 @@ minutes. Delete one profile's markers without touching the others:
 | Teach it my taste | `peaks label --host 0.0.0.0` then `peaks train` |
 | Refresh the megaboard | `peaks playlist`, then reload the page |
 | Reconcile after moving/deleting files | `peaks sync` (add `--dry-run` to preview) |
+| Retry scenes that failed to embed | `peaks fix` (`--list` to see them first) |
 | Add a new profile | folder `references\apex-<thing>`, then `peaks score --tag apex-<thing> --write` |
 | Mix profiles on the board | `peaks playlist --tag apex --tag apex-<thing>` |
 
