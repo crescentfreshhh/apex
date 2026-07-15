@@ -11,6 +11,8 @@ Usage:
     peaks clear           # delete generated markers for a tag (dry-run first)
     peaks playlist        # export apex markers -> webapp/playlist.json
     peaks serve           # serve the megaboard webapp
+    peaks web             # full control-panel + explorer web app
+    peaks watch           # recurring incremental embed passes
 
 Run `python -m peaks <cmd>` if you haven't installed the console script.
 """
@@ -443,6 +445,56 @@ def cmd_playlist(args) -> int:
     return 0
 
 
+def cmd_web(args) -> int:
+    """Run the full control-panel + explorer web app."""
+    cfg = Config.load(args.config)
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "✗ the web UI needs fastapi + uvicorn.\n"
+            '  pip install -e ".[web]"   (or update the container image)',
+            file=sys.stderr,
+        )
+        return 2
+    from .web.app import create_app
+
+    app = create_app(cfg)
+    print(f"peaks web on http://{args.host}:{args.port}  (Ctrl-C to stop)")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
+def cmd_watch(args) -> int:
+    """Recurring incremental embed passes (e.g. CPU, after the GPU is gone)."""
+    import time as _time
+
+    cfg = Config.load(args.config)
+    from .web.service import Service
+
+    every = args.interval or cfg.schedule.embed_seconds or 21600.0
+    service = Service(cfg)
+    print(
+        f"watch: incremental embed every {every / 3600:.1f}h "
+        f"(model={cfg.embedding.model}, device={cfg.embedding.device or 'auto'}). "
+        "Ctrl-C to stop."
+    )
+    while True:
+        try:
+            stats = service.run_embed()
+            print(f"[{_time.strftime('%H:%M')}] pass done: {stats}")
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            return 0
+        except Exception as exc:  # keep the loop alive across transient failures
+            print(f"[{_time.strftime('%H:%M')}] pass failed: {exc}")
+        try:
+            _time.sleep(every)
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            return 0
+
+
 def cmd_serve(args) -> int:
     import functools
     import http.server
@@ -538,6 +590,18 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--out", help="Output path (default: webapp/playlist.json)")
     pp.add_argument("--limit", type=int, default=0, help="Max apexes (0 = all)")
     pp.set_defaults(func=cmd_playlist)
+
+    wp = sub.add_parser("web", help="Run the control-panel + explorer web app")
+    wp.add_argument("--port", type=int, default=8800, help="Port (default: 8800)")
+    wp.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
+    wp.set_defaults(func=cmd_web)
+
+    wat = sub.add_parser("watch", help="Recurring incremental embed passes")
+    wat.add_argument(
+        "--interval", type=float, default=0,
+        help="Seconds between passes (default: config schedule or 6h)",
+    )
+    wat.set_defaults(func=cmd_watch)
 
     svp = sub.add_parser("serve", help="Serve the megaboard webapp locally")
     svp.add_argument("--port", type=int, default=8800, help="Port (default: 8800)")

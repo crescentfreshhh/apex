@@ -30,7 +30,7 @@ WORKDIR /opt/peaks
 COPY pyproject.toml README.md config.example.toml ./
 COPY src ./src
 COPY webapp ./webapp
-RUN pip install --no-cache-dir ".[ml,label]"
+RUN pip install --no-cache-dir ".[ml,label,web]"
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -39,8 +39,10 @@ RUN chmod +x /entrypoint.sh
 ENV TORCH_HOME=/config/torch \
     HF_HOME=/config/hf
 
+ENV PEAKS_WEBAPP_DIR=/config/webapp
 WORKDIR /config
 EXPOSE 8800 7860
 ENTRYPOINT ["/entrypoint.sh"]
-# default process: keep the megaboard served; everything else runs via console
-CMD ["peaks", "serve", "--host", "0.0.0.0", "--port", "8800", "--directory", "/config/webapp"]
+# default process: the control-panel + explorer web app (megaboard mounted at
+# /megaboard). Other commands still run via the container console.
+CMD ["peaks", "web", "--host", "0.0.0.0", "--port", "8800"]

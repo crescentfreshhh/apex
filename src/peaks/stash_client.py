@@ -77,6 +77,25 @@ query FindSceneMarkers($filter: FindFilterType, $marker_filter: SceneMarkerFilte
 }
 """
 
+_SCENE_DETAILS_QUERY = """
+query SceneDetails($ids: [ID!]) {
+  findScenes(ids: $ids, filter: {per_page: -1}) {
+    scenes {
+      id
+      title
+      date
+      details
+      rating100
+      studio { name }
+      performers { name gender }
+      tags { name }
+      files { path duration width height }
+      paths { screenshot preview }
+    }
+  }
+}
+"""
+
 _FIND_TAGS_QUERY = """
 query FindTags($filter: FindFilterType, $tag_filter: TagFilterType) {
   findTags(filter: $filter, tag_filter: $tag_filter) {
@@ -200,6 +219,33 @@ class StashClient:
             if not scenes or seen >= result["count"]:
                 break
             page += 1
+
+    def scene_details(self, ids: list[str]) -> dict[str, dict]:
+        """Fetch display metadata for scene ids → {id: {title, performers,
+        studio, date, tags, rating, cover, duration}}. Empty ids → {}."""
+        ids = [str(i) for i in ids if i]
+        if not ids:
+            return {}
+        data = self.execute(_SCENE_DETAILS_QUERY, {"ids": ids})
+        out: dict[str, dict] = {}
+        for s in data["findScenes"]["scenes"]:
+            files = s.get("files") or []
+            f0 = files[0] if files else {}
+            paths = s.get("paths") or {}
+            out[str(s["id"])] = {
+                "title": s.get("title") or "",
+                "date": s.get("date") or "",
+                "details": s.get("details") or "",
+                "rating100": s.get("rating100"),
+                "studio": (s.get("studio") or {}).get("name") or "",
+                "performers": [p.get("name", "") for p in (s.get("performers") or [])],
+                "tags": [t.get("name", "") for t in (s.get("tags") or [])],
+                "duration": f0.get("duration"),
+                "width": f0.get("width"),
+                "height": f0.get("height"),
+                "cover": paths.get("screenshot"),
+            }
+        return out
 
     def iter_markers_by_tag(
         self, tag_name: str, page_size: int = 200

@@ -78,6 +78,17 @@ class ModelingConfig:
 
 
 @dataclass
+class ScheduleConfig:
+    # Recurring incremental embed (web app scheduler). 0 = off. Handy for
+    # picking up newly-added scenes on CPU after the GPU goes back to the VM.
+    embed_hours: float = 0.0
+
+    @property
+    def embed_seconds(self) -> float:
+        return self.embed_hours * 3600.0
+
+
+@dataclass
 class LibraryConfig:
     # Only work on scenes whose file path starts with this (empty = whole
     # library). Point it at a folder to exclude everything else — e.g. skip VR.
@@ -93,6 +104,7 @@ class Config:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     modeling: ModelingConfig = field(default_factory=ModelingConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -148,7 +160,9 @@ class Config:
             tag_name=markers_raw.get("tag_name", MarkersConfig.tag_name)
         )
         embedding = EmbeddingConfig(
-            model=embedding_raw.get("model", EmbeddingConfig.model),
+            model=os.environ.get(
+                "PEAKS_MODEL", embedding_raw.get("model", EmbeddingConfig.model)
+            ),
             cache_dir=embedding_raw.get("cache_dir", EmbeddingConfig.cache_dir),
             device=os.environ.get(
                 "PEAKS_DEVICE", embedding_raw.get("device", EmbeddingConfig.device)
@@ -191,6 +205,15 @@ class Config:
                 "PEAKS_LIBRARY_PATH", library_raw.get("path", LibraryConfig.path)
             ),
         )
+        schedule_raw = raw.get("schedule", {})
+        schedule = ScheduleConfig(
+            embed_hours=float(
+                os.environ.get(
+                    "PEAKS_EMBED_EVERY_HOURS",
+                    schedule_raw.get("embed_hours", ScheduleConfig.embed_hours),
+                )
+            ),
+        )
         return cls(
             stash=stash,
             sampling=sampling,
@@ -199,4 +222,5 @@ class Config:
             scoring=scoring,
             modeling=modeling,
             library=library,
+            schedule=schedule,
         )

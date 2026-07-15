@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Opus — peaks</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <span class="brand">Opus</span>
+    <nav>
+      <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="explore">Explore</button>
+      <button class="tab" data-view="board">Megaboard</button>
+    </nav>
+    <span id="conn" class="dim"></span>
+  </header>
+
+  <!-- DASHBOARD -->
+  <section id="dashboard" class="view active">
+    <div class="cards" id="stat-cards"></div>
+
+    <div class="panel">
+      <h2>Embed</h2>
+      <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
+      <div class="row">
+        <button id="btn-embed" class="primary">Embed new scenes</button>
+        <span id="embed-status" class="dim"></span>
+      </div>
+      <pre id="embed-log" class="log" hidden></pre>
+    </div>
+
+    <div class="panel">
+      <h2>Score</h2>
+      <p class="dim">Find your apexes and write markers into Stash.</p>
+      <div class="row">
+        <input id="score-tag" placeholder="tag (default: apex)" />
+        <label class="check"><input type="checkbox" id="score-write" /> write markers</label>
+        <button id="btn-score" class="primary">Run scoring</button>
+        <span id="score-status" class="dim"></span>
+      </div>
+      <pre id="score-log" class="log" hidden></pre>
+    </div>
+  </section>
+
+  <!-- EXPLORE -->
+  <section id="explore" class="view">
+    <div class="search-bar">
+      <input id="q" placeholder="Search by description (needs a CLIP pass)…" />
+      <button id="btn-text" class="primary">Search</button>
+      <span id="explore-hint" class="dim"></span>
+    </div>
+    <div id="results" class="grid"></div>
+  </section>
+
+  <!-- MEGABOARD -->
+  <section id="board" class="view">
+    <p class="panel dim">The megaboard opens in its own optimized page.
+      <a id="board-link" href="/megaboard/" target="_blank">Open megaboard →</a>
+      (run <code>peaks playlist</code> first to populate it).</p>
+  </section>
+
+  <div id="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

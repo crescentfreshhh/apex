@@ -28,10 +28,17 @@ ml = [
 label = [
     "gradio>=4",      # the rapid frame-rating tool (Tier 2); >=4 for Blocks(js=...)
 ]
+web = [
+    "fastapi>=0.110",   # control-panel + explorer API
+    "uvicorn>=0.27",    # ASGI server
+    "python-multipart", # form/file uploads (reference stills)
+]
 dev = [
     "pytest>=7",      # the offline test suite (no torch/ffmpeg/Stash needed)
     "scikit-learn",   # classifier tests exercise the real sklearn estimators
     "av>=12",         # sparse-sampler tests run against real generated video
+    "fastapi>=0.110", # web API tests
+    "httpx",          # FastAPI TestClient transport
 ]
 
 [project.scripts]
@@ -39,3 +46,6 @@ peaks = "peaks.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"peaks.web" = ["static/*"]
