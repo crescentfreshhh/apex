@@ -6,7 +6,7 @@ from peaks.cache import EmbeddingCache
 from peaks.config import ScoringConfig
 from peaks.embedding import FakeEmbedder
 from peaks.models import Scene
-from peaks.pipeline import embed_library, score_library, scene_key
+from peaks.pipeline import embed_library, score_library, scene_key, sync_cache
 from peaks.scoring import make_similarity_scorer
 
 
@@ -123,6 +123,45 @@ def test_score_library_write_creates_markers(tmp_path):
     scene_id, start, end, title = client.markers[0]
     assert scene_id == "1" and title.startswith("apex ")  # "apex <peak score>"
     assert start == 16.0 and end == 22.0  # frames 8-11 -> times 16..22
+
+
+def _cache_scene(cache, key, scene_id, path, model="fake"):
+    t = np.array([0.0], dtype=np.float32)
+    v = np.zeros((1, 4), dtype=np.float32)
+    cache.save(key, model, t, v, meta={"scene_id": scene_id, "path": path})
+
+
+def test_sync_cache_refreshes_moved_scene(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    # cached under the stable fingerprint key, but at the OLD path
+    _cache_scene(cache, "fp1", "1", "/data/Rando/old/a.mp4")
+    # Stash now reports the same scene (same fingerprint) at a new path
+    scenes = [_scene("1", "/data/Rando/new/a.mp4")]
+
+    stats = sync_cache(scenes, cache, "fake", prune=True, log=lambda *_: None)
+    assert stats["moved"] == 1 and stats["pruned"] == 0
+    _, _, meta = cache.load("fp1", "fake")
+    assert meta["path"] == "/data/Rando/new/a.mp4"  # refreshed in place
+
+
+def test_sync_cache_prunes_deleted_scene(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    _cache_scene(cache, "fp1", "1", "/data/Rando/a.mp4")
+    _cache_scene(cache, "fp2", "2", "/data/Rando/gone.mp4")
+    scenes = [_scene("1", "/data/Rando/a.mp4")]  # fp2 no longer in Stash
+
+    stats = sync_cache(scenes, cache, "fake", prune=True, log=lambda *_: None)
+    assert stats["orphaned"] == 1 and stats["pruned"] == 1
+    assert cache.has("fp1", "fake") and not cache.has("fp2", "fake")
+
+
+def test_sync_cache_dry_run_reports_without_deleting(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    _cache_scene(cache, "fp2", "2", "/data/Rando/gone.mp4")
+
+    stats = sync_cache([], cache, "fake", prune=False, log=lambda *_: None)
+    assert stats["orphaned"] == 1 and stats["pruned"] == 0
+    assert cache.has("fp2", "fake")  # dry run leaves the orphan intact
 
 
 def test_score_library_skips_uncached_scene(tmp_path):

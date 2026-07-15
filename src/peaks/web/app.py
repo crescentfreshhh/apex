@@ -9,7 +9,6 @@ added scenes once the GPU is gone).
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 
 from .jobs import JobManager
@@ -105,6 +104,14 @@ def create_app(cfg=None):
             job = jobs.start(
                 "score", lambda j: service.run_score(j, tag=tag, write=write)
             )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
+    @app.post("/api/sync")
+    def start_sync(prune: bool = True):
+        try:
+            job = jobs.start("sync", lambda j: service.run_sync(j, prune=prune))
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()
@@ -223,6 +230,16 @@ def create_app(cfg=None):
 def _start_scheduler(app, service: Service, jobs: JobManager, seconds: float):
     stop = threading.Event()
 
+    sync = service.cfg.schedule.sync
+    prune = service.cfg.schedule.prune
+
+    def _embed_then_sync(job):
+        stats = service.run_embed(job)
+        if sync:
+            job.log("--- reconciling cache with Stash (sync) ---")
+            stats["sync"] = service.run_sync(job, prune=prune)
+        return stats
+
     def _loop():
         # small initial delay so startup isn't slammed
         if stop.wait(30):
@@ -230,7 +247,7 @@ def _start_scheduler(app, service: Service, jobs: JobManager, seconds: float):
         while not stop.wait(seconds):
             if jobs.running("embed") is None:
                 try:
-                    jobs.start("embed", lambda j: service.run_embed(j))
+                    jobs.start("embed", _embed_then_sync)
                 except RuntimeError:
                     pass  # a run is already going
 

@@ -13,6 +13,7 @@ Usage:
     peaks serve           # serve the megaboard webapp
     peaks web             # full control-panel + explorer web app
     peaks watch           # recurring incremental embed passes
+    peaks sync            # reconcile cache with Stash (moves + deletions)
 
 Run `python -m peaks <cmd>` if you haven't installed the console script.
 """
@@ -495,6 +496,37 @@ def cmd_watch(args) -> int:
             return 0
 
 
+def cmd_sync(args) -> int:
+    """Reconcile the cache with Stash: refresh moved scenes, prune deleted ones.
+
+    Cache keys are stable file fingerprints, so a moved scene keeps its
+    embeddings — only its stored path is refreshed. A scene deleted from Stash
+    leaves an orphan entry, pruned unless --dry-run."""
+    cfg = Config.load(args.config)
+    from .web.service import Service
+
+    service = Service(cfg)
+    prune = not args.dry_run
+    print(
+        f"sync: reconciling cache with Stash "
+        f"({'prune deleted' if prune else 'DRY RUN — report only'}"
+        f"{', all models' if args.all_models else ''}) ...\n"
+    )
+    try:
+        stats = service.run_sync(prune=prune, all_models=args.all_models)
+    except StashError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"\nDone. cached={stats['cached']} moved={stats['moved']} "
+        f"orphaned={stats['orphaned']} pruned={stats['pruned']} "
+        f"across {stats.get('models', 1)} model(s)"
+    )
+    if stats["orphaned"] and args.dry_run:
+        print("  (re-run without --dry-run to delete the orphaned entries)")
+    return 0
+
+
 def cmd_serve(args) -> int:
     import functools
     import http.server
@@ -602,6 +634,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between passes (default: config schedule or 6h)",
     )
     wat.set_defaults(func=cmd_watch)
+
+    syp = sub.add_parser(
+        "sync", help="Reconcile cache with Stash (refresh moves, prune deletes)"
+    )
+    syp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report orphaned/moved entries without deleting anything",
+    )
+    syp.add_argument(
+        "--all-models",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Sync every cached model (dino + clip); on by default",
+    )
+    syp.set_defaults(func=cmd_sync)
 
     svp = sub.add_parser("serve", help="Serve the megaboard webapp locally")
     svp.add_argument("--port", type=int, default=8800, help="Port (default: 8800)")

@@ -95,3 +95,18 @@ class EmbeddingCache:
         if not model_dir.exists():
             return []
         return sorted(p.stem for p in model_dir.glob("*.npz"))
+
+    def models(self) -> list[str]:
+        """Names of every model that has a cache directory (dinov2, clip, ...)."""
+        if not self.root.exists():
+            return []
+        return sorted(p.name for p in self.root.iterdir() if p.is_dir())
+
+    def delete(self, key: str, model_name: str) -> bool:
+        """Remove a cached scene entry. Returns True if a file was deleted.
+        Used by the sync/prune pass when a scene leaves the library."""
+        f = self._file(key, model_name)
+        if f.exists():
+            f.unlink()
+            return True
+        return False

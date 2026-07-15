@@ -212,6 +212,12 @@ To borrow the GPU again later (new videos to embed): repeat Part A steps 1–3
   browse to `http://<unraid-ip>:7860`. It shows frames — press **→** for
   "want it," **←** for "no." A few hundred takes ~15 min. Then `peaks train`
   (it prints a quality score) and `peaks score --write` again.
+- **Files moved or deleted?** The cache is keyed by a stable file fingerprint,
+  so a scene shuffled between subfolders in `/data/Rando` keeps its embeddings —
+  nothing to redo. Hit **Sync now** on the Dashboard (or run `peaks sync`) to
+  refresh moved paths and drop cache entries for scenes you deleted from Stash.
+  If you set `PEAKS_EMBED_EVERY_HOURS`, this reconcile runs automatically after
+  each recurring pass (moves always; deletions only if you set `PEAKS_PRUNE=true`).
 - **Start fresh:** `peaks clear --tag apex --write`, then score again.
 - **Updates:** when Claude pushes changes, Unraid's Docker tab will show an
   update for peaks — click Update, done.
@@ -279,6 +285,7 @@ minutes. Delete one profile's markers without touching the others:
 | Delete the saved moments | `peaks clear --tag apex --write` |
 | Teach it my taste | `peaks label --host 0.0.0.0` then `peaks train` |
 | Refresh the megaboard | `peaks playlist`, then reload the page |
+| Reconcile after moving/deleting files | `peaks sync` (add `--dry-run` to preview) |
 | Add a new profile | folder `references\apex-<thing>`, then `peaks score --tag apex-<thing> --write` |
 | Mix profiles on the board | `peaks playlist --tag apex --tag apex-<thing>` |
 

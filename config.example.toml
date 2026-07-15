@@ -60,6 +60,17 @@ path = ""
 # the VM. 0 = manual only. (Env override: PEAKS_EMBED_EVERY_HOURS)
 embed_hours = 0.0
 
+# After each recurring embed pass, reconcile the cache with Stash. Moves
+# (a scene shuffled between subfolders) are refreshed in place — the cache is
+# keyed by a stable file fingerprint, so no re-embedding. (Env: PEAKS_SYNC)
+sync = true
+
+# Also PRUNE: delete cache entries for scenes removed from Stash. Destructive,
+# so it's off by default in the recurring pass (a bad Stash response can't wipe
+# your cache). The manual `peaks sync` and the GUI "Sync now" button prune
+# regardless of this. (Env override: PEAKS_PRUNE)
+prune = false
+
 
 [markers]
 # The tag name written onto scene markers this tool generates.

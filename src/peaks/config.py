@@ -20,6 +20,14 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
 
+def _as_bool(env_val, default: bool) -> bool:
+    """Coerce an env string ("1", "true", "yes", "on") to bool; fall back to
+    `default` (from TOML or the dataclass) when the env var is unset."""
+    if env_val is None:
+        return bool(default)
+    return str(env_val).strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class StashConfig:
     url: str = "http://192.168.1.2:6969"
@@ -82,6 +90,13 @@ class ScheduleConfig:
     # Recurring incremental embed (web app scheduler). 0 = off. Handy for
     # picking up newly-added scenes on CPU after the GPU goes back to the VM.
     embed_hours: float = 0.0
+
+    # After each recurring embed pass, reconcile the cache with Stash: refresh
+    # moved scenes' stored paths and (if prune) drop entries for scenes deleted
+    # from Stash. Moves are always refreshed; pruning is destructive so it is
+    # opt-in here. The manual `peaks sync` / GUI button prunes regardless.
+    sync: bool = True
+    prune: bool = False
 
     @property
     def embed_seconds(self) -> float:
@@ -212,6 +227,14 @@ class Config:
                     "PEAKS_EMBED_EVERY_HOURS",
                     schedule_raw.get("embed_hours", ScheduleConfig.embed_hours),
                 )
+            ),
+            sync=_as_bool(
+                os.environ.get("PEAKS_SYNC"),
+                schedule_raw.get("sync", ScheduleConfig.sync),
+            ),
+            prune=_as_bool(
+                os.environ.get("PEAKS_PRUNE"),
+                schedule_raw.get("prune", ScheduleConfig.prune),
             ),
         )
         return cls(

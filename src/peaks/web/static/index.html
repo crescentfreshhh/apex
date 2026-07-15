@@ -33,6 +33,18 @@
     </div>
 
     <div class="panel">
+      <h2>Sync library</h2>
+      <p class="dim">Reconcile the cache with Stash: refresh scenes that moved
+        between folders and drop cache entries for scenes deleted from Stash.</p>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="sync-prune" checked /> prune deleted scenes</label>
+        <button id="btn-sync" class="primary">Sync now</button>
+        <span id="sync-status" class="dim"></span>
+      </div>
+      <pre id="sync-log" class="log" hidden></pre>
+    </div>
+
+    <div class="panel">
       <h2>Score</h2>
       <p class="dim">Find your apexes and write markers into Stash.</p>
       <div class="row">

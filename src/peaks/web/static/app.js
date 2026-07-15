@@ -71,6 +71,10 @@ async function poll(id, statusEl, logEl, btn) {
   } catch (e) { btn.disabled = false; toast(e.message, true); }
 }
 wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => api("/api/embed", { method: "POST" }));
+wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
+  const prune = $("#sync-prune").checked;
+  return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });
+});
 wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
   const tag = $("#score-tag").value.trim();
   const write = $("#score-write").checked;

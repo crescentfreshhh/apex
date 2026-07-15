@@ -303,6 +303,61 @@ def _embed_library_parallel(
     return stats
 
 
+def sync_cache(
+    scenes: Iterable[Scene],
+    cache: EmbeddingCache,
+    model_name: str,
+    *,
+    prune: bool = False,
+    log: Logger = print,
+) -> dict:
+    """Reconcile one model's cache against the current Stash library.
+
+    The cache is keyed by a stable file fingerprint (oshash), so a scene that
+    MOVES between folders keeps its key — only the stored ``path``/``scene_id``
+    go stale. This refreshes those in place (no re-embedding). A scene that was
+    DELETED from Stash no longer appears in `scenes`; its cache entry is an
+    orphan and, when ``prune`` is set, its ``.npz`` is removed.
+
+    `scenes` must be the set the cache should be reconciled against — pass the
+    WHOLE library (unscoped) so a scene that merely moved out of the embed
+    scope isn't mistaken for a deletion. Returns counts; when ``prune`` is
+    False the orphans are only reported (a dry run for the destructive half).
+    """
+    current: dict[str, Scene] = {}
+    for scene in scenes:
+        current[scene_key(scene)] = scene
+
+    stats = {"cached": 0, "moved": 0, "orphaned": 0, "pruned": 0}
+    for key in cache.keys(model_name):
+        try:
+            times, vecs, meta = cache.load(key, model_name)
+        except Exception:
+            continue  # unreadable entry: leave it for a human
+        stats["cached"] += 1
+        scene = current.get(key)
+        if scene is None:
+            stats["orphaned"] += 1
+            if prune:
+                cache.delete(key, model_name)
+                stats["pruned"] += 1
+                log(f"  - pruned {key} ({meta.get('path') or 'unknown path'})")
+            else:
+                log(f"  ? orphan {key} ({meta.get('path') or 'unknown path'})")
+            continue
+        new_path = scene.path or meta.get("path")
+        path_changed = new_path and new_path != meta.get("path")
+        id_changed = str(scene.id) != str(meta.get("scene_id"))
+        if path_changed or id_changed:
+            meta["path"] = new_path
+            meta["scene_id"] = scene.id
+            cache.save(key, model_name, times, vecs, meta=meta)
+            stats["moved"] += 1
+            if path_changed:
+                log(f"  ~ moved {key}: -> {new_path}")
+    return stats
+
+
 def load_references(embedder: Embedder, references_dir: str | Path) -> np.ndarray:
     """Embed the top-level images in a directory into reference vectors
     (m, dim). Subfolders are other profiles' references and are ignored —

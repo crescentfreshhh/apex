@@ -119,6 +119,30 @@ def test_embed_job_lifecycle(client, monkeypatch):
     assert j["result"] == {"embedded": 1, "skipped": 0}
 
 
+def test_sync_job_lifecycle(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+
+    def fake_sync(self, job=None, prune=True, all_models=True):
+        seen["prune"] = prune
+        job.log("- pruned k9")
+        return {"cached": 2, "moved": 1, "orphaned": 1, "pruned": 1, "models": 1}
+
+    monkeypatch.setattr(svc.Service, "run_sync", fake_sync)
+    r = client.post("/api/sync", params={"prune": "false"})
+    assert r.status_code == 200
+    jid = r.json()["id"]
+    for _ in range(50):
+        j = client.get(f"/api/jobs/{jid}").json()
+        if j["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert j["status"] == "done"
+    assert j["result"]["pruned"] == 1
+    assert seen["prune"] is False  # query param threaded through
+
+
 def test_scene_edit_endpoints(client, monkeypatch):
     from peaks.web import service as svc
 

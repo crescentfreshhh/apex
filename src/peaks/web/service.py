@@ -147,6 +147,37 @@ class Service:
             client=client, tag_name=tag, write=write, log=log,
         )
 
+    def run_sync(self, job=None, prune: bool = True, all_models: bool = True) -> dict:
+        """Reconcile the cache with Stash: refresh moved scenes' stored paths
+        and (optionally) prune entries for scenes deleted from Stash.
+
+        Fetches the WHOLE library (unscoped) so a scene that moved out of the
+        embed scope isn't mistaken for a deletion. A safety guard refuses to
+        prune when Stash returns nothing but the cache is non-empty (an
+        unreachable/empty response must never wipe the cache)."""
+        from ..pipeline import sync_cache
+
+        log = (job.log if job else print)
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        models = cache.models() if all_models else [canonical_name(self.cfg.embedding.model)]
+        models = [m for m in models if m]
+        # one scene fetch, reused across models
+        scenes = list(self.client().iter_scenes())
+        total = {"cached": 0, "moved": 0, "orphaned": 0, "pruned": 0}
+        safe_prune = prune
+        if prune and not scenes and any(cache.keys(m) for m in models):
+            log("  ! Stash returned no scenes — skipping prune (cache left intact)")
+            safe_prune = False
+        for model in models:
+            log(f"sync: model {model} ({len(scenes)} live scenes)")
+            s = sync_cache(scenes, cache, model, prune=safe_prune, log=log)
+            for k in total:
+                total[k] += s.get(k, 0)
+            self.invalidate_index(model)
+        self.invalidate_meta()
+        total["models"] = len(models)
+        return total
+
     # --- search index --------------------------------------------------------
 
     def index(self, model: str | None = None) -> SearchIndex:

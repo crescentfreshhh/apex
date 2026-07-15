@@ -49,3 +49,23 @@ def test_mismatched_lengths_rejected(tmp_path):
     cache = EmbeddingCache(tmp_path)
     with pytest.raises(ValueError):
         cache.save("k", "fake", np.zeros(3), np.zeros((2, 4)))
+
+
+def test_delete_removes_entry(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    t = np.array([0.0], dtype=np.float32)
+    v = np.zeros((1, 4), dtype=np.float32)
+    cache.save("k", "fake", t, v)
+    assert cache.delete("k", "fake") is True
+    assert not cache.has("k", "fake")
+    assert cache.delete("k", "fake") is False  # already gone
+
+
+def test_models_lists_cache_dirs(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    t = np.array([0.0], dtype=np.float32)
+    v = np.zeros((1, 4), dtype=np.float32)
+    assert cache.models() == []
+    cache.save("k", "clip", t, v)
+    cache.save("k", "dino", t, v)
+    assert cache.models() == ["clip", "dino"]
