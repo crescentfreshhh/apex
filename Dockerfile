@@ -33,6 +33,7 @@ COPY webapp ./webapp
 RUN pip install --no-cache-dir ".[ml,label,web]"
 
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/refresh_config.py /opt/peaks/refresh_config.py
 RUN chmod +x /entrypoint.sh
 
 # persist model downloads + all working data under the /config volume

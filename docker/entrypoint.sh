@@ -6,7 +6,9 @@ set -e
 mkdir -p /config/references /config/models /config/webapp
 cd /config
 
-[ -f config.toml ] || cp /opt/peaks/config.example.toml config.toml
+# seed config.toml on first run, and refresh it when the bundled defaults change
+# (backs up the old file, keeps your [stash] connection block)
+python3 /opt/peaks/refresh_config.py || echo "config: refresh skipped"
 
 cp -f /opt/peaks/webapp/index.html \
       /opt/peaks/webapp/megaboard.css \
