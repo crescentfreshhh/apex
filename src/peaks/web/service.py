@@ -144,10 +144,33 @@ class Service:
         self.invalidate_index(embedder.name)
         return stats
 
-    def run_score(self, job=None, tag: str | None = None, write: bool = False) -> dict:
+    def run_score(
+        self,
+        job=None,
+        tag: str | None = None,
+        write: bool = False,
+        *,
+        high: float | None = None,
+        low: float | None = None,
+        reduce: str | None = None,
+        max_duration: float | None = None,
+        normalize: str | None = None,
+    ) -> dict:
+        """Score cached scenes into apex segments; write markers when asked.
+
+        `high`/`low`/`reduce` override the configured scoring for this run only
+        (so thresholds can be tuned from the GUI). A dry run (write=False) also
+        logs a calibration read-out — the actual frame-score distribution — so
+        you can pick thresholds that match your library instead of guessing. On
+        a write run the megaboard playlist is rebuilt automatically."""
+        from dataclasses import replace
+        from pathlib import Path
+
+        from ..classifier import TasteClassifier
         from ..pipeline import (
             load_references,
             resolve_references_dir,
+            safe_tag,
             score_library,
         )
         from ..scoring import make_similarity_scorer
@@ -156,11 +179,16 @@ class Service:
         tag = tag or self.cfg.markers.tag_name
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         model = canonical_name(self.cfg.embedding.model)
-        # model file first, else references
-        from pathlib import Path
 
-        from ..classifier import TasteClassifier
-        from ..pipeline import safe_tag
+        overrides = {
+            k: v
+            for k, v in {
+                "high": high, "low": low,
+                "max_duration": max_duration, "normalize": normalize,
+            }.items()
+            if v is not None
+        }
+        scoring = replace(self.cfg.scoring, **overrides) if overrides else self.cfg.scoring
 
         model_path = Path(self.cfg.modeling.dir) / f"{safe_tag(tag)}.pkl"
         if model_path.exists():
@@ -171,14 +199,94 @@ class Service:
             refs_dir = resolve_references_dir(self.cfg.scoring.references_dir, tag)
             embedder = get_embedder_for_references(self.cfg)
             refs = load_references(embedder, refs_dir)
-            score_frames = make_similarity_scorer(refs, self.cfg.scoring.reduce)
+            score_frames = make_similarity_scorer(refs, reduce or self.cfg.scoring.reduce)
             log(f"scoring with {refs.shape[0]} references from {refs_dir}")
 
+        if not write:
+            self._log_score_calibration(cache, model, score_frames, scoring, log)
+
         client = self.client() if write else None
-        return score_library(
-            self.scenes(), cache, model, score_frames, self.cfg.scoring,
+        stats = score_library(
+            self.scenes(), cache, model, score_frames, scoring,
             client=client, tag_name=tag, write=write, log=log,
         )
+        if write:
+            pl = self.run_playlist(tags=[tag], log=log)
+            stats["playlist"] = pl["count"]
+        return stats
+
+    def _log_score_calibration(
+        self, cache, model, score_frames, scoring, log, sample: int = 300
+    ) -> None:
+        """Report the real frame-score distribution so thresholds aren't a
+        guess. This is the antidote to a silent "0 segments": it shows whether
+        anything reaches `high`, and suggests values that would."""
+        import random
+
+        import numpy as np
+
+        from ..scoring import normalize_scores, smooth
+
+        keys = cache.keys(model)
+        if not keys:
+            log(f"  (no cached embeddings for model '{model}' — embed first)")
+            return
+        pick = keys if len(keys) <= sample else random.Random(0).sample(keys, sample)
+        chunks = []
+        for k in pick:
+            try:
+                _, vecs, _ = cache.load(k, model)
+            except Exception:
+                continue
+            if vecs.shape[0] == 0:
+                continue
+            s = normalize_scores(score_frames(vecs), getattr(scoring, "normalize", "none"))
+            chunks.append(smooth(np.asarray(s, dtype=np.float32), scoring.smooth_window))
+        if not chunks:
+            return
+        arr = np.concatenate(chunks)
+
+        def p(q):
+            return float(np.percentile(arr, q))
+
+        over = float((arr >= scoring.high).mean())
+        sug_high, sug_low = round(p(99.0), 3), round(p(97.0), 3)
+        log(
+            f"  calibration · {len(pick)} scenes / {arr.size} frames "
+            f"(normalize={getattr(scoring, 'normalize', 'none')}):"
+        )
+        log(
+            f"    frame score  p50={p(50):.3f}  p90={p(90):.3f}  "
+            f"p99={p(99):.3f}  max={float(arr.max()):.3f}"
+        )
+        log(
+            f"    current high={scoring.high} low={scoring.low} "
+            f"→ {over * 100:.2f}% of frames qualify"
+        )
+        if over == 0:
+            log(
+                f"    ⚠ nothing reaches high={scoring.high}. Try high≈{sug_high} "
+                f"low≈{sug_low} in Score → Advanced (or lower further)."
+            )
+        else:
+            log(f"    (to tighten/loosen, try high≈{sug_high} low≈{sug_low})")
+
+    def run_playlist(self, job=None, tags=None, log=None) -> dict:
+        """(Re)build the megaboard playlist from Stash markers → the mounted
+        webapp dir, so the board updates with one click (or automatically after
+        a scoring run)."""
+        import os
+        from pathlib import Path
+
+        from ..playlist import build_playlist, write_playlist
+
+        log = log or (job.log if job else print)
+        tags = tags or [self.cfg.markers.tag_name]
+        pl = build_playlist(self.client(), tags, limit=None)
+        out = Path(os.environ.get("PEAKS_WEBAPP_DIR", "webapp")) / "playlist.json"
+        write_playlist(pl, out)
+        log(f"megaboard: {pl['count']} apex(es) for '{pl['tag']}' → {out}")
+        return {"tag": pl["tag"], "count": pl["count"], "out": str(out)}
 
     def run_sync(self, job=None, prune: bool = True, all_models: bool = True) -> dict:
         """Reconcile the cache with Stash: refresh moved scenes' stored paths

@@ -178,6 +178,49 @@ def test_defaults_endpoint(client):
     d = client.get("/api/defaults").json()
     assert d["model"] == "dino"
     assert "interval" in d and "workers" in d and "mode" in d
+    assert "high" in d and "low" in d and d["tag"] == "apex"
+    assert "max_duration" in d and "normalize" in d
+
+
+def test_score_forwards_thresholds(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+
+    def fake_score(self, job=None, tag=None, write=False, **kw):
+        seen.update(kw)
+        seen["tag"], seen["write"] = tag, write
+        return {"segments": 0}
+
+    monkeypatch.setattr(svc.Service, "run_score", fake_score)
+    jid = client.post(
+        "/api/score",
+        params={"tag": "apex", "write": "true", "high": 0.35, "low": 0.28,
+                "reduce": "mean", "max_duration": 30, "normalize": "scene-z"},
+    ).json()["id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert seen["high"] == 0.35 and seen["low"] == 0.28 and seen["reduce"] == "mean"
+    assert seen["max_duration"] == 30 and seen["normalize"] == "scene-z"
+    assert seen["tag"] == "apex" and seen["write"] is True
+
+
+def test_playlist_job(client, monkeypatch):
+    from peaks.web import service as svc
+
+    monkeypatch.setattr(
+        svc.Service, "run_playlist",
+        lambda self, job=None, tags=None: {"tag": "apex", "count": 4, "out": "x"},
+    )
+    jid = client.post("/api/playlist").json()["id"]
+    for _ in range(50):
+        j = client.get(f"/api/jobs/{jid}").json()
+        if j["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert j["status"] == "done" and j["result"]["count"] == 4
 
 
 def test_embed_forwards_advanced_overrides(client, monkeypatch):

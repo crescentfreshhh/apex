@@ -86,14 +86,25 @@ let defaultsLoaded = false;
     $("#adv-interval").value = d.interval;
     $("#adv-workers").value = d.workers;
     $("#adv-timeout").value = d.timeout;
+    // scoring thresholds
+    $("#adv-high").value = d.high;
+    $("#adv-low").value = d.low;
+    $("#adv-maxdur").value = d.max_duration;
+    $("#adv-reduce").value = d.reduce;
+    $("#adv-normalize").value = d.normalize;
     defaultsLoaded = true;
   } catch {}
 })();
-$("#toggle-adv").addEventListener("click", () => {
-  const a = $("#embed-adv"), open = a.hidden;
-  a.hidden = !open; $("#adv-hint").hidden = !open;
-  $("#toggle-adv").textContent = open ? "Advanced ▴" : "Advanced ▾";
-});
+function wireToggle(btnSel, panelSel, hintSel) {
+  $(btnSel).addEventListener("click", () => {
+    const a = $(panelSel), open = a.hidden;
+    a.hidden = !open;
+    if (hintSel) $(hintSel).hidden = !open;
+    $(btnSel).textContent = open ? "Advanced ▴" : "Advanced ▾";
+  });
+}
+wireToggle("#toggle-adv", "#embed-adv", "#adv-hint");
+wireToggle("#toggle-score-adv", "#score-adv", null);
 function embedQuery() {
   // only override once we know the current defaults; selects (incl. hwaccel="")
   // are always sent, numbers only when non-empty (avoids a 422 on blanks)
@@ -130,8 +141,21 @@ $("#btn-fail-list").addEventListener("click", async () => {
 wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
   const tag = $("#score-tag").value.trim();
   const write = $("#score-write").checked;
-  const qs = new URLSearchParams(); if (tag) qs.set("tag", tag); if (write) qs.set("write", "true");
+  const qs = new URLSearchParams();
+  if (tag) qs.set("tag", tag);
+  if (write) qs.set("write", "true");
+  if (defaultsLoaded && !$("#score-adv").hidden) {
+    if ($("#adv-high").value !== "") qs.set("high", $("#adv-high").value);
+    if ($("#adv-low").value !== "") qs.set("low", $("#adv-low").value);
+    if ($("#adv-maxdur").value !== "") qs.set("max_duration", $("#adv-maxdur").value);
+    qs.set("reduce", $("#adv-reduce").value);
+    qs.set("normalize", $("#adv-normalize").value);
+  }
   return api("/api/score?" + qs, { method: "POST" });
+});
+wireJob($("#btn-playlist"), $("#playlist-status"), $("#playlist-log"), () => {
+  const tag = $("#board-tag").value.trim();
+  return api("/api/playlist" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
 });
 
 // --- explore / search -------------------------------------------------------

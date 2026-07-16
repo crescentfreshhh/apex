@@ -94,7 +94,7 @@ def create_app(cfg=None):
     def defaults():
         """Current embed/sampling settings, so the Advanced form pre-fills to
         what the container is configured with."""
-        s, e = service.cfg.sampling, service.cfg.embedding
+        s, e, sc = service.cfg.sampling, service.cfg.embedding, service.cfg.scoring
         return {
             "model": e.model,
             "mode": s.mode,
@@ -103,6 +103,12 @@ def create_app(cfg=None):
             "pipeline": s.pipeline,
             "workers": e.workers,
             "timeout": s.scene_timeout,
+            "tag": service.cfg.markers.tag_name,
+            "high": sc.high,
+            "low": sc.low,
+            "reduce": sc.reduce,
+            "max_duration": sc.max_duration,
+            "normalize": sc.normalize,
         }
 
     @app.post("/api/embed")
@@ -135,11 +141,32 @@ def create_app(cfg=None):
         return job.as_dict()
 
     @app.post("/api/score")
-    def start_score(tag: str | None = None, write: bool = False):
+    def start_score(
+        tag: str | None = None,
+        write: bool = False,
+        high: float | None = None,
+        low: float | None = None,
+        reduce: str | None = None,
+        max_duration: float | None = None,
+        normalize: str | None = None,
+    ):
         try:
             job = jobs.start(
-                "score", lambda j: service.run_score(j, tag=tag, write=write)
+                "score",
+                lambda j: service.run_score(
+                    j, tag=tag, write=write, high=high, low=low, reduce=reduce,
+                    max_duration=max_duration, normalize=normalize,
+                ),
             )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
+    @app.post("/api/playlist")
+    def start_playlist(tag: str | None = None):
+        tags = [tag] if tag else None
+        try:
+            job = jobs.start("playlist", lambda j: service.run_playlist(j, tags=tags))
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()

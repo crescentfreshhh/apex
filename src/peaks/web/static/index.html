@@ -88,12 +88,32 @@
 
     <div class="panel">
       <h2>Score</h2>
-      <p class="dim">Find your apexes and write markers into Stash.</p>
+      <p class="dim">Find your apexes and write markers into Stash. Run once with
+        <em>write</em> off first — the log shows a calibration read-out (your
+        actual score distribution) so you can set thresholds that match.</p>
       <div class="row">
         <input id="score-tag" placeholder="tag (default: apex)" />
         <label class="check"><input type="checkbox" id="score-write" /> write markers</label>
+        <button id="toggle-score-adv" class="ghost" type="button">Advanced ▾</button>
         <button id="btn-score" class="primary">Run scoring</button>
         <span id="score-status" class="dim"></span>
+      </div>
+      <div id="score-adv" class="adv" hidden>
+        <label>Enter at (high)<input id="adv-high" type="number" min="0" step="0.01" /></label>
+        <label>Stay until (low)<input id="adv-low" type="number" min="0" step="0.01" /></label>
+        <label>Max length (s)<input id="adv-maxdur" type="number" min="0" step="5" /></label>
+        <label>Match
+          <select id="adv-reduce">
+            <option value="max">max — specific</option>
+            <option value="mean">mean — broader</option>
+          </select>
+        </label>
+        <label>Normalize
+          <select id="adv-normalize">
+            <option value="none">none — absolute</option>
+            <option value="scene-z">scene-z — per-scene peaks</option>
+          </select>
+        </label>
       </div>
       <pre id="score-log" class="log" hidden></pre>
     </div>
@@ -111,9 +131,20 @@
 
   <!-- MEGABOARD -->
   <section id="board" class="view">
-    <p class="panel dim">The megaboard opens in its own optimized page.
-      <a id="board-link" href="/megaboard/" target="_blank">Open megaboard →</a>
-      (run <code>peaks playlist</code> first to populate it).</p>
+    <div class="panel">
+      <h2>Megaboard</h2>
+      <p class="dim">Builds the grid's playlist from your <code>apex</code> markers,
+        then opens the board in its own optimized page. Scoring with <em>write</em>
+        rebuilds this automatically — use this button to refresh on demand or for
+        another tag.</p>
+      <div class="row">
+        <input id="board-tag" placeholder="tag (default: apex)" />
+        <button id="btn-playlist" class="primary">Build megaboard</button>
+        <a id="board-link" class="ghost" href="/megaboard/" target="_blank">Open megaboard →</a>
+        <span id="playlist-status" class="dim"></span>
+      </div>
+      <pre id="playlist-log" class="log" hidden></pre>
+    </div>
   </section>
 
   <div id="toast" hidden></div>
