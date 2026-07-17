@@ -123,6 +123,68 @@ def test_create_apex_writes_marker(tmp_path, monkeypatch):
     assert m["seconds"] == 42.0 and m["end_seconds"] == 57.0  # default +15s clip
 
 
+class _ReelClient:
+    def iter_markers_by_tag(self, tag, page_size=200):
+        yield {"marker_id": "1", "scene_id": "7", "seconds": 10.0, "end_seconds": 25.0,
+               "title": "apex", "primary_tag": tag}
+        yield {"marker_id": "2", "scene_id": "8", "seconds": 5.0, "end_seconds": 20.0,
+               "title": "apex", "primary_tag": tag}
+
+    def scene_details(self, ids):
+        return {i: {"path": f"/data/Rando/{i}.mp4"} for i in ids}
+
+
+def test_export_reel_extracts_and_concats(tmp_path, monkeypatch):
+    import subprocess
+
+    svc, _ = _service(tmp_path)
+    monkeypatch.setattr(svc, "client", lambda: _ReelClient())
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    monkeypatch.setattr("os.path.exists", lambda p: True)  # pretend sources + segs exist
+    monkeypatch.setattr("os.path.getsize", lambda p: 1000)
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        # the concat step must write the output file
+        if "concat" in cmd:
+            (tmp_path / "exports").mkdir(parents=True, exist_ok=True)
+            out = cmd[-1]
+            with open(out, "wb") as f:
+                f.write(b"x" * 2_000_000)
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    res = svc.export_reel(tag="apex")
+    assert res["clips"] == 2  # both segments extracted
+    assert res["name"].endswith(".mp4") and res["bytes"] > 0
+    # two extract calls + one concat call
+    assert sum(1 for c in calls if "-f" in c and "mpegts" in c) == 2
+    assert any("concat" in c for c in calls)
+
+
+def test_export_reel_no_markers(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+
+    class Empty:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+    monkeypatch.setattr(svc, "client", lambda: Empty())
+    assert svc.export_reel(tag="apex")["clips"] == 0
+
+
+def test_reel_path_rejects_traversal(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    (tmp_path / "exports").mkdir()
+    (tmp_path / "exports" / "good.mp4").write_bytes(b"x")
+    assert svc.reel_path("good") is not None
+    assert svc.reel_path("../../etc/passwd") is None  # sanitized away
+
+
 def test_score_calibration_reports_distribution(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 

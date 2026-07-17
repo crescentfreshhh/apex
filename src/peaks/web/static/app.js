@@ -50,6 +50,7 @@ async function refreshDashboard() {
   } catch (e) {
     $("#conn").textContent = "disconnected"; toast("Cannot reach backend: " + e.message, true);
   }
+  if (typeof refreshReels === "function") refreshReels();
 }
 
 function wireJob(btn, statusEl, logEl, start, stopBtn) {
@@ -167,6 +168,21 @@ wireJob($("#btn-playlist"), $("#playlist-status"), $("#playlist-log"), () => {
   const tag = $("#board-tag").value.trim();
   return api("/api/playlist" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
 });
+wireJob($("#btn-reel"), $("#reel-status"), $("#reel-log"), () => {
+  const tag = $("#board-tag").value.trim();
+  return api("/api/reel" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
+}, $("#btn-reel-stop"));
+async function refreshReels() {
+  try {
+    const { reels } = await api("/api/reels");
+    $("#reels").innerHTML = reels.length
+      ? "<div class='dim' style='margin:8px 0 4px'>Exported reels</div>" + reels.map((r) =>
+          `<a class="reel-item" href="/api/reel/download?name=${encodeURIComponent(r.name)}" download>
+             ⬇ ${esc(r.name)} <span class="dim">${(r.bytes / 1e6).toFixed(0)} MB</span></a>`).join("")
+      : "";
+  } catch {}
+}
+refreshReels();
 
 // --- explore / search -------------------------------------------------------
 function stars(rating100) {

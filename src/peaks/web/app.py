@@ -171,6 +171,25 @@ def create_app(cfg=None):
             raise HTTPException(409, str(exc))
         return job.as_dict()
 
+    @app.post("/api/reel")
+    def start_reel(tag: str | None = None, limit: int = Query(0)):
+        try:
+            job = jobs.start("reel", lambda j: service.export_reel(j, tag=tag, limit=limit))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
+    @app.get("/api/reels")
+    def list_reels():
+        return {"reels": service.reels()}
+
+    @app.get("/api/reel/download")
+    def download_reel(name: str):
+        path = service.reel_path(name)
+        if not path:
+            raise HTTPException(404, "no such reel")
+        return FileResponse(path, media_type="video/mp4", filename=name)
+
     @app.post("/api/sync")
     def start_sync(prune: bool = True):
         try:

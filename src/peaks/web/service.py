@@ -273,6 +273,103 @@ class Service:
         else:
             log(f"    (to tighten/loosen, try high≈{sug_high} low≈{sug_low})")
 
+    def export_reel(
+        self, job=None, tag: str | None = None, limit: int = 0, name: str | None = None
+    ) -> dict:
+        """Concatenate a tag's apex clips into one video (fast stream-copy).
+
+        Reads the scene files directly off the mounted (read-only) library and
+        copies each [start,end] segment without re-encoding, then concats them.
+        Stream-copy is fast but needs codec-compatible sources; clips that can't
+        be copied are skipped and reported. Output lands in the exports dir."""
+        import os
+        import subprocess
+        import tempfile
+        import time as _t
+        from pathlib import Path
+
+        log = (job.log if job else print)
+        tag = tag or self.cfg.markers.tag_name
+        client = self.client()
+        apexes = [m for m in client.iter_markers_by_tag(tag) if m["scene_id"]]
+        if limit:
+            apexes = apexes[:limit]
+        if not apexes:
+            log(f"no '{tag}' markers to export")
+            return {"clips": 0}
+
+        details = client.scene_details(sorted({a["scene_id"] for a in apexes}))
+        exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
+        exports.mkdir(parents=True, exist_ok=True)
+        name = _safe_reel_name(name or f"reel-{tag}-{_t.strftime('%Y%m%d-%H%M%S')}") + ".mp4"
+        out = exports / name
+        if job:
+            job.progress = {"total": len(apexes), "done": 0}
+
+        with tempfile.TemporaryDirectory() as td:
+            segs: list[str] = []
+            for i, a in enumerate(apexes):
+                if job and job.cancelled:
+                    log(f"  ⏹ stop requested — halting after {len(segs)} clips")
+                    break
+                d = details.get(str(a["scene_id"])) or {}
+                path = d.get("path")
+                if not path or not os.path.exists(path):
+                    log(f"  ! scene {a['scene_id']}: file missing — skipped")
+                    continue
+                start = float(a["seconds"])
+                end = float(a["end_seconds"]) if a.get("end_seconds") else start + 15.0
+                seg = os.path.join(td, f"seg{i:04d}.ts")
+                r = subprocess.run(
+                    ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
+                     "-c", "copy", "-f", "mpegts", seg],
+                    capture_output=True,
+                )
+                if r.returncode == 0 and os.path.exists(seg) and os.path.getsize(seg) > 0:
+                    segs.append(seg)
+                    if job:
+                        job.progress["done"] = len(segs)
+                    log(f"  + clip {len(segs)}: scene {a['scene_id']} {start:.0f}-{end:.0f}s")
+                else:
+                    log(f"  ! scene {a['scene_id']} clip failed (codec mismatch?) — skipped")
+            if not segs:
+                log("no clips extracted")
+                return {"clips": 0}
+            listf = os.path.join(td, "list.txt")
+            with open(listf, "w") as f:
+                for s in segs:
+                    f.write(f"file '{s}'\n")
+            cc = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", str(out)],
+                capture_output=True,
+            )
+            if cc.returncode != 0:
+                raise RuntimeError("concat failed: " + cc.stderr.decode("replace")[-300:])
+        size = out.stat().st_size if out.exists() else 0
+        log(f"reel: {len(segs)} clips → {out} ({size // 1_000_000} MB)")
+        return {"clips": len(segs), "name": name, "path": str(out), "bytes": size}
+
+    def reels(self) -> list[dict]:
+        """List exported reels (newest first)."""
+        import os
+        from pathlib import Path
+
+        exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
+        if not exports.is_dir():
+            return []
+        files = [p for p in exports.glob("*.mp4") if p.is_file()]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return [{"name": p.name, "bytes": p.stat().st_size} for p in files]
+
+    def reel_path(self, name: str) -> str | None:
+        """Absolute path of an export, or None if the name escapes the dir."""
+        import os
+        from pathlib import Path
+
+        exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports")).resolve()
+        p = (exports / _safe_reel_name(Path(name).stem)).with_suffix(".mp4")
+        return str(p) if p.exists() and exports in p.resolve().parents else None
+
     def run_playlist(self, job=None, tags=None, log=None) -> dict:
         """(Re)build the megaboard playlist from Stash markers → the mounted
         webapp dir, so the board updates with one click (or automatically after
@@ -590,6 +687,12 @@ class Service:
 
     def stream_url(self, scene_id: str, start: float | None = None) -> str:
         return self.client().stream_url(scene_id, start=start)
+
+
+def _safe_reel_name(name: str) -> str:
+    """Filesystem-safe basename (no path separators or surprises)."""
+    keep = "".join(c if c.isalnum() or c in "-_." else "-" for c in name)
+    return (keep.strip("-.") or "reel")[:120]
 
 
 def _scene_from_entry(entry: dict):

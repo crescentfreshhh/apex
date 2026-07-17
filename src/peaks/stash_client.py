@@ -284,6 +284,7 @@ class StashClient:
                 "duration": f0.get("duration"),
                 "width": f0.get("width"),
                 "height": f0.get("height"),
+                "path": f0.get("path"),
                 "cover": paths.get("screenshot"),
             }
         return out
