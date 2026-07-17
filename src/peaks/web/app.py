@@ -268,6 +268,14 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
 
+    @app.post("/api/autotag")
+    def autotag(top: int = Query(5), min_score: float = Query(0.0), limit: int = Query(0)):
+        try:
+            job = jobs.start("autotag", lambda j: service.auto_tag(j, top=top, min_score=min_score, limit=limit))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
     @app.get("/api/classify")
     def classify(key: str, t: float, top_k: int = 6):
         try:

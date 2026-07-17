@@ -77,6 +77,20 @@
     </div>
 
     <div class="panel">
+      <h2>Auto-tag (CLIP)</h2>
+      <p class="dim">Zero-shot tag every scene from what CLIP sees in it, writing
+        the labels to Stash (existing tags are kept). Needs a CLIP pass. Edit the
+        vocabulary in <code>/config/vocab.txt</code>.</p>
+      <div class="row">
+        <label class="check">top <input id="autotag-top" type="number" min="1" max="15" value="5" style="width:56px" /> per scene</label>
+        <button id="btn-autotag" class="primary">Auto-tag library</button>
+        <button id="btn-autotag-stop" class="ghost" hidden>Stop</button>
+        <span id="autotag-status" class="dim"></span>
+      </div>
+      <pre id="autotag-log" class="log" hidden></pre>
+    </div>
+
+    <div class="panel">
       <h2>Sync library</h2>
       <p class="dim">Reconcile the cache with Stash: refresh scenes that moved
         between folders and drop cache entries for scenes deleted from Stash.</p>

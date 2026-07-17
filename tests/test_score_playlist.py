@@ -123,6 +123,49 @@ def test_create_apex_writes_marker(tmp_path, monkeypatch):
     assert m["seconds"] == 42.0 and m["end_seconds"] == 57.0  # default +15s clip
 
 
+def test_auto_tag_scores_and_writes(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    # scene A looks like "beach", scene B like "office"
+    cache.save("A", "clip", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    cache.save("B", "clip", np.array([0.0], dtype="float32"),
+               np.array([[0, 1, 0]], dtype="float32"), meta={"scene_id": "2"})
+    monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
+    vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
+    monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
+
+    writes = []
+
+    class C:
+        def find_or_create_tag(self, name):
+            return type("T", (), {"id": {"beach": "10", "office": "20"}[name], "name": name})()
+
+        def add_scene_tags(self, scene_ids, tag_ids):
+            writes.append((sorted(scene_ids), tag_ids)); return len(scene_ids)
+
+    monkeypatch.setattr(svc, "client", lambda: C())
+
+    res = svc.auto_tag(top=1)
+    assert res["scenes"] == 2 and res["tags"] == 2
+    w = {tid[0]: sids for sids, tid in writes}
+    assert w["10"] == ["1"] and w["20"] == ["2"]  # beach→sceneA, office→sceneB
+
+
+def test_add_scene_tags_uses_add_mode(monkeypatch):
+    from peaks.stash_client import StashClient
+
+    c = StashClient(url="http://x")
+    seen = {}
+    monkeypatch.setattr(c, "execute", lambda q, v=None: seen.update(v or {}) or {"bulkSceneUpdate": []})
+    n = c.add_scene_tags(["1", "2"], ["10"])
+    assert n == 2
+    assert seen["input"]["tag_ids"] == {"ids": ["10"], "mode": "ADD"}
+    assert seen["input"]["ids"] == ["1", "2"]
+
+
 def test_classify_frame_top_labels(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 

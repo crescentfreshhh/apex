@@ -136,6 +136,12 @@ mutation SceneMarkersDestroy($ids: [ID!]!) {
 }
 """
 
+_BULK_SCENE_UPDATE = """
+mutation BulkSceneUpdate($input: BulkSceneUpdateInput!) {
+  bulkSceneUpdate(input: $input) { id }
+}
+"""
+
 
 class StashClient:
     # transient network errors are retried with these sleeps between attempts;
@@ -377,6 +383,19 @@ class StashClient:
             input_obj["end_seconds"] = end_seconds
         data = self.execute(_SCENE_MARKER_CREATE, {"input": input_obj})
         return data["sceneMarkerCreate"]
+
+    def add_scene_tags(self, scene_ids: list[str], tag_ids: list[str]) -> int:
+        """Append tags to scenes without clobbering their existing tags
+        (bulkSceneUpdate ADD mode). Returns how many scenes were submitted."""
+        scene_ids = [str(s) for s in scene_ids if s]
+        tag_ids = [str(t) for t in tag_ids if t]
+        if not scene_ids or not tag_ids:
+            return 0
+        self.execute(
+            _BULK_SCENE_UPDATE,
+            {"input": {"ids": scene_ids, "tag_ids": {"ids": tag_ids, "mode": "ADD"}}},
+        )
+        return len(scene_ids)
 
     def destroy_scene_markers(self, marker_ids: list[str], chunk: int = 100) -> int:
         """Delete markers by id (chunked). Returns how many ids were submitted."""

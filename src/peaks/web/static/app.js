@@ -133,6 +133,10 @@ wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => {
   const q = embedQuery();
   return api("/api/embed" + (q ? "?" + q : ""), { method: "POST" });
 }, $("#btn-embed-stop"));
+wireJob($("#btn-autotag"), $("#autotag-status"), $("#autotag-log"), () => {
+  const top = $("#autotag-top").value || 5;
+  return api("/api/autotag?top=" + top, { method: "POST" });
+}, $("#btn-autotag-stop"));
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
   const prune = $("#sync-prune").checked;
   return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });

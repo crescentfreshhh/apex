@@ -745,6 +745,64 @@ class Service:
             self._vocab_cache = (labels, mat)
         return labels, mat
 
+    def auto_tag(
+        self, job=None, top: int = 5, min_score: float = 0.0, limit: int = 0
+    ) -> dict:
+        """Zero-shot tag the library: for each CLIP-embedded scene, take the
+        vocabulary labels that best match any of its moments (max over frames)
+        and write them to Stash. Writes are batched one bulk update per tag
+        (ADD mode, so existing tags are preserved). Cancellable."""
+        from collections import defaultdict
+
+        log = (job.log if job else print)
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        keys = cache.keys("clip")
+        if not keys:
+            log("no CLIP cache — run a CLIP embed pass first")
+            return {"scenes": 0, "tags": 0}
+        if limit:
+            keys = keys[:limit]
+        labels, mat = self._vocab_matrix()
+        client = self.client()
+        tag_id: dict[str, str] = {}
+        assign: dict[str, list[str]] = defaultdict(list)
+        scored = 0
+        if job:
+            job.progress = {"total": len(keys), "done": 0}
+        for k in keys:
+            if job and job.cancelled:
+                log(f"  ⏹ stop requested — halting after {scored} scenes")
+                break
+            try:
+                _, vecs, meta = cache.load(k, "clip")
+            except Exception:
+                continue
+            sid = meta.get("scene_id")
+            if not sid or vecs.shape[0] == 0:
+                continue
+            per_label = (vecs.astype(np.float32) @ mat.T).max(axis=0)  # (V,)
+            for i in np.argsort(-per_label)[:top]:
+                if float(per_label[i]) < min_score:
+                    continue
+                lab = labels[i]
+                if lab not in tag_id:
+                    tag_id[lab] = client.find_or_create_tag(lab).id
+                assign[tag_id[lab]].append(str(sid))
+            scored += 1
+            if job:
+                job.progress["done"] = scored
+            if scored % 100 == 0:
+                log(f"  scored {scored}/{len(keys)} scenes")
+
+        written = 0
+        for tid, sids in assign.items():
+            if job and job.cancelled:
+                break
+            client.add_scene_tags(sids, [tid])
+            written += 1
+        log(f"auto-tag: {scored} scenes → {written} tags applied")
+        return {"scenes": scored, "tags": written}
+
     def classify_frame(self, key: str, time: float, top_k: int = 6) -> dict:
         """Top vocabulary matches for one frame — what CLIP thinks it is."""
         v = self.index("clip").vector_at(key, time)
