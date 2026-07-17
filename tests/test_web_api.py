@@ -289,6 +289,41 @@ def test_scene_edit_endpoints(client, monkeypatch):
     assert client.delete("/api/scene/7/o").json() == {"o_counter": 4}
 
 
+def test_label_and_train_endpoints(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+    monkeypatch.setattr(svc.Service, "add_label",
+                        lambda self, key, t, label, profile=None, scene_id=None:
+                        seen.update(key=key, t=t, label=label, scene_id=scene_id) or {"positive": 1, "negative": 0})
+    monkeypatch.setattr(svc.Service, "train_taste",
+                        lambda self, profile=None, model=None: {"samples": 4, "positives": 2, "cv_auc": 0.9})
+
+    r = client.post("/api/label", params={"key": "k1", "t": 3.0, "label": 1, "scene_id": "7"})
+    assert r.status_code == 200 and r.json()["positive"] == 1
+    assert seen["key"] == "k1" and seen["label"] == 1 and seen["scene_id"] == "7"
+
+    r2 = client.post("/api/train")
+    assert r2.status_code == 200 and r2.json()["cv_auc"] == 0.9
+
+
+def test_search_forwards_taste_flag(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+    monkeypatch.setattr(svc.Service, "has_clip_index", lambda self: True)
+    monkeypatch.setattr(svc.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc.Service, "stream_url", lambda self, sid, start=None: "s")
+
+    def fake_text(self, q, top_k=60, taste=False):
+        seen["taste"] = taste
+        return []
+
+    monkeypatch.setattr(svc.Service, "search_text", fake_text)
+    client.get("/api/search/text", params={"q": "x", "taste": "true"})
+    assert seen["taste"] is True
+
+
 def test_timeline_endpoint(client, monkeypatch):
     from peaks.web import service as svc
 

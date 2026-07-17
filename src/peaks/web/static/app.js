@@ -220,6 +220,8 @@ function renderHits(hits) {
         </div>
       </div>
       <div class="actions">
+        <button class="thumb up" title="More like this (👍)">👍</button>
+        <button class="thumb down" title="Less like this (👎)">👎</button>
         <button data-key="${h.key}" data-t="${h.time}">Find similar</button>
         ${h.stream ? `<button class="play-btn">Play ▸</button>` : ""}
       </div>
@@ -229,11 +231,36 @@ function renderHits(hits) {
     b.addEventListener("click", () => similar(b.dataset.key, b.dataset.t)));
   g.querySelectorAll(".tile").forEach((tile, i) => {
     wireTileEdits(tile);
-    const open = () => openViewer(lastHits[i]);
+    const h = lastHits[i];
+    const open = () => openViewer(h);
     tile.querySelector(".play-btn")?.addEventListener("click", open);
     tile.querySelector(".thumbwrap")?.addEventListener("click", open);
+    tile.querySelector(".thumb.up")?.addEventListener("click", () => thumb(h.key, h.time, 1, h.scene_id));
+    tile.querySelector(".thumb.down")?.addEventListener("click", () => thumb(h.key, h.time, 0, h.scene_id));
   });
 }
+
+// --- taste: explicit thumbs → trained preference ranking -------------------
+async function thumb(key, time, label, sceneId) {
+  try {
+    const qs = new URLSearchParams({ key, t: (+time).toFixed(2), label });
+    if (sceneId) qs.set("scene_id", sceneId);
+    const c = await api("/api/label?" + qs, { method: "POST" });
+    toast(label ? "👍 saved" : "👎 saved"); updateTasteUI(c);
+  } catch (e) { toast(e.message, true); }
+}
+function updateTasteUI(c) {
+  if (c && c.positive != null) $("#btn-train").textContent = `Train (${c.positive + c.negative})`;
+}
+$("#btn-train").addEventListener("click", async () => {
+  const btn = $("#btn-train"); btn.disabled = true;
+  try {
+    const s = await api("/api/train", { method: "POST" });
+    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+  } catch (e) { toast(e.message, true); }
+  btn.disabled = false;
+});
+(async () => { try { updateTasteUI(await api("/api/labels")); } catch {} })();
 
 async function patchScene(sid, body) {
   return api(`/api/scene/${sid}`, {
@@ -274,18 +301,19 @@ function wireSceneEdits(sid, root) {
 function wireTileEdits(tile) { wireSceneEdits(tile.dataset.sid, tile); }
 
 let currentContext = {}; // what produced the current hits → drives the heatmap
+const tasteOn = () => ($("#taste-toggle").checked ? "&taste=true" : "");
 async function similar(key, t) {
   setActiveView("explore");
   currentContext = { kind: "frame", key, t };
   $("#results").innerHTML = '<p class="dim">Finding similar moments…</p>';
-  try { renderHits(await api(`/api/search/similar?key=${key}&t=${t}&top_k=60`)); }
+  try { renderHits(await api(`/api/search/similar?key=${key}&t=${t}&top_k=60` + tasteOn())); }
   catch (e) { toast(e.message, true); }
 }
 async function textSearch() {
   const q = $("#q").value.trim(); if (!q) return;
   currentContext = { kind: "text", q };
   $("#results").innerHTML = '<p class="dim">Searching…</p>';
-  try { renderHits(await api("/api/search/text?q=" + encodeURIComponent(q) + "&top_k=60")); }
+  try { renderHits(await api("/api/search/text?q=" + encodeURIComponent(q) + "&top_k=60" + tasteOn())); }
   catch (e) { $("#results").innerHTML = ""; toast(e.message, true); }
 }
 
@@ -366,6 +394,8 @@ function openViewer(hit) {
   v.play().catch(() => {});
   wireViewerTransport(v);
   $("#viewer-save").onclick = () => saveMoment(hit.scene_id, v.currentTime);
+  $("#viewer-up").onclick = () => thumb(hit.key, v.currentTime, 1, hit.scene_id);
+  $("#viewer-down").onclick = () => thumb(hit.key, v.currentTime, 0, hit.scene_id);
   try { $("#viewer-stash").href = new URL(hit.stream, location.href).origin + "/scenes/" + hit.scene_id; }
   catch { $("#viewer-stash").href = "#"; }
   loadViewerMeta(hit.scene_id);

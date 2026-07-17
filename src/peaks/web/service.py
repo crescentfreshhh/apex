@@ -27,6 +27,8 @@ class Service:
         self._clip_lock = threading.Lock()
         self._meta: dict[str, dict] = {}  # scene_id -> Stash display metadata
         self._meta_lock = threading.Lock()
+        self._taste: dict[str, object] = {}  # taste classifiers, keyed by file
+        self._taste_lock = threading.Lock()
 
     # --- library / scenes ----------------------------------------------------
 
@@ -525,8 +527,13 @@ class Service:
             else:
                 self._index.pop(model, None)
 
-    def search_by_frame(self, key: str, time: float, top_k: int = 60) -> list[Hit]:
-        return self.index().search_by_frame(key, time, top_k=top_k)
+    def search_by_frame(
+        self, key: str, time: float, top_k: int = 60, taste: bool = False
+    ) -> list[Hit]:
+        hits = self.index().search_by_frame(key, time, top_k=top_k)
+        if taste:
+            hits = self._rerank_by_taste(hits, canonical_name(self.cfg.embedding.model))
+        return hits
 
     def scene_timeline(
         self,
@@ -583,12 +590,102 @@ class Service:
         )
         return marker
 
-    def search_text(self, text: str, top_k: int = 60) -> list[Hit]:
+    def search_text(self, text: str, top_k: int = 60, taste: bool = False) -> list[Hit]:
         """CLIP text -> nearest moments. Supports blended queries: words
         prefixed with '-' are pushed AWAY from ("beach -crowd -text"), so you
-        can steer results without re-typing the whole prompt."""
+        can steer results without re-typing the whole prompt. With `taste`, the
+        results are re-ranked by your trained preference model."""
         vec = self._clip_query_vector(text)
-        return self.index("clip").search(vec, top_k=top_k, per_scene=3)
+        hits = self.index("clip").search(vec, top_k=top_k, per_scene=3)
+        return self._rerank_by_taste(hits, "clip") if taste else hits
+
+    # --- taste model (explicit thumbs → personalized ranking) ----------------
+
+    def _label_store(self):
+        from ..labels import LabelStore
+
+        return LabelStore(self.cfg.modeling.labels_path)
+
+    def add_label(
+        self, key: str, time: float, label: int,
+        profile: str | None = None, scene_id: str | None = None,
+    ) -> dict:
+        profile = profile or self.cfg.markers.tag_name
+        store = self._label_store()
+        store.add(key, float(time), int(label), profile, scene_id=scene_id)
+        store.save()
+        pos, neg = store.counts(profile)
+        return {"profile": profile, "positive": pos, "negative": neg}
+
+    def label_counts(self, profile: str | None = None) -> dict:
+        profile = profile or self.cfg.markers.tag_name
+        pos, neg = self._label_store().counts(profile)
+        return {"profile": profile, "positive": pos, "negative": neg}
+
+    def _taste_path(self, profile: str, model: str):
+        from pathlib import Path
+
+        from ..pipeline import safe_tag
+
+        return Path(self.cfg.modeling.dir) / "taste" / f"{safe_tag(profile)}__{model}.pkl"
+
+    def train_taste(self, profile: str | None = None, model: str | None = None) -> dict:
+        """Fit a preference classifier from your thumbs, in one embedding space
+        (kept separate from scoring's models so the two never collide)."""
+        from ..pipeline import train_profile
+
+        profile = profile or self.cfg.markers.tag_name
+        model = model or canonical_name(self.cfg.embedding.model)
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        clf, stats = train_profile(
+            self._label_store(), cache, model, profile, kind=self.cfg.modeling.classifier
+        )
+        out = self._taste_path(profile, model)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        clf.save(out)
+        with self._taste_lock:
+            self._taste.pop(str(out), None)
+        return {"model": model, "profile": profile, **stats}
+
+    def _taste_model(self, profile: str, model: str):
+        from ..classifier import TasteClassifier
+
+        p = self._taste_path(profile, model)
+        if not p.exists():
+            return None
+        with self._taste_lock:
+            if str(p) not in self._taste:
+                self._taste[str(p)] = TasteClassifier.load(p)
+            return self._taste[str(p)]
+
+    def has_taste(self, profile: str | None = None, model: str | None = None) -> bool:
+        profile = profile or self.cfg.markers.tag_name
+        model = model or canonical_name(self.cfg.embedding.model)
+        return self._taste_path(profile, model).exists() or self._taste_path(profile, "clip").exists()
+
+    def _rerank_by_taste(
+        self, hits: list[Hit], model: str, profile: str | None = None,
+        relevance_weight: float = 0.2,
+    ) -> list[Hit]:
+        """Re-order the (already query-relevant) results by your taste model,
+        with the original relevance kept as a gentle tiebreak. Taste is primary
+        because this only runs when you've explicitly asked for "my taste".
+        No-op if there's no model for this space."""
+        profile = profile or self.cfg.markers.tag_name
+        clf = self._taste_model(profile, model)
+        if clf is None or not hits:
+            return hits
+        idx = self.index(model)
+        vecs = []
+        for h in hits:
+            v = idx.vector_at(h.key, h.time)
+            vecs.append(v if v is not None else np.zeros(idx.dim or 1, dtype=np.float32))
+        taste = np.asarray(clf.predict_proba(np.stack(vecs)), dtype=np.float32)
+        ss = np.array([h.score for h in hits], dtype=np.float32)
+        span = float(ss.max() - ss.min()) or 1.0
+        snorm = (ss - float(ss.min())) / span
+        final = (1.0 - relevance_weight) * taste + relevance_weight * snorm
+        return [hits[i] for i in np.argsort(-final)]
 
     def has_clip_index(self) -> bool:
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)

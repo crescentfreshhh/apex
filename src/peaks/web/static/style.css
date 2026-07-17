@@ -85,6 +85,12 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .reel-item { display: inline-block; color: var(--fg); text-decoration: none;
   padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); }
 .reel-item:hover { border-color: var(--accent); }
+.thumb { cursor: pointer; }
+.tile .actions .thumb { font-size: 13px; padding: 4px 7px; }
+.viewer-taste { display: flex; gap: 8px; }
+.viewer-taste .thumb { flex: 1; background: var(--panel2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 7px; cursor: pointer; }
+.viewer-taste .thumb:hover { border-color: var(--accent); }
 
 .adv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px; margin-top: 12px; padding: 12px; background: var(--panel2);

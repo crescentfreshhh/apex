@@ -128,6 +128,8 @@
       <input id="q" placeholder="Describe a moment… use -word to exclude (e.g. beach -crowd)" />
       <button id="btn-text" class="primary">Search</button>
       <button id="btn-board-search" class="ghost" disabled title="Open the current results as a megaboard, each tile starting at its matched moment">Play on megaboard</button>
+      <label class="check" title="Re-rank results by your trained taste"><input type="checkbox" id="taste-toggle" /> ★ My taste</label>
+      <button id="btn-train" class="ghost" title="Train your preference model from the thumbs you've given">Train</button>
       <span id="explore-hint" class="dim"></span>
     </div>
     <div id="results" class="grid"></div>
@@ -180,6 +182,10 @@
       <div id="viewer-title" class="viewer-vtitle"></div>
       <div id="viewer-sub" class="dim"></div>
       <div id="viewer-edit" class="viewer-edit"></div>
+      <div class="viewer-taste">
+        <button id="viewer-up" class="thumb up" title="More like this moment">👍 More like this</button>
+        <button id="viewer-down" class="thumb down" title="Less like this">👎 Less</button>
+      </div>
       <a id="viewer-stash" class="ghost" target="_blank" rel="noopener">Open in Stash ↗</a>
     </aside>
   </div>

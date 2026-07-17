@@ -234,20 +234,39 @@ def create_app(cfg=None):
     # --- search -------------------------------------------------------------
 
     @app.get("/api/search/similar")
-    def search_similar(key: str, t: float, top_k: int = 60):
-        return _hit_payload(service, service.search_by_frame(key, t, top_k=top_k))
+    def search_similar(key: str, t: float, top_k: int = 60, taste: bool = False):
+        return _hit_payload(service, service.search_by_frame(key, t, top_k=top_k, taste=taste))
 
     @app.get("/api/search/text")
-    def search_text(q: str, top_k: int = 60):
+    def search_text(q: str, top_k: int = 60, taste: bool = False):
         if not service.has_clip_index():
             raise HTTPException(
                 400, "no CLIP index — run an embed pass with PEAKS_MODEL=clip"
             )
         try:
-            hits = service.search_text(q, top_k=top_k)
+            hits = service.search_text(q, top_k=top_k, taste=taste)
         except ImportError as exc:
             raise HTTPException(500, f"CLIP unavailable: {exc}")
         return _hit_payload(service, hits)
+
+    # --- taste (explicit thumbs → personalized ranking) ---------------------
+
+    @app.get("/api/labels")
+    def labels(profile: str | None = None):
+        counts = service.label_counts(profile)
+        counts["has_model"] = service.has_taste(profile)
+        return counts
+
+    @app.post("/api/label")
+    def add_label(key: str, t: float, label: int, scene_id: str | None = None, profile: str | None = None):
+        return service.add_label(key, t, label, profile=profile, scene_id=scene_id)
+
+    @app.post("/api/train")
+    def train_taste(profile: str | None = None, model: str | None = None):
+        try:
+            return service.train_taste(profile=profile, model=model)
+        except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
+            raise HTTPException(400, str(exc))
 
     @app.get("/api/timeline")
     def timeline(

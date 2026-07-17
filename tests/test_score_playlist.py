@@ -123,6 +123,38 @@ def test_create_apex_writes_marker(tmp_path, monkeypatch):
     assert m["seconds"] == 42.0 and m["end_seconds"] == 57.0  # default +15s clip
 
 
+def test_taste_label_train_and_rerank(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+    from peaks.search import Hit
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    # two scenes in dinov2 space: scene A frames ~[1,0], scene B ~[0,1]
+    cache.save("A", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+               np.array([[1, 0, 0, 0], [1, 0, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    cache.save("B", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+               np.array([[0, 1, 0, 0], [0, 1, 0, 0]], dtype="float32"), meta={"scene_id": "2"})
+
+    # thumbs: love A frames, skip B frames
+    svc.add_label("A", 0.0, 1)
+    svc.add_label("A", 8.0, 1)
+    svc.add_label("B", 0.0, 0)
+    svc.add_label("B", 8.0, 0)
+    counts = svc.label_counts()
+    assert counts["positive"] == 2 and counts["negative"] == 2
+
+    stats = svc.train_taste(model="dinov2")
+    assert stats["samples"] == 4 and svc.has_taste()
+
+    # re-rank: a B-ish hit ranked above an A-ish hit should flip toward A
+    hits = [Hit(scene_id="2", key="B", time=0.0, score=0.9),
+            Hit(scene_id="1", key="A", time=0.0, score=0.85)]
+    ranked = svc._rerank_by_taste(hits, "dinov2")
+    assert ranked[0].key == "A"  # taste pulls the loved scene to the top
+
+
 class _ReelClient:
     def iter_markers_by_tag(self, tag, page_size=200):
         yield {"marker_id": "1", "scene_id": "7", "seconds": 10.0, "end_seconds": 25.0,
