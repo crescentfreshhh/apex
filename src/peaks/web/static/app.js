@@ -51,6 +51,7 @@ async function refreshDashboard() {
     $("#conn").textContent = "disconnected"; toast("Cannot reach backend: " + e.message, true);
   }
   if (typeof refreshReels === "function") refreshReels();
+  if (typeof refreshCollections === "function") refreshCollections();
 }
 
 function wireJob(btn, statusEl, logEl, start, stopBtn) {
@@ -200,7 +201,9 @@ let lastHits = [];
 function renderHits(hits) {
   const g = $("#results");
   lastHits = hits || [];
-  $("#btn-board-search").disabled = !lastHits.some((h) => h.scene_id && h.stream);
+  const playable = lastHits.some((h) => h.scene_id && h.stream);
+  $("#btn-board-search").disabled = !playable;
+  $("#btn-save-collection").disabled = !playable;
   if (!hits.length) { g.innerHTML = '<p class="dim">No results.</p>'; return; }
   g.innerHTML = hits.map((h) => {
     const perf = (h.performers || []).slice(0, 3).join(", ");
@@ -407,6 +410,17 @@ async function similarFromViewer() {
     renderHits(hits); openViewerAt(0); toast("More like this moment");
   } catch (e) { toast(e.message, true); }
 }
+async function dupesFromViewer() {
+  if (!currentHit) return;
+  const v = $("#viewer-v"); const t = v.currentTime || +currentHit.time;
+  try {
+    const hits = await api(`/api/duplicates?key=${encodeURIComponent(currentHit.key)}&t=${t.toFixed(2)}`);
+    if (!hits.length) return toast("no near-duplicates found");
+    currentContext = { kind: "frame", key: currentHit.key, t };
+    closeViewer(); renderHits(hits); setActiveView("explore");
+    toast(`${hits.length} near-duplicate${hits.length > 1 ? "s" : ""}`);
+  } catch (e) { toast(e.message, true); }
+}
 async function classifyCurrent(hit) {
   const el = $("#viewer-clip"); const v = $("#viewer-v");
   let d; try { d = await api(`/api/classify?key=${encodeURIComponent(hit.key)}&t=${(v.currentTime || +hit.time).toFixed(2)}`); }
@@ -434,6 +448,7 @@ function openViewer(hit) {
   $("#viewer-prev").onclick = prevViewer;
   $("#viewer-next").onclick = nextViewer;
   $("#viewer-similar").onclick = similarFromViewer;
+  $("#viewer-dupes").onclick = dupesFromViewer;
   $("#viewer-save").onclick = () => saveMoment(hit.scene_id, v.currentTime);
   $("#viewer-up").onclick = (e) => thumb(hit.key, v.currentTime, 1, hit.scene_id, e.currentTarget);
   $("#viewer-down").onclick = (e) => thumb(hit.key, v.currentTime, 0, hit.scene_id, e.currentTarget);
@@ -468,22 +483,41 @@ $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") textSearch()
 // moment (the stream URL already carries start=<time>). Passed via localStorage
 // (same origin) so we don't clobber the saved apex playlist.json.
 const BOARD_CLIP_SECONDS = 20;
+function hitsToApexes(hits) {
+  return (hits || []).filter((h) => h.scene_id && h.stream).map((h) => ({
+    scene_id: h.scene_id, start: +h.time, end: +h.time + BOARD_CLIP_SECONDS,
+    duration: BOARD_CLIP_SECONDS, url: h.stream, score: h.score ?? 1, title: h.title || "",
+  }));
+}
 $("#btn-board-search").addEventListener("click", () => {
-  const apexes = lastHits
-    .filter((h) => h.scene_id && h.stream)
-    .map((h) => ({
-      scene_id: h.scene_id,
-      start: +h.time,
-      end: +h.time + BOARD_CLIP_SECONDS,
-      duration: BOARD_CLIP_SECONDS,
-      url: h.stream,
-      score: h.score ?? 1,
-      title: h.title || "",
-    }));
+  const apexes = hitsToApexes(lastHits);
   if (!apexes.length) return;
   localStorage.setItem("mb_search", JSON.stringify({ tag: "search", count: apexes.length, apexes }));
   window.open("/megaboard/?src=search", "_blank");
 });
+$("#btn-save-collection").addEventListener("click", async () => {
+  const apexes = hitsToApexes(lastHits);
+  if (!apexes.length) return;
+  const name = prompt("Name this collection:");
+  if (!name) return;
+  try {
+    const r = await api("/api/collection", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, apexes }),
+    });
+    toast(`Saved "${r.name}" (${r.count} moments)`); refreshCollections();
+  } catch (e) { toast(e.message, true); }
+});
+async function refreshCollections() {
+  try {
+    const { collections } = await api("/api/collections");
+    $("#collections").innerHTML = collections.length
+      ? "<div class='dim' style='margin:8px 0 4px'>Collections</div>" + collections.map((c) =>
+          `<a class="reel-item" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank">▶ ${esc(c.name)} <span class="dim">${c.count}</span></a>`).join("")
+      : "";
+  } catch {}
+}
+refreshCollections();
 
 function setActiveView(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === name));

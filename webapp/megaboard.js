@@ -429,12 +429,20 @@ function wireControls() {
 
 async function main() {
   let playlist;
+  const params = new URLSearchParams(location.search);
   // a search handoff from Explore ("Play on megaboard") arrives via localStorage
-  if (new URLSearchParams(location.search).get("src") === "search") {
+  if (params.get("src") === "search") {
     try {
       playlist = JSON.parse(localStorage.getItem("mb_search") || "null");
     } catch {}
     if (playlist) State.searchMode = true;
+  }
+  // a saved collection is fetched by name from the API
+  if (!playlist && params.get("collection")) {
+    try {
+      const res = await fetch("/api/collection?name=" + encodeURIComponent(params.get("collection")));
+      if (res.ok) { playlist = await res.json(); State.searchMode = true; }
+    } catch {}
   }
   if (!playlist) {
     try {

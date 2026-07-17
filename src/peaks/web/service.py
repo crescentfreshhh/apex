@@ -373,6 +373,52 @@ class Service:
         p = (exports / _safe_reel_name(Path(name).stem)).with_suffix(".mp4")
         return str(p) if p.exists() and exports in p.resolve().parents else None
 
+    # --- saved collections (named boards of moments) -------------------------
+
+    def _collections_dir(self):
+        import os
+        from pathlib import Path
+
+        return Path(os.environ.get("PEAKS_COLLECTIONS_DIR", "/config/collections"))
+
+    def save_collection(self, name: str, apexes: list) -> dict:
+        import json
+
+        d = self._collections_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        safe = _safe_reel_name(name)
+        data = {"name": name, "count": len(apexes), "apexes": apexes}
+        (d / f"{safe}.json").write_text(json.dumps(data))
+        return {"name": name, "safe": safe, "count": len(apexes)}
+
+    def list_collections(self) -> list[dict]:
+        import json
+
+        d = self._collections_dir()
+        if not d.is_dir():
+            return []
+        out = []
+        for p in sorted(d.glob("*.json")):
+            try:
+                j = json.loads(p.read_text())
+            except Exception:
+                continue
+            out.append({"name": j.get("name", p.stem), "safe": p.stem,
+                        "count": j.get("count", len(j.get("apexes", [])))})
+        return out
+
+    def load_collection(self, name: str):
+        import json
+        from pathlib import Path
+
+        p = self._collections_dir() / f"{_safe_reel_name(Path(name).stem)}.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+
     def run_playlist(self, job=None, tags=None, log=None) -> dict:
         """(Re)build the megaboard playlist from Stash markers → the mounted
         webapp dir, so the board updates with one click (or automatically after
@@ -535,6 +581,22 @@ class Service:
         if taste:
             hits = self._rerank_by_taste(hits, canonical_name(self.cfg.embedding.model))
         return hits
+
+    def find_duplicates(
+        self, key: str, time: float, threshold: float = 0.9, top_k: int = 40,
+        model: str | None = None,
+    ) -> list[Hit]:
+        """Near-identical moments in OTHER scenes (re-encodes, re-uploads).
+        Uses DINOv2 by default — structural identity, the right space for visual
+        duplicates — and keeps only the strongest match per other scene above
+        `threshold`."""
+        model = model or canonical_name(self.cfg.embedding.model)
+        idx = self.index(model)
+        v = idx.vector_at(key, time)
+        if v is None:
+            return []
+        hits = idx.search(v, top_k=top_k, per_scene=1, exclude_key=key)
+        return [h for h in hits if h.score >= threshold]
 
     def scene_timeline(
         self,

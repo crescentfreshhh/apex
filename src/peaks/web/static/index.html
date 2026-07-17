@@ -142,6 +142,7 @@
       <input id="q" placeholder="Describe a moment… use -word to exclude (e.g. beach -crowd)" />
       <button id="btn-text" class="primary">Search</button>
       <button id="btn-board-search" class="ghost" disabled title="Open the current results as a megaboard, each tile starting at its matched moment">Play on megaboard</button>
+      <button id="btn-save-collection" class="ghost" disabled title="Save the current results as a named collection you can reopen">Save collection</button>
       <label class="check" title="Re-rank results by your trained taste"><input type="checkbox" id="taste-toggle" /> ★ My taste</label>
       <button id="btn-train" class="ghost" title="Train your preference model from the thumbs you've given">Train</button>
       <span id="explore-hint" class="dim"></span>
@@ -164,6 +165,7 @@
         <span id="playlist-status" class="dim"></span>
       </div>
       <pre id="playlist-log" class="log" hidden></pre>
+      <div id="collections" class="reels"></div>
 
       <p class="dim" style="margin-top:16px">Or stitch the tag's apexes into a single
         highlight reel (fast stream-copy from the source files).</p>
@@ -192,6 +194,7 @@
         </div>
         <span id="viewer-time" class="dim">0:00 / 0:00</span>
         <button id="viewer-similar" class="ghost" title="Find more moments like the one on screen right now">⟳ Similar from here</button>
+        <button id="viewer-dupes" class="ghost" title="Find near-identical moments in other scenes">⧉ Dupes</button>
         <button id="viewer-save" class="primary" title="Save the current moment as an apex marker in Stash (s)">★ Save moment</button>
       </div>
     </div>

@@ -220,6 +220,39 @@ def test_taste_label_train_and_rerank(tmp_path, monkeypatch):
     assert ranked[0].key == "A"  # taste pulls the loved scene to the top
 
 
+def test_collections_save_list_load(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    apexes = [{"scene_id": "7", "start": 3, "url": "u"}]
+    saved = svc.save_collection("Beach Days!", apexes)
+    assert saved["count"] == 1 and saved["safe"] == "Beach-Days"
+
+    listed = svc.list_collections()
+    assert listed and listed[0]["name"] == "Beach Days!" and listed[0]["count"] == 1
+
+    loaded = svc.load_collection("Beach-Days")
+    assert loaded["apexes"][0]["scene_id"] == "7"
+    assert svc.load_collection("missing") is None
+
+
+def test_find_duplicates_threshold(tmp_path):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    # query scene A; B is near-identical (same vec), C is different
+    cache.save("A", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    cache.save("B", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "2"})
+    cache.save("C", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[0, 1, 0]], dtype="float32"), meta={"scene_id": "3"})
+
+    dupes = svc.find_duplicates("A", 0.0, threshold=0.9)
+    keys = {h.key for h in dupes}
+    assert "B" in keys and "C" not in keys and "A" not in keys  # only the near-identical other scene
+
+
 class _ReelClient:
     def iter_markers_by_tag(self, tag, page_size=200):
         yield {"marker_id": "1", "scene_id": "7", "seconds": 10.0, "end_seconds": 25.0,

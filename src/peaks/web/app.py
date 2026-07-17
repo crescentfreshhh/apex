@@ -35,6 +35,19 @@ def _scene_edit_model():
 SceneEdit = _scene_edit_model()
 
 
+def _collection_model():
+    from pydantic import BaseModel
+
+    class CollectionIn(BaseModel):
+        name: str
+        apexes: list = []
+
+    return CollectionIn
+
+
+CollectionIn = _collection_model()
+
+
 def _hit_payload(service: Service, hits) -> list[dict]:
     meta = service.scene_meta([h.scene_id for h in hits if h.scene_id])
     out = []
@@ -183,6 +196,23 @@ def create_app(cfg=None):
     def list_reels():
         return {"reels": service.reels()}
 
+    @app.post("/api/collection")
+    def save_collection(body: CollectionIn):
+        if not body.name.strip() or not body.apexes:
+            raise HTTPException(400, "need a name and at least one moment")
+        return service.save_collection(body.name.strip(), body.apexes)
+
+    @app.get("/api/collections")
+    def collections():
+        return {"collections": service.list_collections()}
+
+    @app.get("/api/collection")
+    def get_collection(name: str):
+        c = service.load_collection(name)
+        if not c:
+            raise HTTPException(404, "no such collection")
+        return c
+
     @app.get("/api/reel/download")
     def download_reel(name: str):
         path = service.reel_path(name)
@@ -275,6 +305,10 @@ def create_app(cfg=None):
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()
+
+    @app.get("/api/duplicates")
+    def duplicates(key: str, t: float, threshold: float = 0.9, model: str | None = None):
+        return _hit_payload(service, service.find_duplicates(key, t, threshold=threshold, model=model))
 
     @app.get("/api/classify")
     def classify(key: str, t: float, top_k: int = 6):
