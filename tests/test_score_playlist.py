@@ -94,6 +94,20 @@ def test_scene_timeline_missing_scene_is_empty(tmp_path):
     assert svc.scene_timeline("nope", text="x")["points"] == []
 
 
+def test_clip_query_vector_handles_negatives(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    vecs = {"beach sunset": np.array([1, 0, 0], dtype="float32"),
+            "crowd": np.array([0, 1, 0], dtype="float32")}
+    monkeypatch.setattr(svc, "_clip_text_vector", lambda phrase: vecs[phrase])
+
+    q = svc._clip_query_vector("beach sunset -crowd")
+    # positive along beach, pushed away from crowd
+    assert q[0] > 0.8 and q[1] < -0.1
+
+    plain = svc._clip_query_vector("beach sunset")
+    assert plain[0] > 0.99 and abs(plain[1]) < 1e-6  # no negative → pure positive
+
+
 def test_create_apex_writes_marker(tmp_path, monkeypatch):
     svc, _ = _service(tmp_path)
 

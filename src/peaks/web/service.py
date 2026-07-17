@@ -487,13 +487,37 @@ class Service:
         return marker
 
     def search_text(self, text: str, top_k: int = 60) -> list[Hit]:
-        """CLIP text -> nearest moments in the CLIP index."""
-        vec = self._clip_text_vector(text)
+        """CLIP text -> nearest moments. Supports blended queries: words
+        prefixed with '-' are pushed AWAY from ("beach -crowd -text"), so you
+        can steer results without re-typing the whole prompt."""
+        vec = self._clip_query_vector(text)
         return self.index("clip").search(vec, top_k=top_k, per_scene=3)
 
     def has_clip_index(self) -> bool:
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         return len(cache.keys("clip")) > 0
+
+    @staticmethod
+    def _unit(v: np.ndarray) -> np.ndarray:
+        v = np.asarray(v, dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        return v / n if n > 0 else v
+
+    def _clip_query_vector(self, text: str, neg_weight: float = 0.5) -> np.ndarray:
+        """Build a query vector from a prompt with optional '-negative' terms.
+        Positive phrase minus the negatives' direction, renormalized — standard
+        CLIP embedding arithmetic."""
+        pos, neg = [], []
+        for tok in text.split():
+            if len(tok) > 1 and tok.startswith("-"):
+                neg.append(tok[1:])
+            else:
+                pos.append(tok[1:] if (len(tok) > 1 and tok.startswith("+")) else tok)
+        pos_phrase = " ".join(pos) or text  # all-negative: fall back to literal
+        q = self._unit(self._clip_text_vector(pos_phrase))
+        if neg:
+            q = self._unit(q - neg_weight * self._unit(self._clip_text_vector(" ".join(neg))))
+        return q
 
     def _clip_text_vector(self, text: str) -> np.ndarray:
         with self._clip_lock:
