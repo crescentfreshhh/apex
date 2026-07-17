@@ -431,6 +431,61 @@ class Service:
     def search_by_frame(self, key: str, time: float, top_k: int = 60) -> list[Hit]:
         return self.index().search_by_frame(key, time, top_k=top_k)
 
+    def scene_timeline(
+        self,
+        key: str,
+        *,
+        model: str | None = None,
+        text: str | None = None,
+        ref_key: str | None = None,
+        ref_t: float | None = None,
+    ) -> dict:
+        """Per-frame relevance across ONE scene — the data behind the heatmap.
+
+        Scores every cached frame of scene `key` against a query: a CLIP text
+        prompt (`text`, forces the clip model), or another frame (`ref_key` +
+        `ref_t`, the "find similar" source). Returns points sorted by time; the
+        UI maps them onto the video's own duration."""
+        model = "clip" if text else (model or canonical_name(self.cfg.embedding.model))
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        try:
+            times, vecs, meta = cache.load(key, model)
+        except Exception:
+            return {"points": [], "model": model}
+        if vecs.shape[0] == 0:
+            return {"points": [], "model": model, "scene_id": meta.get("scene_id")}
+        if text:
+            q = self._clip_text_vector(text)
+        elif ref_key is not None and ref_t is not None:
+            q = self.index(model).vector_at(ref_key, ref_t)
+        else:
+            q = None
+        if q is None:
+            return {"points": [], "model": model, "scene_id": meta.get("scene_id")}
+        q = np.asarray(q, dtype=np.float32).reshape(-1)
+        n = np.linalg.norm(q)
+        if n > 0:
+            q = q / n
+        scores = (vecs.astype(np.float32) @ q)
+        points = [[round(float(t), 2), round(float(s), 4)] for t, s in zip(times, scores)]
+        return {"points": points, "model": model, "scene_id": meta.get("scene_id")}
+
+    def create_apex(
+        self, scene_id: str, start: float, end: float | None = None, tag: str | None = None
+    ) -> dict:
+        """Write a marker at `start` (a moment you saved while watching). Shows
+        up in Stash and on the next megaboard build."""
+        tag = tag or self.cfg.markers.tag_name
+        client = self.client()
+        t = client.find_or_create_tag(tag)
+        if end is None or end <= start:
+            end = start + 15.0
+        marker = client.create_scene_marker(
+            scene_id=str(scene_id), seconds=float(start), primary_tag_id=t.id,
+            title=f"{tag} (saved)", end_seconds=float(end),
+        )
+        return marker
+
     def search_text(self, text: str, top_k: int = 60) -> list[Hit]:
         """CLIP text -> nearest moments in the CLIP index."""
         vec = self._clip_text_vector(text)

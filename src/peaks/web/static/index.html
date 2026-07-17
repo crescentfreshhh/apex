@@ -151,6 +151,29 @@
     </div>
   </section>
 
+  <!-- SCENE VIEWER (in-app player + heatmap + editable stats) -->
+  <div id="viewer" class="viewer" hidden>
+    <div class="viewer-stage">
+      <button id="viewer-close" class="viewer-close" title="Close (Esc)">✕</button>
+      <div class="viewer-video"><video id="viewer-v" playsinline></video></div>
+      <div class="viewer-transport">
+        <button id="viewer-play" class="vbtn" title="Play / pause">❚❚</button>
+        <div class="viewer-seekwrap">
+          <div id="viewer-heat" class="viewer-heat" title="relevance across the scene — click to jump"></div>
+          <input id="viewer-seek" class="viewer-seek" type="range" min="0" max="1000" value="0" />
+        </div>
+        <span id="viewer-time" class="dim">0:00 / 0:00</span>
+        <button id="viewer-save" class="primary" title="Save the current moment as an apex marker in Stash">★ Save moment</button>
+      </div>
+    </div>
+    <aside class="viewer-side">
+      <div id="viewer-title" class="viewer-vtitle"></div>
+      <div id="viewer-sub" class="dim"></div>
+      <div id="viewer-edit" class="viewer-edit"></div>
+      <a id="viewer-stash" class="ghost" target="_blank" rel="noopener">Open in Stash ↗</a>
+    </aside>
+  </div>
+
   <div id="toast" hidden></div>
 
   <script src="/static/app.js"></script>

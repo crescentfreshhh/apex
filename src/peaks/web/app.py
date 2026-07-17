@@ -230,6 +230,18 @@ def create_app(cfg=None):
             raise HTTPException(500, f"CLIP unavailable: {exc}")
         return _hit_payload(service, hits)
 
+    @app.get("/api/timeline")
+    def timeline(
+        key: str,
+        model: str | None = None,
+        q: str | None = None,
+        ref_key: str | None = None,
+        ref_t: float | None = None,
+    ):
+        return service.scene_timeline(
+            key, model=model, text=q, ref_key=ref_key, ref_t=ref_t
+        )
+
     # --- scene metadata (two-way sync with Stash) ---------------------------
 
     @app.get("/api/scene/{scene_id}")
@@ -245,6 +257,13 @@ def create_app(cfg=None):
             return service.update_scene(scene_id, **fields)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash update failed: {exc}")
+
+    @app.post("/api/scene/{scene_id}/apex")
+    def save_apex(scene_id: str, t: float, end: float | None = None, tag: str | None = None):
+        try:
+            return {"marker": service.create_apex(scene_id, t, end=end, tag=tag)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash marker create failed: {exc}")
 
     @app.post("/api/scene/{scene_id}/o")
     def add_o(scene_id: str):

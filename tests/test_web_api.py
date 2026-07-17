@@ -289,6 +289,32 @@ def test_scene_edit_endpoints(client, monkeypatch):
     assert client.delete("/api/scene/7/o").json() == {"o_counter": 4}
 
 
+def test_timeline_endpoint(client, monkeypatch):
+    from peaks.web import service as svc
+
+    monkeypatch.setattr(
+        svc.Service, "scene_timeline",
+        lambda self, key, **kw: {"points": [[0, 0.5]], "model": "clip", "kw": list(kw)},
+    )
+    r = client.get("/api/timeline", params={"key": "k1", "q": "red couch"})
+    assert r.status_code == 200 and r.json()["points"] == [[0, 0.5]]
+
+
+def test_save_apex_endpoint(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+
+    def fake(self, scene_id, start, end=None, tag=None):
+        seen.update(scene_id=scene_id, start=start, end=end, tag=tag)
+        return {"id": "m1", "seconds": start}
+
+    monkeypatch.setattr(svc.Service, "create_apex", fake)
+    r = client.post("/api/scene/5/apex", params={"t": 42})
+    assert r.status_code == 200 and r.json()["marker"]["id"] == "m1"
+    assert seen["scene_id"] == "5" and seen["start"] == 42
+
+
 def test_scene_edit_empty_body_400(client):
     assert client.patch("/api/scene/7", json={}).status_code == 400
 
