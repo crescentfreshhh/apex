@@ -123,6 +123,28 @@ def test_create_apex_writes_marker(tmp_path, monkeypatch):
     assert m["seconds"] == 42.0 and m["end_seconds"] == 57.0  # default +15s clip
 
 
+def test_classify_frame_top_labels(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    cache.save("k", "clip", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
+    vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
+    monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
+
+    out = svc.classify_frame("k", 0.0, top_k=2)
+    assert out["labels"][0][0] == "beach"  # frame vector matches "beach"
+    labs = dict(out["labels"])
+    assert labs["beach"] > labs["office"]
+
+
+def test_classify_frame_missing_is_empty(tmp_path):
+    svc, _ = _service(tmp_path)
+    assert svc.classify_frame("nope", 0.0)["labels"] == []
+
+
 def test_taste_label_train_and_rerank(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
     from peaks.search import Hit

@@ -268,6 +268,13 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
 
+    @app.get("/api/classify")
+    def classify(key: str, t: float, top_k: int = 6):
+        try:
+            return service.classify_frame(key, t, top_k=top_k)
+        except Exception:  # noqa: BLE001 — classification is cosmetic
+            return {"labels": []}
+
     @app.get("/api/timeline")
     def timeline(
         key: str,

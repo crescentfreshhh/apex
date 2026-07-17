@@ -232,21 +232,23 @@ function renderHits(hits) {
   g.querySelectorAll(".tile").forEach((tile, i) => {
     wireTileEdits(tile);
     const h = lastHits[i];
-    const open = () => openViewer(h);
+    const open = () => openViewerAt(i);
     tile.querySelector(".play-btn")?.addEventListener("click", open);
     tile.querySelector(".thumbwrap")?.addEventListener("click", open);
-    tile.querySelector(".thumb.up")?.addEventListener("click", () => thumb(h.key, h.time, 1, h.scene_id));
-    tile.querySelector(".thumb.down")?.addEventListener("click", () => thumb(h.key, h.time, 0, h.scene_id));
+    tile.querySelector(".thumb.up")?.addEventListener("click", (e) => thumb(h.key, h.time, 1, h.scene_id, e.currentTarget));
+    tile.querySelector(".thumb.down")?.addEventListener("click", (e) => thumb(h.key, h.time, 0, h.scene_id, e.currentTarget));
   });
 }
 
 // --- taste: explicit thumbs → trained preference ranking -------------------
-async function thumb(key, time, label, sceneId) {
+async function thumb(key, time, label, sceneId, btn) {
+  if (btn) { btn.classList.add("flash"); setTimeout(() => btn.classList.remove("flash"), 600); }
   try {
     const qs = new URLSearchParams({ key, t: (+time).toFixed(2), label });
     if (sceneId) qs.set("scene_id", sceneId);
     const c = await api("/api/label?" + qs, { method: "POST" });
-    toast(label ? "👍 saved" : "👎 saved"); updateTasteUI(c);
+    toast(label ? "👍 More like this — noted" : "👎 Less like this — noted");
+    updateTasteUI(c);
   } catch (e) { toast(e.message, true); }
 }
 function updateTasteUI(c) {
@@ -381,21 +383,56 @@ async function saveMoment(sid, t) {
   try { await api(`/api/scene/${sid}/apex?t=${(t || 0).toFixed(2)}`, { method: "POST" }); toast("Saved apex @ " + fmt(t)); }
   catch (e) { toast(e.message, true); }
 }
+let viewerIndex = -1;
+let currentHit = null;
+let classifyTimer = null;
+function openViewerAt(i) {
+  if (i < 0 || i >= lastHits.length) return;
+  viewerIndex = i;
+  openViewer(lastHits[i]);
+}
+function nextViewer() { if (lastHits.length) openViewerAt((viewerIndex + 1) % lastHits.length); }
+function prevViewer() { if (lastHits.length) openViewerAt((viewerIndex - 1 + lastHits.length) % lastHits.length); }
+async function similarFromViewer() {
+  if (!currentHit) return;
+  const v = $("#viewer-v"); const t = v.currentTime || +currentHit.time;
+  currentContext = { kind: "frame", key: currentHit.key, t };
+  try {
+    const hits = await api(`/api/search/similar?key=${currentHit.key}&t=${t.toFixed(2)}&top_k=60` + tasteOn());
+    if (!hits.length) return toast("no similar moments found");
+    renderHits(hits); openViewerAt(0); toast("More like this moment");
+  } catch (e) { toast(e.message, true); }
+}
+async function classifyCurrent(hit) {
+  const el = $("#viewer-clip"); const v = $("#viewer-v");
+  let d; try { d = await api(`/api/classify?key=${encodeURIComponent(hit.key)}&t=${(v.currentTime || +hit.time).toFixed(2)}`); }
+  catch { el.innerHTML = ""; return; }
+  const labs = d.labels || [];
+  el.innerHTML = labs.length
+    ? `<span class="dim">CLIP sees</span> ` + labs.map(([l, s]) => `<span class="clip-chip" title="${(s * 100).toFixed(0)}% match">${esc(l)}</span>`).join("")
+    : "";
+}
 function openViewer(hit) {
   if (!hit || !hit.stream) return;
+  currentHit = hit;
   const V = $("#viewer"), v = $("#viewer-v");
   V.hidden = false;
   const startAt = +hit.time || 0;
   v.src = sceneStreamUrl(hit.stream);
   v.onloadedmetadata = () => {
     try { v.currentTime = Math.min(startAt, (v.duration || startAt) - 0.1); } catch {}
-    renderHeat(hit);
+    renderHeat(hit); classifyCurrent(hit);
   };
+  v.onseeked = () => { clearTimeout(classifyTimer); classifyTimer = setTimeout(() => classifyCurrent(hit), 350); };
+  v.onclick = () => { if (v.paused) v.play().catch(() => {}); else v.pause(); }; // click video = play/pause
   v.play().catch(() => {});
   wireViewerTransport(v);
+  $("#viewer-prev").onclick = prevViewer;
+  $("#viewer-next").onclick = nextViewer;
+  $("#viewer-similar").onclick = similarFromViewer;
   $("#viewer-save").onclick = () => saveMoment(hit.scene_id, v.currentTime);
-  $("#viewer-up").onclick = () => thumb(hit.key, v.currentTime, 1, hit.scene_id);
-  $("#viewer-down").onclick = () => thumb(hit.key, v.currentTime, 0, hit.scene_id);
+  $("#viewer-up").onclick = (e) => thumb(hit.key, v.currentTime, 1, hit.scene_id, e.currentTarget);
+  $("#viewer-down").onclick = (e) => thumb(hit.key, v.currentTime, 0, hit.scene_id, e.currentTarget);
   try { $("#viewer-stash").href = new URL(hit.stream, location.href).origin + "/scenes/" + hit.scene_id; }
   catch { $("#viewer-stash").href = "#"; }
   loadViewerMeta(hit.scene_id);
@@ -412,7 +449,13 @@ $("#viewer-heat").addEventListener("click", (e) => {
   v.currentTime = ((e.clientX - r.left) / r.width) * v.duration;
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("#viewer").hidden) closeViewer();
+  if ($("#viewer").hidden) return;
+  const v = $("#viewer-v");
+  if (e.key === "Escape") closeViewer();
+  else if (e.key === "ArrowRight") nextViewer();
+  else if (e.key === "ArrowLeft") prevViewer();
+  else if (e.key === " ") { e.preventDefault(); if (v.paused) v.play().catch(() => {}); else v.pause(); }
+  else if (e.key === "s" || e.key === "S") saveMoment(currentHit?.scene_id, v.currentTime);
 });
 $("#btn-text").addEventListener("click", textSearch);
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") textSearch(); });

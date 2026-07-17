@@ -91,6 +91,10 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .viewer-taste .thumb { flex: 1; background: var(--panel2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px; padding: 7px; cursor: pointer; }
 .viewer-taste .thumb:hover { border-color: var(--accent); }
+.viewer-clip { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.clip-chip { font-size: 12px; padding: 3px 8px; border-radius: 12px;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--fg); }
+.viewer-video video { cursor: pointer; }
 
 .adv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px; margin-top: 12px; padding: 12px; background: var(--panel2);
@@ -143,5 +147,7 @@ input, select { background: var(--panel2); color: var(--fg); border: 1px solid v
 
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
-  padding: 10px 16px; border-radius: 8px; z-index: 50; }
+  padding: 10px 16px; border-radius: 8px; z-index: 100; }
 #toast.bad { border-color: var(--bad); color: #ffd7cf; }
+.thumb.flash { border-color: var(--accent) !important; color: var(--accent) !important;
+  background: rgba(200, 162, 74, 0.18) !important; }

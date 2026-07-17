@@ -29,6 +29,7 @@ class Service:
         self._meta_lock = threading.Lock()
         self._taste: dict[str, object] = {}  # taste classifiers, keyed by file
         self._taste_lock = threading.Lock()
+        self._vocab_cache = None  # (labels, CLIP-text matrix) for classification
 
     # --- library / scenes ----------------------------------------------------
 
@@ -712,6 +713,47 @@ class Service:
         if neg:
             q = self._unit(q - neg_weight * self._unit(self._clip_text_vector(" ".join(neg))))
         return q
+
+    # --- "what CLIP sees" — zero-shot moment classification ------------------
+
+    def _vocab(self) -> list[str]:
+        """Classification prompts: a user-supplied /config/vocab.txt (one per
+        line) if present, else the built-in default list."""
+        import os
+        from pathlib import Path
+
+        from ..vocab import DEFAULT_VOCAB
+
+        path = Path(os.environ.get("PEAKS_VOCAB", "/config/vocab.txt"))
+        if path.is_file():
+            lines = [ln.strip() for ln in path.read_text().splitlines()]
+            terms = [ln for ln in lines if ln and not ln.startswith("#")]
+            if terms:
+                return terms
+        return DEFAULT_VOCAB
+
+    def _vocab_matrix(self):
+        """(labels, matrix) for the vocabulary, CLIP-text-embedded once and
+        cached (unit rows, so scoring a frame is one matmul)."""
+        with self._clip_lock:
+            cached = getattr(self, "_vocab_cache", None)
+        if cached is not None:
+            return cached
+        labels = self._vocab()
+        mat = np.stack([self._unit(self._clip_text_vector(t)) for t in labels])
+        with self._clip_lock:
+            self._vocab_cache = (labels, mat)
+        return labels, mat
+
+    def classify_frame(self, key: str, time: float, top_k: int = 6) -> dict:
+        """Top vocabulary matches for one frame — what CLIP thinks it is."""
+        v = self.index("clip").vector_at(key, time)
+        if v is None:
+            return {"labels": []}
+        labels, mat = self._vocab_matrix()
+        scores = mat @ self._unit(v)
+        order = np.argsort(-scores)[:top_k]
+        return {"labels": [[labels[i], round(float(scores[i]), 3)] for i in order]}
 
     def _clip_text_vector(self, text: str) -> np.ndarray:
         with self._clip_lock:
