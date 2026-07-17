@@ -1,6 +1,7 @@
 """Web API tests via FastAPI TestClient — a fake embedding cache, no torch,
 no Stash, no ffmpeg (frame decoding is monkeypatched)."""
 
+import threading
 import time
 
 import numpy as np
@@ -320,6 +321,26 @@ def test_jobmanager_one_per_kind():
     jm.start("embed", slow)
     with pytest.raises(RuntimeError, match="already running"):
         jm.start("embed", slow)
+
+
+def test_jobmanager_cancel_marks_cancelled():
+    jm = JobManager()
+    started = threading.Event()
+
+    def loop(job: Job):
+        started.set()
+        while not job.cancelled:
+            time.sleep(0.01)
+        return {"stopped": True}
+
+    job = jm.start("x", loop)
+    assert started.wait(1)
+    job.request_cancel()
+    for _ in range(100):
+        if job.status != "running":
+            break
+        time.sleep(0.01)
+    assert job.status == "cancelled" and job.result == {"stopped": True}
 
 
 def test_jobmanager_captures_errors():

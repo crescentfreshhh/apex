@@ -45,6 +45,8 @@ button.primary:disabled { opacity: .5; cursor: default; }
   padding: 8px 14px; border-radius: 8px; cursor: pointer; display: inline-block;
   text-decoration: none; }
 .ghost:hover { border-color: var(--accent); }
+.ghost[hidden] { display: none; }  /* class display must not defeat the hidden attr */
+.ghost:disabled { opacity: .5; cursor: default; }
 
 .adv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px; margin-top: 12px; padding: 12px; background: var(--panel2);

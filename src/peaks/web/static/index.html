@@ -27,6 +27,7 @@
       <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
       <div class="row">
         <button id="btn-embed" class="primary">Embed new scenes</button>
+        <button id="btn-embed-stop" class="ghost" hidden>Stop</button>
         <button id="toggle-adv" class="ghost" type="button">Advanced ▾</button>
         <span id="embed-status" class="dim"></span>
       </div>
@@ -67,6 +68,7 @@
         then a full linear decode like VLC uses.</p>
       <div class="row">
         <button id="btn-fix" class="primary">Retry failed</button>
+        <button id="btn-fix-stop" class="ghost" hidden>Stop</button>
         <button id="btn-fail-list" class="ghost">Show list</button>
         <span id="fix-status" class="dim"></span>
       </div>
@@ -96,6 +98,7 @@
         <label class="check"><input type="checkbox" id="score-write" /> write markers</label>
         <button id="toggle-score-adv" class="ghost" type="button">Advanced ▾</button>
         <button id="btn-score" class="primary">Run scoring</button>
+        <button id="btn-score-stop" class="ghost" hidden>Stop</button>
         <span id="score-status" class="dim"></span>
       </div>
       <div id="score-adv" class="adv" hidden>
@@ -124,6 +127,7 @@
     <div class="search-bar">
       <input id="q" placeholder="Search by description (needs a CLIP pass)…" />
       <button id="btn-text" class="primary">Search</button>
+      <button id="btn-board-search" class="ghost" disabled title="Open the current results as a megaboard, each tile starting at its matched moment">Play on megaboard</button>
       <span id="explore-hint" class="dim"></span>
     </div>
     <div id="results" class="grid"></div>

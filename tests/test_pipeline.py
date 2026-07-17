@@ -167,6 +167,41 @@ def test_embed_library_records_and_clears_failures(tmp_path):
     assert flog.keys() == set()
 
 
+def test_embed_library_honors_should_stop(tmp_path):
+    emb = FakeEmbedder(dim=8)
+    sampler = _StubSampler([(0.0, _StubImage(b"f0"))])
+    cache = EmbeddingCache(tmp_path)
+    scenes = [_scene("1", "/m/1.mp4"), _scene("2", "/m/2.mp4"), _scene("3", "/m/3.mp4")]
+    calls = {"n": 0}
+
+    def stop():
+        calls["n"] += 1
+        return calls["n"] > 1  # let the first scene through, then halt
+
+    stats = embed_library(scenes, sampler, emb, cache, log=lambda *_: None, should_stop=stop)
+    assert stats["embedded"] == 1  # stopped before the rest
+
+
+def test_score_library_honors_should_stop(tmp_path):
+    emb = FakeEmbedder(dim=8)
+    cache = EmbeddingCache(tmp_path)
+    for k in ("fp1", "fp2"):
+        cache.save(k, emb.name, np.array([0.0], dtype="float32"), np.zeros((1, 8), dtype="float32"))
+    refs = emb.embed_images([_StubImage(b"x")])
+    calls = {"n": 0}
+
+    def stop():
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    stats = score_library(
+        [_scene("1", "/m/1.mp4"), _scene("2", "/m/2.mp4")],
+        cache, emb.name, make_similarity_scorer(refs, "max"), ScoringConfig(),
+        should_stop=stop, log=lambda *_: None,
+    )
+    assert stats["scenes"] == 1
+
+
 def _cache_scene(cache, key, scene_id, path, model="fake"):
     t = np.array([0.0], dtype=np.float32)
     v = np.zeros((1, 4), dtype=np.float32)

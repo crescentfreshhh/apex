@@ -140,6 +140,7 @@ class Service:
             workers=n_workers,
             total=total, log=_log,
             failure_log=failure_log_for(self.cfg),
+            should_stop=(lambda: job.cancelled) if job else None,
         )
         self.invalidate_index(embedder.name)
         return stats
@@ -209,6 +210,7 @@ class Service:
         stats = score_library(
             self.scenes(), cache, model, score_frames, scoring,
             client=client, tag_name=tag, write=write, log=log,
+            should_stop=(lambda: job.cancelled) if job else None,
         )
         if write:
             pl = self.run_playlist(tags=[tag], log=log)
@@ -360,6 +362,9 @@ class Service:
         iv = self.cfg.sampling.interval_seconds
         to = self.cfg.sampling.scene_timeout
         for e in entries:
+            if job and job.cancelled:
+                log(f"  ⏹ stop requested — halting after {result['fixed']} fixed")
+                break
             key = e["key"]
             scene = _scene_from_entry(e)
             if not scene.path or not os.path.exists(scene.path):

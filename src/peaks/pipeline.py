@@ -78,6 +78,7 @@ def embed_library(
     workers: int = 1,
     log: Logger = print,
     failure_log=None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     """Embed every scene not already cached. Resumable + idempotent.
 
@@ -121,12 +122,17 @@ def embed_library(
             scenes, sampler, embedder, cache,
             signature=signature, batch_size=batch_size, total=total,
             workers=workers, log=log, failure_log=failure_log,
+            should_stop=should_stop,
         )
 
     stats = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
     embed_seconds = 0.0
     processed = 0
     for scene in scenes:
+        if should_stop and should_stop():
+            log("  ⏹ stop requested — halting after "
+                f"{stats['embedded']} embedded")
+            break
         processed += 1
         key = scene_key(scene)
         if cache.has(key, embedder.name, interval=signature):
@@ -216,6 +222,7 @@ def _embed_library_parallel(
     workers: int,
     log: Logger,
     failure_log=None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     """Raw-path embed with `workers` scenes decoding concurrently.
 
@@ -310,6 +317,9 @@ def _embed_library_parallel(
     inflight: deque = deque()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for scene in scenes:
+            if should_stop and should_stop():
+                log(f"  ⏹ stop requested — halting after {stats['embedded']} embedded")
+                break
             key = scene_key(scene)
             if cache.has(key, embedder.name, interval=signature):
                 processed += 1
@@ -436,6 +446,7 @@ def score_library(
     tag_name: str = "apex",
     write: bool = False,
     log: Logger = print,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     """Score cached scenes into segments; optionally write Stash markers.
 
@@ -463,6 +474,9 @@ def score_library(
         return False
 
     for scene in scenes:
+        if should_stop and should_stop():
+            log("  ⏹ stop requested — halting scoring")
+            break
         key = scene_key(scene)
         if not cache.has(key, embedder_name):
             stats["skipped"] += 1

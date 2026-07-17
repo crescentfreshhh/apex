@@ -395,8 +395,9 @@ function reshuffle() {
 }
 
 function updateStatus() {
+  const what = State.searchMode ? "search moments" : "apexes";
   document.getElementById("status").textContent =
-    `${State.apexes.length} apexes · ${State.tiles.length} tiles`;
+    `${State.apexes.length} ${what} · ${State.tiles.length} tiles`;
 }
 
 function fmt(sec) {
@@ -428,17 +429,26 @@ function wireControls() {
 
 async function main() {
   let playlist;
-  try {
-    const res = await fetch("playlist.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    playlist = await res.json();
-  } catch (err) {
-    return showError(
-      "Couldn't load playlist.json.\n\n" +
-        'Build it from the web app (Megaboard → "Build megaboard"),\n' +
-        "or run `peaks playlist`.\n\n" +
-        `(${err.message})`
-    );
+  // a search handoff from Explore ("Play on megaboard") arrives via localStorage
+  if (new URLSearchParams(location.search).get("src") === "search") {
+    try {
+      playlist = JSON.parse(localStorage.getItem("mb_search") || "null");
+    } catch {}
+    if (playlist) State.searchMode = true;
+  }
+  if (!playlist) {
+    try {
+      const res = await fetch("playlist.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      playlist = await res.json();
+    } catch (err) {
+      return showError(
+        "Couldn't load playlist.json.\n\n" +
+          'Build it from the web app (Megaboard → "Build megaboard"),\n' +
+          "or run `peaks playlist`.\n\n" +
+          `(${err.message})`
+      );
+    }
   }
   State.apexes = playlist.apexes || [];
   if (State.apexes.length === 0) {

@@ -52,28 +52,38 @@ async function refreshDashboard() {
   }
 }
 
-function wireJob(btn, statusEl, logEl, start) {
+function wireJob(btn, statusEl, logEl, start, stopBtn) {
   btn.addEventListener("click", async () => {
     btn.disabled = true; statusEl.textContent = "starting…"; logEl.hidden = false; logEl.textContent = "";
     try {
       const job = await start();
-      poll(job.id, statusEl, logEl, btn);
+      if (stopBtn) {
+        stopBtn.hidden = false; stopBtn.disabled = false;
+        stopBtn.onclick = async () => {
+          stopBtn.disabled = true; statusEl.textContent = "stopping…";
+          try { await api("/api/jobs/" + job.id + "/cancel", { method: "POST" }); }
+          catch (e) { toast(e.message, true); }
+        };
+      }
+      poll(job.id, statusEl, logEl, btn, stopBtn);
     } catch (e) {
       btn.disabled = false; statusEl.textContent = ""; toast(e.message, true);
     }
   });
 }
-async function poll(id, statusEl, logEl, btn) {
+async function poll(id, statusEl, logEl, btn, stopBtn) {
+  const done = () => { btn.disabled = false; if (stopBtn) stopBtn.hidden = true; };
   try {
     const j = await api("/api/jobs/" + id);
     const p = j.progress || {};
     statusEl.textContent = `${j.status} · ${p.done ?? 0}/${p.total ?? "?"} · ${j.elapsed}s`;
     logEl.textContent = (j.log || []).join("\n"); logEl.scrollTop = logEl.scrollHeight;
-    if (j.status === "running") return setTimeout(() => poll(id, statusEl, logEl, btn), 1000);
-    btn.disabled = false;
+    if (j.status === "running") return setTimeout(() => poll(id, statusEl, logEl, btn, stopBtn), 1000);
+    done();
     if (j.status === "error") toast("Job failed: " + j.error, true);
+    else if (j.status === "cancelled") { toast("Stopped."); refreshDashboard(); }
     else { toast("Done: " + JSON.stringify(j.result || {})); refreshDashboard(); }
-  } catch (e) { btn.disabled = false; toast(e.message, true); }
+  } catch (e) { done(); toast(e.message, true); }
 }
 // --- embed advanced overrides (per-run model / sampling, no restart) --------
 let defaultsLoaded = false;
@@ -121,12 +131,12 @@ function embedQuery() {
 wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => {
   const q = embedQuery();
   return api("/api/embed" + (q ? "?" + q : ""), { method: "POST" });
-});
+}, $("#btn-embed-stop"));
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
   const prune = $("#sync-prune").checked;
   return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });
 });
-wireJob($("#btn-fix"), $("#fix-status"), $("#fix-log"), () => api("/api/fix", { method: "POST" }));
+wireJob($("#btn-fix"), $("#fix-status"), $("#fix-log"), () => api("/api/fix", { method: "POST" }), $("#btn-fix-stop"));
 $("#btn-fail-list").addEventListener("click", async () => {
   const el = $("#fail-list");
   if (!el.hidden) { el.hidden = true; return; }
@@ -152,7 +162,7 @@ wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
     qs.set("normalize", $("#adv-normalize").value);
   }
   return api("/api/score?" + qs, { method: "POST" });
-});
+}, $("#btn-score-stop"));
 wireJob($("#btn-playlist"), $("#playlist-status"), $("#playlist-log"), () => {
   const tag = $("#board-tag").value.trim();
   return api("/api/playlist" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
@@ -166,8 +176,11 @@ function stars(rating100) {
     s += `<span class="star ${i <= filled ? "on" : ""}" data-r="${i * 20}">★</span>`;
   return s;
 }
+let lastHits = [];
 function renderHits(hits) {
   const g = $("#results");
+  lastHits = hits || [];
+  $("#btn-board-search").disabled = !lastHits.some((h) => h.scene_id && h.stream);
   if (!hits.length) { g.innerHTML = '<p class="dim">No results.</p>'; return; }
   g.innerHTML = hits.map((h) => {
     const perf = (h.performers || []).slice(0, 3).join(", ");
@@ -251,6 +264,27 @@ async function textSearch() {
 }
 $("#btn-text").addEventListener("click", textSearch);
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") textSearch(); });
+
+// hand the current results to the megaboard: each tile starts at its matched
+// moment (the stream URL already carries start=<time>). Passed via localStorage
+// (same origin) so we don't clobber the saved apex playlist.json.
+const BOARD_CLIP_SECONDS = 20;
+$("#btn-board-search").addEventListener("click", () => {
+  const apexes = lastHits
+    .filter((h) => h.scene_id && h.stream)
+    .map((h) => ({
+      scene_id: h.scene_id,
+      start: +h.time,
+      end: +h.time + BOARD_CLIP_SECONDS,
+      duration: BOARD_CLIP_SECONDS,
+      url: h.stream,
+      score: h.score ?? 1,
+      title: h.title || "",
+    }));
+  if (!apexes.length) return;
+  localStorage.setItem("mb_search", JSON.stringify({ tag: "search", count: apexes.length, apexes }));
+  window.open("/megaboard/?src=search", "_blank");
+});
 
 function setActiveView(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === name));
