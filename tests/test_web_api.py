@@ -250,6 +250,24 @@ def test_embed_forwards_advanced_overrides(client, monkeypatch):
     assert seen["hwaccel"] == ""  # empty string forwarded (force CPU), not dropped
 
 
+def test_embed_queues_multiple_models(client, monkeypatch):
+    from peaks.web import service as svc
+
+    seen = {}
+
+    def fake_multi(self, job=None, models=None, limit=0, **kw):
+        seen["models"] = models
+        return {"embedded": 0}
+
+    monkeypatch.setattr(svc.Service, "run_embed_multi", fake_multi)
+    jid = client.post("/api/embed", params={"model": "dino,clip"}).json()["id"]
+    for _ in range(50):
+        if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert seen["models"] == ["dino", "clip"]
+
+
 def test_embed_without_overrides_stays_bare(client, monkeypatch):
     from peaks.web import service as svc
 

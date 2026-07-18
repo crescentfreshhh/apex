@@ -135,20 +135,26 @@ def create_app(cfg=None):
         workers: int | None = None,
         timeout: float | None = None,
     ):
-        # only forward the knobs actually supplied; absent ones fall back to
-        # config inside run_embed (keeps the scheduler/tests calling it bare)
-        overrides = {
+        # sampling knobs actually supplied; absent ones fall back to config
+        sampling = {
             k: v
             for k, v in dict(
-                model=model, mode=mode, interval=interval, hwaccel=hwaccel,
+                mode=mode, interval=interval, hwaccel=hwaccel,
                 pipeline=pipeline, workers=workers, scene_timeout=timeout,
             ).items()
             if v is not None
         }
+        # `model` may be a comma-list ("dino,clip") to queue passes back-to-back
+        models = [m.strip() for m in model.split(",") if m.strip()] if model else []
+        if len(models) > 1:
+            target = lambda j: service.run_embed_multi(j, models=models, limit=limit, **sampling)  # noqa: E731
+        else:
+            overrides = dict(sampling)
+            if models:
+                overrides["model"] = models[0]
+            target = lambda j: service.run_embed(j, limit=limit, **overrides)  # noqa: E731
         try:
-            job = jobs.start(
-                "embed", lambda j: service.run_embed(j, limit=limit, **overrides)
-            )
+            job = jobs.start("embed", target)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()

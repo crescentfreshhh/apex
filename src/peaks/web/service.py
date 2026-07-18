@@ -436,6 +436,26 @@ class Service:
         log(f"megaboard: {pl['count']} apex(es) for '{pl['tag']}' → {out}")
         return {"tag": pl["tag"], "count": pl["count"], "out": str(out)}
 
+    def run_embed_multi(self, job=None, models=None, limit: int = 0, **overrides) -> dict:
+        """Run several embed passes back-to-back in one job (e.g. DINOv2 then
+        CLIP), so you can queue both and walk away. Stops between passes if
+        cancelled; totals are aggregated and each pass is reported."""
+        log = (job.log if job else print)
+        models = list(models) if models else [self.cfg.embedding.model]
+        total = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
+        passes: dict[str, dict] = {}
+        for i, m in enumerate(models):
+            if job and job.cancelled:
+                log("  ⏹ stop requested — halting the queue")
+                break
+            log(f"=== embed pass {i + 1}/{len(models)}: model={m} ===")
+            st = self.run_embed(job, limit=limit, model=m, **overrides)
+            passes[m] = st
+            for k in total:
+                total[k] += st.get(k, 0)
+        total["passes"] = passes
+        return total
+
     def run_sync(self, job=None, prune: bool = True, all_models: bool = True) -> dict:
         """Reconcile the cache with Stash: refresh moved scenes' stored paths
         and (optionally) prune entries for scenes deleted from Stash.

@@ -122,6 +122,23 @@ def test_run_embed_defaults_when_no_overrides(tmp_path, monkeypatch):
     assert cap["sampler"]["interval_seconds"] == cfg.sampling.interval_seconds
 
 
+def test_run_embed_multi_runs_each_model(tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    svc, _ = _service(tmp_path)
+    calls = []
+
+    def fake_embed(self, job=None, limit=0, **kw):
+        calls.append(kw.get("model"))
+        return {"embedded": 1, "skipped": 0, "failed": 0, "frames": 10}
+
+    monkeypatch.setattr(svc_mod.Service, "run_embed", fake_embed)
+    res = svc.run_embed_multi(models=["dino", "clip"])
+    assert calls == ["dino", "clip"]  # back-to-back, in order
+    assert res["embedded"] == 2 and res["frames"] == 20
+    assert set(res["passes"]) == {"dino", "clip"}
+
+
 def test_run_fix_empty_log(tmp_path):
     svc, _ = _service(tmp_path)
     assert svc.run_fix() == {"fixed": 0, "failed": 0, "total": 0}
