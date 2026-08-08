@@ -105,6 +105,12 @@ workers = 3
 # left untouched and can be deleted). (Env: PEAKS_CLIP_MODEL, PEAKS_CLIP_PRETRAINED)
 clip_model = "ViT-L-14"
 clip_pretrained = "laion2b_s32b_b82k"
+# DINOv2 backbone (visual structure / "find similar"). "dinov2_vits14" (small,
+# default) → "dinov2_vitb14" (base, sharper) → "dinov2_vitl14" (large) →
+# "dinov2_vitg14" (giant). Bigger = more accurate at more cost. Cache is
+# namespaced per backbone, so switching means re-embedding DINO.
+# (Env override: PEAKS_DINO_MODEL)
+dino_model = "dinov2_vits14"
 
 
 [scoring]

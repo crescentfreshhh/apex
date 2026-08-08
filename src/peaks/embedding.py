@@ -86,10 +86,18 @@ class FakeEmbedder(Embedder):
 # --- real channels (lazy torch) ---------------------------------------------
 
 
-class DinoV2Embedder(Embedder):
-    """DINOv2 ViT features (CLS token). Defaults to the small backbone."""
+def dino_cache_name(model_name: str) -> str:
+    """Cache subdir for a DINOv2 backbone. The small backbone keeps the legacy
+    "dinov2" name (backward compatible); bigger backbones get their own dir so
+    their different-dim vectors never collide (e.g. "dinov2-vitb14")."""
+    if model_name in ("dinov2_vits14", "dinov2"):
+        return "dinov2"
+    return "dinov2-" + model_name.replace("dinov2_", "").replace("_", "-")
 
-    name = "dinov2"
+
+class DinoV2Embedder(Embedder):
+    """DINOv2 ViT features (CLS token). Backbone size is configurable."""
+
     raw_resize = 256  # matches transforms.Resize(256)
     raw_crop = 224  # matches transforms.CenterCrop(224)
     _MEAN = (0.485, 0.456, 0.406)
@@ -99,6 +107,7 @@ class DinoV2Embedder(Embedder):
         import torch  # lazy
 
         self._torch = torch
+        self.name = dino_cache_name(model_name)  # cache namespaced by backbone
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = torch.hub.load("facebookresearch/dinov2", model_name)
         self.model.eval().to(self.device)
@@ -242,6 +251,17 @@ def canonical_name(alias: str) -> str:
     if key not in _CANONICAL:
         raise ValueError(f"unknown embedder {alias!r}; choices: {sorted(_REGISTRY)}")
     return _CANONICAL[key]
+
+
+def model_cache_name(alias: str, cfg_embedding) -> str:
+    """Backbone-aware cache name for a channel: resolves dino/clip to the dir
+    for the *configured* variant (so bigger models get their own namespace)."""
+    key = alias.lower()
+    if key in ("dino", "dinov2"):
+        return dino_cache_name(getattr(cfg_embedding, "dino_model", "dinov2_vits14"))
+    if key == "clip":
+        return clip_cache_name(getattr(cfg_embedding, "clip_model", "ViT-B-32"))
+    return canonical_name(alias)
 
 
 def get_embedder(name: str, **kwargs) -> Embedder:

@@ -65,12 +65,15 @@ class Service:
         from ..failures import failure_log_for
 
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        model = canonical_name(self.cfg.embedding.model)
+        model = self._model_name()
         cached = len(cache.keys(model))
         return {
             "library_path": self.cfg.library.path or "(whole library)",
             "model": model,
             "cached_scenes": cached,
+            "dino_model": self.cfg.embedding.dino_model,
+            "clip_model": self.cfg.embedding.clip_model,
+            "clip_cached": len(cache.keys(self._clip_name())),
             "device": self.cfg.embedding.device or "auto",
             "interval": self.cfg.sampling.interval_seconds,
             "mode": self.cfg.sampling.mode,
@@ -84,14 +87,24 @@ class Service:
 
         return clip_cache_name(self.cfg.embedding.clip_model)
 
+    def _model_name(self, alias: str | None = None) -> str:
+        """Backbone-aware cache name for a channel (defaults to the configured
+        primary model)."""
+        from ..embedding import model_cache_name
+
+        return model_cache_name(alias or self.cfg.embedding.model, self.cfg.embedding)
+
     def _embedder(self, model: str | None = None):
-        from ..embedding import canonical_name, get_embedder
+        from ..embedding import get_embedder
 
         name = model or self.cfg.embedding.model
         kwargs = {"device": self.cfg.embedding.device} if self.cfg.embedding.device else {}
-        if canonical_name(name) == "clip":
+        canon = canonical_name(name)
+        if canon == "clip":
             kwargs["model_name"] = self.cfg.embedding.clip_model
             kwargs["pretrained"] = self.cfg.embedding.clip_pretrained
+        elif canon == "dinov2":
+            kwargs["model_name"] = self.cfg.embedding.dino_model
         return get_embedder(name, **kwargs)
 
     # --- embed / score (job targets) ----------------------------------------
@@ -194,7 +207,7 @@ class Service:
         log = (job.log if job else print)
         tag = tag or self.cfg.markers.tag_name
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        model = canonical_name(self.cfg.embedding.model)
+        model = self._model_name()
 
         overrides = {
             k: v
@@ -510,7 +523,7 @@ class Service:
 
         log = (job.log if job else print)
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        models = cache.models() if all_models else [canonical_name(self.cfg.embedding.model)]
+        models = cache.models() if all_models else [self._model_name()]
         models = [m for m in models if m]
         # one scene fetch, reused across models
         scenes = list(self.client().iter_scenes())
@@ -622,7 +635,7 @@ class Service:
     # --- search index --------------------------------------------------------
 
     def index(self, model: str | None = None) -> SearchIndex:
-        model = model or canonical_name(self.cfg.embedding.model)
+        model = model or self._model_name()
         with self._index_lock:
             if model not in self._index:
                 cache = EmbeddingCache(self.cfg.embedding.cache_dir)
@@ -641,7 +654,7 @@ class Service:
     ) -> list[Hit]:
         hits = self.index().search_by_frame(key, time, top_k=top_k)
         if taste:
-            hits = self._rerank_by_taste(hits, canonical_name(self.cfg.embedding.model))
+            hits = self._rerank_by_taste(hits, self._model_name())
         return hits
 
     def find_duplicates(
@@ -652,7 +665,7 @@ class Service:
         Uses DINOv2 by default — structural identity, the right space for visual
         duplicates — and keeps only the strongest match per other scene above
         `threshold`."""
-        model = model or canonical_name(self.cfg.embedding.model)
+        model = model or self._model_name()
         idx = self.index(model)
         v = idx.vector_at(key, time)
         if v is None:
@@ -675,7 +688,7 @@ class Service:
         prompt (`text`, forces the clip model), or another frame (`ref_key` +
         `ref_t`, the "find similar" source). Returns points sorted by time; the
         UI maps them onto the video's own duration."""
-        model = self._clip_name() if text else (model or canonical_name(self.cfg.embedding.model))
+        model = self._clip_name() if text else (model or self._model_name())
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         try:
             times, vecs, meta = cache.load(key, model)
@@ -761,7 +774,7 @@ class Service:
         from ..pipeline import train_profile
 
         profile = profile or self.cfg.markers.tag_name
-        model = model or canonical_name(self.cfg.embedding.model)
+        model = model or self._model_name()
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         clf, stats = train_profile(
             self._label_store(), cache, model, profile, kind=self.cfg.modeling.classifier
@@ -786,7 +799,7 @@ class Service:
 
     def has_taste(self, profile: str | None = None, model: str | None = None) -> bool:
         profile = profile or self.cfg.markers.tag_name
-        model = model or canonical_name(self.cfg.embedding.model)
+        model = model or self._model_name()
         return self._taste_path(profile, model).exists() or self._taste_path(profile, self._clip_name()).exists()
 
     def _rerank_by_taste(

@@ -34,12 +34,14 @@ async function refreshDashboard() {
       api("/api/stats"), api("/api/capabilities"),
     ]);
     $("#conn").textContent = "connected";
+    const dino = (stats.dino_model || "").replace("dinov2_", "") || stats.model;
+    const clip = `${stats.clip_model || "?"} · ${stats.clip_cached ? stats.clip_cached.toLocaleString() + " cached" : "not embedded"}`;
     $("#stat-cards").innerHTML = [
       ["Cached scenes", stats.cached_scenes],
       ["Indexed moments", caps.indexed_frames.toLocaleString()],
-      ["Model", stats.model],
+      ["DINOv2 backbone", dino],
+      ["CLIP model", clip],
       ["Device", stats.device],
-      ["CLIP / text search", caps.has_clip ? "ready" : "not yet"],
       ["Failed scenes", stats.failures || 0],
       ["Library", stats.library_path],
     ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
