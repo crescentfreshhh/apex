@@ -294,15 +294,37 @@ def _seed_two_scenes(cfg):
 def test_recommend_ranks_by_taste_centroid(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
     _seed_two_scenes(cfg)
     monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
     monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
 
     r = svc.recommend(top_k=10, per_scene=2)
     assert r["sources"] == 1  # one apex marker on scene A
+    assert r["reranked"] is False  # no trained model yet → pure centroid
     # centroid ≈ A's direction, so A's frames should top the list
     assert r["hits"][0].scene_id == "1"
     assert r["hits"][0].score > r["hits"][-1].score
+
+
+def test_recommend_reranks_with_trained_model(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    # centroid points at scene A (the apex marker), but teach the classifier the
+    # opposite: dislike A, like B — then train.
+    svc.add_label("A", 0.0, 0); svc.add_label("A", 8.0, 0)
+    svc.add_label("B", 0.0, 1); svc.add_label("B", 8.0, 1)
+    svc.train_taste(model="dinov2")
+
+    r = svc.recommend(top_k=10, per_scene=2)
+    assert r["reranked"] is True  # a trained model exists → retrieve-then-rerank
+    # reranking overrides the centroid: the liked scene B rises to the top
+    assert r["hits"][0].scene_id == "2"
 
 
 def test_recommend_empty_without_taste(tmp_path, monkeypatch):

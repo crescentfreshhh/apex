@@ -461,6 +461,7 @@ def create_app(cfg=None):
         return {
             "items": _hit_payload(service, r["hits"]),
             "sources": r["sources"], "total": r["total"], "model": r["model"],
+            "reranked": r["reranked"],
         }
 
     @app.get("/api/foryou/next")

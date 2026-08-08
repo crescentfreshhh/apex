@@ -640,7 +640,9 @@ async function loadForYou(rebuild) {
     }
     $("#foryou-status").textContent =
       `Built from ${d.sources} loved moment${d.sources === 1 ? "" : "s"}` +
-      (recentN() ? " (lately)" : "") + ` · ${d.model}`;
+      (recentN() ? " (lately)" : "") +
+      (d.reranked ? " · reranked by your taste model" : " · taste centroid (train to sharpen)") +
+      ` · ${d.model}`;
     currentContext = { kind: "foryou" };
     renderHits(d.items, grid);
   } catch (e) { grid.innerHTML = ""; toast(e.message, true); }

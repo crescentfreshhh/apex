@@ -990,16 +990,26 @@ class Service:
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
     ) -> dict:
-        """Moments across the whole library nearest your taste centroid — a
-        recommender built from your own apex history, no query needed."""
+        """Moments across the whole library ranked for you — retrieve-then-rerank:
+        the taste centroid pulls a generous candidate pool (fast, spans the
+        library), then your trained taste classifier reranks that pool (so your
+        👎 passes and "Train now" shape the feed, not just your 👍). Falls back
+        to pure centroid ranking when there's no trained model yet."""
         model = model or self._model_name()
         if rebuild:
             self._taste_src_cache.clear()
         c, n, sources = self._taste_centroid(model, recent=recent, rebuild=rebuild)
         if c is None:
-            return {"hits": [], "sources": 0, "total": 0, "model": model}
-        hits = self.index(model).search(c, top_k=top_k, per_scene=per_scene)
-        return {"hits": hits, "sources": n, "total": len(sources), "model": model}
+            return {"hits": [], "sources": 0, "total": 0, "model": model, "reranked": False}
+        # retrieve a pool larger than we'll show, so the reranker has room to
+        # surface moments the centroid alone ranked lower.
+        pool = self.index(model).search(c, top_k=max(top_k * 4, 200), per_scene=per_scene)
+        reranked = self._taste_model(self.cfg.markers.tag_name, model) is not None
+        hits = self._rerank_by_taste(pool, model) if reranked else pool
+        return {
+            "hits": hits[:top_k], "sources": n, "total": len(sources),
+            "model": model, "reranked": reranked,
+        }
 
     def next_uncertain(self, model: str | None = None, pool: int = 800) -> dict | None:
         """The unlabeled frame the taste model is least sure about — active
