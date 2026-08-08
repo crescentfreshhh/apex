@@ -712,8 +712,8 @@ document.addEventListener("keydown", (e) => {
   if (!$("#viewer").hidden) return;                       // viewer owns keys when open
   if (!$("#foryou")?.classList.contains("active")) return;
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-  if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(1); }   // ← = 👍 love
-  else if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(0); }  // → = 👎 pass
+  if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(1); }   // → = 👍 love
+  else if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(0); }  // ← = 👎 pass
   else if (e.key === "ArrowDown") { e.preventDefault(); loadNextSwipe(); }
 });
 
