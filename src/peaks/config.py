@@ -116,6 +116,17 @@ class ScheduleConfig:
 
 
 @dataclass
+class AuthConfig:
+    # Password-gate the whole web app (UI + API + megaboard). Empty = no auth
+    # (open, the historical behaviour). Set a password to require a login.
+    # (Env: PEAKS_PASSWORD) — keep it out of the repo; config.toml is gitignored.
+    password: str = ""
+    # A login lasts this long (sliding: refreshed on each request). (Env:
+    # PEAKS_SESSION_HOURS)
+    session_hours: float = 1.0
+
+
+@dataclass
 class LibraryConfig:
     # Only work on scenes whose file path starts with this (empty = whole
     # library). Point it at a folder to exclude everything else — e.g. skip VR.
@@ -132,6 +143,7 @@ class Config:
     modeling: ModelingConfig = field(default_factory=ModelingConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -259,6 +271,18 @@ class Config:
                 schedule_raw.get("prune", ScheduleConfig.prune),
             ),
         )
+        auth_raw = raw.get("auth", {})
+        auth = AuthConfig(
+            password=os.environ.get(
+                "PEAKS_PASSWORD", auth_raw.get("password", AuthConfig.password)
+            ),
+            session_hours=float(
+                os.environ.get(
+                    "PEAKS_SESSION_HOURS",
+                    auth_raw.get("session_hours", AuthConfig.session_hours),
+                )
+            ),
+        )
         return cls(
             stash=stash,
             sampling=sampling,
@@ -268,4 +292,5 @@ class Config:
             modeling=modeling,
             library=library,
             schedule=schedule,
+            auth=auth,
         )

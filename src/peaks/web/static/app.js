@@ -3,6 +3,7 @@
 const $ = (s) => document.querySelector(s);
 const api = async (path, opts) => {
   const r = await fetch(path, opts);
+  if (r.status === 401) { location.reload(); throw new Error("session expired"); }
   if (!r.ok) {
     let msg = r.status;
     try { msg = (await r.json()).detail || msg; } catch {}
@@ -17,7 +18,7 @@ const toast = (msg, bad) => {
 };
 
 // --- tabs -------------------------------------------------------------------
-document.querySelectorAll(".tab").forEach((b) =>
+document.querySelectorAll(".tab[data-view]").forEach((b) =>
   b.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
     document.querySelectorAll(".view").forEach((x) => x.classList.remove("active"));
@@ -723,13 +724,18 @@ function setActiveView(name) {
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-// hint about CLIP availability for text search
+// hint about CLIP availability for text search + reveal the lock button
 (async () => {
   try {
     const caps = await api("/api/capabilities");
     if (!caps.has_clip)
       $("#explore-hint").textContent = "text search needs a CLIP embed pass";
+    if (caps.auth) $("#btn-logout").hidden = false;
   } catch {}
 })();
+$("#btn-logout").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch {}
+  location.reload();
+});
 
 refreshDashboard();

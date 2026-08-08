@@ -55,6 +55,47 @@ def test_stats(client):
     assert body["cached_scenes"] == 2 and body["model"] == "dinov2"
 
 
+def test_no_auth_by_default(client):
+    # empty password → open app, capabilities reports auth off
+    assert client.get("/api/stats").status_code == 200
+    assert client.get("/api/capabilities").json()["auth"] is False
+
+
+def test_auth_gate_blocks_then_allows(cfg):
+    cfg.auth.password = "hunter2"
+    # a fresh client with no cookie jar shared across the login boundary
+    client = TestClient(create_app(cfg))
+    # API is 401 without a session; a browser GET gets the login page (200 HTML)
+    assert client.get("/api/stats").status_code == 401
+    page = client.get("/")
+    assert page.status_code == 200 and "sign in" in page.text.lower()
+    assert client.get("/api/capabilities").status_code == 401
+
+    # wrong password stays locked
+    assert client.post("/api/login", json={"password": "nope"}).status_code == 401
+    # correct password sets the session cookie; the client jar carries it
+    ok = client.post("/api/login", json={"password": "hunter2"})
+    assert ok.status_code == 200 and "peaks_session" in ok.cookies
+    assert client.get("/api/stats").status_code == 200
+
+    # logout clears it → gated again
+    client.post("/api/logout")
+    assert client.get("/api/stats").status_code == 401
+
+
+def test_auth_rejects_garbage_and_sets_ttl(cfg):
+    cfg.auth.password = "pw"
+    cfg.auth.session_hours = 1.0
+    client = TestClient(create_app(cfg))
+    # a forged/garbage session cookie is not a known token → still gated
+    client.cookies.set("peaks_session", "not-a-real-token")
+    assert client.get("/api/stats").status_code == 401
+    # a real login stamps a cookie whose max-age matches the 1-hour session
+    ok = client.post("/api/login", json={"password": "pw"})
+    set_cookie = ok.headers["set-cookie"].lower()
+    assert "max-age=3600" in set_cookie and "httponly" in set_cookie
+
+
 def test_capabilities_reports_index(client):
     r = client.get("/api/capabilities")
     body = r.json()

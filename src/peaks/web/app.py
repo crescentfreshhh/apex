@@ -16,6 +16,43 @@ from .service import Service
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Self-contained login screen (no /static needed — those assets are gated too),
+# served for any unauthenticated non-API request when a password is configured.
+_LOGIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Opus — sign in</title><link rel="icon" href="data:,">
+<style>
+  :root{--bg:#0b0b0d;--panel:#141417;--panel2:#1b1b20;--fg:#e8e8ea;--dim:#8a8a92;
+    --line:#2a2a30;--accent:#c8a24a;--bad:#e0604d}
+  *{box-sizing:border-box}html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);display:flex;align-items:center;
+    justify-content:center;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  form{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:32px 28px;width:300px;text-align:center}
+  .brand{font-weight:700;color:var(--accent);letter-spacing:.5px;font-size:26px}
+  .sub{color:var(--dim);margin-bottom:20px;font-size:13px}
+  input{width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:8px;padding:11px 12px;font-size:15px;margin-bottom:12px}
+  button{width:100%;background:var(--accent);color:#1a1400;border:none;border-radius:8px;
+    padding:11px;font-size:15px;font-weight:600;cursor:pointer}
+  button:hover{filter:brightness(1.06)}
+  #err{color:var(--bad);font-size:13px;min-height:18px;margin-top:10px}
+</style></head><body>
+<form id="f" autocomplete="on">
+  <div class="brand">Opus</div><div class="sub">peaks — sign in</div>
+  <input id="pw" type="password" placeholder="Password" autofocus autocomplete="current-password">
+  <button type="submit">Unlock</button>
+  <div id="err"></div>
+</form>
+<script>
+  const f=document.getElementById('f'),pw=document.getElementById('pw'),err=document.getElementById('err');
+  f.addEventListener('submit',async e=>{e.preventDefault();err.textContent='';
+    try{const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({password:pw.value})});
+      if(r.ok){location.reload();}else{err.textContent='Wrong password';pw.value='';pw.focus();}}
+    catch{err.textContent='Something went wrong';}});
+</script></body></html>"""
+
 
 def _scene_edit_model():
     """Request body for scene edits (module-level so FastAPI resolves it as a
@@ -73,6 +110,18 @@ def _models_model():
 ModelsIn = _models_model()
 
 
+def _login_model():
+    from pydantic import BaseModel
+
+    class LoginIn(BaseModel):
+        password: str = ""
+
+    return LoginIn
+
+
+LoginIn = _login_model()
+
+
 def _hit_payload(service: Service, hits) -> list[dict]:
     meta = service.scene_meta([h.scene_id for h in hits if h.scene_id])
     out = []
@@ -102,13 +151,72 @@ def _hit_payload(service: Service, hits) -> list[dict]:
 
 
 def create_app(cfg=None):
-    from fastapi import FastAPI, HTTPException, Query
-    from fastapi.responses import FileResponse, JSONResponse, Response
+    import secrets
+    import time as _time
+
+    from fastapi import Cookie, FastAPI, HTTPException, Query, Request
+    from fastapi.responses import (
+        FileResponse,
+        HTMLResponse,
+        JSONResponse,
+        Response,
+    )
     from fastapi.staticfiles import StaticFiles
 
     service = Service(cfg)
     jobs = JobManager()
     app = FastAPI(title="peaks", docs_url="/api/docs")
+
+    # --- auth (optional password gate over the whole app) -------------------
+    _auth_pw = service.cfg.auth.password
+    _auth_on = bool(_auth_pw)
+    _session_ttl = max(60.0, service.cfg.auth.session_hours * 3600.0)
+    _sessions: dict[str, float] = {}  # token -> expiry epoch (sliding)
+
+    def _session_valid(token: str | None) -> bool:
+        if not token:
+            return False
+        exp = _sessions.get(token)
+        if exp is None:
+            return False
+        if _time.time() > exp:
+            _sessions.pop(token, None)
+            return False
+        _sessions[token] = _time.time() + _session_ttl  # refresh on activity
+        return True
+
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        if not _auth_on or request.url.path == "/api/login":
+            return await call_next(request)
+        if _session_valid(request.cookies.get("peaks_session")):
+            return await call_next(request)
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": "authentication required"}, status_code=401)
+        return HTMLResponse(_LOGIN_HTML, status_code=200)
+
+    @app.post("/api/login")
+    def login(body: LoginIn):
+        if not _auth_on:
+            return {"ok": True}
+        if secrets.compare_digest(body.password or "", _auth_pw):
+            token = secrets.token_urlsafe(32)
+            _sessions[token] = _time.time() + _session_ttl
+            resp = JSONResponse({"ok": True})
+            resp.set_cookie(
+                "peaks_session", token, max_age=int(_session_ttl),
+                httponly=True, samesite="lax", path="/",
+            )
+            return resp
+        _time.sleep(0.5)  # gentle brute-force damper
+        raise HTTPException(401, "wrong password")
+
+    @app.post("/api/logout")
+    def logout(peaks_session: str | None = Cookie(default=None)):
+        _sessions.pop(peaks_session or "", None)
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie("peaks_session", path="/")
+        return resp
 
     # --- meta ---------------------------------------------------------------
 
@@ -124,6 +232,7 @@ def create_app(cfg=None):
             "has_clip": service.has_clip_index(),
             "embed_running": jobs.running("embed") is not None,
             "score_running": jobs.running("score") is not None,
+            "auth": _auth_on,
         }
 
     # --- jobs ---------------------------------------------------------------

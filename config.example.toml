@@ -4,6 +4,17 @@
 # You can also override any of these with environment variables:
 #   STASH_URL, STASH_API_KEY
 
+[auth]
+# Password-gate the whole web app — the dashboard, Explore, For You, the API,
+# and the megaboard. Empty = open (no login, the default). Set a password and
+# every visit needs it. Keep it out of the repo (config.toml is gitignored) or
+# set it via the PEAKS_PASSWORD env var. (Env: PEAKS_PASSWORD)
+password = ""
+# A login lasts this long, refreshed on each request (so it's an idle timeout —
+# an hour of inactivity signs you out). (Env: PEAKS_SESSION_HOURS)
+session_hours = 1.0
+
+
 [stash]
 # Base URL of your Stash server (no trailing /graphql — the client adds it).
 url = "http://192.168.1.2:6969"
