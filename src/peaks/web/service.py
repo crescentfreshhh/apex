@@ -121,14 +121,14 @@ class Service:
     def get_models(self) -> dict:
         """Active models + the option lists, so the GUI can render the pickers
         and show whether the choice is a saved override or the container default."""
-        from ..embedding import DINO_BACKBONES
-
         s = self._settings()
         return {
             "dino_model": self._active_dino_model(),
             "clip_model": self._active_clip_model(),
-            "dino_options": list(DINO_BACKBONES),
-            "clip_options": ["ViT-B-32", "ViT-L-14", "ViT-H-14"],
+            # curated to the top-tier backbones/variants the GUI offers; the
+            # smaller models still validate (for env overrides) but aren't shown.
+            "dino_options": ["dinov2_vitl14", "dinov2_vitg14"],
+            "clip_options": ["ViT-H-14"],
             "dino_saved": bool(s.get("dino_model")),
             "clip_saved": bool(s.get("clip_model")),
             "dino_default": self.cfg.embedding.dino_model,

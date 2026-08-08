@@ -26,6 +26,7 @@ def cfg(tmp_path):
     c = Config()
     c.embedding.cache_dir = str(tmp_path / "cache")
     c.embedding.model = "dino"  # canonical -> dinov2
+    c.embedding.dino_model = "dinov2_vits14"  # legacy "dinov2" namespace (tests seed it)
     cache = EmbeddingCache(c.embedding.cache_dir)
     cache.save(
         "k1", "dinov2",

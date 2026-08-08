@@ -32,17 +32,13 @@
       <div class="row">
         <label>DINOv2 backbone
           <select id="sel-dino">
-            <option value="dinov2_vits14">small — vits14 (fast)</option>
-            <option value="dinov2_vitb14">base — vitb14 (sharper)</option>
-            <option value="dinov2_vitl14">large — vitl14</option>
-            <option value="dinov2_vitg14">giant — vitg14 (heavy)</option>
+            <option value="dinov2_vitl14">large — vitl14 (default)</option>
+            <option value="dinov2_vitg14">giant — vitg14 (heaviest)</option>
           </select>
         </label>
         <label>CLIP variant
           <select id="sel-clip">
-            <option value="ViT-B-32">ViT-B-32 (small/fast)</option>
-            <option value="ViT-L-14">ViT-L-14 (sharp)</option>
-            <option value="ViT-H-14">ViT-H-14 (heavy)</option>
+            <option value="ViT-H-14">ViT-H-14 (largest)</option>
           </select>
         </label>
         <span id="models-status" class="dim"></span>
@@ -76,9 +72,9 @@
         <label>Interval (s)<input id="adv-interval" type="number" min="1" step="1" /></label>
         <label>GPU decode
           <select id="adv-hwaccel">
-            <option value="">off (CPU)</option>
             <option value="cuda">cuda (NVDEC)</option>
             <option value="auto">auto</option>
+            <option value="">off (CPU)</option>
           </select>
         </label>
         <label>Workers<input id="adv-workers" type="number" min="1" step="1" /></label>

@@ -33,11 +33,11 @@ interval_seconds = 8.0
 # (Env override: PEAKS_SAMPLING_MODE)
 mode = "sparse"
 
-# GPU-assisted video decode: "" (CPU), "cuda" (NVDEC), or "auto".
-# Decode — not embedding — is the pipeline bottleneck; if the GPU is in the
-# box anyway, "cuda" is usually a large speedup on H.264/HEVC sources.
-# (Env override: PEAKS_HWACCEL)
-hwaccel = ""
+# GPU-assisted video decode: "cuda" (NVDEC, default), "auto", or "" (CPU).
+# Decode — not embedding — is the pipeline bottleneck; on a GPU box "cuda" is a
+# large speedup on H.264/HEVC sources. Use "auto" if the GPU is sometimes handed
+# back to a VM (NVDEC when present, CPU when not). (Env override: PEAKS_HWACCEL)
+hwaccel = "cuda"
 
 # Frame delivery: "raw" (default) pipes raw frames from ffmpeg straight to the
 # GPU at the model's input size — no JPEG encode, no PIL decode, no CPU resize.
@@ -104,18 +104,16 @@ workers = 3
 # starting default.
 #
 # Which OpenCLIP variant powers the "clip" channel (search + tags + "CLIP sees").
-# "ViT-L-14" (default) is sharper than the older "ViT-B-32" at ~2-3x the cost;
-# "ViT-H-14" is sharper still but heavy. The CLIP cache is namespaced per
+# "ViT-H-14" (default) is the largest/sharpest. The CLIP cache is namespaced per
 # variant, so switching means re-running the CLIP embed pass (the old cache is
 # left untouched and can be deleted). (Env: PEAKS_CLIP_MODEL, PEAKS_CLIP_PRETRAINED)
-clip_model = "ViT-L-14"
-clip_pretrained = "laion2b_s32b_b82k"
-# DINOv2 backbone (visual structure / "find similar"). "dinov2_vits14" (small,
-# default) → "dinov2_vitb14" (base, sharper) → "dinov2_vitl14" (large) →
-# "dinov2_vitg14" (giant). Bigger = more accurate at more cost. Cache is
-# namespaced per backbone, so switching means re-embedding DINO.
+clip_model = "ViT-H-14"
+clip_pretrained = "laion2b_s32b_b79k"
+# DINOv2 backbone (visual structure / "find similar"). "dinov2_vitl14" (large,
+# default) or "dinov2_vitg14" (giant). Bigger = more accurate at more cost.
+# Cache is namespaced per backbone, so switching means re-embedding DINO.
 # (Env override: PEAKS_DINO_MODEL)
-dino_model = "dinov2_vits14"
+dino_model = "dinov2_vitl14"
 
 
 [scoring]

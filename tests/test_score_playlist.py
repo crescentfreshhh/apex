@@ -20,6 +20,7 @@ def _service(tmp_path):
     cfg = Config()
     cfg.embedding.cache_dir = str(tmp_path / "cache" / "embeddings")
     cfg.embedding.model = "dino"
+    cfg.embedding.dino_model = "dinov2_vits14"  # legacy "dinov2" namespace (tests seed it)
     cfg.embedding.clip_model = "ViT-B-32"  # so _clip_name() == "clip" (tests seed "clip")
     return svc_mod.Service(cfg), cfg
 
