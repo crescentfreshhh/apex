@@ -99,6 +99,18 @@ class ModelingConfig:
     # many new ratings, so "Train now" is optional. 0 disables (manual only).
     # (Env override: PEAKS_AUTOTRAIN_EVERY)
     autotrain_every: int = 25
+    # Taste model kind: "auto" (logreg on small data, non-linear MLP once there's
+    # enough — captures multi-modal taste), or force "logreg" / "mlp". Applies to
+    # the For You taste model only, not scoring. (Env: PEAKS_TASTE_CLASSIFIER)
+    taste_classifier: str = "auto"
+    # Weight recent ratings more when training taste: a rating this many days old
+    # counts half as much, so your taste evolves with you. 0 = off (uniform).
+    # (Env override: PEAKS_RECENCY_HALFLIFE_DAYS)
+    recency_halflife_days: float = 90.0
+    # How much the For You feed trades relevance for variety (0 = pure best-match,
+    # 1 = maximally diverse). A little keeps it from collapsing into a bubble.
+    # (Env override: PEAKS_FEED_DIVERSITY)
+    feed_diversity: float = 0.3
 
 
 @dataclass
@@ -256,6 +268,24 @@ class Config:
                 os.environ.get(
                     "PEAKS_AUTOTRAIN_EVERY",
                     modeling_raw.get("autotrain_every", ModelingConfig.autotrain_every),
+                )
+            ),
+            taste_classifier=os.environ.get(
+                "PEAKS_TASTE_CLASSIFIER",
+                modeling_raw.get("taste_classifier", ModelingConfig.taste_classifier),
+            ),
+            recency_halflife_days=float(
+                os.environ.get(
+                    "PEAKS_RECENCY_HALFLIFE_DAYS",
+                    modeling_raw.get(
+                        "recency_halflife_days", ModelingConfig.recency_halflife_days
+                    ),
+                )
+            ),
+            feed_diversity=float(
+                os.environ.get(
+                    "PEAKS_FEED_DIVERSITY",
+                    modeling_raw.get("feed_diversity", ModelingConfig.feed_diversity),
                 )
             ),
         )

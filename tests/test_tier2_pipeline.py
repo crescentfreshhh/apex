@@ -59,6 +59,54 @@ def test_build_training_set_empty(tmp_path):
     assert X.shape[0] == 0 and y.shape[0] == 0
 
 
+def test_recency_weights_decay_with_age():
+    from time import time as now
+
+    from peaks.pipeline import recency_weights
+
+    day = 86400.0
+    t = now()
+    ts = np.array([t, t - 90 * day, t - 180 * day, 0.0])  # fresh, 90d, 180d, unknown
+    w = recency_weights(ts, halflife_days=90.0)
+    assert w[0] > w[1] > w[2]                 # newer ratings weigh more
+    assert abs(w[1] / w[0] - 0.5) < 0.02      # one half-life ≈ half the weight
+    assert w[3] >= 0.05                        # unknown-time floored, not zeroed
+    assert recency_weights(ts, halflife_days=0.0) is None      # 0 disables
+    assert recency_weights(np.zeros(3), halflife_days=90.0) is None  # no timestamps
+
+
+def test_train_profile_auto_picks_logreg_on_small_data(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    _cache_scene(cache, "k1", "1", n=20, dim=16, seed=3)
+    store = LabelStore(tmp_path / "labels.json")
+    for t in (0.0, 2.0, 4.0):
+        store.add("k1", t, 1, "apex")
+    for t in (30.0, 34.0, 38.0):
+        store.add("k1", t, 0, "apex")
+    _, stats = train_profile(
+        store, cache, "fake", "apex", kind="auto", recency_halflife_days=90.0
+    )
+    assert stats["kind"] == "logreg"   # far below the MLP threshold
+    assert stats["recency"] is True    # labels carry timestamps → recency applied
+
+
+def test_train_profile_mlp_with_recency_trains(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    _cache_scene(cache, "k1", "1", n=20, dim=16, seed=5)
+    store = LabelStore(tmp_path / "labels.json")
+    for t in (0.0, 2.0, 4.0, 6.0):
+        store.add("k1", t, 1, "apex")
+    for t in (30.0, 34.0, 38.0):
+        store.add("k1", t, 0, "apex")
+    clf, stats = train_profile(
+        store, cache, "fake", "apex", kind="mlp", recency_halflife_days=30.0
+    )
+    assert stats["kind"] == "mlp" and clf.fitted
+    # a usable probability comes out (resample path didn't drop a class)
+    p = clf.predict_proba(np.ones((1, 16), dtype=np.float32))
+    assert 0.0 <= float(p[0]) <= 1.0
+
+
 def test_gather_candidates_prioritizes_high_scores(tmp_path):
     cache = EmbeddingCache(tmp_path)
     _cache_scene(cache, "k1", "1", n=10)

@@ -158,3 +158,15 @@ labels_path = "labels.json"  # your frame labels (gitignored)
 # new ratings, so "Train now" is optional — just keep swiping. 0 = manual only.
 # (Env override: PEAKS_AUTOTRAIN_EVERY)
 autotrain_every = 25
+# Taste model kind: "auto" (robust logreg on small data, non-linear MLP once
+# there's enough — captures liking several distinct kinds of moments), or force
+# "logreg" / "mlp". For You only, not scoring. (Env: PEAKS_TASTE_CLASSIFIER)
+taste_classifier = "auto"
+# Weight recent ratings more when training taste — a rating this many days old
+# counts half as much, so your taste evolves with you instead of averaging your
+# whole history. 0 = off (all ratings equal). (Env: PEAKS_RECENCY_HALFLIFE_DAYS)
+recency_halflife_days = 90.0
+# How much the For You feed trades relevance for variety (0 = pure best-match,
+# 1 = maximally diverse). A little spread keeps it from collapsing into
+# near-duplicates of your one favourite. (Env override: PEAKS_FEED_DIVERSITY)
+feed_diversity = 0.3

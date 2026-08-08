@@ -327,6 +327,28 @@ def test_recommend_reranks_with_trained_model(tmp_path, monkeypatch):
     assert r["hits"][0].scene_id == "2"
 
 
+def test_diversify_breaks_up_near_duplicates(tmp_path):
+    from peaks.cache import EmbeddingCache
+    from peaks.search import Hit
+
+    svc, cfg = _service(tmp_path)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    # three scenes: A and B look near-identical; C is different
+    cache.save("A", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    cache.save("B", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[0.99, 0.14, 0, 0]], dtype="float32"), meta={"scene_id": "2"})
+    cache.save("C", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[0, 0, 1, 0]], dtype="float32"), meta={"scene_id": "3"})
+    # ranking has the two look-alikes on top, the different one last
+    ranked = [Hit("1", "A", 0.0, 0.99), Hit("2", "B", 0.0, 0.98), Hit("3", "C", 0.0, 0.90)]
+
+    pure = svc._diversify(ranked, "dinov2", k=2, diversity=0.0)
+    assert [h.key for h in pure] == ["A", "B"]  # pure ranking keeps the duplicates
+    diverse = svc._diversify(ranked, "dinov2", k=2, diversity=0.6)
+    assert [h.key for h in diverse] == ["A", "C"]  # variety pulls C above the near-dupe B
+
+
 def test_recommend_empty_without_taste(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")

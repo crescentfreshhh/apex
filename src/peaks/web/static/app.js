@@ -362,7 +362,7 @@ $("#btn-train").addEventListener("click", async () => {
   const btn = $("#btn-train"); btn.disabled = true;
   try {
     const s = await api("/api/train", { method: "POST" });
-    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
   } catch (e) { toast(e.message, true); }
   btn.disabled = false;
 });
@@ -642,6 +642,7 @@ async function loadForYou(rebuild) {
       `Built from ${d.sources} loved moment${d.sources === 1 ? "" : "s"}` +
       (recentN() ? " (lately)" : "") +
       (d.reranked ? " · reranked by your taste model" : " · taste centroid (train to sharpen)") +
+      (d.diversified ? " · diverse mix" : "") +
       ` · ${d.model}`;
     currentContext = { kind: "foryou" };
     renderHits(d.items, grid);
@@ -709,7 +710,7 @@ $("#btn-swipe-train")?.addEventListener("click", async () => {
   const btn = $("#btn-swipe-train"); btn.disabled = true;
   try {
     const s = await api("/api/train", { method: "POST" });
-    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
     loadNextSwipe();
   } catch (e) { toast(e.message, true); }
   btn.disabled = false;

@@ -522,17 +522,20 @@ class Candidate:
 
 
 def build_training_set(
-    label_store, cache: EmbeddingCache, model_name: str, profile: str
-) -> tuple[np.ndarray, np.ndarray]:
+    label_store, cache: EmbeddingCache, model_name: str, profile: str,
+    with_recency: bool = False,
+):
     """Assemble (X, y) from labels: each label's nearest cached frame vector.
 
-    Loads each scene's cache once. Skips labels whose scene isn't cached.
+    Loads each scene's cache once. Skips labels whose scene isn't cached. With
+    `with_recency`, also returns a per-row `ts` (when each rating was made), so
+    training can weight recent ratings more heavily.
     """
     by_key: dict[str, list] = defaultdict(list)
     for lab in label_store.for_profile(profile):
         by_key[lab.key].append(lab)
 
-    rows, ys = [], []
+    rows, ys, tss = [], [], []
     for key, labs in by_key.items():
         if not cache.has(key, model_name):
             continue
@@ -543,9 +546,35 @@ def build_training_set(
             idx = int(np.argmin(np.abs(times - lab.time)))
             rows.append(vecs[idx])
             ys.append(lab.label)
+            tss.append(getattr(lab, "ts", 0.0) or 0.0)
     if not rows:
-        return np.zeros((0, 0), dtype=np.float32), np.zeros((0,), dtype=int)
-    return np.asarray(rows, dtype=np.float32), np.asarray(ys, dtype=int)
+        empty = (np.zeros((0, 0), dtype=np.float32), np.zeros((0,), dtype=int))
+        return (*empty, np.zeros((0,), dtype=np.float64)) if with_recency else empty
+    X = np.asarray(rows, dtype=np.float32)
+    y = np.asarray(ys, dtype=int)
+    if with_recency:
+        return X, y, np.asarray(tss, dtype=np.float64)
+    return X, y
+
+
+def recency_weights(ts: np.ndarray, halflife_days: float) -> np.ndarray | None:
+    """Per-sample weights that decay with age: a rating `halflife_days` old
+    counts half as much as a fresh one, so the model tracks your *current*
+    taste instead of averaging your whole history. Ratings with an unknown
+    time (ts=0, pre-dating the field) are treated as the oldest known rating,
+    and a floor keeps old history from vanishing entirely. Returns None when
+    recency is off or no timestamps exist (→ uniform weighting)."""
+    ts = np.asarray(ts, dtype=np.float64)
+    known = ts[ts > 0]
+    if halflife_days <= 0 or known.size == 0:
+        return None
+    from time import time as _now
+
+    now = max(float(known.max()), _now())
+    eff = np.where(ts > 0, ts, float(known.min()))
+    age_days = np.clip((now - eff) / 86400.0, 0.0, None)
+    w = 0.5 ** (age_days / float(halflife_days))
+    return np.maximum(w, 0.05)  # old history still counts a little
 
 
 def gather_candidates(
@@ -615,27 +644,45 @@ def gather_candidates(
     return cands
 
 
+# "auto" taste classifier switches to the non-linear MLP once there's enough
+# data for it not to overfit; below this it stays on the robust logreg.
+AUTO_MLP_MIN_SAMPLES = 200
+
+
 def train_profile(
-    label_store, cache: EmbeddingCache, model_name: str, profile: str, kind: str = "logreg"
+    label_store, cache: EmbeddingCache, model_name: str, profile: str,
+    kind: str = "logreg", recency_halflife_days: float = 0.0,
 ):
     """Build the training set and fit a TasteClassifier for `profile`.
 
-    When there are enough labels, stats include `cv_auc`: mean ROC-AUC over
-    stratified cross-validation folds — a quick "is this model any good"
-    signal (1.0 = perfect separation, 0.5 = coin flip) before trusting it on
-    the whole library.
+    `kind="auto"` picks logreg on small data (robust) and the non-linear MLP
+    once there's enough (captures multi-modal taste). `recency_halflife_days`>0
+    weights recent ratings more, so the model evolves with you. When there are
+    enough labels, stats include `cv_auc`: mean ROC-AUC over stratified CV folds
+    — a quick "is this model any good" signal (1.0 = perfect, 0.5 = coin flip).
     """
     from .classifier import TasteClassifier
 
-    X, y = build_training_set(label_store, cache, model_name, profile)
-    clf = TasteClassifier(kind=kind, model_name=model_name, profile=profile)
-    clf.train(X, y)
-    stats = {"samples": int(X.shape[0]), "positives": int((y == 1).sum())}
+    X, y, ts = build_training_set(
+        label_store, cache, model_name, profile, with_recency=True
+    )
+    resolved = kind
+    if kind == "auto":
+        resolved = "mlp" if int(X.shape[0]) >= AUTO_MLP_MIN_SAMPLES else "logreg"
+    sample_weight = recency_weights(ts, recency_halflife_days)
 
+    clf = TasteClassifier(kind=resolved, model_name=model_name, profile=profile)
+    clf.train(X, y, sample_weight=sample_weight)
+    stats = {
+        "samples": int(X.shape[0]), "positives": int((y == 1).sum()),
+        "kind": resolved, "recency": sample_weight is not None,
+    }
+
+    # CV quality signal (logreg only — cheap, and MLP CV is slow/unweighted)
     n_pos = int((y == 1).sum())
     n_neg = int((y == 0).sum())
     folds = min(5, n_pos, n_neg)
-    if folds >= 2:
+    if resolved == "logreg" and folds >= 2:
         from sklearn.model_selection import cross_val_score
 
         scores = cross_val_score(

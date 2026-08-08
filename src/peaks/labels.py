@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import time as _now
 
 
 @dataclass
@@ -23,6 +24,7 @@ class Label:
     label: int  # 1 = positive (want it), 0 = negative
     profile: str  # taste tag this label belongs to
     scene_id: str | None = None
+    ts: float = 0.0  # when the rating was made (unix time); 0 = pre-dates the field
 
 
 class LabelStore:
@@ -61,7 +63,10 @@ class LabelStore:
         profile: str,
         scene_id: str | None = None,
     ) -> None:
-        lab = Label(key=key, time=float(time), label=int(label), profile=profile, scene_id=scene_id)
+        lab = Label(
+            key=key, time=float(time), label=int(label), profile=profile,
+            scene_id=scene_id, ts=_now(),  # re-rating counts as recent activity
+        )
         self._labels[self._id(key, time, profile)] = lab
 
     def for_profile(self, profile: str) -> list[Label]:

@@ -18,6 +18,23 @@ from pathlib import Path
 import numpy as np
 
 
+def _weighted_resample(X, y, w, seed: int = 0):
+    """Per-class weighted bootstrap: resample each class to its own size, drawing
+    with probability ∝ weight. Emulates sample_weight for estimators that lack
+    it (MLP) while guaranteeing both classes survive at their original balance."""
+    rng = np.random.default_rng(seed)
+    w = np.clip(np.asarray(w, dtype=np.float64), 1e-9, None)
+    picks = []
+    for cls in (0, 1):
+        idx = np.where(y == cls)[0]
+        if idx.size:
+            p = w[idx] / w[idx].sum()
+            picks.append(rng.choice(idx, size=idx.size, replace=True, p=p))
+    sel = np.concatenate(picks)
+    rng.shuffle(sel)
+    return X[sel], y[sel]
+
+
 class TasteClassifier:
     def __init__(self, kind: str = "logreg", model_name: str = "", profile: str = ""):
         self.kind = kind
@@ -37,10 +54,13 @@ class TasteClassifier:
         if self.kind == "mlp":
             from sklearn.neural_network import MLPClassifier
 
-            return MLPClassifier(hidden_layer_sizes=(128,), max_iter=500)
+            # a touch of L2 (alpha) to keep the non-linear model honest
+            return MLPClassifier(hidden_layer_sizes=(128,), max_iter=500, alpha=1e-3)
         raise ValueError(f"unknown classifier kind: {self.kind!r}")
 
-    def train(self, X: np.ndarray, y: np.ndarray) -> "TasteClassifier":
+    def train(
+        self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
+    ) -> "TasteClassifier":
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y).astype(int)
         if X.ndim != 2 or X.shape[0] == 0:
@@ -52,7 +72,15 @@ class TasteClassifier:
                 f"got classes {sorted(classes)}"
             )
         self._clf = self._new_estimator()
-        self._clf.fit(X, y)
+        if sample_weight is not None and self.kind == "mlp":
+            # MLPClassifier has no sample_weight → emulate it with a per-class
+            # weighted bootstrap (keeps both classes and their balance).
+            Xr, yr = _weighted_resample(X, y, sample_weight)
+            self._clf.fit(Xr, yr)
+        elif sample_weight is not None:
+            self._clf.fit(X, y, sample_weight=np.asarray(sample_weight, dtype=np.float64))
+        else:
+            self._clf.fit(X, y)
         self.dim = X.shape[1]
         self._pos_index = int(np.where(self._clf.classes_ == 1)[0][0])
         return self

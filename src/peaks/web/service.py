@@ -909,7 +909,9 @@ class Service:
         model = model or self._model_name()
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         clf, stats = train_profile(
-            self._label_store(), cache, model, profile, kind=self.cfg.modeling.classifier
+            self._label_store(), cache, model, profile,
+            kind=self.cfg.modeling.taste_classifier,
+            recency_halflife_days=self.cfg.modeling.recency_halflife_days,
         )
         out = self._taste_path(profile, model)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1040,11 +1042,45 @@ class Service:
         # surface moments the centroid alone ranked lower.
         pool = self.index(model).search(c, top_k=max(top_k * 4, 200), per_scene=per_scene)
         reranked = self._taste_model(self.cfg.markers.tag_name, model) is not None
-        hits = self._rerank_by_taste(pool, model) if reranked else pool
+        ranked = self._rerank_by_taste(pool, model) if reranked else pool
+        diversity = self.cfg.modeling.feed_diversity
+        hits = self._diversify(ranked, model, top_k, diversity)
         return {
-            "hits": hits[:top_k], "sources": n, "total": len(sources),
-            "model": model, "reranked": reranked,
+            "hits": hits, "sources": n, "total": len(sources),
+            "model": model, "reranked": reranked, "diversified": diversity > 0,
         }
+
+    def _diversify(self, hits: list[Hit], model: str, k: int, diversity: float) -> list[Hit]:
+        """Maximal Marginal Relevance: pick a top-`k` that balances taste-rank
+        against variety, so the feed spans your taste instead of collapsing into
+        near-duplicates of your single favourite. `diversity` in [0,1]: 0 keeps
+        the pure ranking, higher trades relevance for spread."""
+        if diversity <= 0 or len(hits) <= k:
+            return hits[:k]
+        idx = self.index(model)
+        dim = idx.dim or 1
+        rows = []
+        for h in hits:
+            v = idx.vector_at(h.key, h.time)
+            rows.append(v if v is not None else np.zeros(dim, dtype=np.float32))
+        c = np.asarray(rows, dtype=np.float32)
+        norms = np.linalg.norm(c, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        c = c / norms  # unit rows → dot = cosine
+        n = len(hits)
+        rel = np.linspace(1.0, 0.0, n, dtype=np.float32)  # rank-based (best first)
+        lam = 1.0 - float(np.clip(diversity, 0.0, 1.0))
+        chosen = [0]
+        max_sim = c @ c[0]  # similarity of every candidate to the first pick
+        picked = {0}
+        while len(chosen) < min(k, n):
+            mmr = lam * rel - (1.0 - lam) * max_sim
+            mmr[list(picked)] = -np.inf
+            j = int(np.argmax(mmr))
+            chosen.append(j)
+            picked.add(j)
+            max_sim = np.maximum(max_sim, c @ c[j])
+        return [hits[i] for i in chosen]
 
     def next_uncertain(self, model: str | None = None, pool: int = 800) -> dict | None:
         """The unlabeled frame the taste model is least sure about — active
