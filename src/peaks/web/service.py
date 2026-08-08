@@ -875,6 +875,62 @@ class Service:
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
 
+    def delete_taste(self, profile: str | None = None, within_minutes: float | None = None) -> dict:
+        """Erase learned taste: all 👍/👎 ratings for a profile, or only those
+        from the last `within_minutes` (an undo). Retrains from what remains if
+        both classes survive, else drops the trained model. Saved apex markers in
+        Stash are NOT touched — they're separate curated favourites."""
+        profile = profile or self.cfg.markers.tag_name
+        store = self._label_store()
+        if within_minutes and within_minutes > 0:
+            from time import time as _now
+
+            removed = store.remove(profile, newer_than=_now() - within_minutes * 60.0)
+        else:
+            removed = store.remove(profile)  # everything for this profile
+        store.save()
+        self._taste_src_cache.clear()
+        self.reset_labels_since_train()
+        pos, neg = store.counts(profile)
+
+        retrained = model_deleted = False
+        if within_minutes and pos >= 1 and neg >= 1:
+            # enough remains → refit so the model reflects the reduced history
+            try:
+                self.train_taste(profile=profile)
+                retrained = True
+            except Exception:  # noqa: BLE001 — fall through to dropping the model
+                model_deleted = self._delete_taste_models(profile)
+        else:
+            # full wipe, or not enough labels left to train → remove the model(s)
+            model_deleted = self._delete_taste_models(profile)
+        return {
+            "profile": profile, "removed": removed, "positive": pos, "negative": neg,
+            "retrained": retrained, "model_deleted": model_deleted,
+        }
+
+    def _delete_taste_models(self, profile: str) -> bool:
+        """Delete every trained taste model for `profile` (across embedding
+        spaces) and drop any in-memory copies. Returns True if anything went."""
+        from pathlib import Path
+
+        from ..pipeline import safe_tag
+
+        prefix = safe_tag(profile) + "__"
+        taste_dir = Path(self.cfg.modeling.dir) / "taste"
+        removed = False
+        if taste_dir.is_dir():
+            for p in taste_dir.glob(prefix + "*.pkl"):
+                try:
+                    p.unlink()
+                    removed = True
+                except OSError:
+                    pass
+        with self._taste_lock:
+            for k in [k for k in self._taste if Path(k).name.startswith(prefix)]:
+                self._taste.pop(k, None)
+        return removed
+
     def autotrain_due(self, profile: str | None = None) -> bool:
         """True when enough new ratings have piled up to retrain in the
         background — and there's at least one 👍 and one 👎 (a classifier needs

@@ -214,6 +214,20 @@
       </div>
     </div>
 
+    <div class="panel" id="taste-manage">
+      <h2>Manage taste</h2>
+      <p class="dim">Undo a bad session, or wipe your learned taste to start fresh.
+        This deletes your 👍/👎 ratings (and retrains on what's left) — your saved
+        apex moments in Stash are <strong>not</strong> touched.</p>
+      <div class="row">
+        <button class="ghost" data-del="20">Undo last 20 min</button>
+        <button class="ghost" data-del="60">Undo last 1 hr</button>
+        <button class="ghost" data-del="360">Undo last 6 hr</button>
+        <button class="danger" data-del="all">Delete entire taste profile</button>
+        <span id="taste-manage-status" class="dim"></span>
+      </div>
+    </div>
+
     <div id="foryou-results" class="grid"></div>
   </section>
 

@@ -86,6 +86,19 @@ class LabelStore:
         pos = sum(1 for l in labs if l.label == 1)
         return pos, len(labs) - pos
 
+    def remove(self, profile: str, newer_than: float | None = None) -> int:
+        """Delete labels for `profile`. With `newer_than` (unix ts), only those
+        rated at/after it — an "undo the last N minutes". Returns how many were
+        removed. Caller should save()."""
+        drop = [
+            k for k, lab in self._labels.items()
+            if lab.profile == profile
+            and (newer_than is None or (lab.ts or 0.0) >= newer_than)
+        ]
+        for k in drop:
+            del self._labels[k]
+        return len(drop)
+
     def profiles(self) -> list[str]:
         return sorted({l.profile for l in self._labels.values()})
 

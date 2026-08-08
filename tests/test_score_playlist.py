@@ -327,6 +327,60 @@ def test_recommend_reranks_with_trained_model(tmp_path, monkeypatch):
     assert r["hits"][0].scene_id == "2"
 
 
+def test_labelstore_remove_all_and_recent(tmp_path):
+    import time
+
+    from peaks.labels import LabelStore
+
+    store = LabelStore(tmp_path / "labels.json")
+    store.add("A", 0.0, 1, "apex")
+    store.add("B", 0.0, 0, "apex")
+    # backdate A so only B counts as "recent"
+    for lab in store.for_profile("apex"):
+        if lab.key == "A":
+            lab.ts = time.time() - 3600
+    assert store.remove("apex", newer_than=time.time() - 600) == 1  # drops recent B
+    assert {lab.key for lab in store.for_profile("apex")} == {"A"}
+    assert store.remove("apex") == 1 and store.for_profile("apex") == []  # wipe the rest
+
+
+def test_delete_taste_full_wipe_removes_model(tmp_path):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)
+    svc.add_label("A", 0.0, 1); svc.add_label("A", 8.0, 1)
+    svc.add_label("B", 0.0, 0); svc.add_label("B", 8.0, 0)
+    svc.train_taste(model="dinov2")
+    assert svc.has_taste()
+
+    r = svc.delete_taste()  # full wipe
+    assert r["removed"] == 4 and r["positive"] == 0 and r["model_deleted"] is True
+    assert not svc.has_taste()
+    assert svc.label_counts()["positive"] == 0
+
+
+def test_delete_taste_recent_window_keeps_and_retrains(tmp_path):
+    import time
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)
+    svc.add_label("A", 0.0, 1); svc.add_label("B", 0.0, 0)  # will backdate → "old"
+    svc.add_label("A", 8.0, 1); svc.add_label("B", 8.0, 0)  # recent
+    st = svc._label_store()
+    for lab in st.for_profile("apex"):
+        if lab.time == 0.0:
+            lab.ts = time.time() - 7200  # 2h old
+    st.save()
+
+    r = svc.delete_taste(within_minutes=60)  # drop the 2 recent, keep the 2 old
+    assert r["removed"] == 2
+    assert r["positive"] == 1 and r["negative"] == 1
+    assert r["retrained"] is True and svc.has_taste()
+
+
 def test_diversify_breaks_up_near_duplicates(tmp_path):
     from peaks.cache import EmbeddingCache
     from peaks.search import Hit
