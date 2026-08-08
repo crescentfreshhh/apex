@@ -19,6 +19,7 @@ const State = {
   shuffle: false, // whole-library random mode
   pool: null, // scene pool for shuffle
   searchMode: false,
+  source: null, // current source id (for Refresh)
 };
 
 // --- weighted, no-immediate-repeat picker ---------------------------------
@@ -417,6 +418,10 @@ function wireControls() {
   });
   document.getElementById("toggle").addEventListener("click", () => setPlaying(!State.playing));
   document.getElementById("reshuffle").addEventListener("click", reshuffle);
+  document.getElementById("refresh-lib").addEventListener("click", () => {
+    const src = State.source || document.getElementById("source").value;
+    loadSource(src, { refresh: true }); // rebuild pool/apexes from Stash
+  });
   document.getElementById("mute").addEventListener("click", () => {
     if (State.big) {
       State.big.video.muted = true;
@@ -453,13 +458,14 @@ function randomMoment() {
   };
 }
 
-async function loadSource(src) {
+async function loadSource(src, opts = {}) {
+  State.source = src;
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
   document.getElementById("error").hidden = true;
   document.getElementById("status").textContent = "loading…";
   try {
     if (src === "shuffle") {
-      const d = await api("/api/board/scenes");
+      const d = await api("/api/board/scenes" + (opts.refresh ? "?refresh=true" : ""));
       State.pool = d.scenes || [];
       if (!State.pool.length) return showError("No scenes found in your library scope.");
       State.shuffle = true;

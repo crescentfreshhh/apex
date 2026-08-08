@@ -209,8 +209,8 @@ def create_app(cfg=None):
         return service.board_sources()
 
     @app.get("/api/board/scenes")
-    def board_scenes():
-        return {"scenes": service.scene_pool()}
+    def board_scenes(refresh: bool = False):
+        return {"scenes": service.scene_pool(refresh=refresh)}
 
     @app.get("/api/board/apexes")
     def board_apexes(tag: str | None = None):
