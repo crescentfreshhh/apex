@@ -734,13 +734,30 @@ class Service:
 
     # --- search index --------------------------------------------------------
 
-    def index(self, model: str | None = None) -> SearchIndex:
+    def index(self, model: str | None = None, refresh: bool = False) -> SearchIndex:
+        """The in-memory search index for `model`, built lazily and cached.
+
+        A cached index is normally reused until an embed pass finishes (which
+        calls invalidate_index). Two exceptions keep live views honest during an
+        in-progress embed: an *empty* cached index is always rebuilt (so the
+        first embedded frames show up), and with `refresh=True` the index is
+        rebuilt whenever the cache has grown since it was built (so the swipe
+        trainer's candidate pool keeps expanding as scenes embed)."""
         model = model or self._model_name()
         with self._index_lock:
-            if model not in self._index:
+            idx = self._index.get(model)
+            rebuild = idx is None or idx.size == 0
+            if refresh and not rebuild:
                 cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-                self._index[model] = SearchIndex(cache, model).build()
-            return self._index[model]
+                if len(cache.keys(model)) != getattr(idx, "source_key_count", -1):
+                    rebuild = True
+            if rebuild:
+                cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+                keys = cache.keys(model)
+                idx = SearchIndex(cache, model).build(keys)
+                idx.source_key_count = len(keys)
+                self._index[model] = idx
+            return idx
 
     def invalidate_index(self, model: str | None = None) -> None:
         with self._index_lock:
@@ -1016,7 +1033,7 @@ class Service:
         learning: rating the ambiguous ones teaches it fastest. Falls back to
         centroid-ambiguity, then random, when there's no model/centroid yet."""
         model = model or self._model_name()
-        idx = self.index(model)
+        idx = self.index(model, refresh=True)  # pick up frames from an in-progress embed
         if idx.size == 0:
             return None
         profile = self.cfg.markers.tag_name

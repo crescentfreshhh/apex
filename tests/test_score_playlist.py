@@ -341,6 +341,24 @@ def test_recommend_empty_without_taste(tmp_path, monkeypatch):
     assert r["sources"] == 0 and r["hits"] == []
 
 
+def test_index_rebuilds_as_cache_grows(tmp_path):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    assert svc.index("dinov2").size == 0  # nothing embedded yet
+    # a scene embeds mid-session → an empty cached index is rebuilt on access
+    cache.save("A", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    assert svc.index("dinov2").size == 1
+    # another embeds; a plain access reuses the cached (now-stale) index,
+    # but refresh=True picks up the growth (what the swipe trainer uses)
+    cache.save("B", "dinov2", np.array([0.0], dtype="float32"),
+               np.array([[0, 1, 0, 0]], dtype="float32"), meta={"scene_id": "2"})
+    assert svc.index("dinov2").size == 1
+    assert svc.index("dinov2", refresh=True).size == 2
+
+
 def test_next_uncertain_skips_labeled(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
