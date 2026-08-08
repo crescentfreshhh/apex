@@ -6,6 +6,12 @@
 # is not guaranteed). The NVDEC driver libs are injected at runtime by the
 # nvidia container runtime (NVIDIA_DRIVER_CAPABILITIES must include "video").
 # Model weights (DINOv2/CLIP) download on first use into /config so they persist.
+#
+# torch is the CUDA 12.8 build (cu128): it carries kernels for Blackwell
+# (RTX 50-series, sm_120) AND older cards (Ampere/Ada), so the same image runs
+# on a 5070 or a 3080 Ti. Blackwell REQUIRES cu128 — the older cu124 wheels have
+# no sm_120 kernels and fail with "no kernel image is available". Needs a recent
+# driver (>= 570); on Blackwell that means the open-source kernel module.
 
 FROM python:3.11-slim
 
@@ -21,10 +27,10 @@ RUN apt-get update \
     && apt-get purge -y wget xz-utils && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# heavy ML deps pinned to CUDA 12.4 wheels (work on any recent driver via the
-# nvidia container runtime; also run fine on CPU)
-RUN pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 \
-    --index-url https://download.pytorch.org/whl/cu124
+# heavy ML deps pinned to CUDA 12.8 wheels — cover Blackwell (sm_120) through
+# Ampere, and still run fine on CPU when no GPU is present
+RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 WORKDIR /opt/peaks
 COPY pyproject.toml README.md config.example.toml ./
