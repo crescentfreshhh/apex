@@ -253,6 +253,38 @@ def test_find_duplicates_threshold(tmp_path):
     assert "B" in keys and "C" not in keys and "A" not in keys  # only the near-identical other scene
 
 
+def test_scene_pool_lists_scenes_with_urls(tmp_path, monkeypatch):
+    from peaks.models import Scene
+
+    svc, _ = _service(tmp_path)
+
+    class C:
+        def iter_scenes(self, path_prefix=""):
+            for i in ("1", "2"):
+                yield Scene.from_dict({"id": i, "title": "", "files": [{"path": f"/data/{i}.mp4", "duration": 100.0}], "scene_markers": []})
+
+        def stream_url(self, sid, start=None):
+            return f"http://stash/scene/{sid}/stream?start={start}"
+
+    monkeypatch.setattr(svc, "client", lambda: C())
+    pool = svc.scene_pool()
+    assert len(pool) == 2
+    assert pool[0]["scene_id"] == "1" and pool[0]["duration"] == 100.0
+    assert "start=0" in pool[0]["url"]
+    # cached: a second call doesn't rebuild (client swapped to a raiser)
+    monkeypatch.setattr(svc, "client", lambda: (_ for _ in ()).throw(AssertionError("rebuilt")))
+    assert svc.scene_pool() is pool
+
+
+def test_board_sources(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    svc.save_collection("Faves", [{"scene_id": "7"}])
+    s = svc.board_sources()
+    assert s["tag"] == "apex"
+    assert any(c["name"] == "Faves" for c in s["collections"])
+
+
 class _ReelClient:
     def iter_markers_by_tag(self, tag, page_size=200):
         yield {"marker_id": "1", "scene_id": "7", "seconds": 10.0, "end_seconds": 25.0,

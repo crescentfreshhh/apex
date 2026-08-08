@@ -202,6 +202,20 @@ def create_app(cfg=None):
     def list_reels():
         return {"reels": service.reels()}
 
+    # --- megaboard sources --------------------------------------------------
+
+    @app.get("/api/board/sources")
+    def board_sources():
+        return service.board_sources()
+
+    @app.get("/api/board/scenes")
+    def board_scenes():
+        return {"scenes": service.scene_pool()}
+
+    @app.get("/api/board/apexes")
+    def board_apexes(tag: str | None = None):
+        return service.board_apexes(tag)
+
     @app.post("/api/collection")
     def save_collection(body: CollectionIn):
         if not body.name.strip() or not body.apexes:

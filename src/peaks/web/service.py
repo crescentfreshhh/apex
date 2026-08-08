@@ -30,6 +30,7 @@ class Service:
         self._taste: dict[str, object] = {}  # taste classifiers, keyed by file
         self._taste_lock = threading.Lock()
         self._vocab_cache = None  # (labels, CLIP-text matrix) for classification
+        self._pool = None  # cached scene pool for the shuffle board
 
     # --- library / scenes ----------------------------------------------------
 
@@ -418,6 +419,36 @@ class Service:
             return json.loads(p.read_text())
         except Exception:
             return None
+
+    # --- megaboard sources (shuffle-all / apex tag / collection) -------------
+
+    def scene_pool(self, refresh: bool = False) -> list[dict]:
+        """Every scene (within library scope) as {scene_id, duration, url} — the
+        pool the shuffle board draws random moments from. Cached, since it's a
+        full Stash pass; call with refresh=True to rebuild."""
+        if self._pool is None or refresh:
+            client = self.client()
+            pool = []
+            for s in client.iter_scenes(path_prefix=self.cfg.library.path):
+                if not s.path:
+                    continue
+                pool.append({
+                    "scene_id": s.id,
+                    "duration": s.duration or 0,
+                    "url": client.stream_url(s.id, start=0),
+                })
+            self._pool = pool
+        return self._pool
+
+    def board_apexes(self, tag: str | None = None) -> dict:
+        """Live apex playlist for a tag (no on-disk write) so the board's source
+        picker can load any tag on demand."""
+        from ..playlist import build_playlist
+
+        return build_playlist(self.client(), [tag or self.cfg.markers.tag_name], limit=None)
+
+    def board_sources(self) -> dict:
+        return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections()}
 
     def run_playlist(self, job=None, tags=None, log=None) -> dict:
         """(Re)build the megaboard playlist from Stash markers → the mounted

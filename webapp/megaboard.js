@@ -16,6 +16,9 @@ const State = {
   playing: true,
   big: null, // the tile currently enlarged
   n: 3,
+  shuffle: false, // whole-library random mode
+  pool: null, // scene pool for shuffle
+  searchMode: false,
 };
 
 // --- weighted, no-immediate-repeat picker ---------------------------------
@@ -395,9 +398,10 @@ function reshuffle() {
 }
 
 function updateStatus() {
-  const what = State.searchMode ? "search moments" : "apexes";
-  document.getElementById("status").textContent =
-    `${State.apexes.length} ${what} · ${State.tiles.length} tiles`;
+  const label = State.shuffle
+    ? `shuffle · ${(State.pool || []).length} scenes`
+    : `${State.apexes.length} ${State.searchMode ? "moments" : "apexes"}`;
+  document.getElementById("status").textContent = `${label} · ${State.tiles.length} tiles`;
 }
 
 function fmt(sec) {
@@ -425,49 +429,95 @@ function wireControls() {
   });
 }
 
+// --- sources: shuffle-all / apex tag / saved collection / search handoff ----
+
+const SHUFFLE_MIN = 7, SHUFFLE_MAX = 22; // random clip length (s) => random intervals
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function withStart(url, start) {
+  try { const u = new URL(url, location.href); u.searchParams.set("start", Math.round(start)); return u.toString(); }
+  catch { return url; }
+}
+// shuffle: a fresh random moment (random scene, random start, random length)
+function randomMoment() {
+  const pool = State.pool;
+  if (!pool || !pool.length) return null;
+  const s = pool[Math.floor(Math.random() * pool.length)];
+  const dur = s.duration || 60;
+  const clip = SHUFFLE_MIN + Math.random() * (SHUFFLE_MAX - SHUFFLE_MIN);
+  const start = Math.max(0, Math.random() * Math.max(1, dur - clip));
+  return {
+    scene_id: s.scene_id, start: Math.round(start), end: Math.round(start + clip),
+    duration: Math.round(clip), url: withStart(s.url, start),
+  };
+}
+
+async function loadSource(src) {
+  State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
+  document.getElementById("error").hidden = true;
+  document.getElementById("status").textContent = "loading…";
+  try {
+    if (src === "shuffle") {
+      const d = await api("/api/board/scenes");
+      State.pool = d.scenes || [];
+      if (!State.pool.length) return showError("No scenes found in your library scope.");
+      State.shuffle = true;
+      pickApex = randomMoment;
+    } else if (src.startsWith("collection:")) {
+      const pl = await api("/api/collection?name=" + encodeURIComponent(src.slice(11)));
+      State.apexes = pl.apexes || []; State.searchMode = true;
+      if (!State.apexes.length) return showError("This collection has no moments.");
+      pickApex = makePicker(State.apexes);
+    } else if (src === "search") {
+      let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_search") || "null"); } catch {}
+      State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
+      if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
+      pickApex = makePicker(State.apexes);
+    } else {
+      const tag = src.startsWith("tag:") ? src.slice(4) : src;
+      const pl = await api("/api/board/apexes?tag=" + encodeURIComponent(tag));
+      State.apexes = pl.apexes || [];
+      if (!State.apexes.length)
+        return showError(`No apexes for tag "${tag}".\n\nMark some with ⚑ Apex in Explore — or pick "Shuffle" above to play everything.`);
+      pickApex = makePicker(State.apexes);
+    }
+  } catch (err) {
+    return showError("Couldn't load this source.\n\n(" + err.message + ")");
+  }
+  buildBoard(parseInt(document.getElementById("grid").value, 10));
+}
+
+async function initSources(initial) {
+  const sel = document.getElementById("source");
+  const opts = [`<option value="shuffle">Shuffle — whole library</option>`];
+  try {
+    const s = await api("/api/board/sources");
+    opts.push(`<option value="tag:${esc(s.tag)}">Apexes: ${esc(s.tag)}</option>`);
+    for (const c of s.collections || [])
+      opts.push(`<option value="collection:${esc(c.safe)}">Collection: ${esc(c.name)} (${c.count})</option>`);
+  } catch {}
+  if (initial === "search") opts.push(`<option value="search">Search results</option>`);
+  sel.innerHTML = opts.join("");
+  sel.addEventListener("change", () => loadSource(sel.value));
+  return sel;
+}
+
 // --- boot -----------------------------------------------------------------
 
 async function main() {
-  let playlist;
-  const params = new URLSearchParams(location.search);
-  // a search handoff from Explore ("Play on megaboard") arrives via localStorage
-  if (params.get("src") === "search") {
-    try {
-      playlist = JSON.parse(localStorage.getItem("mb_search") || "null");
-    } catch {}
-    if (playlist) State.searchMode = true;
-  }
-  // a saved collection is fetched by name from the API
-  if (!playlist && params.get("collection")) {
-    try {
-      const res = await fetch("/api/collection?name=" + encodeURIComponent(params.get("collection")));
-      if (res.ok) { playlist = await res.json(); State.searchMode = true; }
-    } catch {}
-  }
-  if (!playlist) {
-    try {
-      const res = await fetch("playlist.json", { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      playlist = await res.json();
-    } catch (err) {
-      return showError(
-        "Couldn't load playlist.json.\n\n" +
-          'Build it from the web app (Megaboard → "Build megaboard"),\n' +
-          "or run `peaks playlist`.\n\n" +
-          `(${err.message})`
-      );
-    }
-  }
-  State.apexes = playlist.apexes || [];
-  if (State.apexes.length === 0) {
-    return showError(
-      `No apexes found for tag "${playlist.tag}".\n\n` +
-        "Score with write on (Dashboard → Score), then Build megaboard."
-    );
-  }
-  pickApex = makePicker(State.apexes);
   wireControls();
-  buildBoard(parseInt(document.getElementById("grid").value, 10));
+  const params = new URLSearchParams(location.search);
+  let initial = null;
+  if (params.get("src") === "search") initial = "search";
+  else if (params.get("collection")) initial = "collection:" + params.get("collection");
+  const sel = await initSources(initial);
+  if (initial) sel.value = initial;
+  else {
+    const tagOpt = [...sel.options].find((o) => o.value.startsWith("tag:"));
+    sel.value = tagOpt ? tagOpt.value : "shuffle"; // default to apexes, else shuffle
+  }
+  loadSource(sel.value);
 }
 
 function showError(msg) {

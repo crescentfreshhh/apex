@@ -264,6 +264,7 @@ function renderHits(hits) {
         <button class="thumb up" title="More like this (👍)">👍</button>
         <button class="thumb down" title="Less like this (👎)">👎</button>
         <button data-key="${h.key}" data-t="${h.time}">Find similar</button>
+        <button class="apex-btn" title="Mark this moment as an apex in Stash">⚑ Apex</button>
         ${h.stream ? `<button class="play-btn">Play ▸</button>` : ""}
       </div>
     </div>`;
@@ -278,6 +279,7 @@ function renderHits(hits) {
     tile.querySelector(".thumbwrap")?.addEventListener("click", open);
     tile.querySelector(".thumb.up")?.addEventListener("click", (e) => thumb(h.key, h.time, 1, h.scene_id, e.currentTarget));
     tile.querySelector(".thumb.down")?.addEventListener("click", (e) => thumb(h.key, h.time, 0, h.scene_id, e.currentTarget));
+    tile.querySelector(".apex-btn")?.addEventListener("click", (e) => { saveMoment(h.scene_id, h.time); e.currentTarget.classList.add("flash"); });
   });
 }
 
