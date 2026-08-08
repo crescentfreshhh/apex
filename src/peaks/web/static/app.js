@@ -712,8 +712,8 @@ document.addEventListener("keydown", (e) => {
   if (!$("#viewer").hidden) return;                       // viewer owns keys when open
   if (!$("#foryou")?.classList.contains("active")) return;
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-  if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(1); }
-  else if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(0); }
+  if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(1); }   // ← = 👍 love
+  else if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(0); }  // → = 👎 pass
   else if (e.key === "ArrowDown") { e.preventDefault(); loadNextSwipe(); }
 });
 
@@ -738,4 +738,5 @@ $("#btn-logout").addEventListener("click", async () => {
   location.reload();
 });
 
-refreshDashboard();
+refreshDashboard();  // conn status + job reattach (runs even though it's not the landing view)
+openForYou();        // For You is the home page — populate it on load

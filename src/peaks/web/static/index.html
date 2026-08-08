@@ -11,8 +11,8 @@
   <header id="topbar">
     <span class="brand">Opus</span>
     <nav>
-      <button class="tab active" data-view="dashboard">Dashboard</button>
-      <button class="tab" data-view="foryou">For You</button>
+      <button class="tab active" data-view="foryou">For You</button>
+      <button class="tab" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="board">Megaboard</button>
     </nav>
@@ -21,7 +21,7 @@
   </header>
 
   <!-- DASHBOARD -->
-  <section id="dashboard" class="view active">
+  <section id="dashboard" class="view">
     <div class="cards" id="stat-cards"></div>
 
     <div class="panel">
@@ -181,7 +181,7 @@
   </section>
 
   <!-- FOR YOU -->
-  <section id="foryou" class="view">
+  <section id="foryou" class="view active">
     <div class="panel">
       <h2>For You <span class="tag-exp">experimental</span></h2>
       <p class="dim">A recommender built from your own taste — the average of every
@@ -205,9 +205,9 @@
         <div id="swipe-card" class="swipe-card dim">Loading a frame…</div>
       </div>
       <div class="row swipe-controls">
-        <button id="btn-swipe-no" class="thumb down" title="Not my thing (←)">👎 Pass</button>
+        <button id="btn-swipe-yes" class="thumb up" title="Love it (←)">👍 Love it</button>
         <button id="btn-swipe-skip" class="ghost" title="Skip without rating (↓)">Skip</button>
-        <button id="btn-swipe-yes" class="thumb up" title="Love it (→)">👍 Love it</button>
+        <button id="btn-swipe-no" class="thumb down" title="Not my thing (→)">👎 Pass</button>
         <button id="btn-swipe-train" class="primary" title="Retrain your taste model from all your ratings">Train now</button>
         <span id="swipe-status" class="dim"></span>
       </div>
