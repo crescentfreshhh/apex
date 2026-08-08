@@ -83,7 +83,10 @@ class TasteClassifier:
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as fh:
+        # atomic write: a background retrain must never leave a reader (the
+        # swipe trainer / rerank) seeing a half-written pickle.
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as fh:
             pickle.dump(
                 {
                     "kind": self.kind,
@@ -95,6 +98,7 @@ class TasteClassifier:
                 },
                 fh,
             )
+        tmp.replace(path)
         return path
 
     @classmethod

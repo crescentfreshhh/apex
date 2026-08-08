@@ -95,6 +95,10 @@ class ModelingConfig:
     dir: str = "models"  # where trained classifiers are saved (gitignored)
     classifier: str = "logreg"  # "logreg" | "mlp"
     labels_path: str = "labels.json"
+    # Auto-retrain the swipe-trainer's taste model in the background after this
+    # many new ratings, so "Train now" is optional. 0 disables (manual only).
+    # (Env override: PEAKS_AUTOTRAIN_EVERY)
+    autotrain_every: int = 25
 
 
 @dataclass
@@ -248,6 +252,12 @@ class Config:
             dir=modeling_raw.get("dir", ModelingConfig.dir),
             classifier=modeling_raw.get("classifier", ModelingConfig.classifier),
             labels_path=modeling_raw.get("labels_path", ModelingConfig.labels_path),
+            autotrain_every=int(
+                os.environ.get(
+                    "PEAKS_AUTOTRAIN_EVERY",
+                    modeling_raw.get("autotrain_every", ModelingConfig.autotrain_every),
+                )
+            ),
         )
         library = LibraryConfig(
             path=os.environ.get(

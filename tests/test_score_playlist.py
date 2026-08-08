@@ -359,6 +359,25 @@ def test_index_rebuilds_as_cache_grows(tmp_path):
     assert svc.index("dinov2", refresh=True).size == 2
 
 
+def test_autotrain_due_needs_threshold_and_both_classes(tmp_path):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.autotrain_every = 3
+    svc.add_label("A", 0.0, 1)
+    assert svc.autotrain_due() is False  # below the threshold
+    svc.add_label("A", 8.0, 1)
+    svc.add_label("B", 0.0, 1)
+    assert svc.autotrain_due() is False  # threshold hit, but only one class (👍)
+    svc.add_label("B", 8.0, 0)
+    assert svc.autotrain_due() is True  # now both classes present
+    svc.reset_labels_since_train()
+    assert svc.autotrain_due() is False  # counter cleared after a (re)train
+
+    cfg.modeling.autotrain_every = 0
+    svc._labels_since_train = 99
+    assert svc.autotrain_due() is False  # 0 disables auto-training
+
+
 def test_next_uncertain_skips_labeled(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")

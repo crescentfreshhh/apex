@@ -154,3 +154,7 @@ references_dir = "references"
 dir = "models"            # where trained models are saved (gitignored)
 classifier = "logreg"     # "logreg" (fast, robust) | "mlp"
 labels_path = "labels.json"  # your frame labels (gitignored)
+# The swipe trainer retrains your taste model in the background after this many
+# new ratings, so "Train now" is optional — just keep swiping. 0 = manual only.
+# (Env override: PEAKS_AUTOTRAIN_EVERY)
+autotrain_every = 25

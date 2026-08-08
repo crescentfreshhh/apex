@@ -444,12 +444,25 @@ def create_app(cfg=None):
 
     @app.post("/api/label")
     def add_label(key: str, t: float, label: int, scene_id: str | None = None, profile: str | None = None):
-        return service.add_label(key, t, label, profile=profile, scene_id=scene_id)
+        res = service.add_label(key, t, label, profile=profile, scene_id=scene_id)
+        # hands-off training: once enough new ratings pile up, retrain the taste
+        # model in the background so "Train now" is optional. One train at a time.
+        res["autotrain"] = False
+        if service.autotrain_due(profile):
+            try:
+                jobs.start("train", lambda j: service.train_taste(profile=profile))
+                service.reset_labels_since_train()
+                res["autotrain"] = True
+            except RuntimeError:
+                pass  # a train is already running; the next rating retries
+        return res
 
     @app.post("/api/train")
     def train_taste(profile: str | None = None, model: str | None = None):
         try:
-            return service.train_taste(profile=profile, model=model)
+            out = service.train_taste(profile=profile, model=model)
+            service.reset_labels_since_train()
+            return out
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
 

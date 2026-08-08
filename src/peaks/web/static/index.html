@@ -199,8 +199,9 @@
     <div class="panel" id="swipe-panel">
       <h2>Swipe trainer <span class="tag-exp">active learning</span></h2>
       <p class="dim">The trainer shows you the frames it's <em>least sure</em> about —
-        rating those teaches your taste model fastest. A few dozen swipes and "For You"
-        sharpens noticeably.</p>
+        rating those teaches your taste model fastest. It <strong>retrains itself in the
+        background</strong> every ~25 ratings, so just keep swiping and "For You" sharpens
+        on its own. "Train now" is optional — it forces an immediate retrain.</p>
       <div id="swipe-stage" class="swipe-stage">
         <div id="swipe-card" class="swipe-card dim">Loading a frame…</div>
       </div>

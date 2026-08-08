@@ -33,6 +33,7 @@ class Service:
         self._pool = None  # cached scene pool for the shuffle board
         self._settings_cache = None  # GUI-saved active models (lazily read)
         self._taste_src_cache = {}  # model -> (stacked loved-moment vecs, sources)
+        self._labels_since_train = 0  # new ratings since the last (auto)train
 
     # --- library / scenes ----------------------------------------------------
 
@@ -870,8 +871,22 @@ class Service:
         store = self._label_store()
         store.add(key, float(time), int(label), profile, scene_id=scene_id)
         store.save()
+        self._labels_since_train += 1
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
+
+    def autotrain_due(self, profile: str | None = None) -> bool:
+        """True when enough new ratings have piled up to retrain in the
+        background — and there's at least one 👍 and one 👎 (a classifier needs
+        both classes). 0 in config disables auto-training."""
+        n = self.cfg.modeling.autotrain_every
+        if n <= 0 or self._labels_since_train < n:
+            return False
+        pos, neg = self._label_store().counts(profile or self.cfg.markers.tag_name)
+        return pos >= 1 and neg >= 1
+
+    def reset_labels_since_train(self) -> None:
+        self._labels_since_train = 0
 
     def label_counts(self, profile: str | None = None) -> dict:
         profile = profile or self.cfg.markers.tag_name
@@ -911,8 +926,11 @@ class Service:
             return None
         with self._taste_lock:
             if str(p) not in self._taste:
-                self._taste[str(p)] = TasteClassifier.load(p)
-            return self._taste[str(p)]
+                try:
+                    self._taste[str(p)] = TasteClassifier.load(p)
+                except Exception:  # noqa: BLE001 — tolerate a mid-write retrain
+                    return None
+            return self._taste.get(str(p))
 
     def has_taste(self, profile: str | None = None, model: str | None = None) -> bool:
         profile = profile or self.cfg.markers.tag_name

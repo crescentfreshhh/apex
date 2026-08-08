@@ -685,7 +685,12 @@ async function swipeRate(label) {
       ...(swipeHit.scene_id ? { scene_id: swipeHit.scene_id } : {}),
     }), { method: "POST" });
     updateTasteUI(c);
-    $("#swipe-status").textContent = `${c.positive}👍 / ${c.negative}👎`;
+    $("#swipe-status").textContent = `${c.positive}👍 / ${c.negative}👎` + (c.autotrain ? " · training…" : "");
+    if (c.autotrain) {
+      // the model refits in the background (a second or two); refresh the feed +
+      // taste words shortly after so the freshly-sharpened ranking shows.
+      setTimeout(() => { loadForYou(false); loadTasteWords(); }, 4000);
+    }
   } catch (e) { toast(e.message, true); }
   loadNextSwipe();
 }

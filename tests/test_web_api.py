@@ -55,6 +55,18 @@ def test_stats(client):
     assert body["cached_scenes"] == 2 and body["model"] == "dinov2"
 
 
+def test_autotrain_kicks_after_threshold(cfg, tmp_path):
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    cfg.modeling.autotrain_every = 2
+    client = TestClient(create_app(cfg))
+    # frames k1@0 and k2@0 are seeded in the dinov2 cache by the fixture
+    r1 = client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1})
+    assert r1.json()["autotrain"] is False  # 1 rating, below threshold
+    r2 = client.post("/api/label", params={"key": "k2", "t": 0.0, "label": 0})
+    assert r2.json()["autotrain"] is True  # 2 ratings + both classes → background train
+
+
 def test_no_auth_by_default(client):
     # empty password → open app, capabilities reports auth off
     assert client.get("/api/stats").status_code == 200
