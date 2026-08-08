@@ -182,6 +182,42 @@ def test_vocab_get_save_roundtrip(tmp_path, monkeypatch):
     assert svc._vocab_cache is None
 
 
+def test_models_save_overrides_active_backbone(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    # before any save: the configured defaults are active and unsaved
+    m = svc.get_models()
+    assert m["dino_model"] == cfg.embedding.dino_model
+    assert m["dino_saved"] is False
+    assert svc._model_name() == "dinov2"  # small backbone → legacy namespace
+
+    # saving a bigger backbone flips the whole pipeline's cache namespace
+    r = svc.save_models(dino_model="dinov2_vitb14", clip_model="ViT-L-14")
+    assert r["dino_model"] == "dinov2_vitb14" and r["dino_saved"] is True
+    assert svc._model_name() == "dinov2-vitb14"
+    assert svc._clip_name() == "clip-vit-l-14"
+    assert svc._active_clip_pretrained() == "laion2b_s32b_b82k"
+    assert svc.stats()["dino_model"] == "dinov2_vitb14"
+
+    # a fresh Service reads the persisted choice back
+    svc2 = svc_mod.Service(cfg)
+    assert svc2._active_dino_model() == "dinov2_vitb14"
+
+    # a blank value clears the override back to the container default
+    svc.save_models(dino_model="")
+    assert svc._active_dino_model() == cfg.embedding.dino_model
+    assert svc.get_models()["dino_saved"] is False
+
+
+def test_models_save_rejects_unknown(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    with pytest.raises(ValueError):
+        svc.save_models(dino_model="dinov2_enormous")
+    with pytest.raises(ValueError):
+        svc.save_models(clip_model="ViT-Z-99")
+
+
 def test_classify_frame_top_labels(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 

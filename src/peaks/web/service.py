@@ -31,6 +31,7 @@ class Service:
         self._taste_lock = threading.Lock()
         self._vocab_cache = None  # (labels, CLIP-text matrix) for classification
         self._pool = None  # cached scene pool for the shuffle board
+        self._settings_cache = None  # GUI-saved active models (lazily read)
 
     # --- library / scenes ----------------------------------------------------
 
@@ -71,8 +72,8 @@ class Service:
             "library_path": self.cfg.library.path or "(whole library)",
             "model": model,
             "cached_scenes": cached,
-            "dino_model": self.cfg.embedding.dino_model,
-            "clip_model": self.cfg.embedding.clip_model,
+            "dino_model": self._active_dino_model(),
+            "clip_model": self._active_clip_model(),
             "clip_cached": len(cache.keys(self._clip_name())),
             "device": self.cfg.embedding.device or "auto",
             "interval": self.cfg.sampling.interval_seconds,
@@ -80,31 +81,129 @@ class Service:
             "failures": len(failure_log_for(self.cfg)),
         }
 
+    # --- active backbone/variant (GUI-saved, overriding config) -------------
+
+    def _settings_path(self):
+        import os
+        from pathlib import Path
+
+        return Path(os.environ.get("PEAKS_SETTINGS", "/config/settings.json"))
+
+    def _settings(self) -> dict:
+        """GUI-saved settings (currently the active DINOv2 backbone + CLIP
+        variant). Cached; save_models() clears the cache."""
+        if self._settings_cache is None:
+            import json
+
+            path = self._settings_path()
+            try:
+                self._settings_cache = json.loads(path.read_text()) if path.is_file() else {}
+            except (OSError, ValueError):
+                self._settings_cache = {}
+        return self._settings_cache
+
+    def _active_dino_model(self) -> str:
+        return self._settings().get("dino_model") or self.cfg.embedding.dino_model
+
+    def _active_clip_model(self) -> str:
+        return self._settings().get("clip_model") or self.cfg.embedding.clip_model
+
+    def _active_clip_pretrained(self) -> str:
+        """Checkpoint paired to the active CLIP variant: the saved override maps
+        to that variant's default weights; otherwise the configured pair."""
+        from ..embedding import default_pretrained
+
+        saved = self._settings().get("clip_model")
+        if saved and saved != self.cfg.embedding.clip_model:
+            return default_pretrained(saved)
+        return self.cfg.embedding.clip_pretrained
+
+    def get_models(self) -> dict:
+        """Active models + the option lists, so the GUI can render the pickers
+        and show whether the choice is a saved override or the container default."""
+        from ..embedding import DINO_BACKBONES
+
+        s = self._settings()
+        return {
+            "dino_model": self._active_dino_model(),
+            "clip_model": self._active_clip_model(),
+            "dino_options": list(DINO_BACKBONES),
+            "clip_options": ["ViT-B-32", "ViT-L-14", "ViT-H-14"],
+            "dino_saved": bool(s.get("dino_model")),
+            "clip_saved": bool(s.get("clip_model")),
+            "dino_default": self.cfg.embedding.dino_model,
+            "clip_default": self.cfg.embedding.clip_model,
+        }
+
+    def save_models(self, dino_model: str | None = None, clip_model: str | None = None) -> dict:
+        """Persist the active DINOv2 backbone and/or CLIP variant to
+        /config/settings.json so the *whole* pipeline (embed, score, search,
+        megaboard, 'CLIP sees') uses them — no container restart, no env vars.
+        Validates against the known model lists; a blank value clears the
+        override back to the container default."""
+        import json
+
+        from ..embedding import DINO_BACKBONES
+
+        clip_opts = {"ViT-B-32", "ViT-L-14", "ViT-H-14"}
+        s = dict(self._settings())
+        if dino_model is not None:
+            if dino_model and dino_model not in DINO_BACKBONES:
+                raise ValueError(f"unknown DINOv2 backbone: {dino_model}")
+            if dino_model:
+                s["dino_model"] = dino_model
+            else:
+                s.pop("dino_model", None)
+        if clip_model is not None:
+            if clip_model and clip_model not in clip_opts:
+                raise ValueError(f"unknown CLIP variant: {clip_model}")
+            if clip_model:
+                s["clip_model"] = clip_model
+            else:
+                s.pop("clip_model", None)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        # a changed backbone means a different cache namespace / vector space,
+        # so drop any built search indexes to force a clean rebuild.
+        self._index = {}
+        return self.get_models()
+
     def _clip_name(self) -> str:
-        """Cache/index name for the configured CLIP variant (namespaced so a
-        bigger model doesn't collide with an existing ViT-B-32 'clip' cache)."""
+        """Cache/index name for the active CLIP variant (namespaced so a bigger
+        model doesn't collide with an existing ViT-B-32 'clip' cache)."""
         from ..embedding import clip_cache_name
 
-        return clip_cache_name(self.cfg.embedding.clip_model)
+        return clip_cache_name(self._active_clip_model())
 
     def _model_name(self, alias: str | None = None) -> str:
-        """Backbone-aware cache name for a channel (defaults to the configured
-        primary model)."""
-        from ..embedding import model_cache_name
+        """Backbone-aware cache name for a channel, resolved against the *active*
+        (GUI-saved) DINOv2 backbone / CLIP variant."""
+        from ..embedding import canonical_name, clip_cache_name, dino_cache_name
 
-        return model_cache_name(alias or self.cfg.embedding.model, self.cfg.embedding)
+        key = (alias or self.cfg.embedding.model).lower()
+        if key in ("dino", "dinov2"):
+            return dino_cache_name(self._active_dino_model())
+        if key == "clip":
+            return clip_cache_name(self._active_clip_model())
+        return canonical_name(alias or self.cfg.embedding.model)
 
     def _embedder(self, model: str | None = None):
+        """Build the embedder for `model`, using the *active* backbone/variant
+        (a GUI-saved choice in /config/settings.json overriding config). The
+        embedder namespaces its own cache from the variant, so the whole
+        pipeline stays self-consistent with the active choice."""
         from ..embedding import get_embedder
 
         name = model or self.cfg.embedding.model
         kwargs = {"device": self.cfg.embedding.device} if self.cfg.embedding.device else {}
         canon = canonical_name(name)
         if canon == "clip":
-            kwargs["model_name"] = self.cfg.embedding.clip_model
-            kwargs["pretrained"] = self.cfg.embedding.clip_pretrained
+            kwargs["model_name"] = self._active_clip_model()
+            kwargs["pretrained"] = self._active_clip_pretrained()
         elif canon == "dinov2":
-            kwargs["model_name"] = self.cfg.embedding.dino_model
+            kwargs["model_name"] = self._active_dino_model()
         return get_embedder(name, **kwargs)
 
     # --- embed / score (job targets) ----------------------------------------

@@ -23,6 +23,33 @@
     <div class="cards" id="stat-cards"></div>
 
     <div class="panel">
+      <h2>Models</h2>
+      <p class="dim">The active DINOv2 backbone (visual structure / "find similar")
+        and CLIP variant (text search / tags / "CLIP sees"). Saved here and used
+        everywhere — no restart, no container variables. Bigger = more accurate at
+        more cost. Each backbone caches into its own namespace, so after switching
+        you re-run an embed pass to populate it.</p>
+      <div class="row">
+        <label>DINOv2 backbone
+          <select id="sel-dino">
+            <option value="dinov2_vits14">small — vits14 (fast)</option>
+            <option value="dinov2_vitb14">base — vitb14 (sharper)</option>
+            <option value="dinov2_vitl14">large — vitl14</option>
+            <option value="dinov2_vitg14">giant — vitg14 (heavy)</option>
+          </select>
+        </label>
+        <label>CLIP variant
+          <select id="sel-clip">
+            <option value="ViT-B-32">ViT-B-32 (small/fast)</option>
+            <option value="ViT-L-14">ViT-L-14 (sharp)</option>
+            <option value="ViT-H-14">ViT-H-14 (heavy)</option>
+          </select>
+        </label>
+        <span id="models-status" class="dim"></span>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>Embed</h2>
       <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
       <div class="row">

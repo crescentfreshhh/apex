@@ -98,6 +98,11 @@ batch_size = 64
 # on disk seeks, so 3-4 workers is a near-linear speedup; drop to 1 if the
 # array thrashes. (Env override: PEAKS_WORKERS)
 workers = 3
+# INITIAL model choices. You normally switch these live from the Dashboard's
+# "Models" panel — that GUI choice is saved to /config/settings.json and
+# overrides the values here (no restart, no env vars). These stay as the
+# starting default.
+#
 # Which OpenCLIP variant powers the "clip" channel (search + tags + "CLIP sees").
 # "ViT-L-14" (default) is sharper than the older "ViT-B-32" at ~2-3x the cost;
 # "ViT-H-14" is sharper still but heavy. The CLIP cache is namespaced per

@@ -86,6 +86,17 @@ class FakeEmbedder(Embedder):
 # --- real channels (lazy torch) ---------------------------------------------
 
 
+# DINOv2 backbones, small → giant. Bigger = more accurate structure at more
+# cost. Cache is namespaced per backbone (dino_cache_name), so switching one in
+# means re-embedding DINO into its own namespace.
+DINO_BACKBONES = (
+    "dinov2_vits14",
+    "dinov2_vitb14",
+    "dinov2_vitl14",
+    "dinov2_vitg14",
+)
+
+
 def dino_cache_name(model_name: str) -> str:
     """Cache subdir for a DINOv2 backbone. The small backbone keeps the legacy
     "dinov2" name (backward compatible); bigger backbones get their own dir so
@@ -164,6 +175,21 @@ def clip_cache_name(model_name: str) -> str:
         return "clip"
     slug = model_name.lower().replace("/", "-").replace(" ", "")
     return f"clip-{slug}"
+
+
+# The open_clip pretrained weights that pair with each variant, so the GUI can
+# offer a bare variant name and we resolve the matching checkpoint for it.
+_CLIP_PRETRAINED = {
+    "ViT-B-32": "laion2b_s34b_b79k",
+    "ViT-L-14": "laion2b_s32b_b82k",
+    "ViT-H-14": "laion2b_s32b_b79k",
+}
+
+
+def default_pretrained(model_name: str) -> str:
+    """Default open_clip checkpoint for a CLIP variant (falls back to the
+    ViT-L-14 laion2b weights for anything unlisted)."""
+    return _CLIP_PRETRAINED.get(model_name, "laion2b_s32b_b82k")
 
 
 class ClipEmbedder(Embedder):

@@ -143,6 +143,39 @@ let defaultsLoaded = false;
     defaultsLoaded = true;
   } catch {}
 })();
+// --- active models (persisted DINOv2 backbone + CLIP variant) ---------------
+async function loadModels() {
+  try {
+    const m = await api("/api/models");
+    $("#sel-dino").value = m.dino_model;
+    $("#sel-clip").value = m.clip_model;
+    const bits = [];
+    if (m.dino_saved) bits.push("DINO override");
+    if (m.clip_saved) bits.push("CLIP override");
+    $("#models-status").textContent = bits.length ? "saved: " + bits.join(" · ") : "container defaults";
+  } catch {}
+}
+async function saveModels(patch) {
+  try {
+    const m = await api("/api/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    $("#sel-dino").value = m.dino_model;
+    $("#sel-clip").value = m.clip_model;
+    toast("Active model saved — re-embed to populate its cache");
+    refreshDashboard();
+    loadModels();
+  } catch (e) {
+    toast("Couldn't save model: " + e.message, true);
+    loadModels();
+  }
+}
+$("#sel-dino")?.addEventListener("change", (e) => saveModels({ dino_model: e.target.value }));
+$("#sel-clip")?.addEventListener("change", (e) => saveModels({ clip_model: e.target.value }));
+loadModels();
+
 function wireToggle(btnSel, panelSel, hintSel) {
   $(btnSel).addEventListener("click", () => {
     const a = $(panelSel), open = a.hidden;

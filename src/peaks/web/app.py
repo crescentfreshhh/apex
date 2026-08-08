@@ -60,6 +60,19 @@ def _vocab_model():
 VocabIn = _vocab_model()
 
 
+def _models_model():
+    from pydantic import BaseModel
+
+    class ModelsIn(BaseModel):
+        dino_model: str | None = None
+        clip_model: str | None = None
+
+    return ModelsIn
+
+
+ModelsIn = _models_model()
+
+
 def _hit_payload(service: Service, hits) -> list[dict]:
     meta = service.scene_meta([h.scene_id for h in hits if h.scene_id])
     out = []
@@ -147,7 +160,8 @@ def create_app(cfg=None):
         workers: int | None = None,
         timeout: float | None = None,
     ):
-        # sampling knobs actually supplied; absent ones fall back to config
+        # sampling knobs actually supplied; absent ones fall back to config.
+        # The active backbone/variant come from the saved model settings.
         sampling = {
             k: v
             for k, v in dict(
@@ -356,6 +370,19 @@ def create_app(cfg=None):
     @app.post("/api/vocab")
     def save_vocab(body: VocabIn):
         return service.save_vocab(body.vocab)
+
+    @app.get("/api/models")
+    def get_models():
+        return service.get_models()
+
+    @app.post("/api/models")
+    def save_models(body: ModelsIn):
+        try:
+            return service.save_models(
+                dino_model=body.dino_model, clip_model=body.clip_model
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
 
     @app.get("/api/timeline")
     def timeline(
