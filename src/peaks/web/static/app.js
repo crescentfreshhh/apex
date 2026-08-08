@@ -52,6 +52,7 @@ async function refreshDashboard() {
   }
   if (typeof refreshReels === "function") refreshReels();
   if (typeof refreshCollections === "function") refreshCollections();
+  if (typeof reattachJobs === "function") reattachJobs();
 }
 
 function wireJob(btn, statusEl, logEl, start, stopBtn) {
@@ -59,14 +60,8 @@ function wireJob(btn, statusEl, logEl, start, stopBtn) {
     btn.disabled = true; statusEl.textContent = "starting…"; logEl.hidden = false; logEl.textContent = "";
     try {
       const job = await start();
-      if (stopBtn) {
-        stopBtn.hidden = false; stopBtn.disabled = false;
-        stopBtn.onclick = async () => {
-          stopBtn.disabled = true; statusEl.textContent = "stopping…";
-          try { await api("/api/jobs/" + job.id + "/cancel", { method: "POST" }); }
-          catch (e) { toast(e.message, true); }
-        };
-      }
+      tracked.add(job.id);
+      wireStop(stopBtn, statusEl, job.id);
       poll(job.id, statusEl, logEl, btn, stopBtn);
     } catch (e) {
       btn.disabled = false; statusEl.textContent = ""; toast(e.message, true);
@@ -87,6 +82,45 @@ async function poll(id, statusEl, logEl, btn, stopBtn) {
     else { toast("Done: " + JSON.stringify(j.result || {})); refreshDashboard(); }
   } catch (e) { done(); toast(e.message, true); }
 }
+
+// --- reattach to jobs already running on the server (survives page refresh
+//     and shows up on any device — the server, not the tab, owns the job) ----
+const JOB_PANELS = {
+  embed: { btn: "#btn-embed", status: "#embed-status", log: "#embed-log", stop: "#btn-embed-stop" },
+  score: { btn: "#btn-score", status: "#score-status", log: "#score-log", stop: "#btn-score-stop" },
+  sync: { btn: "#btn-sync", status: "#sync-status", log: "#sync-log" },
+  fix: { btn: "#btn-fix", status: "#fix-status", log: "#fix-log", stop: "#btn-fix-stop" },
+  reel: { btn: "#btn-reel", status: "#reel-status", log: "#reel-log", stop: "#btn-reel-stop" },
+  autotag: { btn: "#btn-autotag", status: "#autotag-status", log: "#autotag-log", stop: "#btn-autotag-stop" },
+  playlist: { btn: "#btn-playlist", status: "#playlist-status", log: "#playlist-log" },
+};
+const tracked = new Set(); // job ids we're already polling in this tab
+function wireStop(stopBtn, statusEl, id) {
+  if (!stopBtn) return;
+  stopBtn.hidden = false; stopBtn.disabled = false;
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true; statusEl.textContent = "stopping…";
+    try { await api("/api/jobs/" + id + "/cancel", { method: "POST" }); }
+    catch (e) { toast(e.message, true); }
+  };
+}
+async function reattachJobs() {
+  let jobs;
+  try { jobs = await api("/api/jobs"); } catch { return; }
+  for (const j of jobs) {
+    if (j.status !== "running" || tracked.has(j.id)) continue;
+    const panel = JOB_PANELS[j.kind];
+    if (!panel) continue;
+    tracked.add(j.id);
+    const btn = $(panel.btn), statusEl = $(panel.status), logEl = $(panel.log);
+    const stopBtn = panel.stop ? $(panel.stop) : null;
+    if (btn) btn.disabled = true;
+    if (logEl) logEl.hidden = false;
+    wireStop(stopBtn, statusEl, j.id);
+    poll(j.id, statusEl, logEl, btn, stopBtn);
+  }
+}
+
 // --- embed advanced overrides (per-run model / sampling, no restart) --------
 let defaultsLoaded = false;
 (async () => {
