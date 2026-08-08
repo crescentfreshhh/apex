@@ -158,7 +158,7 @@ input, select { background: var(--panel2); color: var(--fg); border: 1px solid v
 .fy-chip { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: var(--panel2);
   border: 1px solid var(--line); color: var(--accent); }
 .swipe-stage { display: flex; justify-content: center; margin-top: 12px; }
-.swipe-card { width: 100%; max-width: 480px; aspect-ratio: 16/9; background: #000;
+.swipe-card { width: 100%; max-width: 960px; aspect-ratio: 16/9; background: #000;
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden; position: relative;
   display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .swipe-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
