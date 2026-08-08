@@ -79,3 +79,13 @@ def test_end_to_end_offline_pipeline(tmp_path):
     assert len(segs) == 1
     # region is frames 10-14 -> times 20..28
     assert segs[0].start == 20.0 and segs[0].end == 28.0
+
+
+def test_clip_cache_name_namespaces_by_variant():
+    from peaks.embedding import clip_cache_name
+
+    # ViT-B-32 keeps the legacy dir; other variants get their own so their
+    # different-dim vectors never collide in the same cache
+    assert clip_cache_name("ViT-B-32") == "clip"
+    assert clip_cache_name("ViT-L-14") == "clip-vit-l-14"
+    assert clip_cache_name("ViT-H-14") == "clip-vit-h-14"

@@ -147,12 +147,21 @@ class DinoV2Embedder(Embedder):
         return feats.cpu().numpy().astype(np.float32)
 
 
+def clip_cache_name(model_name: str) -> str:
+    """Cache subdir for a CLIP variant. ViT-B-32 keeps the legacy "clip" name
+    (backward compatible); every other variant gets its own dir so their
+    different-dim vectors never collide (e.g. "clip-vit-l-14")."""
+    if model_name == "ViT-B-32":
+        return "clip"
+    slug = model_name.lower().replace("/", "-").replace(" ", "")
+    return f"clip-{slug}"
+
+
 class ClipEmbedder(Embedder):
     """OpenCLIP image embedder. Also exposes text embedding for open-vocab
     attribute scoring (e.g. "high heels") used by attribute profiles later.
     """
 
-    name = "clip"
     raw_resize = 224  # open_clip preprocess: Resize(224) + CenterCrop(224)
     raw_crop = 224
     _MEAN = (0.48145466, 0.4578275, 0.40821073)  # CLIP normalization
@@ -160,14 +169,15 @@ class ClipEmbedder(Embedder):
 
     def __init__(
         self,
-        model_name: str = "ViT-B-32",
-        pretrained: str = "laion2b_s34b_b79k",
+        model_name: str = "ViT-L-14",
+        pretrained: str = "laion2b_s32b_b82k",
         device: str | None = None,
     ):
         import open_clip  # lazy
         import torch  # lazy
 
         self._torch = torch
+        self.name = clip_cache_name(model_name)  # cache namespaced by variant
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained

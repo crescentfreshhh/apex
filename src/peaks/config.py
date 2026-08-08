@@ -59,6 +59,13 @@ class EmbeddingConfig:
     cache_dir: str = "cache/embeddings"
     device: str = ""  # "" = auto (cuda if available)
     batch_size: int = 64
+    # which OpenCLIP variant powers the "clip" channel. ViT-L-14 is a strong
+    # default (768-dim, sharper search + tags) at ~2-3x the cost of ViT-B-32.
+    # Changing it invalidates the CLIP cache (different space/dim) — the cache
+    # is namespaced by variant, so re-embed CLIP after switching.
+    # (Env: PEAKS_CLIP_MODEL, PEAKS_CLIP_PRETRAINED)
+    clip_model: str = "ViT-L-14"
+    clip_pretrained: str = "laion2b_s32b_b82k"
     # concurrent scene decodes (raw path). Sparse sampling is I/O-latency
     # bound, so 3-4 workers is a big speedup. (Env override: PEAKS_WORKERS)
     workers: int = 3
@@ -188,6 +195,13 @@ class Config:
                     "PEAKS_WORKERS",
                     embedding_raw.get("workers", EmbeddingConfig.workers),
                 )
+            ),
+            clip_model=os.environ.get(
+                "PEAKS_CLIP_MODEL", embedding_raw.get("clip_model", EmbeddingConfig.clip_model)
+            ),
+            clip_pretrained=os.environ.get(
+                "PEAKS_CLIP_PRETRAINED",
+                embedding_raw.get("clip_pretrained", EmbeddingConfig.clip_pretrained),
             ),
         )
         scoring = ScoringConfig(

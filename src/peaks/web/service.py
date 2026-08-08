@@ -77,11 +77,22 @@ class Service:
             "failures": len(failure_log_for(self.cfg)),
         }
 
-    def _embedder(self, model: str | None = None):
-        from ..embedding import get_embedder
+    def _clip_name(self) -> str:
+        """Cache/index name for the configured CLIP variant (namespaced so a
+        bigger model doesn't collide with an existing ViT-B-32 'clip' cache)."""
+        from ..embedding import clip_cache_name
 
+        return clip_cache_name(self.cfg.embedding.clip_model)
+
+    def _embedder(self, model: str | None = None):
+        from ..embedding import canonical_name, get_embedder
+
+        name = model or self.cfg.embedding.model
         kwargs = {"device": self.cfg.embedding.device} if self.cfg.embedding.device else {}
-        return get_embedder(model or self.cfg.embedding.model, **kwargs)
+        if canonical_name(name) == "clip":
+            kwargs["model_name"] = self.cfg.embedding.clip_model
+            kwargs["pretrained"] = self.cfg.embedding.clip_pretrained
+        return get_embedder(name, **kwargs)
 
     # --- embed / score (job targets) ----------------------------------------
 
@@ -664,7 +675,7 @@ class Service:
         prompt (`text`, forces the clip model), or another frame (`ref_key` +
         `ref_t`, the "find similar" source). Returns points sorted by time; the
         UI maps them onto the video's own duration."""
-        model = "clip" if text else (model or canonical_name(self.cfg.embedding.model))
+        model = self._clip_name() if text else (model or canonical_name(self.cfg.embedding.model))
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         try:
             times, vecs, meta = cache.load(key, model)
@@ -710,8 +721,9 @@ class Service:
         can steer results without re-typing the whole prompt. With `taste`, the
         results are re-ranked by your trained preference model."""
         vec = self._clip_query_vector(text)
-        hits = self.index("clip").search(vec, top_k=top_k, per_scene=3)
-        return self._rerank_by_taste(hits, "clip") if taste else hits
+        clip = self._clip_name()
+        hits = self.index(clip).search(vec, top_k=top_k, per_scene=3)
+        return self._rerank_by_taste(hits, clip) if taste else hits
 
     # --- taste model (explicit thumbs → personalized ranking) ----------------
 
@@ -775,7 +787,7 @@ class Service:
     def has_taste(self, profile: str | None = None, model: str | None = None) -> bool:
         profile = profile or self.cfg.markers.tag_name
         model = model or canonical_name(self.cfg.embedding.model)
-        return self._taste_path(profile, model).exists() or self._taste_path(profile, "clip").exists()
+        return self._taste_path(profile, model).exists() or self._taste_path(profile, self._clip_name()).exists()
 
     def _rerank_by_taste(
         self, hits: list[Hit], model: str, profile: str | None = None,
@@ -803,7 +815,7 @@ class Service:
 
     def has_clip_index(self) -> bool:
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        return len(cache.keys("clip")) > 0
+        return len(cache.keys(self._clip_name())) > 0
 
     @staticmethod
     def _unit(v: np.ndarray) -> np.ndarray:
@@ -896,7 +908,8 @@ class Service:
 
         log = (job.log if job else print)
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        keys = cache.keys("clip")
+        clip = self._clip_name()
+        keys = cache.keys(clip)
         if not keys:
             log("no CLIP cache — run a CLIP embed pass first")
             return {"scenes": 0, "tags": 0}
@@ -914,7 +927,7 @@ class Service:
                 log(f"  ⏹ stop requested — halting after {scored} scenes")
                 break
             try:
-                _, vecs, meta = cache.load(k, "clip")
+                _, vecs, meta = cache.load(k, clip)
             except Exception:
                 continue
             sid = meta.get("scene_id")
@@ -958,11 +971,12 @@ class Service:
     ) -> dict:
         """Top vocabulary matches for one frame — what CLIP thinks it is.
         Accepts a cache key (Explore) or a scene_id (megaboard tiles)."""
+        clip = self._clip_name()
         if key is None and scene_id is not None:
-            key = self._key_for_scene(scene_id, "clip")
+            key = self._key_for_scene(scene_id, clip)
         if key is None:
             return {"labels": []}
-        v = self.index("clip").vector_at(key, time)
+        v = self.index(clip).vector_at(key, time)
         if v is None:
             return {"labels": []}
         labels, mat = self._vocab_matrix()
@@ -976,7 +990,9 @@ class Service:
                 from ..embedding import ClipEmbedder
 
                 self._clip = ClipEmbedder(
-                    device=self.cfg.embedding.device or None
+                    model_name=self.cfg.embedding.clip_model,
+                    pretrained=self.cfg.embedding.clip_pretrained,
+                    device=self.cfg.embedding.device or None,
                 )
             return self._clip.embed_text([text])[0]
 
