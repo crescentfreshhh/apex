@@ -273,6 +273,81 @@ def test_taste_label_train_and_rerank(tmp_path, monkeypatch):
     assert ranked[0].key == "A"  # taste pulls the loved scene to the top
 
 
+class _MarkerTagClient:
+    """Yields one apex marker on scene 1, so the taste centroid has a source."""
+
+    def iter_markers_by_tag(self, tag, page_size=200):
+        yield {"marker_id": "1", "scene_id": "1", "seconds": 0.0,
+               "end_seconds": 15.0, "title": "apex", "primary_tag": tag}
+
+
+def _seed_two_scenes(cfg):
+    from peaks.cache import EmbeddingCache
+
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    cache.save("A", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+               np.array([[1, 0, 0, 0], [1, 0, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    cache.save("B", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+               np.array([[0, 1, 0, 0], [0, 1, 0, 0]], dtype="float32"), meta={"scene_id": "2"})
+
+
+def test_recommend_ranks_by_taste_centroid(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_two_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    r = svc.recommend(top_k=10, per_scene=2)
+    assert r["sources"] == 1  # one apex marker on scene A
+    # centroid ≈ A's direction, so A's frames should top the list
+    assert r["hits"][0].scene_id == "1"
+    assert r["hits"][0].score > r["hits"][-1].score
+
+
+def test_recommend_empty_without_taste(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_two_scenes(cfg)
+
+    class _NoMarkers:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+    monkeypatch.setattr(svc, "client", lambda: _NoMarkers())
+    r = svc.recommend()
+    assert r["sources"] == 0 and r["hits"] == []
+
+
+def test_next_uncertain_skips_labeled(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_two_scenes(cfg)
+    # no trained model, no centroid → random pick, but always an unlabeled frame
+    item = svc.next_uncertain(pool=10)
+    assert item is not None and (item["key"], round(item["time"], 2)) not in (
+        svc._label_store().labeled_ids(cfg.markers.tag_name)
+    )
+
+
+def test_taste_words_from_centroid(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    # CLIP-space frames for the same scenes (so the centroid lives in clip space)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    cache.save("A", "clip", np.array([0.0], dtype="float32"),
+               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
+    vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
+    monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
+
+    out = svc.taste_words(top_k=2)
+    assert out["sources"] == 1 and out["labels"][0][0] == "beach"
+
+
 def test_collections_save_list_load(tmp_path, monkeypatch):
     svc, _ = _service(tmp_path)
     monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))

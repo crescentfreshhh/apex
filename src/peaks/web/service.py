@@ -32,6 +32,7 @@ class Service:
         self._vocab_cache = None  # (labels, CLIP-text matrix) for classification
         self._pool = None  # cached scene pool for the shuffle board
         self._settings_cache = None  # GUI-saved active models (lazily read)
+        self._taste_src_cache = {}  # model -> (stacked loved-moment vecs, sources)
 
     # --- library / scenes ----------------------------------------------------
 
@@ -924,6 +925,132 @@ class Service:
         snorm = (ss - float(ss.min())) / span
         final = (1.0 - relevance_weight) * taste + relevance_weight * snorm
         return [hits[i] for i in np.argsort(-final)]
+
+    # --- "For You": taste centroid, recommendations, active learning ---------
+
+    def _taste_sources(self, model: str, rebuild: bool = False):
+        """Unit vectors of your loved moments in `model` space — apex markers
+        plus thumbs-up labels — stacked oldest→newest, with a parallel list of
+        their {key,time,scene_id,kind}. Cached per model; `rebuild` re-reads the
+        Stash markers and the label store."""
+        if not rebuild and model in self._taste_src_cache:
+            return self._taste_src_cache[model]
+        idx = self.index(model)
+        sid_key: dict[str, str] = {}
+        for k, m in idx.key_meta.items():
+            sid = m.get("scene_id")
+            if sid is not None:
+                sid_key.setdefault(str(sid), k)
+        vecs, sources, seen = [], [], set()
+
+        def _add(key, t, scene_id, kind):
+            sig = (key, round(float(t), 1))
+            if key is None or sig in seen:
+                return
+            v = idx.vector_at(key, float(t))
+            if v is None:
+                return
+            vecs.append(self._unit(v))
+            sources.append(
+                {"key": key, "time": round(float(t), 2), "scene_id": scene_id, "kind": kind}
+            )
+            seen.add(sig)
+
+        # apex markers — the moments you explicitly saved
+        try:
+            for mk in self.client().iter_markers_by_tag(self.cfg.markers.tag_name):
+                sid = mk.get("scene_id")
+                if sid:
+                    _add(sid_key.get(str(sid)), mk.get("seconds") or 0.0, str(sid), "apex")
+        except Exception:  # noqa: BLE001 — Stash down: fall back to labels only
+            pass
+        # thumbs-up labels — from the swipe trainer / viewer
+        try:
+            for lab in self._label_store().for_profile(self.cfg.markers.tag_name):
+                if lab.label == 1:
+                    _add(lab.key, lab.time, lab.scene_id, "thumb")
+        except Exception:  # noqa: BLE001
+            pass
+
+        dim = idx.dim or 1
+        arr = np.stack(vecs).astype(np.float32) if vecs else np.zeros((0, dim), dtype=np.float32)
+        self._taste_src_cache[model] = (arr, sources)
+        return arr, sources
+
+    def _taste_centroid(self, model: str, recent: int = 0, rebuild: bool = False):
+        """(unit centroid, count, sources). `recent`>0 averages only your latest
+        N loved moments — the 'what you're into lately' view."""
+        arr, sources = self._taste_sources(model, rebuild=rebuild)
+        if arr.shape[0] == 0:
+            return None, 0, sources
+        a = arr[-recent:] if (recent and recent < arr.shape[0]) else arr
+        return self._unit(a.mean(axis=0)), int(a.shape[0]), sources
+
+    def recommend(
+        self, top_k: int = 60, model: str | None = None,
+        per_scene: int = 2, recent: int = 0, rebuild: bool = False,
+    ) -> dict:
+        """Moments across the whole library nearest your taste centroid — a
+        recommender built from your own apex history, no query needed."""
+        model = model or self._model_name()
+        if rebuild:
+            self._taste_src_cache.clear()
+        c, n, sources = self._taste_centroid(model, recent=recent, rebuild=rebuild)
+        if c is None:
+            return {"hits": [], "sources": 0, "total": 0, "model": model}
+        hits = self.index(model).search(c, top_k=top_k, per_scene=per_scene)
+        return {"hits": hits, "sources": n, "total": len(sources), "model": model}
+
+    def next_uncertain(self, model: str | None = None, pool: int = 800) -> dict | None:
+        """The unlabeled frame the taste model is least sure about — active
+        learning: rating the ambiguous ones teaches it fastest. Falls back to
+        centroid-ambiguity, then random, when there's no model/centroid yet."""
+        model = model or self._model_name()
+        idx = self.index(model)
+        if idx.size == 0:
+            return None
+        profile = self.cfg.markers.tag_name
+        labeled = self._label_store().labeled_ids(profile)
+        rng = np.random.default_rng()
+        rows = rng.choice(idx.size, size=min(pool, idx.size), replace=False)
+        clf = self._taste_model(profile, model)
+        if clf is not None:
+            p = np.asarray(clf.predict_proba(idx.matrix[rows]), dtype=np.float32)
+            unc = -np.abs(p - 0.5)  # nearest the 0.5 decision boundary
+        else:
+            # use the centroid only if it's already cached — never trigger a
+            # (network) marker rebuild from the swipe loop.
+            cached = self._taste_src_cache.get(model)
+            if cached is not None and cached[0].shape[0] > 0:
+                c = self._unit(cached[0].mean(axis=0))
+                sims = idx.matrix[rows] @ c
+                unc = -np.abs(sims - float(np.median(sims)))  # mid-similarity = ambiguous
+            else:
+                unc = rng.random(rows.shape[0])  # cold start: anything
+        for j in np.argsort(-unc):
+            i = int(rows[j])
+            key, t = idx.keys[i], float(idx.times[i])
+            if (key, round(t, 2)) in labeled:
+                continue
+            return {"key": key, "time": round(t, 2), "scene_id": idx.scene_ids[i], "score": 0.0}
+        return None
+
+    def taste_words(self, top_k: int = 8, recent: int = 0) -> dict:
+        """Your taste centroid described in vocabulary terms (CLIP space) — the
+        'what you're into' readout. `recent` limits to your latest N loved
+        moments so you can compare lately-vs-all-time (taste drift)."""
+        if not self.has_clip_index():
+            return {"labels": [], "sources": 0}
+        c, n, _ = self._taste_centroid(self._clip_name(), recent=recent)
+        if c is None:
+            return {"labels": [], "sources": 0}
+        labels, mat = self._vocab_matrix()
+        scores = mat @ self._unit(c)
+        order = np.argsort(-scores)[:top_k]
+        return {
+            "labels": [[labels[i], round(float(scores[i]), 3)] for i in order],
+            "sources": n,
+        }
 
     def has_clip_index(self) -> bool:
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)

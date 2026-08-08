@@ -24,6 +24,7 @@ document.querySelectorAll(".tab").forEach((b) =>
     b.classList.add("active");
     $("#" + b.dataset.view).classList.add("active");
     if (b.dataset.view === "dashboard") refreshDashboard();
+    if (b.dataset.view === "foryou") openForYou();
   })
 );
 
@@ -291,8 +292,8 @@ function stars(rating100) {
   return s;
 }
 let lastHits = [];
-function renderHits(hits) {
-  const g = $("#results");
+function renderHits(hits, container) {
+  const g = container || $("#results");
   lastHits = hits || [];
   const playable = lastHits.some((h) => h.scene_id && h.stream);
   $("#btn-board-search").disabled = !playable;
@@ -620,6 +621,100 @@ async function refreshCollections() {
   } catch {}
 }
 refreshCollections();
+
+// --- For You: taste-centroid recommender + active-learning swipe trainer ----
+function recentN() { return $("#foryou-recent")?.checked ? 40 : 0; }
+
+async function loadForYou(rebuild) {
+  const grid = $("#foryou-results");
+  grid.innerHTML = '<p class="dim">Reading your taste…</p>';
+  try {
+    const qs = new URLSearchParams({ top_k: 80, recent: recentN(), rebuild: rebuild ? "true" : "false" });
+    const d = await api("/api/foryou?" + qs);
+    if (!d.items.length) {
+      grid.innerHTML = "";
+      $("#foryou-status").textContent =
+        "No taste yet — save some apexes (⚑) or thumb up moments, then rebuild.";
+      return;
+    }
+    $("#foryou-status").textContent =
+      `Built from ${d.sources} loved moment${d.sources === 1 ? "" : "s"}` +
+      (recentN() ? " (lately)" : "") + ` · ${d.model}`;
+    currentContext = { kind: "foryou" };
+    renderHits(d.items, grid);
+  } catch (e) { grid.innerHTML = ""; toast(e.message, true); }
+}
+
+async function loadTasteWords() {
+  const el = $("#foryou-words");
+  try {
+    const d = await api("/api/foryou/words?recent=" + recentN());
+    if (!d.labels || !d.labels.length) { el.innerHTML = ""; return; }
+    el.innerHTML = `<span class="dim">${recentN() ? "Lately you're into" : "What you're into"}:</span> ` +
+      d.labels.map(([w, s]) => `<span class="fy-chip" title="${(s * 100).toFixed(0)}% match">${esc(w)}</span>`).join("");
+  } catch { el.innerHTML = ""; }
+}
+
+let swipeHit = null;
+async function loadNextSwipe() {
+  const card = $("#swipe-card");
+  card.classList.add("dim"); card.textContent = "Finding a frame to rate…";
+  try {
+    const d = await api("/api/foryou/next");
+    swipeHit = d.item;
+    if (!swipeHit) {
+      card.textContent = "Embed some scenes first, then come back to train.";
+      return;
+    }
+    card.classList.remove("dim");
+    const title = swipeHit.title || `scene ${swipeHit.scene_id ?? "?"}`;
+    card.innerHTML = `<img src="${swipeHit.thumb}" alt="" onerror="this.style.opacity=.15" />
+      <div class="swipe-meta"><div class="title">${esc(title)}</div>
+      <div class="dim">${fmt(swipeHit.time)}</div></div>`;
+    card.onclick = () => openViewer(swipeHit);
+  } catch (e) { card.textContent = e.message; }
+}
+async function swipeRate(label) {
+  if (!swipeHit) return;
+  try {
+    const c = await api("/api/label?" + new URLSearchParams({
+      key: swipeHit.key, t: (+swipeHit.time).toFixed(2), label,
+      ...(swipeHit.scene_id ? { scene_id: swipeHit.scene_id } : {}),
+    }), { method: "POST" });
+    updateTasteUI(c);
+    $("#swipe-status").textContent = `${c.positive}👍 / ${c.negative}👎`;
+  } catch (e) { toast(e.message, true); }
+  loadNextSwipe();
+}
+
+async function openForYou() {
+  loadNextSwipe();
+  await loadForYou(true);   // rebuild on open so fresh apexes/thumbs count
+  loadTasteWords();
+}
+$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); });
+$("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
+$("#btn-swipe-yes")?.addEventListener("click", () => swipeRate(1));
+$("#btn-swipe-no")?.addEventListener("click", () => swipeRate(0));
+$("#btn-swipe-skip")?.addEventListener("click", () => loadNextSwipe());
+$("#btn-swipe-train")?.addEventListener("click", async () => {
+  const btn = $("#btn-swipe-train"); btn.disabled = true;
+  try {
+    const s = await api("/api/train", { method: "POST" });
+    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    loadNextSwipe();
+  } catch (e) { toast(e.message, true); }
+  btn.disabled = false;
+});
+// keyboard shortcuts while the For You tab is the active view
+document.addEventListener("keydown", (e) => {
+  if (!$("#viewer").hidden) return;                       // viewer owns keys when open
+  if (!$("#foryou")?.classList.contains("active")) return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(1); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(0); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); loadNextSwipe(); }
+});
 
 function setActiveView(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === name));

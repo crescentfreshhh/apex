@@ -344,6 +344,35 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
 
+    # --- "For You": taste-centroid recommendations + active-learning trainer -
+
+    @app.get("/api/foryou")
+    def foryou(top_k: int = 60, recent: int = 0, rebuild: bool = False):
+        r = service.recommend(top_k=top_k, recent=recent, rebuild=rebuild)
+        return {
+            "items": _hit_payload(service, r["hits"]),
+            "sources": r["sources"], "total": r["total"], "model": r["model"],
+        }
+
+    @app.get("/api/foryou/next")
+    def foryou_next():
+        # deliberately lightweight (no scene_meta fetch) so rapid swiping never
+        # blocks on Stash — the viewer loads full metadata on click.
+        hit = service.next_uncertain()
+        if not hit:
+            return {"item": None}
+        sid = hit["scene_id"]
+        return {"item": {
+            "scene_id": sid, "key": hit["key"], "time": hit["time"], "score": 0.0,
+            "thumb": f"/api/frame?key={hit['key']}&t={hit['time']:g}",
+            "stream": service.stream_url(sid, start=hit["time"]) if sid else None,
+            "title": "", "performers": [],
+        }}
+
+    @app.get("/api/foryou/words")
+    def foryou_words(recent: int = 0, top_k: int = 8):
+        return service.taste_words(top_k=top_k, recent=recent)
+
     @app.post("/api/autotag")
     def autotag(top: int = Query(5), min_score: float = Query(0.0), limit: int = Query(0)):
         try:
