@@ -48,6 +48,18 @@ def _collection_model():
 CollectionIn = _collection_model()
 
 
+def _vocab_model():
+    from pydantic import BaseModel
+
+    class VocabIn(BaseModel):
+        vocab: str = ""
+
+    return VocabIn
+
+
+VocabIn = _vocab_model()
+
+
 def _hit_payload(service: Service, hits) -> list[dict]:
     meta = service.scene_meta([h.scene_id for h in hits if h.scene_id])
     out = []
@@ -331,11 +343,19 @@ def create_app(cfg=None):
         return _hit_payload(service, service.find_duplicates(key, t, threshold=threshold, model=model))
 
     @app.get("/api/classify")
-    def classify(key: str, t: float, top_k: int = 6):
+    def classify(t: float, key: str | None = None, scene_id: str | None = None, top_k: int = 6):
         try:
-            return service.classify_frame(key, t, top_k=top_k)
+            return service.classify_frame(key=key, time=t, scene_id=scene_id, top_k=top_k)
         except Exception:  # noqa: BLE001 — classification is cosmetic
             return {"labels": []}
+
+    @app.get("/api/vocab")
+    def get_vocab():
+        return service.get_vocab()
+
+    @app.post("/api/vocab")
+    def save_vocab(body: VocabIn):
+        return service.save_vocab(body.vocab)
 
     @app.get("/api/timeline")
     def timeline(

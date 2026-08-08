@@ -92,6 +92,24 @@
     </div>
 
     <div class="panel">
+      <h2>CLIP vocabulary</h2>
+      <p class="dim">The terms CLIP ranks each moment against for "CLIP sees" and
+        auto-tagging. One per line — saved to <code>/config/vocab.txt</code>. Natural
+        noun-phrases ("a woman in red heels") score better than bare keywords.</p>
+      <div class="row">
+        <button id="btn-vocab-edit" class="ghost">Edit vocabulary</button>
+        <span id="vocab-status" class="dim"></span>
+      </div>
+      <div id="vocab-editor" hidden>
+        <textarea id="vocab-text" class="vocab-text" rows="12" spellcheck="false"></textarea>
+        <div class="row">
+          <button id="btn-vocab-save" class="primary">Save vocabulary</button>
+          <button id="btn-vocab-reset" class="ghost">Reload</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>Sync library</h2>
       <p class="dim">Reconcile the cache with Stash: refresh scenes that moved
         between folders and drop cache entries for scenes deleted from Stash.</p>

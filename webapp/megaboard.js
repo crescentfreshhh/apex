@@ -190,6 +190,11 @@ function expand(tile) {
   v.addEventListener("loadedmetadata", onMeta);
   if (State.playing) v.play().catch(() => {});
   loadMeta(tile);
+  clearInterval(tile.clipTimer);
+  tile.clipTimer = setInterval(() => {
+    if (State.big === tile && !tile.video.paused) classifyBig(tile);
+  }, 1900);
+  classifyBig(tile);
 }
 
 function collapse(tile) {
@@ -208,6 +213,7 @@ function buildBigUI(tile) {
   meta.className = "mb-meta";
   meta.innerHTML = `<div class="mb-title">#${tile.apex.scene_id}</div>
     <div class="mb-sub dim">loading…</div>
+    <div class="mb-clip"></div>
     <div class="mb-edit"></div>`;
 
   const controls = document.createElement("div");
@@ -237,9 +243,23 @@ function buildBigUI(tile) {
 }
 
 function teardownBigUI(tile) {
+  clearInterval(tile.clipTimer);
   tile.ui?.meta.remove();
   tile.ui?.controls.remove();
   tile.ui = null;
+}
+
+// live "CLIP sees" for the enlarged tile — classify by scene_id (no key here)
+async function classifyBig(tile) {
+  const el = tile.ui && tile.ui.meta.querySelector(".mb-clip");
+  if (!el || !tile.apex) return;
+  try {
+    const d = await api(`/api/classify?scene_id=${encodeURIComponent(tile.apex.scene_id)}&t=${(tile.video.currentTime || 0).toFixed(2)}`);
+    const labs = d.labels || [];
+    el.innerHTML = labs.length
+      ? `<span class="dim">CLIP sees</span> ` + labs.slice(0, 5).map(([l]) => `<span class="mb-chip">${esc(l)}</span>`).join("")
+      : "";
+  } catch {}
 }
 
 function setupScrubber(tile) {

@@ -845,6 +845,33 @@ class Service:
                 return terms
         return DEFAULT_VOCAB
 
+    def _vocab_path(self):
+        import os
+        from pathlib import Path
+
+        return Path(os.environ.get("PEAKS_VOCAB", "/config/vocab.txt"))
+
+    def get_vocab(self) -> dict:
+        """Current classification vocabulary as editable text (one term/line)."""
+        path = self._vocab_path()
+        return {
+            "vocab": "\n".join(self._vocab()),
+            "count": len(self._vocab()),
+            "from_file": path.is_file(),
+            "path": str(path),
+        }
+
+    def save_vocab(self, text: str) -> dict:
+        """Write the vocabulary file and drop the cached matrix so the next
+        classification rebuilds against the new terms."""
+        path = self._vocab_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        path.write_text("\n".join(lines) + "\n")
+        with self._clip_lock:
+            self._vocab_cache = None
+        return {"count": len([ln for ln in lines if ln.strip() and not ln.startswith("#")])}
+
     def _vocab_matrix(self):
         """(labels, matrix) for the vocabulary, CLIP-text-embedded once and
         cached (unit rows, so scoring a frame is one matmul)."""
@@ -916,8 +943,25 @@ class Service:
         log(f"auto-tag: {scored} scenes → {written} tags applied")
         return {"scenes": scored, "tags": written}
 
-    def classify_frame(self, key: str, time: float, top_k: int = 6) -> dict:
-        """Top vocabulary matches for one frame — what CLIP thinks it is."""
+    def _key_for_scene(self, scene_id: str, model: str) -> str | None:
+        """Reverse-lookup a scene's cache key (the megaboard knows scene_id, not
+        the fingerprint key)."""
+        idx = self.index(model)
+        for k, m in idx.key_meta.items():
+            if str(m.get("scene_id")) == str(scene_id):
+                return k
+        return None
+
+    def classify_frame(
+        self, key: str | None = None, time: float = 0.0,
+        scene_id: str | None = None, top_k: int = 6,
+    ) -> dict:
+        """Top vocabulary matches for one frame — what CLIP thinks it is.
+        Accepts a cache key (Explore) or a scene_id (megaboard tiles)."""
+        if key is None and scene_id is not None:
+            key = self._key_for_scene(scene_id, "clip")
+        if key is None:
+            return {"labels": []}
         v = self.index("clip").vector_at(key, time)
         if v is None:
             return {"labels": []}

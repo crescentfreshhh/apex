@@ -84,6 +84,9 @@ html, body {
 .mb-meta > * { pointer-events: auto; }
 .mb-title { font-weight: 600; font-size: 15px; }
 .mb-sub { font-size: 12px; margin-top: 2px; }
+.mb-clip { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 8px; }
+.mb-chip { font-size: 11px; padding: 2px 7px; border-radius: 11px;
+  background: rgba(20, 20, 24, 0.75); border: 1px solid #33333a; color: var(--fg); }
 .mb-edit { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 .mb-rating { letter-spacing: 1px; }
 .mb-star { color: #55555c; cursor: pointer; font-size: 17px; }

@@ -211,6 +211,30 @@ wireJob($("#btn-reel"), $("#reel-status"), $("#reel-log"), () => {
   const tag = $("#board-tag").value.trim();
   return api("/api/reel" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
 }, $("#btn-reel-stop"));
+// --- CLIP vocabulary editor -------------------------------------------------
+$("#btn-vocab-edit").addEventListener("click", async () => {
+  const ed = $("#vocab-editor");
+  if (!ed.hidden) { ed.hidden = true; return; }
+  try {
+    const d = await api("/api/vocab");
+    $("#vocab-text").value = d.vocab;
+    $("#vocab-status").textContent = `${d.count} terms${d.from_file ? "" : " (defaults)"}`;
+    ed.hidden = false;
+  } catch (e) { toast(e.message, true); }
+});
+$("#btn-vocab-reset").addEventListener("click", async () => {
+  try { $("#vocab-text").value = (await api("/api/vocab")).vocab; } catch {}
+});
+$("#btn-vocab-save").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/vocab", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ vocab: $("#vocab-text").value }),
+    });
+    toast(`Saved ${r.count} terms`); $("#vocab-status").textContent = `${r.count} terms`;
+  } catch (e) { toast(e.message, true); }
+});
+
 async function refreshReels() {
   try {
     const { reels } = await api("/api/reels");
@@ -429,6 +453,7 @@ async function saveMoment(sid, t) {
 let viewerIndex = -1;
 let currentHit = null;
 let classifyTimer = null;
+let classifyInterval = null;
 function openViewerAt(i) {
   if (i < 0 || i >= lastHits.length) return;
   viewerIndex = i;
@@ -479,6 +504,11 @@ function openViewer(hit) {
   };
   v.onseeked = () => { clearTimeout(classifyTimer); classifyTimer = setTimeout(() => classifyCurrent(hit), 350); };
   v.onclick = () => { if (v.paused) v.play().catch(() => {}); else v.pause(); }; // click video = play/pause
+  // live "CLIP sees": reclassify the moment as it plays
+  clearInterval(classifyInterval);
+  classifyInterval = setInterval(() => {
+    if (!$("#viewer").hidden && !v.paused) classifyCurrent(currentHit);
+  }, 1600);
   v.play().catch(() => {});
   wireViewerTransport(v);
   $("#viewer-prev").onclick = prevViewer;
@@ -494,6 +524,7 @@ function openViewer(hit) {
 }
 function closeViewer() {
   const V = $("#viewer"), v = $("#viewer-v");
+  clearInterval(classifyInterval);
   try { v.pause(); } catch {}
   v.removeAttribute("src"); v.load(); V.hidden = true;
 }

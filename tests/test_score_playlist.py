@@ -166,6 +166,21 @@ def test_add_scene_tags_uses_add_mode(monkeypatch):
     assert seen["input"]["ids"] == ["1", "2"]
 
 
+def test_vocab_get_save_roundtrip(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_VOCAB", str(tmp_path / "vocab.txt"))
+    # defaults before any file
+    d = svc.get_vocab()
+    assert d["from_file"] is False and d["count"] > 20
+
+    r = svc.save_vocab("beach\noffice\n# a comment\n")
+    assert r["count"] == 2  # comment + blank not counted
+    d2 = svc.get_vocab()
+    assert d2["from_file"] is True and "beach" in d2["vocab"]
+    # saving drops the cached matrix so classification rebuilds on the new terms
+    assert svc._vocab_cache is None
+
+
 def test_classify_frame_top_labels(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 
