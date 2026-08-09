@@ -27,6 +27,41 @@ def test_build_stacks_all_scenes(tmp_path):
     assert set(idx.scene_ids) == {"1", "2"}
 
 
+def test_build_preallocates_matches_manual_stack(tmp_path):
+    # the preallocated build must produce the exact same matrix/times/rows as a
+    # naive per-scene stack (parity guard for the memory-lean rewrite).
+    cache = EmbeddingCache(tmp_path)
+    _seed(cache, "k1", "1", [_unit([1, 0, 0]), _unit([0, 1, 0])], [0.0, 8.0])
+    _seed(cache, "k2", "2", [_unit([0, 0, 1])], [4.0])
+    _seed(cache, "k3", "3", [_unit([1, 1, 0]), _unit([0, 1, 1])], [1.0, 2.0])
+    keys = ["k1", "k2", "k3"]
+    idx = SearchIndex(cache, "dino").build(keys)
+
+    expected = np.concatenate([cache.load(k, "dino")[1] for k in keys], axis=0)
+    assert idx.matrix.dtype == np.float32
+    assert np.array_equal(idx.matrix, expected)
+    assert idx.times.tolist() == [0.0, 8.0, 4.0, 1.0, 2.0]
+    assert idx._key_rows == {"k1": (0, 2), "k2": (2, 3), "k3": (3, 5)}
+    assert idx.keys == ["k1", "k1", "k2", "k3", "k3"]
+
+
+def test_peek_count_reads_frame_count(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    _seed(cache, "k1", "1", [_unit([1, 0, 0]), _unit([0, 1, 0])], [0.0, 8.0])
+    assert cache.peek_count("k1", "dino") == 2
+
+
+def test_build_tolerates_count_growth_between_passes(tmp_path, monkeypatch):
+    # a scene may gain frames between the count pass and the load pass during a
+    # live embed; the extra rows are clamped, never an out-of-bounds write.
+    cache = EmbeddingCache(tmp_path)
+    _seed(cache, "k1", "1", [_unit([1, 0, 0]), _unit([0, 1, 0]), _unit([0, 0, 1])], [0, 1, 2])
+    real_peek = cache.peek_count
+    monkeypatch.setattr(cache, "peek_count", lambda k, m: 1 if k == "k1" else real_peek(k, m))
+    idx = SearchIndex(cache, "dino").build(["k1"])
+    assert idx.size == 1 and idx.dim == 3  # sized to the undercount, clamped safely
+
+
 def test_search_ranks_by_cosine(tmp_path):
     cache = EmbeddingCache(tmp_path)
     _seed(cache, "k1", "1", [_unit([1, 0, 0])], [0.0])

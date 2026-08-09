@@ -753,6 +753,11 @@ class Service:
                 if len(cache.keys(model)) != getattr(idx, "source_key_count", -1):
                     rebuild = True
             if rebuild:
+                # drop the old index first so its matrix is freed before the new
+                # one is allocated — a whole-library float32 matrix is GBs, and
+                # holding both at once is what spiked RSS during an embed.
+                self._index.pop(model, None)
+                idx = None
                 cache = EmbeddingCache(self.cfg.embedding.cache_dir)
                 keys = cache.keys(model)
                 idx = SearchIndex(cache, model).build(keys)

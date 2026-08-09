@@ -90,6 +90,14 @@ class EmbeddingCache:
             meta = json.loads(str(data["meta"]))
         return times, vecs, meta
 
+    def peek_count(self, key: str, model_name: str) -> int:
+        """Frame count for an entry without loading its (large) vectors — reads
+        only the small `times` array. Lets the search index size its matrix up
+        front and fill it in place, instead of stacking per-scene arrays and
+        paying a transient second full copy at np.concatenate time."""
+        with np.load(self._file(key, model_name), allow_pickle=False) as data:
+            return int(data["times"].shape[0])
+
     def keys(self, model_name: str) -> list[str]:
         model_dir = self.root / model_name
         if not model_dir.exists():

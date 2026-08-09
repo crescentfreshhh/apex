@@ -52,30 +52,69 @@ class SearchIndex:
 
         Vectors are L2-normalized at write time, so cosine similarity is just a
         dot product. Stored float32 for fast matmul (the cache is float16).
+
+        The matrix is **preallocated** from a cheap first pass (frame counts via
+        `peek_count`, no vectors) and filled in place, so building a
+        whole-library index needs one copy of the data — not the ~2x transient a
+        per-scene `mats` list plus `np.concatenate` would hold. For a large
+        library (millions of frames) that halves the peak RAM of a rebuild.
         """
         keys = keys if keys is not None else self.cache.keys(self.model_name)
-        mats, all_keys, all_scenes, all_times = [], [], [], []
+
+        # pass 1: cheap frame counts (reads only the tiny `times` arrays) to
+        # size the matrix without a transient second copy.
+        kept: list[str] = []
+        counts: list[int] = []
         for key in keys:
+            try:
+                n = self.cache.peek_count(key, self.model_name)
+            except Exception:
+                continue
+            if n > 0:
+                kept.append(key)
+                counts.append(n)
+
+        total = sum(counts)
+        if total == 0:
+            self.matrix = np.zeros((0, 0), dtype=np.float32)
+            self.times = np.zeros((0,), dtype=np.float32)
+            self.keys = []
+            self.scene_ids = []
+            return self
+
+        # dim from the first kept scene, then fill the preallocated matrix.
+        _, first_vecs, _ = self.cache.load(kept[0], self.model_name)
+        dim = int(first_vecs.shape[1])
+        matrix = np.empty((total, dim), dtype=np.float32)
+        times_all = np.empty((total,), dtype=np.float32)
+        all_keys: list[str] = []
+        all_scenes: list[str | None] = []
+        pos = 0
+        for key in kept:
             try:
                 times, vecs, meta = self.cache.load(key, self.model_name)
             except Exception:
                 continue
-            if vecs.shape[0] == 0:
+            n = vecs.shape[0]
+            if n == 0:
                 continue
-            start = sum(m.shape[0] for m in mats)
-            mats.append(vecs.astype(np.float32))
-            self._key_rows[key] = (start, start + vecs.shape[0])
-            all_keys.extend([key] * vecs.shape[0])
+            if pos + n > total:  # count grew between passes (mid-embed write)
+                n = total - pos
+                vecs, times = vecs[:n], times[:n]
+            matrix[pos : pos + n] = vecs  # cache.load already returns float32
+            times_all[pos : pos + n] = times.astype(np.float32)
+            self._key_rows[key] = (pos, pos + n)
+            all_keys.extend([key] * n)
             sid = meta.get("scene_id")
-            all_scenes.extend([sid] * vecs.shape[0])
-            all_times.append(times.astype(np.float32))
+            all_scenes.extend([sid] * n)
             self.key_meta[key] = {"scene_id": sid, "path": meta.get("path")}
-        if mats:
-            self.matrix = np.concatenate(mats, axis=0)
-            self.times = np.concatenate(all_times, axis=0)
-        else:
-            self.matrix = np.zeros((0, 0), dtype=np.float32)
-            self.times = np.zeros((0,), dtype=np.float32)
+            pos += n
+            if pos >= total:
+                break
+
+        # trim if the live cache shrank between passes (any count drift)
+        self.matrix = matrix[:pos]
+        self.times = times_all[:pos]
         self.keys = all_keys
         self.scene_ids = all_scenes
         return self
