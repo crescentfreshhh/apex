@@ -1096,7 +1096,8 @@ class Service:
     def recommend(
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
-        exclude: set | None = None,
+        exclude: set | None = None, shuffle: bool | None = None,
+        seed: int | None = None,
     ) -> dict:
         """Moments across the whole library ranked for you — retrieve-then-rerank:
         the taste centroid pulls a generous candidate pool (fast, spans the
@@ -1104,8 +1105,14 @@ class Service:
         👎 passes and "Train now" shape the feed, not just your 👍). Falls back
         to pure centroid ranking when there's no trained model yet. `exclude` is
         a set of scene_ids to drop (Taste Radio uses it to keep the stream
-        endless — never replay what you've already seen)."""
+        endless — never replay what you've already seen). `shuffle` reorders the
+        candidate pool with a rank-weighted random shuffle so each rebuild
+        surfaces a fresh mix (strong matches stay likely near the top); it
+        defaults to `rebuild`, so an explicit "Rebuild from my taste" varies
+        while background refreshes stay stable."""
         model = model or self._model_name()
+        if shuffle is None:
+            shuffle = rebuild
         if rebuild:
             self._taste_src_cache.clear()
         c, n, sources = self._taste_centroid(model, recent=recent, rebuild=rebuild)
@@ -1119,12 +1126,32 @@ class Service:
             pool = [h for h in pool if str(h.scene_id) not in exclude]
         reranked = self._taste_model(self.cfg.markers.tag_name, model) is not None
         ranked = self._rerank_by_taste(pool, model) if reranked else pool
+        if shuffle:
+            ranked = self._shuffle_ranked(ranked, top_k, seed)
         diversity = self.cfg.modeling.feed_diversity
         hits = self._diversify(ranked, model, top_k, diversity)
         return {
             "hits": hits, "sources": n, "total": len(sources),
             "model": model, "reranked": reranked, "diversified": diversity > 0,
         }
+
+    def _shuffle_ranked(
+        self, ranked: list[Hit], top_k: int, seed: int | None = None
+    ) -> list[Hit]:
+        """Rank-weighted random reorder of the candidate pool: sample without
+        replacement with weights that decay by rank, so highly-ranked moments
+        stay probable near the front but every call yields a different mix. The
+        temperature is tied to `top_k` so the shuffle spans roughly the moments
+        that could actually make the feed, not the whole long tail."""
+        n = len(ranked)
+        if n <= 1:
+            return ranked
+        rng = np.random.default_rng(seed)
+        temp = float(max(top_k, 20))
+        w = np.exp(-np.arange(n) / temp)
+        p = w / w.sum()
+        order = rng.choice(n, size=n, replace=False, p=p)
+        return [ranked[int(i)] for i in order]
 
     def _diversify(self, hits: list[Hit], model: str, k: int, diversity: float) -> list[Hit]:
         """Maximal Marginal Relevance: pick a top-`k` that balances taste-rank

@@ -334,6 +334,38 @@ def test_recommend_ranks_by_taste_centroid(tmp_path, monkeypatch):
     assert r["hits"][0].score > r["hits"][-1].score
 
 
+def test_recommend_shuffle_varies_but_is_seeded(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    # 20 scenes all near the taste direction, so scores are close and the
+    # rank-weighted shuffle has room to reorder the top of the feed.
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    rng = np.random.default_rng(0)
+    for i in range(1, 21):
+        v = np.array([1.0, 0, 0, 0], dtype="float32") + rng.normal(0, 0.15, 4).astype("float32")
+        v = v / np.linalg.norm(v)
+        cache.save(f"s{i}", "dinov2", np.array([0.0], dtype="float32"),
+                   v.reshape(1, 4), meta={"scene_id": str(i)})
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    order = lambda r: [h.scene_id for h in r["hits"]]
+    # no shuffle → deterministic, same feed every call
+    assert order(svc.recommend(top_k=6, shuffle=False)) == order(svc.recommend(top_k=6, shuffle=False))
+    # different seeds → a different mix (the whole point of "Rebuild")
+    a = order(svc.recommend(top_k=6, shuffle=True, seed=1))
+    b = order(svc.recommend(top_k=6, shuffle=True, seed=2))
+    assert a != b
+    assert a == order(svc.recommend(top_k=6, shuffle=True, seed=1))  # same seed reproduces
+    # shuffle defaults to rebuild, so the Rebuild button varies without a flag
+    assert order(svc.recommend(top_k=6, rebuild=True, seed=1)) == a
+    # still a real, correctly-sized feed drawn from the library
+    assert len(a) == 6 and set(a) <= {str(i) for i in range(1, 21)}
+
+
 def test_recommend_reranks_with_trained_model(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
