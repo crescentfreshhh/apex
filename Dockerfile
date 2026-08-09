@@ -42,6 +42,16 @@ COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/refresh_config.py /opt/peaks/refresh_config.py
 RUN chmod +x /entrypoint.sh
 
+# Cap glibc's per-thread malloc arenas. Embedding does many large transient
+# numpy allocs/frees per scene (npz load, stack, concatenate) across threads;
+# glibc otherwise spreads these over many arenas and keeps the freed memory
+# reserved, so RSS only ratchets upward over a long embed and never returns to
+# the OS. ARENA_MAX=2 forces reuse (freed memory is released), which keeps the
+# embed's memory flat instead of climbing into double-digit GB. Trim threshold
+# nudges glibc to hand mapped memory back after big frees.
+ENV MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072
+
 # persist model downloads + all working data under the /config volume
 ENV TORCH_HOME=/config/torch \
     HF_HOME=/config/hf
