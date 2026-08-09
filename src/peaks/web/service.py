@@ -1203,6 +1203,151 @@ class Service:
             "sources": n,
         }
 
+    # --- galaxy map: 2D projection of the whole library ----------------------
+
+    def _galaxy_path(self, space: str):
+        import os
+        from pathlib import Path
+
+        return Path(os.environ.get("PEAKS_GALAXY_DIR", "/config/galaxy")) / f"{space}.json"
+
+    def get_galaxy(self, space: str = "dino") -> dict:
+        """The cached 2D map for a space, or {"built": False} if not built yet."""
+        import json
+
+        space = "clip" if space == "clip" else "dino"
+        p = self._galaxy_path(space)
+        if not p.is_file():
+            return {"built": False, "space": space}
+        try:
+            data = json.loads(p.read_text())
+            data["built"] = True
+            return data
+        except (OSError, ValueError):
+            return {"built": False, "space": space}
+
+    def build_galaxy(self, job=None, space: str = "dino", method: str = "umap") -> dict:
+        """Project every embedded scene to 2D (one point per scene), cluster the
+        points, colour them by your taste, and cache it. Runs as a background job
+        because UMAP on a few thousand scenes takes a beat."""
+        import json
+        from time import time as _now
+
+        from ..galaxy import cluster, project, scene_points
+
+        log = (job.log if job else print)
+        space = "clip" if space == "clip" else "dino"
+        model = self._clip_name() if space == "clip" else self._model_name()
+        idx = self.index(model, refresh=True)
+        if idx.size == 0:
+            raise RuntimeError(f"nothing embedded for {space} yet — run an embed pass first")
+
+        pts = scene_points(idx)
+        n = len(pts["keys"])
+        if n == 0:
+            raise RuntimeError("no scenes to map")
+        log(f"galaxy[{space}]: projecting {n} scenes to 2D…")
+        coords = project(pts["centroids"], method=method)
+        labels = cluster(coords)
+        taste = self._galaxy_taste()
+        cluster_meta = self._galaxy_cluster_labels(coords, labels, pts["scene_ids"])
+
+        records = []
+        for i, key in enumerate(pts["keys"]):
+            sid = pts["scene_ids"][i]
+            t = round(float(pts["rep_t"][i]), 2)
+            records.append({
+                "scene_id": sid, "key": key, "t": t,
+                "x": round(float(coords[i, 0]), 4), "y": round(float(coords[i, 1]), 4),
+                "c": int(labels[i]),
+                "taste": round(float(taste.get(str(sid), 0.0)), 3) if sid else 0.0,
+                "url": self.stream_url(sid, start=t) if sid else None,
+            })
+        out = {
+            "space": space, "model": model, "scenes": records,
+            "clusters": cluster_meta, "has_taste": bool(taste), "built_at": _now(),
+        }
+        p = self._galaxy_path(space)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out))
+        log(f"galaxy[{space}]: {n} scenes, {len(cluster_meta)} clusters cached")
+        return {"space": space, "scenes": n, "clusters": len(cluster_meta)}
+
+    def _galaxy_taste(self) -> dict:
+        """scene_id -> taste probability, from the DINO taste model applied to
+        each scene's (unit) DINO centroid. Batched; {} when no model exists."""
+        dino = self._model_name()
+        clf = self._taste_model(self.cfg.markers.tag_name, dino)
+        if clf is None:
+            return {}
+        idx = self.index(dino)
+        sids, cents = [], []
+        for _key, (start, end) in idx._key_rows.items():
+            block = idx.matrix[start:end]
+            if block.shape[0] == 0:
+                continue
+            sid = idx.scene_ids[start] if start < len(idx.scene_ids) else None
+            if sid is None:
+                continue
+            sids.append(str(sid))
+            cents.append(self._unit(block.mean(axis=0)))
+        if not cents:
+            return {}
+        try:
+            probs = clf.predict_proba(np.asarray(cents, dtype=np.float32))
+        except Exception:  # noqa: BLE001 — dim mismatch etc.; skip taste colour
+            return {}
+        return {s: float(p) for s, p in zip(sids, probs)}
+
+    def _galaxy_cluster_labels(self, coords, labels, scene_ids) -> list[dict]:
+        """Per cluster: its 2D centre, size, and top CLIP vocab terms (if CLIP is
+        embedded). Noise (-1) is skipped."""
+        clip_terms = self._cluster_clip_terms(labels, scene_ids) if self.has_clip_index() else {}
+        meta = []
+        for c in sorted({int(x) for x in labels}):
+            if c < 0:
+                continue
+            mask = labels == c
+            meta.append({
+                "id": c, "n": int(mask.sum()),
+                "cx": round(float(coords[mask, 0].mean()), 4),
+                "cy": round(float(coords[mask, 1].mean()), 4),
+                "label": clip_terms.get(c, ""),
+            })
+        return meta
+
+    def _cluster_clip_terms(self, labels, scene_ids, top_k: int = 3) -> dict:
+        """Top vocab terms per cluster, from the mean CLIP centroid of its scenes.
+        Best-effort — {} if anything's missing (labels are cosmetic)."""
+        try:
+            vocab, mat = self._vocab_matrix()
+            cidx = self.index(self._clip_name())
+            sid_cent = {}
+            for _key, (start, end) in cidx._key_rows.items():
+                block = cidx.matrix[start:end]
+                if block.shape[0] == 0:
+                    continue
+                sid = cidx.scene_ids[start] if start < len(cidx.scene_ids) else None
+                if sid is not None:
+                    sid_cent[str(sid)] = self._unit(block.mean(axis=0))
+            out = {}
+            for c in sorted({int(x) for x in labels}):
+                if c < 0:
+                    continue
+                cents = [
+                    sid_cent[str(scene_ids[i])]
+                    for i in range(len(scene_ids))
+                    if int(labels[i]) == c and str(scene_ids[i]) in sid_cent
+                ]
+                if not cents:
+                    continue
+                scores = mat @ self._unit(np.mean(cents, axis=0))
+                order = np.argsort(-scores)[:top_k]
+                out[c] = ", ".join(vocab[j] for j in order)
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
+
     def has_clip_index(self) -> bool:
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         return len(cache.keys(self._clip_name())) > 0

@@ -21,7 +21,8 @@ ml = [
     "open_clip_torch",  # the CLIP channel
     "torchvision",    # DINOv2 image transforms
     "pillow",
-    "scikit-learn",   # the Tier-2 taste classifier
+    "scikit-learn",   # the Tier-2 taste classifier + galaxy PCA/HDBSCAN
+    "umap-learn",     # galaxy-map 2D projection (pulls numba/llvmlite)
     "av>=12",         # sparse (seek-based) sampling; bundles ffmpeg libs
     "tqdm",
 ]

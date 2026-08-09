@@ -12,6 +12,7 @@
     <span class="brand">Opus</span>
     <nav>
       <button class="tab active" data-view="foryou">For You</button>
+      <button class="tab" data-view="galaxy">Galaxy</button>
       <button class="tab" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="board">Megaboard</button>
@@ -232,6 +233,34 @@
     <div id="foryou-results" class="grid"></div>
   </section>
 
+  <!-- GALAXY -->
+  <section id="galaxy" class="view">
+    <div class="galaxy-bar">
+      <span class="brand-mini">Galaxy <span class="tag-exp">experimental</span></span>
+      <label>Space
+        <select id="gx-space">
+          <option value="dino">DINOv2 — structure</option>
+          <option value="clip">CLIP — meaning</option>
+        </select>
+      </label>
+      <label>Color by
+        <select id="gx-color">
+          <option value="taste">Taste</option>
+          <option value="cluster">Cluster</option>
+          <option value="rating">Rating</option>
+        </select>
+      </label>
+      <button id="gx-rebuild" class="ghost">Rebuild map</button>
+      <button id="gx-reset" class="ghost" title="Reset zoom/pan">Reset view</button>
+      <span id="gx-status" class="dim"></span>
+    </div>
+    <div id="gx-stage" class="galaxy-stage">
+      <canvas id="gx-canvas"></canvas>
+      <div id="gx-tip" class="galaxy-tip" hidden></div>
+      <div id="gx-hint" class="galaxy-hint dim">Scroll to zoom · drag to pan · shift-drag to select a region → play on megaboard · click a star to watch</div>
+    </div>
+  </section>
+
   <!-- EXPLORE -->
   <section id="explore" class="view">
     <div class="search-bar">
@@ -312,5 +341,6 @@
   <div id="toast" hidden></div>
 
   <script src="/static/app.js"></script>
+  <script src="/static/galaxy.js"></script>
 </body>
 </html>

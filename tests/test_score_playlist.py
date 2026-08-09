@@ -408,6 +408,32 @@ def test_delete_taste_recent_window_keeps_and_retrains(tmp_path):
     assert r["retrained"] is True and svc.has_taste()
 
 
+def test_build_and_get_galaxy(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_GALAXY_DIR", str(tmp_path / "galaxy"))
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    rng = np.random.default_rng(1)
+    for s in range(8):
+        base = np.zeros(6, dtype="float32"); base[s % 2] = 1.0
+        v = base + rng.normal(0, 0.05, size=(3, 6)).astype("float32")
+        v /= np.linalg.norm(v, axis=1, keepdims=True)
+        cache.save(f"k{s}", "dinov2", np.array([0.0, 5.0, 10.0], dtype="float32"),
+                   v, meta={"scene_id": str(s + 1)})
+
+    assert svc.get_galaxy("dino")["built"] is False  # nothing cached yet
+    out = svc.build_galaxy(space="dino", method="pca")  # pca → no numba in CI
+    assert out["scenes"] == 8
+
+    g = svc.get_galaxy("dino")
+    assert g["built"] is True and len(g["scenes"]) == 8
+    r = g["scenes"][0]
+    assert {"scene_id", "key", "t", "x", "y", "c", "taste", "url"} <= set(r)
+    assert 0.0 <= r["x"] <= 1.0 and 0.0 <= r["y"] <= 1.0
+
+
 def test_diversify_breaks_up_near_duplicates(tmp_path):
     from peaks.cache import EmbeddingCache
     from peaks.search import Hit

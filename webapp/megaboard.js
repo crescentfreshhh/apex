@@ -505,6 +505,11 @@ async function loadSource(src, opts = {}) {
       State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
       if (!State.apexes.length) return showError("No For You feed to play. Open the For You tab and hit 'Play on megaboard'.");
       pickApex = makePicker(State.apexes);
+    } else if (src === "galaxy") {
+      let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_galaxy") || "null"); } catch {}
+      State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
+      if (!State.apexes.length) return showError("No galaxy selection to play. Select a region in the Galaxy tab.");
+      pickApex = makePicker(State.apexes);
     } else {
       const tag = src.startsWith("tag:") ? src.slice(4) : src;
       const pl = await api("/api/board/apexes?tag=" + encodeURIComponent(tag));
@@ -530,6 +535,7 @@ async function initSources(initial) {
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "foryou") opts.push(`<option value="foryou">For You — your taste</option>`);
+  if (initial === "galaxy") opts.push(`<option value="galaxy">Galaxy selection</option>`);
   sel.innerHTML = opts.join("");
   sel.addEventListener("change", () => loadSource(sel.value));
   return sel;
@@ -543,6 +549,7 @@ async function main() {
   let initial = null;
   if (params.get("src") === "search") initial = "search";
   else if (params.get("src") === "foryou") initial = "foryou";
+  else if (params.get("src") === "galaxy") initial = "galaxy";
   else if (params.get("collection")) initial = "collection:" + params.get("collection");
   const sel = await initSources(initial);
   if (initial) sel.value = initial;
