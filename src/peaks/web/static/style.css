@@ -66,6 +66,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .viewer-heat { position: relative; height: 12px; border-radius: 3px; overflow: hidden;
   background: #101014; cursor: pointer; }
 .viewer-seek { width: 100%; margin-top: 5px; accent-color: var(--accent); cursor: pointer; }
+.viewer-vol { width: 84px; flex: none; accent-color: var(--accent); cursor: pointer; }
 .viewer-side { width: 320px; flex-shrink: 0; background: var(--panel);
   border-left: 1px solid var(--line); padding: 18px; overflow: auto;
   display: flex; flex-direction: column; gap: 12px; }

@@ -460,6 +460,29 @@ function wireViewerTransport(v) {
   play.onclick = () => { if (v.paused) v.play().catch(() => {}); else v.pause(); };
   v.onplay = () => (play.textContent = "❚❚");
   v.onpause = () => (play.textContent = "▶");
+  // volume: restore the last-used level, and reflect mute state in the icon
+  const vol = $("#viewer-vol"), muteBtn = $("#viewer-mute");
+  const stored = parseFloat(localStorage.getItem("peaks_vol"));
+  v.volume = isNaN(stored) ? 1 : stored;
+  v.muted = localStorage.getItem("peaks_muted") === "1";
+  const paintVol = () => {
+    vol.value = v.muted ? 0 : v.volume;
+    muteBtn.textContent = v.muted || v.volume === 0 ? "🔇" : v.volume < 0.5 ? "🔉" : "🔊";
+  };
+  paintVol();
+  vol.oninput = () => {
+    v.volume = parseFloat(vol.value);
+    v.muted = v.volume === 0;
+    localStorage.setItem("peaks_vol", v.volume);
+    localStorage.setItem("peaks_muted", v.muted ? "1" : "0");
+    paintVol();
+  };
+  muteBtn.onclick = () => {
+    v.muted = !v.muted;
+    localStorage.setItem("peaks_muted", v.muted ? "1" : "0");
+    paintVol();
+  };
+  v.onvolumechange = paintVol;
   let drag = false;
   seek.oninput = () => { drag = true; if (v.duration) time.textContent = `${fmt(seek.value / 1000 * v.duration)} / ${fmt(v.duration)}`; };
   seek.onchange = () => { if (v.duration) v.currentTime = seek.value / 1000 * v.duration; drag = false; };
@@ -579,6 +602,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowLeft") prevViewer();
   else if (e.key === " ") { e.preventDefault(); if (v.paused) v.play().catch(() => {}); else v.pause(); }
   else if (e.key === "s" || e.key === "S") saveMoment(currentHit?.scene_id, v.currentTime);
+  else if (e.key === "m" || e.key === "M") $("#viewer-mute").click();
 });
 $("#btn-text").addEventListener("click", textSearch);
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") textSearch(); });
