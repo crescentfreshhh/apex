@@ -834,7 +834,9 @@ class Service:
         self, scene_id: str, start: float, end: float | None = None, tag: str | None = None
     ) -> dict:
         """Write a marker at `start` (a moment you saved while watching). Shows
-        up in Stash and on the next megaboard build."""
+        up in Stash and on the next megaboard build. A manual save is also a
+        deliberate "I love this", so it's folded into your taste model as a
+        positive (feeds the reranker, not just the retrieval centroid)."""
         tag = tag or self.cfg.markers.tag_name
         client = self.client()
         t = client.find_or_create_tag(tag)
@@ -844,7 +846,19 @@ class Service:
             scene_id=str(scene_id), seconds=float(start), primary_tag_id=t.id,
             title=f"{tag} (saved)", end_seconds=float(end),
         )
+        self._label_apex_as_taste(scene_id, float(start), tag)
         return marker
+
+    def _label_apex_as_taste(self, scene_id: str, time: float, profile: str) -> None:
+        """Record a saved apex as a positive taste label (best-effort). Only
+        works once the scene is embedded (we need its cache key); never blocks
+        the save if it can't."""
+        try:
+            key = self._key_for_scene(str(scene_id), self._model_name())
+            if key:
+                self.add_label(key, time, 1, profile=profile, scene_id=str(scene_id))
+        except Exception:  # noqa: BLE001 — taste labeling must never break a save
+            pass
 
     def search_text(self, text: str, top_k: int = 60, taste: bool = False) -> list[Hit]:
         """CLIP text -> nearest moments. Supports blended queries: words

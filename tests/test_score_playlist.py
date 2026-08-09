@@ -125,6 +125,33 @@ def test_create_apex_writes_marker(tmp_path, monkeypatch):
     assert m["seconds"] == 42.0 and m["end_seconds"] == 57.0  # default +15s clip
 
 
+def test_create_apex_adds_positive_taste_label(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    cache.save("A", "dinov2", np.array([0.0, 45.0], dtype="float32"),
+               np.array([[1, 0, 0, 0], [1, 0, 0, 0]], dtype="float32"), meta={"scene_id": "5"})
+
+    class C:
+        def find_or_create_tag(self, name):
+            return type("T", (), {"id": "9", "name": name})()
+
+        def create_scene_marker(self, **kw):
+            return {"id": "m1", **kw}
+
+    monkeypatch.setattr(svc, "client", lambda: C())
+    assert svc.label_counts()["positive"] == 0
+    svc.create_apex("5", 42.0)  # scene 5 is embedded (key "A")
+    c = svc.label_counts()
+    assert c["positive"] == 1 and c["negative"] == 0  # the save became a taste 👍
+
+    # saving a moment whose scene isn't embedded doesn't error or mislabel
+    svc.create_apex("999", 3.0)
+    assert svc.label_counts()["positive"] == 1  # unchanged — no cache key for scene 999
+
+
 def test_auto_tag_scores_and_writes(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 

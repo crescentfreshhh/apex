@@ -322,10 +322,10 @@ function renderHits(hits, container) {
         </div>
       </div>
       <div class="actions">
-        <button class="thumb up" title="More like this (👍)">👍</button>
-        <button class="thumb down" title="Less like this (👎)">👎</button>
+        <button class="thumb up" title="Add to my taste (trains your model)">👍</button>
+        <button class="thumb down" title="Not my taste">👎</button>
         <button data-key="${h.key}" data-t="${h.time}">Find similar</button>
-        <button class="apex-btn" title="Mark this moment as an apex in Stash">⚑ Apex</button>
+        <button class="apex-btn" title="Save as apex — Stash marker + adds to your taste">⚑ Apex</button>
         ${h.stream ? `<button class="play-btn">Play ▸</button>` : ""}
       </div>
     </div>`;
@@ -507,7 +507,7 @@ async function loadViewerMeta(sid) {
 }
 async function saveMoment(sid, t) {
   if (!sid) return toast("no scene id for this result", true);
-  try { await api(`/api/scene/${sid}/apex?t=${(t || 0).toFixed(2)}`, { method: "POST" }); toast("Saved apex @ " + fmt(t)); }
+  try { await api(`/api/scene/${sid}/apex?t=${(t || 0).toFixed(2)}`, { method: "POST" }); toast("Saved apex + added to taste @ " + fmt(t)); }
   catch (e) { toast(e.message, true); }
 }
 let viewerIndex = -1;
