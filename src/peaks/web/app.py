@@ -509,6 +509,20 @@ def create_app(cfg=None):
             "title": "", "performers": [],
         }}
 
+    @app.get("/api/foryou/sample")
+    def foryou_sample(count: int = 10):
+        # Taste Picker: a batch of random frames to eyeball and tap. Lightweight
+        # (no scene_meta) like /api/foryou/next so the collage loads instantly.
+        items = []
+        for hit in service.sample_frames(count=count):
+            sid = hit["scene_id"]
+            items.append({
+                "scene_id": sid, "key": hit["key"], "time": hit["time"], "score": 0.0,
+                "thumb": f"/api/frame?key={hit['key']}&t={hit['time']:g}",
+                "stream": service.stream_url(sid, start=hit["time"]) if sid else None,
+            })
+        return {"items": items}
+
     @app.get("/api/foryou/words")
     def foryou_words(recent: int = 0, top_k: int = 8):
         return service.taste_words(top_k=top_k, recent=recent)

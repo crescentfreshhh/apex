@@ -217,6 +217,19 @@
       </div>
     </div>
 
+    <div class="panel" id="pick-panel">
+      <h2>🎲 Taste Picker <span class="tag-exp">batch</span></h2>
+      <p class="dim">A collage of random frames from your whole library. <strong>Tap the
+        ones that are <em>you</em></strong> — they go straight into your taste (the rest are
+        left untouched). Hit ▶ on a frame to preview it, then shuffle for ten more.</p>
+      <div class="row">
+        <button id="btn-pick-shuffle" class="primary" title="Draw ten fresh random frames">🎲 Shuffle 10</button>
+        <button id="btn-pick-add" class="thumb up" title="Save the tapped frames as in-taste" disabled>＋ Add to my taste</button>
+        <span id="pick-status" class="dim"></span>
+      </div>
+      <div id="pick-grid" class="grid pick-grid"></div>
+    </div>
+
     <div class="panel" id="taste-manage">
       <h2>Manage taste</h2>
       <p class="dim">Undo a bad session, or wipe your learned taste to start fresh.

@@ -533,6 +533,25 @@ def test_next_uncertain_skips_labeled(tmp_path, monkeypatch):
     )
 
 
+def test_sample_frames_distinct_and_bounded(tmp_path):
+    svc, cfg = _service(tmp_path)
+    _seed_two_scenes(cfg)  # 4 frames total (A x2, B x2)
+
+    got = svc.sample_frames(count=3, seed=0)
+    assert len(got) == 3
+    pairs = {(h["key"], h["time"]) for h in got}
+    assert len(pairs) == 3  # distinct rows, no repeats
+    assert all(h["scene_id"] in {"1", "2"} for h in got)
+
+    # asking for more than the library holds is clamped to the library size
+    assert len(svc.sample_frames(count=99)) == 4
+
+
+def test_sample_frames_empty_without_cache(tmp_path):
+    svc, _ = _service(tmp_path)  # nothing seeded
+    assert svc.sample_frames(count=10) == []
+
+
 def test_taste_words_from_centroid(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 

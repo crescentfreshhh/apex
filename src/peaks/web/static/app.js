@@ -727,6 +727,7 @@ async function swipeRate(label) {
 
 async function openForYou() {
   loadNextSwipe();
+  loadPicks();
   await loadForYou(true);   // rebuild on open so fresh apexes/thumbs count
   loadTasteWords();
 }
@@ -734,6 +735,75 @@ $("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); lo
 $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
 $("#btn-foryou-board")?.addEventListener("click", () => sendToMegaboard(foryouItems, "mb_foryou", "foryou"));
 $("#btn-foryou-radio")?.addEventListener("click", () => startRadio());
+
+// --- Taste Picker: a random-frame collage you tap to build your taste --------
+let pickItems = [], selectedPicks = new Set();
+const pickId = (it) => `${it.key}@${it.time}`;
+
+function refreshPickAdd() {
+  const btn = $("#btn-pick-add");
+  if (!btn) return;
+  const n = selectedPicks.size;
+  btn.disabled = n === 0;
+  btn.textContent = n ? `＋ Add ${n} to my taste` : "＋ Add to my taste";
+}
+
+function renderPicks() {
+  const grid = $("#pick-grid");
+  grid.innerHTML = "";
+  pickItems.forEach((it, i) => {
+    const id = pickId(it);
+    const tile = document.createElement("div");
+    tile.className = "pick-tile" + (selectedPicks.has(id) ? " selected" : "");
+    tile.innerHTML = `<img loading="lazy" src="${it.thumb}" alt="" onerror="this.style.opacity=.15" />
+      <span class="pick-t">${fmt(it.time)}</span>
+      <button class="pick-play" title="Preview">▶</button>`;
+    tile.addEventListener("click", (e) => {
+      if (e.target.closest(".pick-play")) { openViewer(it); return; }
+      if (selectedPicks.has(id)) selectedPicks.delete(id); else selectedPicks.add(id);
+      tile.classList.toggle("selected");
+      refreshPickAdd();
+    });
+    grid.appendChild(tile);
+  });
+}
+
+async function loadPicks() {
+  const grid = $("#pick-grid");
+  if (!grid) return;
+  selectedPicks.clear(); refreshPickAdd();
+  grid.innerHTML = `<div class="dim" style="padding:8px">Shuffling frames…</div>`;
+  try {
+    const d = await api("/api/foryou/sample?count=10");
+    pickItems = d.items || [];
+    if (!pickItems.length) { grid.innerHTML = `<div class="dim" style="padding:8px">Embed some scenes first, then shuffle.</div>`; return; }
+    renderPicks();
+  } catch (e) { grid.innerHTML = `<div class="dim" style="padding:8px">${esc(e.message)}</div>`; }
+}
+
+async function addPicks() {
+  const chosen = pickItems.filter((it) => selectedPicks.has(pickId(it)));
+  if (!chosen.length) return;
+  const btn = $("#btn-pick-add"); btn.disabled = true;
+  try {
+    // sequential, not Promise.all: each /api/label reloads+saves the label file,
+    // so concurrent posts would clobber each other (lost updates).
+    let c = null, trained = false;
+    for (const it of chosen) {
+      c = await api("/api/label?" + new URLSearchParams({
+        key: it.key, t: (+it.time).toFixed(2), label: 1,
+        ...(it.scene_id ? { scene_id: it.scene_id } : {}),
+      }), { method: "POST" });
+      trained = trained || !!(c && c.autotrain);
+    }
+    updateTasteUI(c);
+    $("#pick-status").textContent = `+${chosen.length} added · ${c.positive}👍` + (trained ? " · training…" : "");
+    if (trained) setTimeout(() => { loadForYou(false); loadTasteWords(); }, 4000);
+  } catch (e) { toast(e.message, true); }
+  loadPicks();   // fresh collage
+}
+$("#btn-pick-shuffle")?.addEventListener("click", () => loadPicks());
+$("#btn-pick-add")?.addEventListener("click", () => addPicks());
 
 // --- Taste Radio: endless, auto-advancing, live-adapting personal stream -----
 let radioOn = false, radioQueue = [], radioPos = 0, radioSeen = new Set();

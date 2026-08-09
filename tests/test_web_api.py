@@ -79,6 +79,28 @@ def test_radio_endpoint(cfg, tmp_path, monkeypatch):
     assert client.get("/api/radio?count=5&exclude=" + sids).json()["items"] == []
 
 
+def test_sample_endpoint_returns_random_frames(cfg, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+    client = TestClient(create_app(cfg))
+
+    # library has 3 seeded frames (k1 x2, k2 x1) — asking for more is clamped.
+    d = client.get("/api/foryou/sample?count=10").json()
+    items = d["items"]
+    assert 0 < len(items) <= 3
+    assert all(it["thumb"].startswith("/api/frame?key=") for it in items)
+    assert all(it["stream"] for it in items)
+    # distinct (key, time) rows, no repeats within a batch
+    pairs = {(it["key"], it["time"]) for it in items}
+    assert len(pairs) == len(items)
+
+    # count caps the batch size
+    small = client.get("/api/foryou/sample?count=2").json()["items"]
+    assert len(small) == 2
+
+
 def test_autotrain_kicks_after_threshold(cfg, tmp_path):
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
     cfg.modeling.dir = str(tmp_path / "models")

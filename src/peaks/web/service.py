@@ -1192,6 +1192,28 @@ class Service:
             return {"key": key, "time": round(t, 2), "scene_id": idx.scene_ids[i], "score": 0.0}
         return None
 
+    def sample_frames(
+        self, count: int = 10, model: str | None = None, seed: int | None = None
+    ) -> list[dict]:
+        """A batch of `count` uniformly-random distinct frames from the whole
+        library — the Taste Picker collage. No taste model, no uncertainty, no
+        labeled-set filtering: deliberately just random (re-picking an already
+        loved frame is a harmless upsert on /api/label)."""
+        model = model or self._model_name()
+        idx = self.index(model, refresh=True)  # pick up frames from an in-progress embed
+        if idx.size == 0:
+            return []
+        rng = np.random.default_rng(seed)
+        rows = rng.choice(idx.size, size=min(count, idx.size), replace=False)
+        return [
+            {
+                "key": idx.keys[i],
+                "time": round(float(idx.times[i]), 2),
+                "scene_id": idx.scene_ids[i],
+            }
+            for i in (int(r) for r in rows)
+        ]
+
     def taste_words(self, top_k: int = 8, recent: int = 0) -> dict:
         """Your taste centroid described in vocabulary terms (CLIP space) — the
         'what you're into' readout. `recent` limits to your latest N loved
