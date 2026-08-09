@@ -500,6 +500,11 @@ async function loadSource(src, opts = {}) {
       State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
       if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
       pickApex = makePicker(State.apexes);
+    } else if (src === "foryou") {
+      let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_foryou") || "null"); } catch {}
+      State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
+      if (!State.apexes.length) return showError("No For You feed to play. Open the For You tab and hit 'Play on megaboard'.");
+      pickApex = makePicker(State.apexes);
     } else {
       const tag = src.startsWith("tag:") ? src.slice(4) : src;
       const pl = await api("/api/board/apexes?tag=" + encodeURIComponent(tag));
@@ -524,6 +529,7 @@ async function initSources(initial) {
       opts.push(`<option value="collection:${esc(c.safe)}">Collection: ${esc(c.name)} (${c.count})</option>`);
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
+  if (initial === "foryou") opts.push(`<option value="foryou">For You — your taste</option>`);
   sel.innerHTML = opts.join("");
   sel.addEventListener("change", () => loadSource(sel.value));
   return sel;
@@ -536,6 +542,7 @@ async function main() {
   const params = new URLSearchParams(location.search);
   let initial = null;
   if (params.get("src") === "search") initial = "search";
+  else if (params.get("src") === "foryou") initial = "foryou";
   else if (params.get("collection")) initial = "collection:" + params.get("collection");
   const sel = await initSources(initial);
   if (initial) sel.value = initial;

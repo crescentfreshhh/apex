@@ -617,12 +617,13 @@ function hitsToApexes(hits) {
     duration: BOARD_CLIP_SECONDS, url: h.stream, score: h.score ?? 1, title: h.title || "",
   }));
 }
-$("#btn-board-search").addEventListener("click", () => {
-  const apexes = hitsToApexes(lastHits);
-  if (!apexes.length) return;
-  localStorage.setItem("mb_search", JSON.stringify({ tag: "search", count: apexes.length, apexes }));
-  window.open("/megaboard/?src=search", "_blank");
-});
+function sendToMegaboard(hits, storeKey, src) {
+  const apexes = hitsToApexes(hits);
+  if (!apexes.length) { toast("Nothing playable to send to the megaboard yet"); return; }
+  localStorage.setItem(storeKey, JSON.stringify({ tag: src, count: apexes.length, apexes }));
+  window.open("/megaboard/?src=" + src, "_blank");
+}
+$("#btn-board-search").addEventListener("click", () => sendToMegaboard(lastHits, "mb_search", "search"));
 $("#btn-save-collection").addEventListener("click", async () => {
   const apexes = hitsToApexes(lastHits);
   if (!apexes.length) return;
@@ -649,6 +650,7 @@ refreshCollections();
 
 // --- For You: taste-centroid recommender + active-learning swipe trainer ----
 function recentN() { return $("#foryou-recent")?.checked ? 40 : 0; }
+let foryouItems = [];  // the current feed, for the "Play on megaboard" handoff
 
 async function loadForYou(rebuild) {
   const grid = $("#foryou-results");
@@ -656,6 +658,8 @@ async function loadForYou(rebuild) {
   try {
     const qs = new URLSearchParams({ top_k: 80, recent: recentN(), rebuild: rebuild ? "true" : "false" });
     const d = await api("/api/foryou?" + qs);
+    foryouItems = d.items || [];
+    $("#btn-foryou-board").disabled = !foryouItems.some((h) => h.scene_id && h.stream);
     if (!d.items.length) {
       grid.innerHTML = "";
       $("#foryou-status").textContent =
@@ -727,6 +731,7 @@ async function openForYou() {
 }
 $("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); });
 $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
+$("#btn-foryou-board")?.addEventListener("click", () => sendToMegaboard(foryouItems, "mb_foryou", "foryou"));
 $("#btn-swipe-yes")?.addEventListener("click", () => swipeRate(1));
 $("#btn-swipe-no")?.addEventListener("click", () => swipeRate(0));
 $("#btn-swipe-skip")?.addEventListener("click", () => loadNextSwipe());
