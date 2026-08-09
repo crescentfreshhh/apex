@@ -176,6 +176,10 @@ button.danger { background: transparent; color: var(--bad); border: 1px solid va
   border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; }
 button.danger:hover { background: var(--bad); color: #1a0a06; }
 
+.radio-badge { position: absolute; top: 10px; left: 12px; z-index: 51;
+  background: rgba(200,162,74,.9); color: #1a1400; font-size: 12px; font-weight: 600;
+  padding: 3px 10px; border-radius: 20px; letter-spacing: .3px; }
+
 /* --- Galaxy map --- */
 .galaxy-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
 .galaxy-bar .brand-mini { font-weight: 700; color: var(--accent); }

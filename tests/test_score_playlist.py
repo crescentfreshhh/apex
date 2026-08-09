@@ -456,6 +456,21 @@ def test_diversify_breaks_up_near_duplicates(tmp_path):
     assert [h.key for h in diverse] == ["A", "C"]  # variety pulls C above the near-dupe B
 
 
+def test_recommend_exclude_drops_scenes(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    sids = {str(h.scene_id) for h in svc.recommend(top_k=10)["hits"]}
+    assert sids  # baseline has results
+    r = svc.recommend(top_k=10, exclude={"1"})
+    assert all(str(h.scene_id) != "1" for h in r["hits"])  # excluded scene gone
+    assert svc.recommend(top_k=10, exclude=sids)["hits"] == []  # exclude all → empty
+
+
 def test_recommend_empty_without_taste(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")

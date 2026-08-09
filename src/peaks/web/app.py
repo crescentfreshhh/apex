@@ -513,6 +513,14 @@ def create_app(cfg=None):
     def foryou_words(recent: int = 0, top_k: int = 8):
         return service.taste_words(top_k=top_k, recent=recent)
 
+    @app.get("/api/radio")
+    def radio(exclude: str = "", count: int = 30):
+        """Next batch for Taste Radio: top taste moments minus the scene_ids in
+        `exclude` (comma-separated), so the stream never replays what you've seen."""
+        seen = {s for s in exclude.split(",") if s}
+        r = service.recommend(top_k=count, exclude=seen)
+        return {"items": _hit_payload(service, r["hits"])}
+
     # --- galaxy map ---------------------------------------------------------
 
     @app.get("/api/galaxy")

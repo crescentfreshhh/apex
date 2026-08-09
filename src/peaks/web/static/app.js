@@ -586,6 +586,7 @@ function openViewer(hit) {
 function closeViewer() {
   const V = $("#viewer"), v = $("#viewer-v");
   clearInterval(classifyInterval);
+  if (typeof stopRadio === "function") stopRadio();
   try { v.pause(); } catch {}
   v.removeAttribute("src"); v.load(); V.hidden = true;
 }
@@ -732,6 +733,80 @@ async function openForYou() {
 $("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); });
 $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
 $("#btn-foryou-board")?.addEventListener("click", () => sendToMegaboard(foryouItems, "mb_foryou", "foryou"));
+$("#btn-foryou-radio")?.addEventListener("click", () => startRadio());
+
+// --- Taste Radio: endless, auto-advancing, live-adapting personal stream -----
+let radioOn = false, radioQueue = [], radioPos = 0, radioSeen = new Set();
+let radioTick = null, radioClipStart = -1, radioThumbs = 0, radioCurrentHit = null;
+const RADIO_CLIP_SECS = 20;
+
+async function radioFetch() {
+  const ex = encodeURIComponent([...radioSeen].join(","));
+  const d = await api("/api/radio?count=30&exclude=" + ex);
+  return (d.items || []).filter((h) => h.scene_id && h.stream);
+}
+async function startRadio() {
+  radioSeen = new Set(); radioThumbs = 0;
+  let q;
+  try { q = await radioFetch(); } catch (e) { return toast(e.message, true); }
+  if (!q.length) return toast("No taste yet — save (⚑) or 👍 some moments first.");
+  q.forEach((h) => radioSeen.add(String(h.scene_id)));
+  radioQueue = q; radioOn = true; lastHits = radioQueue;
+  toast("📻 Taste Radio — lean back");
+  radioShow(0);
+}
+function radioShow(i) {
+  radioPos = i;
+  openViewerAt(i);              // reuse the viewer (stream, volume, "CLIP sees")
+  radioCurrentHit = currentHit;
+  radioClipStart = -1;         // captured on the first playing tick
+  bindRadioControls();
+  const badge = $("#viewer-radio"); if (badge) badge.hidden = false;
+  if (!radioTick) radioTick = setInterval(radioTickFn, 1000);
+}
+function radioTickFn() {
+  if (!radioOn) return;
+  if ($("#viewer").hidden || currentHit !== radioCurrentHit) { stopRadio(); return; }
+  const v = $("#viewer-v");
+  if (v.paused || !v.duration) return;   // pausing the video pauses the stream
+  if (radioClipStart < 0) radioClipStart = v.currentTime;
+  if (v.ended || v.currentTime - radioClipStart >= RADIO_CLIP_SECS) radioNext();
+}
+async function radioNext() {
+  if (!radioOn) return;
+  radioPos++;
+  if (radioPos >= radioQueue.length - 2) {
+    try {
+      const more = await radioFetch();
+      if (more.length) {
+        more.forEach((h) => radioSeen.add(String(h.scene_id)));
+        radioQueue = radioQueue.concat(more); lastHits = radioQueue;
+      } else { radioSeen = new Set(); }   // seen it all → loop your taste again
+    } catch {}
+  }
+  if (radioPos >= radioQueue.length) radioPos = 0;
+  radioShow(radioPos);
+}
+function radioPrev() { if (radioOn) radioShow(Math.max(0, radioPos - 1)); }
+function bindRadioControls() {
+  const v = $("#viewer-v");
+  const up = $("#viewer-up"), down = $("#viewer-down");
+  const next = $("#viewer-next"), prev = $("#viewer-prev");
+  if (up) up.onclick = (e) => { thumb(currentHit.key, v.currentTime, 1, currentHit.scene_id, e.currentTarget); radioThumbs++; radioMaybeTrimTail(); };
+  if (down) down.onclick = (e) => { thumb(currentHit.key, v.currentTime, 0, currentHit.scene_id, e.currentTarget); radioThumbs++; radioNext(); };
+  if (next) next.onclick = radioNext;
+  if (prev) prev.onclick = radioPrev;
+}
+function radioMaybeTrimTail() {
+  // every few thumbs, drop the unplayed tail so the next refill re-ranks against
+  // the freshly auto-retrained model (👍/👎 already hit /api/label → autotrain)
+  if (radioThumbs % 6 === 0) radioQueue = radioQueue.slice(0, radioPos + 1);
+}
+function stopRadio() {
+  radioOn = false;
+  if (radioTick) { clearInterval(radioTick); radioTick = null; }
+  const badge = $("#viewer-radio"); if (badge) badge.hidden = true;
+}
 $("#btn-swipe-yes")?.addEventListener("click", () => swipeRate(1));
 $("#btn-swipe-no")?.addEventListener("click", () => swipeRate(0));
 $("#btn-swipe-skip")?.addEventListener("click", () => loadNextSwipe());

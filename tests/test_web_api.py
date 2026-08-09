@@ -55,6 +55,30 @@ def test_stats(client):
     assert body["cached_scenes"] == 2 and body["model"] == "dinov2"
 
 
+def test_radio_endpoint(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+
+    class _C:  # fast, offline: no markers, no network
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+        def stream_url(self, sid, start=None):
+            return f"http://s/{sid}?t={start}"
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    client = TestClient(create_app(cfg))
+    # a thumbs-up gives the taste centroid something to build the queue from
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
+
+    d = client.get("/api/radio?count=5").json()
+    assert d["items"] and all(it["scene_id"] and it["stream"] for it in d["items"])
+    sids = ",".join({it["scene_id"] for it in d["items"]})
+    assert client.get("/api/radio?count=5&exclude=" + sids).json()["items"] == []
+
+
 def test_autotrain_kicks_after_threshold(cfg, tmp_path):
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
     cfg.modeling.dir = str(tmp_path / "models")
