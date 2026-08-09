@@ -195,6 +195,17 @@ def create_app(cfg=None):
             return JSONResponse({"detail": "authentication required"}, status_code=401)
         return HTMLResponse(_LOGIN_HTML, status_code=200)
 
+    @app.middleware("http")
+    async def _revalidate_ui(request: Request, call_next):
+        """Make the browser revalidate the UI (HTML/JS/CSS) on every load so a
+        redeploy is picked up without a manual hard-refresh — the recurring
+        "stale app.js" trap. no-cache still allows efficient 304s when unchanged."""
+        resp = await call_next(request)
+        p = request.url.path
+        if p == "/" or p.startswith("/static/") or p.startswith("/megaboard"):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     @app.post("/api/login")
     def login(body: LoginIn):
         if not _auth_on:

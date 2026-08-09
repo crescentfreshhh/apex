@@ -659,7 +659,6 @@ async function loadForYou(rebuild) {
     const qs = new URLSearchParams({ top_k: 80, recent: recentN(), rebuild: rebuild ? "true" : "false" });
     const d = await api("/api/foryou?" + qs);
     foryouItems = d.items || [];
-    $("#btn-foryou-board").disabled = !foryouItems.some((h) => h.scene_id && h.stream);
     if (!d.items.length) {
       grid.innerHTML = "";
       $("#foryou-status").textContent =
