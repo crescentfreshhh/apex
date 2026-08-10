@@ -329,13 +329,19 @@
         <select id="perf-sort">
           <option value="moments">Moments</option>
           <option value="scenes">Scenes</option>
-          <option value="taste">Taste</option>
+          <option value="taste">Taste (best)</option>
+          <option value="affinity">You'd love ★</option>
+          <option value="engagement">Engagement ⊙</option>
         </select>
+        <button id="btn-perf-roulette" class="ghost" title="Surprise me — a random on-taste performer, endless on the board">🎲 Roulette</button>
+        <button id="btn-perf-hof" class="ghost" title="Auto-build best-of collections for your top performers">🏆 Hall of Fame</button>
         <button id="btn-perf-refresh" class="ghost" title="Re-scan the library from Stash">↻ Rebuild</button>
         <span id="perf-status" class="dim"></span>
       </div>
+      <div id="compare-tray" class="dim" hidden></div>
     </div>
     <div id="perf-grid" class="perf-grid"></div>
+    <div id="perf-detail" hidden></div>
   </section>
 
   <!-- MEGABOARD -->

@@ -238,6 +238,32 @@ def test_performer_best_and_leaderboard_endpoints(cfg, tmp_path, monkeypatch):
 
     board = client.get("/api/performers?sort=moments").json()["performers"]
     assert board and board[0]["name"] == "Ava" and board[0]["scenes"] == 2
+    assert "affinity" in board[0] and "top" in board[0]
+
+    detail = client.get("/api/performer/detail?id=p1").json()
+    assert detail["performer"] == "Ava" and detail["items"]
+    assert detail["stats"]["scenes"] == 2
+    assert "similar" in detail and "distribution" in detail
+
+    r = client.get("/api/performer/roulette").json()
+    assert r["id"] in {"p1"}   # only performer in this fixture
+
+
+def test_hall_of_fame_endpoint(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _perf_client_cls()())
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+    client = TestClient(create_app(cfg))
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
+
+    hof = client.post("/api/performers/hall-of-fame", params={"top_n": 5}).json()
+    assert hof["created"]
+    names = {c["name"] for c in client.get("/api/collections").json()["collections"]}
+    assert any("best of" in n for n in names)
 
 
 def test_board_performer_endpoint(cfg, monkeypatch):

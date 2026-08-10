@@ -1473,38 +1473,195 @@ class Service:
 
         c, _, _ = self._taste_centroid(model)
         cu = self._unit(c) if c is not None else None
-        # performer id -> {name, scenes:set}
+        dim = idx.dim or 1
+        # performer id -> {name, scenes:set, o, rating_sum, rating_n}
         perf: dict[str, dict] = {}
         for sid, meta in details.items():
             for p in meta.get("performers_detail") or []:
                 if not p.get("id"):
                     continue
-                e = perf.setdefault(str(p["id"]), {"name": p.get("name", ""), "scenes": set()})
+                e = perf.setdefault(str(p["id"]), {
+                    "name": p.get("name", ""), "scenes": set(),
+                    "o": 0, "rating_sum": 0.0, "rating_n": 0,
+                })
                 e["scenes"].add(str(sid))
+                e["o"] += int(meta.get("o_counter") or 0)
+                if meta.get("rating100") is not None:
+                    e["rating_sum"] += float(meta["rating100"])
+                    e["rating_n"] += 1
 
         rows = []
+        centroids: dict[str, np.ndarray] = {}
         for pid, e in perf.items():
             moments = 0
             best = mean_sum = 0.0
+            vsum = np.zeros(dim, dtype=np.float32)
+            ranked: list[tuple[float, int]] = []  # (score, matrix_row) for her top moments
             for sid in e["scenes"]:
                 rows_span = idx._key_rows.get(sid_key.get(sid, ""))
                 if not rows_span:
                     continue
                 start, end = rows_span
                 moments += end - start
+                vsum += idx.matrix[start:end].sum(axis=0)
                 if cu is not None:
                     s = idx.matrix[start:end] @ cu
                     best = max(best, float(s.max()))
                     mean_sum += float(s.sum())
+                    j = int(np.argmax(s))
+                    ranked.append((float(s[j]), start + j))  # this scene's best frame
+                else:
+                    ranked.append((0.0, start))  # no taste yet: a representative frame
+            if moments:
+                centroids[pid] = self._unit(vsum)
+            ranked.sort(reverse=True)
+
+            def _stream(sid, t):
+                try:
+                    return self.stream_url(sid, start=t) if sid else None
+                except Exception:  # noqa: BLE001 — a bad stream url shouldn't kill the board
+                    return None
+
+            top = [{
+                "key": idx.keys[i], "t": round(float(idx.times[i]), 2),
+                "scene_id": idx.scene_ids[i],
+                "thumb": f"/api/frame?key={idx.keys[i]}&t={idx.times[i]:g}",
+                "stream": _stream(idx.scene_ids[i], idx.times[i]),
+            } for _, i in ranked[:6]]
+            taste_mean = round(mean_sum / moments, 4) if (cu is not None and moments) else None
             rows.append({
                 "id": pid, "name": e["name"], "scenes": len(e["scenes"]),
                 "moments": int(moments),
                 "taste_best": round(best, 4) if cu is not None else None,
-                "taste_mean": round(mean_sum / moments, 4) if (cu is not None and moments) else None,
+                "taste_mean": taste_mean, "affinity": taste_mean,
+                "o_counter": e["o"],
+                "rating": round(e["rating_sum"] / e["rating_n"], 1) if e["rating_n"] else None,
+                "top": top,
             })
         rows.sort(key=lambda r: r["moments"], reverse=True)
         self._perf_stats_cache = rows
+        self._perf_centroids = centroids
+        self._perf_rows_by_id = {r["id"]: r for r in rows}
         return rows
+
+    def similar_performers(self, performer_id: str, k: int = 8) -> list[dict]:
+        """Performers whose moments sit closest to hers in embedding space —
+        'if you like her, try these'. Cosine of unit performer centroids."""
+        self.performer_stats()  # ensure centroids/rows are built
+        cents = getattr(self, "_perf_centroids", {})
+        rows = getattr(self, "_perf_rows_by_id", {})
+        me = cents.get(str(performer_id))
+        if me is None:
+            return []
+        out = []
+        for pid, v in cents.items():
+            if pid == str(performer_id):
+                continue
+            r = rows.get(pid, {})
+            out.append({"id": pid, "name": r.get("name", ""),
+                        "score": round(float(me @ v), 4), "top": r.get("top", [])})
+        out.sort(key=lambda r: r["score"], reverse=True)
+        return out[:k]
+
+    def performer_fingerprint(self, scene_ids, top_k: int = 10) -> list[list]:
+        """'What she's known for': her CLIP frames averaged and matched against
+        the vocabulary → top attribute terms. [] when CLIP isn't embedded."""
+        if not self.has_clip_index():
+            return []
+        clip = self._clip_name()
+        idx = self.index(clip)
+        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        vsum, n = None, 0
+        for sid in scene_ids:
+            key = sid_key.get(str(sid))
+            rows_span = idx._key_rows.get(key) if key else None
+            if not rows_span:
+                continue
+            start, end = rows_span
+            block = idx.matrix[start:end]
+            vsum = block.sum(axis=0) if vsum is None else vsum + block.sum(axis=0)
+            n += end - start
+        if not n:
+            return []
+        labels, mat = self._vocab_matrix()
+        scores = mat @ self._unit(vsum / n)
+        order = np.argsort(-scores)[:top_k]
+        return [[labels[i], round(float(scores[i]), 3)] for i in order]
+
+    def performer_detail(
+        self, name=None, performer_id=None, count: int = 300, per_scene: int = 6,
+    ) -> dict:
+        """Everything the detail page needs: her best moments (hero + strip), her
+        leaderboard stats, taste distribution, known-for fingerprint, similar."""
+        pid, pname, scenes = self._resolve_performer(name, performer_id, None)
+        self.performer_stats()  # ensure the leaderboard rows/names are available
+        row = getattr(self, "_perf_rows_by_id", {}).get(str(pid))
+        if row and row.get("name"):  # prefer the real name over a generic fallback
+            pname = row["name"]
+        if not scenes:
+            return {"performer": pname, "id": pid, "hits": [], "stats": row,
+                    "distribution": None, "fingerprint": [], "similar": []}
+        model = self._model_name()
+        c, _, _ = self._taste_centroid(model)
+        hits = self.performer_best(performer_id=pid, name=pname, count=count, per_scene=per_scene)["hits"]
+
+        # taste distribution over ALL her frames (not just the top)
+        distribution = None
+        if c is not None:
+            idx = self.index(model)
+            cu = self._unit(c)
+            sid_key = {str(m.get("scene_id")): kk for kk, m in idx.key_meta.items()}
+            parts = []
+            for sid in scenes:
+                rs = idx._key_rows.get(sid_key.get(str(sid), ""))
+                if rs:
+                    parts.append(idx.matrix[rs[0]:rs[1]] @ cu)
+            if parts:
+                s = np.concatenate(parts)
+                counts, edges = np.histogram(s, bins=20)
+                distribution = {
+                    "median": round(float(np.median(s)), 4),
+                    "best": round(float(s.max()), 4),
+                    "counts": [int(x) for x in counts],
+                    "edges": [round(float(x), 4) for x in edges],
+                }
+
+        return {
+            "performer": pname, "id": pid,
+            "hits": hits,
+            "stats": row,
+            "distribution": distribution,
+            "fingerprint": self.performer_fingerprint(scenes),
+            "similar": self.similar_performers(pid),
+        }
+
+    def performer_roulette(self, min_moments: int = 20) -> dict:
+        """A random performer, weighted toward your taste — 'surprise me'."""
+        rows = [r for r in self.performer_stats() if r["moments"] >= min_moments]
+        if not rows:
+            rows = self.performer_stats()
+        if not rows:
+            return {"id": None, "name": None}
+        w = np.array([max(0.01, (r.get("affinity") or 0.1)) for r in rows], dtype=np.float64)
+        r = rows[int(np.random.default_rng().choice(len(rows), p=w / w.sum()))]
+        return {"id": r["id"], "name": r["name"]}
+
+    def hall_of_fame(self, top_n: int = 10, per_scene: int = 6, count: int = 300) -> dict:
+        """Auto-generate a best-of collection for each of your top performers by
+        taste affinity. Returns the collections created."""
+        rows = sorted(self.performer_stats(), key=lambda r: (r.get("affinity") or 0), reverse=True)
+        created = []
+        for r in rows[:top_n]:
+            best = self.performer_best(performer_id=r["id"], name=r["name"], count=count, per_scene=per_scene)
+            apexes = [{
+                "scene_id": h.scene_id, "start": round(h.time, 2), "end": round(h.time + 20, 2),
+                "duration": 20, "url": self.stream_url(h.scene_id, start=h.time),
+                "score": round(h.score, 4), "title": r["name"],
+            } for h in best["hits"] if h.scene_id]
+            if apexes:
+                saved = self.save_collection(f"{r['name']} — best of", apexes)
+                created.append(saved)
+        return {"created": created}
 
     def taste_words(self, top_k: int = 8, recent: int = 0) -> dict:
         """Your taste centroid described in vocabulary terms (CLIP space) — the

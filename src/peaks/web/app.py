@@ -635,9 +635,32 @@ def create_app(cfg=None):
     @app.get("/api/performers")
     def performers(sort: str = "moments", refresh: bool = False):
         rows = service.performer_stats(rebuild=refresh)
-        key = sort if sort in ("moments", "scenes", "taste") else "moments"
-        rank = (lambda r: (r.get("taste_best") or 0)) if key == "taste" else (lambda r: r.get(key, 0))
-        return {"performers": sorted(rows, key=rank, reverse=True)}
+        keyf = {
+            "moments": lambda r: r.get("moments", 0),
+            "scenes": lambda r: r.get("scenes", 0),
+            "taste": lambda r: (r.get("taste_best") or 0),
+            "affinity": lambda r: (r.get("affinity") or 0),
+            "engagement": lambda r: r.get("o_counter", 0),
+        }.get(sort, lambda r: r.get("moments", 0))
+        return {"performers": sorted(rows, key=keyf, reverse=True)}
+
+    @app.get("/api/performer/detail")
+    def performer_detail(id: str | None = None, name: str | None = None):
+        d = service.performer_detail(name=name, performer_id=id)
+        d["items"] = _hit_payload(service, d.pop("hits"))
+        return d
+
+    @app.get("/api/performers/similar")
+    def performers_similar(id: str, k: int = 8):
+        return {"similar": service.similar_performers(id, k=k)}
+
+    @app.get("/api/performer/roulette")
+    def performer_roulette():
+        return service.performer_roulette()
+
+    @app.post("/api/performers/hall-of-fame")
+    def hall_of_fame(top_n: int = 10):
+        return service.hall_of_fame(top_n=top_n)
 
     @app.get("/api/performer/{pid}/image")
     def performer_image(pid: str):

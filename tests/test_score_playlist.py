@@ -797,10 +797,65 @@ def test_performer_stats_leaderboard(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     _seed_performer_scenes(cfg)
     monkeypatch.setattr(svc, "client", lambda: _PerfClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
     rows = svc.performer_stats(rebuild=True)
     assert len(rows) == 1
     jane = rows[0]
     assert jane["name"] == "Jane Doe" and jane["scenes"] == 3 and jane["moments"] == 6
+    # extended fields + centroid + top moments
+    assert "affinity" in jane and "o_counter" in jane and jane["top"]
+    assert jane["top"][0]["thumb"].startswith("/api/frame?key=")
+    assert svc._perf_centroids and "p1" in svc._perf_centroids
+
+
+class _PerfClient2:
+    """Two performers: p1 (scenes 1,2) and p2 (scene 3), with engagement data."""
+    def scene_details(self, ids):
+        who = {"1": [{"id": "p1", "name": "Ava"}], "2": [{"id": "p1", "name": "Ava"}],
+               "3": [{"id": "p2", "name": "Mia"}]}
+        return {str(i): {"performers_detail": who.get(str(i), []),
+                         "o_counter": 5 if str(i) == "1" else 0, "rating100": 80} for i in ids}
+
+    def scenes_for_performer(self, pid, limit=500):
+        return {"p1": ["1", "2"], "p2": ["3"]}.get(pid, [])
+
+    def find_performers(self, name=None, limit=500):
+        return [{"id": "p1", "name": "Ava"}, {"id": "p2", "name": "Mia"}]
+
+
+def test_performer_detail_and_similar(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_performer_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _PerfClient2())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+    svc.add_label("k1", 0.0, 1, scene_id="1")   # taste ~ scene 1's on-axis frame
+
+    d = svc.performer_detail(performer_id="p1")
+    assert d["performer"] == "Ava" and d["hits"]
+    assert d["stats"]["o_counter"] == 5 and d["stats"]["scenes"] == 2
+    assert d["distribution"] and len(d["distribution"]["counts"]) == 20
+    sim = svc.similar_performers("p1")
+    assert sim and sim[0]["id"] == "p2" and -1.0 <= sim[0]["score"] <= 1.0
+
+
+def test_hall_of_fame_and_roulette(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    import os
+    os.environ["PEAKS_COLLECTIONS_DIR"] = str(tmp_path / "coll")
+    _seed_performer_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _PerfClient2())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+    svc.add_label("k1", 0.0, 1, scene_id="1")
+
+    hof = svc.hall_of_fame(top_n=2)
+    assert len(hof["created"]) >= 1
+    names = {c["name"] for c in svc.list_collections()}
+    assert any("best of" in n for n in names)
+    r = svc.performer_roulette(min_moments=1)
+    assert r["id"] in {"p1", "p2"}
 
 
 def test_find_duplicates_threshold(tmp_path):

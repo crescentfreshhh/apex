@@ -716,6 +716,7 @@ async function refreshCollections() {
 let perfLoaded = false;
 async function openPerformers(refresh) {
   const grid = $("#perf-grid"); if (!grid) return;
+  showPerfDetail(false);   // always land on the grid
   if (perfLoaded && !refresh) return;   // cached; use ↻ Rebuild to re-scan
   grid.innerHTML = '<p class="dim">Reading performers…</p>';
   $("#perf-status").textContent = "";
@@ -726,26 +727,61 @@ async function openPerformers(refresh) {
     renderPerformers(d.performers || []);
   } catch (e) { grid.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
+// a photo that rotates through her best-moment thumbs + hover-plays her #1 clip
+function perfPhotoHTML(r) {
+  const thumbs = (r.top || []).map((t) => t.thumb).filter(Boolean);
+  const stream = (r.top && r.top[0] && r.top[0].stream) || "";
+  const img = thumbs.length
+    ? `<img class="perf-rot" data-thumbs='${esc(JSON.stringify(thumbs))}' data-i="0" src="${thumbs[0]}" onerror="this.src='/api/performer/${encodeURIComponent(r.id)}/image'" />`
+    : `<img src="/api/performer/${encodeURIComponent(r.id)}/image" onerror="this.style.display='none'" />`;
+  const hover = stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : "";
+  return `<div class="perf-photo">${img}${hover}</div>`;
+}
 function renderPerformers(rows) {
   const grid = $("#perf-grid");
   if (!rows.length) { grid.innerHTML = '<p class="dim">No performers found — embed some scenes with performers assigned in Stash.</p>'; return; }
   const maxMoments = Math.max(...rows.map((r) => r.moments)) || 1;
   grid.innerHTML = rows.map((r) => {
     const pct = Math.round((r.moments / maxMoments) * 100);
-    const taste = r.taste_best != null ? `<span class="perf-taste" title="best on-taste moment">★ ${Math.round(r.taste_best * 100)}%</span>` : "";
+    const taste = r.affinity != null ? `<span class="perf-taste" title="mean taste affinity">★ ${Math.round(r.affinity * 100)}%</span>` : "";
+    const eng = r.o_counter ? ` · ⊙ ${r.o_counter}` : "";
     return `<div class="perf-card" data-id="${esc(r.id)}" data-name="${esc(r.name)}">
-      <div class="perf-photo"><img loading="lazy" src="/api/performer/${encodeURIComponent(r.id)}/image" alt="" onerror="this.style.display='none'" /></div>
+      ${perfPhotoHTML(r)}
       <div class="perf-body">
         <div class="perf-name" title="${esc(r.name)}">${esc(r.name)} ${taste}</div>
         <div class="perf-bar"><span style="width:${pct}%"></span></div>
-        <div class="dim perf-stats">${r.moments.toLocaleString()} moments · ${r.scenes} scenes</div>
+        <div class="dim perf-stats">${r.moments.toLocaleString()} moments · ${r.scenes} scenes${eng}</div>
         <div class="perf-actions">
+          <button class="perf-detail-btn">Open</button>
           <button class="perf-best">⭐ Best of</button>
           <button class="perf-play ghost">▶ Board</button>
         </div>
       </div>
     </div>`;
   }).join("");
+  wirePerfHover(grid);
+  startPerfRotation();
+}
+// rotate every .perf-rot through its thumbs; one shared timer
+let perfRotTimer = null;
+function startPerfRotation() {
+  if (perfRotTimer) return;
+  perfRotTimer = setInterval(() => {
+    document.querySelectorAll(".perf-rot").forEach((im) => {
+      if (im.matches(":hover") || im.closest(".perf-card:hover, .perf-hero:hover")) return;
+      let thumbs; try { thumbs = JSON.parse(im.dataset.thumbs); } catch { return; }
+      if (!thumbs || thumbs.length < 2) return;
+      const i = ((+im.dataset.i || 0) + 1) % thumbs.length;
+      im.dataset.i = i; im.src = thumbs[i];
+    });
+  }, 2500);
+}
+function wirePerfHover(container) {
+  container.querySelectorAll(".perf-card, .perf-hero").forEach((card) => {
+    const v = card.querySelector(".perf-hover"); if (!v) return;
+    card.addEventListener("mouseenter", () => { if (!v.src) v.src = v.dataset.stream; v.style.opacity = 1; v.play().catch(() => {}); });
+    card.addEventListener("mouseleave", () => { v.pause(); v.style.opacity = 0; });
+  });
 }
 async function performerBestOf(id, name) {
   const query = $("#perf-query").value.trim();
@@ -764,23 +800,145 @@ async function performerBestOf(id, name) {
     if (!d.items.length) toast(`No embedded moments for ${name}`);
   } catch (e) { toast(e.message, true); }
 }
+function playPerformerBoard(id, name) {
+  const qs = new URLSearchParams({ src: "performer", id: id || "", name: name || "" });
+  const query = $("#perf-query").value.trim(); if (query) qs.set("pq", query);
+  window.open("/megaboard/?" + qs.toString(), "_blank");
+}
 $("#perf-grid")?.addEventListener("click", (e) => {
   const card = e.target.closest(".perf-card"); if (!card) return;
   const { id, name } = card.dataset;
   if (e.target.closest(".perf-best")) performerBestOf(id, name);
-  else if (e.target.closest(".perf-play")) {
-    const qs = new URLSearchParams({ src: "performer", id, name });
-    const query = $("#perf-query").value.trim(); if (query) qs.set("pq", query);
-    window.open("/megaboard/?" + qs.toString(), "_blank");
-  }
+  else if (e.target.closest(".perf-play")) playPerformerBoard(id, name);
+  else openPerformerDetail(id);   // card body → detail page
 });
 $("#btn-perf-search")?.addEventListener("click", async () => {
   const name = $("#perf-search").value.trim(); if (!name) return;
   await performerBestOf("", name);   // id blank → backend resolves by name
 });
 $("#perf-search")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-perf-search").click(); });
-$("#perf-sort")?.addEventListener("change", () => openPerformers(true));
+$("#perf-sort")?.addEventListener("change", () => { perfLoaded = false; openPerformers(); });
 $("#btn-perf-refresh")?.addEventListener("click", () => openPerformers(true));
+$("#btn-perf-roulette")?.addEventListener("click", async () => {
+  try { const r = await api("/api/performer/roulette"); if (r.id) playPerformerBoard(r.id, r.name); else toast("No performers yet"); }
+  catch (e) { toast(e.message, true); }
+});
+$("#btn-perf-hof")?.addEventListener("click", async () => {
+  if (!confirm("Auto-build best-of collections for your top 10 performers?")) return;
+  $("#perf-status").textContent = "building hall of fame…";
+  try { const r = await api("/api/performers/hall-of-fame", { method: "POST" }); $("#perf-status").textContent = `🏆 created ${r.created.length} collections`; refreshCollections(); }
+  catch (e) { toast(e.message, true); $("#perf-status").textContent = ""; }
+});
+
+// --- performer detail page --------------------------------------------------
+function showPerfDetail(on) {
+  $("#perf-grid").hidden = on; $("#perf-detail").hidden = !on;
+}
+async function openPerformerDetail(id) {
+  const box = $("#perf-detail");
+  setActiveView("performers");
+  showPerfDetail(true);
+  box.innerHTML = '<p class="dim">Loading…</p>';
+  try {
+    const d = await api("/api/performer/detail?id=" + encodeURIComponent(id));
+    renderPerfDetail(d);
+  } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+function renderPerfDetail(d) {
+  const box = $("#perf-detail");
+  const items = d.items || [];
+  const thumbs = items.slice(0, 12).map((h) => h.thumb);
+  const stream = items[0] && items[0].stream;
+  const s = d.stats || {};
+  const stat = (lbl, v) => v == null ? "" : `<span class="pd-stat">${lbl} <b>${v}</b></span>`;
+  const dist = d.distribution ? sparkHTML(d.distribution.counts) : "";
+  const fp = (d.fingerprint || []).map(([w]) => `<span class="fy-chip">${esc(w)}</span>`).join("");
+  const sim = (d.similar || []).map((p) =>
+    `<button class="pd-sim" data-id="${esc(p.id)}"><img loading="lazy" src="${(p.top && p.top[0] && p.top[0].thumb) || `/api/performer/${encodeURIComponent(p.id)}/image`}" onerror="this.style.opacity=.15"/><span>${esc(p.name)}</span></button>`).join("");
+  box.innerHTML = `
+    <div class="row"><button id="pd-back" class="ghost">← Performers</button></div>
+    <div class="pd-head">
+      <div class="perf-hero">
+        <img class="perf-rot" data-thumbs='${esc(JSON.stringify(thumbs))}' data-i="0" src="${thumbs[0] || `/api/performer/${encodeURIComponent(d.id)}/image`}" />
+        ${stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : ""}
+      </div>
+      <div class="pd-info">
+        <h2>${esc(d.performer || "performer")}</h2>
+        <div class="pd-stats">
+          ${stat("moments", (s.moments || 0).toLocaleString())}
+          ${stat("scenes", s.scenes)}
+          ${stat("★ taste", s.affinity != null ? Math.round(s.affinity * 100) + "%" : null)}
+          ${stat("⊙", s.o_counter)}
+          ${stat("✩", s.rating)}
+        </div>
+        ${dist ? `<div class="dim" style="margin-top:6px">how on-taste her moments are</div>${dist}` : ""}
+        ${fp ? `<div class="dim" style="margin:8px 0 4px">known for</div><div class="fy-words">${fp}</div>` : ""}
+        <div class="perf-actions" style="margin-top:10px">
+          <button id="pd-best" class="primary">⭐ Save best-of</button>
+          <button id="pd-board" class="ghost">▶ Endless channel</button>
+          <button id="pd-compare" class="ghost">⚔ Compare</button>
+        </div>
+      </div>
+    </div>
+    ${sim ? `<div class="dim" style="margin:14px 0 6px">if you like her, try…</div><div class="pd-similar">${sim}</div>` : ""}
+    <div class="dim" style="margin:14px 0 6px">her best moments</div>
+    <div id="pd-strip" class="grid"></div>`;
+  renderHits(items, $("#pd-strip"), 60);   // sets lastHits to her best (for save/play)
+  wirePerfHover(box);
+  $("#pd-back").onclick = () => showPerfDetail(false);
+  $("#pd-board").onclick = () => playPerformerBoard(d.id, d.performer);
+  $("#pd-best").onclick = () => saveCollectionPrompt(items, `${d.performer} — best of`);
+  $("#pd-compare").onclick = () => addToCompare(d.id, d.performer);
+  box.querySelectorAll(".pd-sim").forEach((b) => b.onclick = () => openPerformerDetail(b.dataset.id));
+}
+function sparkHTML(counts) {
+  const hi = Math.max(...counts) || 1;
+  return `<div class="m-spark">${counts.map((c) => `<span class="mbar" style="height:${Math.round((c / hi) * 100)}%"></span>`).join("")}</div>`;
+}
+async function saveCollectionPrompt(items, defName) {
+  const apexes = hitsToApexes(items);
+  if (!apexes.length) return toast("nothing to save");
+  const name = prompt("Save collection:", defName); if (!name) return;
+  try { const r = await api("/api/collection", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, apexes }) }); toast(`Saved "${r.name}" (${r.count})`); refreshCollections(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// --- compare two performers -------------------------------------------------
+let compareList = [];
+async function addToCompare(id, name) {
+  if (compareList.some((c) => c.id === id)) return;
+  compareList.push({ id, name });
+  if (compareList.length > 2) compareList.shift();
+  const tray = $("#compare-tray");
+  tray.hidden = false;
+  tray.innerHTML = "compare: " + compareList.map((c) => esc(c.name)).join(" vs ") +
+    (compareList.length === 2 ? ` <button id="cmp-go" class="ghost">⚔ Go</button>` : " · add one more") +
+    ` <button id="cmp-clear" class="ghost">clear</button>`;
+  $("#cmp-clear").onclick = () => { compareList = []; tray.hidden = true; };
+  if ($("#cmp-go")) $("#cmp-go").onclick = renderCompare;
+}
+async function renderCompare() {
+  const box = $("#perf-detail"); showPerfDetail(true);
+  box.innerHTML = '<p class="dim">Loading compare…</p>';
+  try {
+    const [a, b] = await Promise.all(compareList.map((c) => api("/api/performer/detail?id=" + encodeURIComponent(c.id))));
+    const col = (d) => {
+      const s = d.stats || {};
+      const fp = (d.fingerprint || []).slice(0, 8).map(([w]) => `<span class="fy-chip">${esc(w)}</span>`).join("");
+      const thumb = (d.items[0] && d.items[0].thumb) || `/api/performer/${encodeURIComponent(d.id)}/image`;
+      return `<div class="cmp-col">
+        <img src="${thumb}" onerror="this.style.opacity=.15"/>
+        <h3>${esc(d.performer)}</h3>
+        <div class="dim">${(s.moments || 0).toLocaleString()} moments · ${s.scenes || 0} scenes</div>
+        <div class="dim">★ ${s.affinity != null ? Math.round(s.affinity * 100) + "%" : "—"} · ⊙ ${s.o_counter || 0} · ✩ ${s.rating ?? "—"}</div>
+        <div class="fy-words" style="margin-top:8px">${fp}</div>
+      </div>`;
+    };
+    box.innerHTML = `<div class="row"><button id="pd-back" class="ghost">← Performers</button></div>
+      <div class="cmp-grid">${col(a)}${col(b)}</div>`;
+    $("#pd-back").onclick = () => showPerfDetail(false);
+  } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
 
 // delegated collection actions (the list is innerHTML-rendered)
 $("#collections")?.addEventListener("click", async (e) => {

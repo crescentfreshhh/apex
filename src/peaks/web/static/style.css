@@ -268,3 +268,33 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .perf-stats { font-size: 12px; }
 .perf-actions { display: flex; gap: 6px; margin-top: auto; }
 .perf-actions button { font-size: 12px; padding: 4px 8px; }
+
+/* Performer detail page + rotating/hover hero + compare */
+.perf-photo { position: relative; }
+.perf-photo .perf-hover, .perf-hero .perf-hover {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  opacity: 0; transition: opacity .2s; pointer-events: none; }
+.perf-card { cursor: pointer; }
+.perf-actions .perf-detail-btn { background: var(--panel2); }
+
+#perf-detail { padding: 4px; }
+.pd-head { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; margin-top: 8px; }
+.perf-hero { position: relative; width: 300px; max-width: 100%; aspect-ratio: 4/3;
+  border-radius: 12px; overflow: hidden; background: var(--panel2); flex: none; }
+.perf-hero .perf-rot { width: 100%; height: 100%; object-fit: cover; }
+.pd-info { flex: 1; min-width: 240px; }
+.pd-info h2 { margin: 0 0 6px; }
+.pd-stats { display: flex; flex-wrap: wrap; gap: 12px; }
+.pd-stat { color: var(--dim); } .pd-stat b { color: var(--fg); }
+.pd-similar { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+.pd-sim { flex: none; width: 96px; background: none; border: 1px solid var(--line);
+  border-radius: 8px; padding: 0; cursor: pointer; overflow: hidden; color: var(--fg); }
+.pd-sim img { width: 96px; height: 72px; object-fit: cover; display: block; }
+.pd-sim span { display: block; font-size: 11px; padding: 3px 4px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pd-sim:hover { border-color: var(--accent); }
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px; }
+.cmp-col { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.cmp-col img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; }
+.cmp-col h3 { margin: 8px 0 2px; }
+#compare-tray { margin-top: 8px; }
