@@ -116,10 +116,14 @@ function makeTile(index) {
   });
 
   el.addEventListener("click", (e) => {
-    if (e.target.closest(".mb-controls, .mb-meta")) return; // interacting, not toggling
+    if (e.target.closest(".mb-controls, .mb-meta, .mb-menu")) return; // interacting, not toggling
     if (State.big === tile) return collapse(tile);
     if (State.big) collapse(State.big);
     expand(tile);
+  });
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (tile.apex && tile.apex.scene_id) openTileMenu(tile, e.clientX, e.clientY);
   });
   return tile;
 }
@@ -423,7 +427,10 @@ function updateStatus() {
   const label = State.shuffle
     ? `shuffle · ${(State.pool || []).length} scenes`
     : `${State.apexes.length} ${State.searchMode ? "moments" : "apexes"}`;
-  document.getElementById("status").textContent = `${label} · ${State.tiles.length} tiles`;
+  const pivot = State.pivot ? `${State.pivot} · ` : "";
+  const floor = (State.source === "foryou" && fyMinScore > 0) ? ` · floor ${Math.round(fyMinScore * 100)}%` : "";
+  document.getElementById("status").textContent =
+    `${pivot}${label} · ${State.tiles.length} tiles${floor} · right-click a tile to steer`;
 }
 
 function fmt(sec) {
@@ -439,6 +446,19 @@ function wireControls() {
   });
   document.getElementById("toggle").addEventListener("click", () => setPlaying(!State.playing));
   document.getElementById("reshuffle").addEventListener("click", reshuffle);
+  const floor = document.getElementById("floor");
+  if (floor) {
+    floor.addEventListener("input", () => {
+      fyMinScore = parseFloat(floor.value) || 0;
+      const v = document.getElementById("floor-val");
+      if (v) v.textContent = fyMinScore > 0 ? Math.round(fyMinScore * 100) + "%" : "off";
+    });
+    floor.addEventListener("change", () => {   // commit → rebuild the pool at the new floor
+      if (State.source !== "foryou") return;
+      fyReset();
+      fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
+    });
+  }
   document.getElementById("refresh-lib").addEventListener("click", () => {
     const src = State.source || document.getElementById("source").value;
     loadSource(src, { refresh: true }); // rebuild pool/apexes from Stash
@@ -451,7 +471,9 @@ function wireControls() {
     }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && State.big) collapse(State.big);
+    if (e.key !== "Escape") return;
+    closeTileMenu();
+    if (State.big) collapse(State.big);
   });
 }
 
@@ -486,7 +508,19 @@ function randomMoment() {
 // batch — excluding scenes already shown — when the queue runs low. Endless.
 const FY_CLIP = 20;                      // clip seconds per For You tile
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
+let fyMinScore = 0;                       // the "taste floor" (0 = off)
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
+function fyBoardUrl(withExclude) {
+  const ex = withExclude ? [...fyState.exclude].join(",") : "";
+  return "/api/foryou/board?count=400"
+    + (ex ? "&exclude=" + encodeURIComponent(ex) : "")
+    + (fyMinScore > 0 ? "&min_score=" + fyMinScore : "");
+}
+function syncFloorUI() {
+  const s = document.getElementById("floor"), v = document.getElementById("floor-val");
+  if (s) s.value = fyMinScore;
+  if (v) v.textContent = fyMinScore > 0 ? Math.round(fyMinScore * 100) + "%" : "off";
+}
 
 function fyHitToApex(h) {
   const start = +h.time || 0;
@@ -507,14 +541,13 @@ async function fyRefetch(reset) {
   if (fyState.refetching) return;
   fyState.refetching = true;
   try {
-    const ex = [...fyState.exclude].join(",");
     let d;
-    try { d = await api("/api/foryou/board?count=400" + (ex ? "&exclude=" + encodeURIComponent(ex) : "")); }
+    try { d = await api(fyBoardUrl(true)); }
     catch { d = { items: [] }; }
     let items = (d.items || []).filter((h) => h.scene_id && h.stream).map(fyHitToApex);
     if (!items.length && fyState.exclude.size) {   // whole library cycled — start fresh
       fyState.exclude.clear();
-      try { d = await api("/api/foryou/board?count=400"); } catch { d = { items: [] }; }
+      try { d = await api(fyBoardUrl(false)); } catch { d = { items: [] }; }
       items = (d.items || []).filter((h) => h.scene_id && h.stream).map(fyHitToApex);
       reset = true;
     }
@@ -543,10 +576,80 @@ function fyPick() {
   return fyState.queue.shift();   // all recent: take the head anyway
 }
 
+// --- in-the-moment right-click menu: drive the board without leaving ---------
+function closeTileMenu() {
+  document.querySelectorAll(".mb-menu").forEach((m) => m.remove());
+  document.removeEventListener("click", closeTileMenu, true);
+}
+function openTileMenu(tile, x, y) {
+  closeTileMenu();
+  const apex = tile.apex;
+  const t = (tile.video && isFinite(tile.video.currentTime)) ? tile.video.currentTime : apex.start;
+  const items = [
+    ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
+    ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
+  ];
+  if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
+
+  const menu = document.createElement("div");
+  menu.className = "mb-menu";
+  items.forEach(([label, fn]) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.addEventListener("click", (e) => { e.stopPropagation(); closeTileMenu(); fn(); });
+    menu.appendChild(b);
+  });
+  document.body.appendChild(menu);
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  menu.style.left = Math.min(x, innerWidth - mw - 8) + "px";
+  menu.style.top = Math.min(y, innerHeight - mh - 8) + "px";
+  setTimeout(() => document.addEventListener("click", closeTileMenu, true), 0);
+}
+
+function apexFromHit(h) {
+  const start = +h.time || 0;
+  return {
+    scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + FY_CLIP),
+    duration: FY_CLIP, url: h.stream, score: h.score ?? 1, title: h.title || "",
+  };
+}
+// swap the whole board to a new pool live — no reload (mirrors fyRefetch)
+function pivotBoard(apexes, label) {
+  if (!apexes.length) { flashStatus("nothing to show"); return; }
+  if (State.big) collapse(State.big);
+  State.apexes = apexes; State.searchMode = true; State.pivot = label;
+  pickApex = makePicker(State.apexes);
+  reshuffle(); updateStatus();
+}
+async function moreLikeThis(scene_id, t) {
+  flashStatus("finding similar…");
+  try {
+    const hits = await api(`/api/search/similar?scene_id=${encodeURIComponent(scene_id)}&t=${t}&top_k=200`);
+    pivotBoard((hits || []).filter((h) => h.scene_id && h.stream).map(apexFromHit), "🔎 more like that moment");
+  } catch (e) { flashStatus(e.message); }
+}
+async function moreFromActress(scene_id) {
+  flashStatus("finding her scenes…");
+  try {
+    const d = await api(`/api/board/performer?scene_id=${encodeURIComponent(scene_id)}`);
+    const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+    if (!apexes.length) return flashStatus(d.performer ? `no other embedded scenes for ${d.performer}` : "no performer info for this scene");
+    pivotBoard(apexes, "🎬 " + (d.performer || "this actress"));
+  } catch (e) { flashStatus(e.message); }
+}
+function backToTaste() { loadSource("foryou"); }
+function flashStatus(msg) {
+  const el = document.getElementById("status");
+  if (el) el.textContent = msg;
+}
+
 async function loadSource(src, opts = {}) {
   State.source = src;
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
+  State.pivot = null;
   document.getElementById("error").hidden = true;
+  const fw = document.getElementById("floor-wrap");
+  if (fw) fw.hidden = src !== "foryou";   // taste floor only applies to For You
   document.getElementById("status").textContent = "loading…";
   try {
     if (src === "shuffle") {
@@ -620,6 +723,9 @@ async function initSources(initial) {
 async function main() {
   wireControls();
   const params = new URLSearchParams(location.search);
+  const ms = parseFloat(params.get("min_score"));
+  if (ms > 0) fyMinScore = ms;   // taste floor carried from the app's metrics slider
+  syncFloorUI();
   let initial = null;
   if (params.get("src") === "search") initial = "search";
   else if (params.get("src") === "foryou") initial = "foryou";

@@ -818,9 +818,13 @@ async function openForYou() {
 }
 $("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); loadTasteMetrics(); });
 $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
-// the For You megaboard now pulls its own big, varied pool from /api/foryou/board
-// (endless, non-repeating) — no need to hand off the small on-screen feed.
-$("#btn-foryou-board")?.addEventListener("click", () => window.open("/megaboard/?src=foryou", "_blank"));
+// the For You megaboard pulls its own big, varied pool from /api/foryou/board
+// (endless, non-repeating). Carry the current Taste Metrics slider value as the
+// board's starting "taste floor" so it opens as selective as you set it.
+$("#btn-foryou-board")?.addEventListener("click", () => {
+  const floor = $("#m-slider")?.value;
+  window.open("/megaboard/?src=foryou" + (floor ? "&min_score=" + floor : ""), "_blank");
+});
 $("#btn-foryou-radio")?.addEventListener("click", () => startRadio());
 
 // --- Taste Picker: a random-frame collage you tap to build your taste --------

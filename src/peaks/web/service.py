@@ -1102,7 +1102,7 @@ class Service:
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
         exclude: set | None = None, shuffle: bool | None = None,
-        seed: int | None = None,
+        seed: int | None = None, min_score: float | None = None,
     ) -> dict:
         """Moments across the whole library ranked for you — retrieve-then-rerank:
         the taste centroid pulls a generous candidate pool (fast, spans the
@@ -1129,6 +1129,8 @@ class Service:
         if exclude:
             exclude = {str(s) for s in exclude}
             pool = [h for h in pool if str(h.scene_id) not in exclude]
+        if min_score is not None:  # taste floor: only moments this close to your taste
+            pool = [h for h in pool if h.score >= min_score]
         reranked = self._taste_model(self.cfg.markers.tag_name, model) is not None
         ranked = self._rerank_by_taste(pool, model) if reranked else pool
         if shuffle:
@@ -1245,6 +1247,72 @@ class Service:
             }
             for i in (int(r) for r in rows)
         ]
+
+    def _moments_for_scenes(
+        self, scene_ids, per_scene: int = 6, model: str | None = None
+    ) -> list["Hit"]:
+        """Up to `per_scene` frames spread across each given scene, as Hits —
+        the moment pool behind 'more from this actress' (plays her scenes)."""
+        from ..search import Hit
+
+        model = model or self._model_name()
+        idx = self.index(model)
+        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        hits: list[Hit] = []
+        for sid in scene_ids:
+            key = sid_key.get(str(sid))
+            if key is None:
+                continue
+            rows = idx._key_rows.get(key)
+            if not rows:
+                continue
+            start, end = rows
+            n = end - start
+            step = max(1, n // per_scene)
+            for i in range(start, end, step):
+                hits.append(Hit(
+                    scene_id=idx.scene_ids[i], key=idx.keys[i],
+                    time=float(idx.times[i]), score=0.0,
+                ))
+        return hits
+
+    def performer_board(
+        self, scene_id: str, count: int = 300, per_scene: int = 6
+    ) -> dict:
+        """'More from this actress': resolve this scene's lead performer, pull
+        her other scenes from Stash, keep the embedded ones, and return a
+        shuffled pool of moments from them. `{performer, hits}` (empty hits when
+        she has no other embedded scenes / Stash is unreachable)."""
+        empty = {"performer": None, "hits": []}
+        try:
+            details = self.client().scene_details([str(scene_id)])
+        except Exception:  # noqa: BLE001 — Stash down
+            return empty
+        perfs = (details.get(str(scene_id)) or {}).get("performers_detail") or []
+        perfs = [p for p in perfs if p.get("id")]
+        if not perfs:
+            return empty
+        model = self._model_name()
+        idx = self.index(model)
+        embedded = {str(m.get("scene_id")) for m in idx.key_meta.values()}
+
+        # pick the performer with the most *embedded* scenes to play from
+        best_name, best_scenes = None, []
+        for p in perfs:
+            try:
+                scenes = self.client().scenes_for_performer(p["id"])
+            except Exception:  # noqa: BLE001
+                scenes = []
+            keep = [s for s in scenes if str(s) in embedded]
+            if len(keep) > len(best_scenes):
+                best_name, best_scenes = p.get("name") or "this performer", keep
+        if not best_scenes:
+            return empty
+
+        hits = self._moments_for_scenes(best_scenes, per_scene=per_scene, model=model)
+        rng = np.random.default_rng()
+        rng.shuffle(hits)
+        return {"performer": best_name, "hits": hits[:count]}
 
     def taste_words(self, top_k: int = 8, recent: int = 0) -> dict:
         """Your taste centroid described in vocabulary terms (CLIP space) — the
@@ -1586,7 +1654,10 @@ class Service:
         if cached is not None:
             return cached
         labels = self._vocab()
-        mat = np.stack([self._unit(self._clip_text_vector(t)) for t in labels])
+        # one batched CLIP-text forward pass for the whole list (was one call
+        # per term) so a few-hundred-term vocabulary builds quickly.
+        vecs = self._clip_text_batch(labels)
+        mat = np.stack([self._unit(v) for v in vecs])
         with self._clip_lock:
             self._vocab_cache = (labels, mat)
         return labels, mat
@@ -1678,7 +1749,8 @@ class Service:
         order = np.argsort(-scores)[:top_k]
         return {"labels": [[labels[i], round(float(scores[i]), 3)] for i in order]}
 
-    def _clip_text_vector(self, text: str) -> np.ndarray:
+    def _ensure_clip(self):
+        """Lazily build (once) the CLIP embedder used for text vectors."""
         with self._clip_lock:
             if self._clip is None:
                 from ..embedding import ClipEmbedder
@@ -1688,7 +1760,14 @@ class Service:
                     pretrained=self.cfg.embedding.clip_pretrained,
                     device=self.cfg.embedding.device or None,
                 )
-            return self._clip.embed_text([text])[0]
+        return self._clip
+
+    def _clip_text_vector(self, text: str) -> np.ndarray:
+        return self._ensure_clip().embed_text([text])[0]
+
+    def _clip_text_batch(self, labels: list[str]) -> np.ndarray:
+        """CLIP-embed many prompts in one forward pass (the vocab-matrix seam)."""
+        return np.asarray(self._ensure_clip().embed_text(list(labels)), dtype=np.float32)
 
     # --- scene metadata (titles, performers, studio, tags) -------------------
 

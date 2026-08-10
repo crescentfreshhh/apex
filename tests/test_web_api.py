@@ -146,6 +146,43 @@ def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
     assert items and all(it["scene_id"] and it["stream"] for it in items)
     sids = ",".join({it["scene_id"] for it in items})
     assert client.get("/api/foryou/board?count=6&exclude=" + sids).json()["items"] == []
+    # taste floor: an impossibly high floor filters everything out
+    assert client.get("/api/foryou/board?count=6&min_score=2.0").json()["items"] == []
+
+
+def test_search_similar_accepts_scene_id(cfg, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+    client = TestClient(create_app(cfg))
+
+    # scene "1" is embedded (fixture seeds k1 -> scene_id "1"); resolves to its key
+    hits = client.get("/api/search/similar?scene_id=1&t=0&top_k=5").json()
+    assert isinstance(hits, list) and hits
+    assert all(h["thumb"].startswith("/api/frame?key=") for h in hits)
+    # unknown scene -> empty (not an error)
+    assert client.get("/api/search/similar?scene_id=nope&t=0").json() == []
+
+
+def test_board_performer_endpoint(cfg, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+
+    class _C:
+        def scene_details(self, ids):
+            return {str(ids[0]): {"performers_detail": [{"id": "p1", "name": "Ava"}]}}
+
+        def scenes_for_performer(self, pid, limit=500):
+            return ["1", "2"]  # both embedded in the fixture (k1->1, k2->2)
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    client = TestClient(create_app(cfg))
+    d = client.get("/api/board/performer?scene_id=1").json()
+    assert d["performer"] == "Ava"
+    assert d["items"] and all(it["scene_id"] in {"1", "2"} for it in d["items"])
 
 
 def test_autotrain_kicks_after_threshold(cfg, tmp_path):

@@ -89,11 +89,22 @@ query SceneDetails($ids: [ID!]) {
       o_counter
       organized
       studio { name }
-      performers { name gender }
+      performers { id name gender }
       tags { name }
       files { path duration width height }
       paths { screenshot preview }
     }
+  }
+}
+"""
+
+_SCENES_BY_PERFORMER_QUERY = """
+query ScenesByPerformer($pid: ID!, $per_page: Int!) {
+  findScenes(
+    filter: {per_page: $per_page}
+    scene_filter: {performers: {value: [$pid], modifier: INCLUDES}}
+  ) {
+    scenes { id }
   }
 }
 """
@@ -286,6 +297,10 @@ class StashClient:
                 "organized": bool(s.get("organized")),
                 "studio": (s.get("studio") or {}).get("name") or "",
                 "performers": [p.get("name", "") for p in (s.get("performers") or [])],
+                "performers_detail": [
+                    {"id": p.get("id"), "name": p.get("name", "")}
+                    for p in (s.get("performers") or [])
+                ],
                 "tags": [t.get("name", "") for t in (s.get("tags") or [])],
                 "duration": f0.get("duration"),
                 "width": f0.get("width"),
@@ -294,6 +309,15 @@ class StashClient:
                 "cover": paths.get("screenshot"),
             }
         return out
+
+    def scenes_for_performer(self, performer_id: str, limit: int = 500) -> list[str]:
+        """Scene ids featuring a performer — powers 'more from this actress'."""
+        if not performer_id:
+            return []
+        data = self.execute(
+            _SCENES_BY_PERFORMER_QUERY, {"pid": str(performer_id), "per_page": limit}
+        )
+        return [str(s["id"]) for s in data["findScenes"]["scenes"]]
 
     def iter_markers_by_tag(
         self, tag_name: str, page_size: int = 200

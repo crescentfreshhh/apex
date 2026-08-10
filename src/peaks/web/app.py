@@ -430,7 +430,16 @@ def create_app(cfg=None):
     # --- search -------------------------------------------------------------
 
     @app.get("/api/search/similar")
-    def search_similar(key: str, t: float, top_k: int = 60, taste: bool = False):
+    def search_similar(
+        key: str | None = None, t: float = 0.0, scene_id: str | None = None,
+        top_k: int = 60, taste: bool = False,
+    ):
+        # the megaboard knows scene_id, not the cache key — resolve it (same path
+        # /api/classify uses) so "more like this moment" works from a board tile.
+        if key is None and scene_id is not None:
+            key = service._key_for_scene(scene_id, service._model_name())
+        if key is None:
+            return []
         return _hit_payload(service, service.search_by_frame(key, t, top_k=top_k, taste=taste))
 
     @app.get("/api/search/text")
@@ -533,12 +542,23 @@ def create_app(cfg=None):
         return service.taste_metrics(threshold=threshold)
 
     @app.get("/api/foryou/board")
-    def foryou_board(count: int = 400, exclude: str = ""):
+    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.0):
         """A big, varied, shuffled pool for the endless For You megaboard —
-        many moments per scene (varied starts), minus scenes already shown."""
+        many moments per scene (varied starts), minus scenes already shown, and
+        only moments whose taste-closeness is ≥ min_score (the 'taste floor')."""
         seen = {s for s in exclude.split(",") if s}
-        r = service.recommend(top_k=count, per_scene=4, shuffle=True, exclude=seen)
+        r = service.recommend(
+            top_k=count, per_scene=4, shuffle=True, exclude=seen,
+            min_score=min_score if min_score > 0 else None,
+        )
         return {"items": _hit_payload(service, r["hits"])}
+
+    @app.get("/api/board/performer")
+    def board_performer(scene_id: str, count: int = 300):
+        """Moments from other scenes featuring this scene's lead performer —
+        the megaboard's 'more from this actress' pivot."""
+        r = service.performer_board(scene_id, count=count)
+        return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
 
     @app.get("/api/radio")
     def radio(exclude: str = "", count: int = 30):

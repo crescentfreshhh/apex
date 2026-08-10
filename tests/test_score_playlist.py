@@ -165,6 +165,7 @@ def test_auto_tag_scores_and_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
     vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
     monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
+    monkeypatch.setattr(svc, "_clip_text_batch", lambda labels: np.stack([vmap[t] for t in labels]))
 
     writes = []
 
@@ -256,6 +257,7 @@ def test_classify_frame_top_labels(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
     vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
     monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
+    monkeypatch.setattr(svc, "_clip_text_batch", lambda labels: np.stack([vmap[t] for t in labels]))
 
     out = svc.classify_frame("k", 0.0, top_k=2)
     assert out["labels"][0][0] == "beach"  # frame vector matches "beach"
@@ -415,6 +417,56 @@ def test_recommend_shuffle_varies_but_is_seeded(tmp_path, monkeypatch):
     assert order(svc.recommend(top_k=6, rebuild=True, seed=1)) == a
     # still a real, correctly-sized feed drawn from the library
     assert len(a) == 6 and set(a) <= {str(i) for i in range(1, 21)}
+
+
+def test_recommend_min_score_floors_the_pool(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)  # centroid ~ scene A ([1,0,0,0]); A frames ~1.0, B frames ~0.0
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    allh = svc.recommend(top_k=10)["hits"]
+    assert any(h.scene_id == "2" for h in allh)  # scene B present without a floor
+    floored = svc.recommend(top_k=10, min_score=0.5)["hits"]
+    assert floored and all(h.score >= 0.5 for h in floored)
+    assert all(h.scene_id == "1" for h in floored)  # only on-taste scene A survives
+
+
+def test_performer_board_plays_her_embedded_scenes(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    for sid in ("1", "2", "3"):  # three embedded scenes
+        cache.save(f"k{sid}", "dinov2", np.array([0.0, 5.0], dtype="float32"),
+                   np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype="float32"),
+                   meta={"scene_id": sid, "path": f"/x/{sid}.mp4"})
+
+    class _C:
+        def scene_details(self, ids):
+            return {str(ids[0]): {"performers_detail": [{"id": "p1", "name": "Jane Doe"}]}}
+
+        def scenes_for_performer(self, pid, limit=500):
+            return ["1", "2", "3", "99"]  # 99 is not embedded
+
+    monkeypatch.setattr(svc, "client", lambda: _C())
+    r = svc.performer_board("1", count=100)
+    assert r["performer"] == "Jane Doe"
+    sids = {h.scene_id for h in r["hits"]}
+    assert sids and sids <= {"1", "2", "3"} and "99" not in sids
+
+
+def test_default_vocab_is_rich_and_unique():
+    from peaks.vocab import DEFAULT_VOCAB
+
+    assert len(DEFAULT_VOCAB) > 250
+    assert all(isinstance(t, str) and t.strip() for t in DEFAULT_VOCAB)
+    assert len(set(DEFAULT_VOCAB)) == len(DEFAULT_VOCAB)  # no duplicates
+    joined = " ".join(DEFAULT_VOCAB).lower()
+    for term in ("breasts", "butt", "doggy", "lingerie", "blonde", "thick", "bbw", "stockings"):
+        assert term in joined
 
 
 def test_recommend_reranks_with_trained_model(tmp_path, monkeypatch):
@@ -648,6 +700,7 @@ def test_taste_words_from_centroid(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
     vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
     monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
+    monkeypatch.setattr(svc, "_clip_text_batch", lambda labels: np.stack([vmap[t] for t in labels]))
 
     out = svc.taste_words(top_k=2)
     assert out["sources"] == 1 and out["labels"][0][0] == "beach"
