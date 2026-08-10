@@ -246,3 +246,25 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 #search-adv input[type=range] { width: 160px; accent-color: var(--accent); vertical-align: middle; }
 #s-min-val { min-width: 128px; }
 #search-count { font-size: 13px; }
+
+/* collection rows: play link + rename/delete */
+.coll-row { display: inline-flex; align-items: center; gap: 2px; margin: 0 6px 6px 0; }
+.coll-row .coll-rename, .coll-row .coll-del { background: none; border: none; cursor: pointer;
+  font-size: 13px; opacity: .5; padding: 2px 4px; }
+.coll-row:hover .coll-rename, .coll-row:hover .coll-del { opacity: 1; }
+
+/* Performers leaderboard */
+.perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.perf-card { display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px; }
+.perf-photo { width: 64px; height: 84px; flex: none; border-radius: 8px; overflow: hidden;
+  background: var(--panel2); display: flex; align-items: center; justify-content: center; }
+.perf-photo img { width: 100%; height: 100%; object-fit: cover; }
+.perf-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.perf-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.perf-taste { color: var(--accent); font-size: 12px; font-weight: 500; }
+.perf-bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+.perf-bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.perf-stats { font-size: 12px; }
+.perf-actions { display: flex; gap: 6px; margin-top: auto; }
+.perf-actions button { font-size: 12px; padding: 4px 8px; }

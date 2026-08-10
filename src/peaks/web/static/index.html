@@ -15,6 +15,7 @@
       <button class="tab" data-view="galaxy">Galaxy</button>
       <button class="tab" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="explore">Explore</button>
+      <button class="tab" data-view="performers">Performers</button>
       <button class="tab" data-view="board">Megaboard</button>
     </nav>
     <span id="conn" class="dim"></span>
@@ -311,6 +312,30 @@
     </div>
     <div id="search-count" class="dim" style="margin:6px 2px"></div>
     <div id="results" class="grid"></div>
+  </section>
+
+  <!-- PERFORMERS -->
+  <section id="performers" class="view">
+    <div class="panel">
+      <h2>Performers</h2>
+      <p class="dim">How the performers in your library stack up by the moments they
+        generate — and, once you've built a taste, how on-taste those moments are. Build a
+        collection of anyone's <strong>best moments</strong> in one click.</p>
+      <div class="row">
+        <input id="perf-search" placeholder="Find a performer by name…" />
+        <button id="btn-perf-search" class="primary">Best of →</button>
+        <input id="perf-query" placeholder="focus (optional, e.g. lingerie)" title="Rank her best moments by this instead of your taste" />
+        <span class="dim">sort:</span>
+        <select id="perf-sort">
+          <option value="moments">Moments</option>
+          <option value="scenes">Scenes</option>
+          <option value="taste">Taste</option>
+        </select>
+        <button id="btn-perf-refresh" class="ghost" title="Re-scan the library from Stash">↻ Rebuild</button>
+        <span id="perf-status" class="dim"></span>
+      </div>
+    </div>
+    <div id="perf-grid" class="perf-grid"></div>
   </section>
 
   <!-- MEGABOARD -->

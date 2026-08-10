@@ -407,6 +407,22 @@ def create_app(cfg=None):
             raise HTTPException(404, "no such collection")
         return c
 
+    @app.delete("/api/collection")
+    def delete_collection(name: str):
+        r = service.delete_collection(name)
+        if not r["removed"]:
+            raise HTTPException(404, "no such collection")
+        return r
+
+    @app.post("/api/collection/rename")
+    def rename_collection(body: dict):
+        try:
+            return service.rename_collection(body.get("name", ""), body.get("new_name", ""))
+        except FileNotFoundError:
+            raise HTTPException(404, "no such collection")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
     @app.get("/api/reel/download")
     def download_reel(name: str):
         path = service.reel_path(name)
@@ -602,6 +618,37 @@ def create_app(cfg=None):
         the megaboard's 'more from this actress' pivot."""
         r = service.performer_board(scene_id, count=count)
         return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
+
+    @app.get("/api/performer/best")
+    def performer_best(
+        name: str | None = None, id: str | None = None, scene_id: str | None = None,
+        count: int = 200, per_scene: int = 6, query: str | None = None,
+    ):
+        """A performer's best moments (taste-ranked, or by a focus `query`) — the
+        preview you save as a collection."""
+        r = service.performer_best(
+            name=name, performer_id=id, scene_id=scene_id,
+            count=count, per_scene=per_scene, query=query or None,
+        )
+        return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
+
+    @app.get("/api/performers")
+    def performers(sort: str = "moments", refresh: bool = False):
+        rows = service.performer_stats(rebuild=refresh)
+        key = sort if sort in ("moments", "scenes", "taste") else "moments"
+        rank = (lambda r: (r.get("taste_best") or 0)) if key == "taste" else (lambda r: r.get(key, 0))
+        return {"performers": sorted(rows, key=rank, reverse=True)}
+
+    @app.get("/api/performer/{pid}/image")
+    def performer_image(pid: str):
+        try:
+            got = service.client().performer_image(pid)
+        except Exception:  # noqa: BLE001
+            got = None
+        if not got:
+            raise HTTPException(404, "no image")
+        data, ctype = got
+        return Response(content=data, media_type=ctype)
 
     @app.get("/api/radio")
     def radio(exclude: str = "", count: int = 30):

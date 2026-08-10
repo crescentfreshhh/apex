@@ -510,6 +510,7 @@ const FY_CLIP = 20;                      // clip seconds per For You tile
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
 let fyMinScore = 0;                       // the "taste floor" (0 = off)
 let boardSearch = null;                   // {q,min,per,neg,taste} when replaying a search
+let boardPerformer = null;                // {id,name,query} when playing a performer's best
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
 function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
@@ -606,6 +607,7 @@ function openTileMenu(tile, x, y) {
   const items = [
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
     ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
+    ["⭐ Save her best as a collection", () => saveHerBest(apex.scene_id)],
   ];
   if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
 
@@ -642,8 +644,22 @@ function pivotBoard(apexes, label) {
 async function moreLikeThis(scene_id, t) {
   flashStatus("finding similar…");
   try {
-    const hits = await api(`/api/search/similar?scene_id=${encodeURIComponent(scene_id)}&t=${t}&top_k=200`);
-    pivotBoard((hits || []).filter((h) => h.scene_id && h.stream).map(apexFromHit), "🔎 more like that moment");
+    const d = await api(`/api/search/similar?scene_id=${encodeURIComponent(scene_id)}&t=${t}&top_k=200`);
+    pivotBoard((d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit), "🔎 more like that moment");
+  } catch (e) { flashStatus(e.message); }
+}
+async function saveHerBest(scene_id) {
+  flashStatus("finding her best…");
+  let d;
+  try { d = await api(`/api/performer/best?scene_id=${encodeURIComponent(scene_id)}&count=500`); }
+  catch (e) { return flashStatus(e.message); }
+  const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+  if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer here");
+  const name = prompt(`Save ${d.performer || "her"}'s best as a collection:`, (d.performer || "performer") + " — best of");
+  if (!name) return;
+  try {
+    await api("/api/collection", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, apexes }) });
+    flashStatus(`saved "${name}" (${apexes.length})`);
   } catch (e) { flashStatus(e.message); }
 }
 async function moreFromActress(scene_id) {
@@ -702,6 +718,19 @@ async function loadSource(src, opts = {}) {
         if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
       }
       pickApex = makeQueuePicker(State.apexes);
+    } else if (src === "performer") {
+      State.searchMode = true;
+      const qs = new URLSearchParams({ count: 500, per_scene: 6 });
+      if (boardPerformer?.id) qs.set("id", boardPerformer.id);
+      else if (boardPerformer?.name) qs.set("name", boardPerformer.name);
+      if (boardPerformer?.query) qs.set("query", boardPerformer.query);
+      let d;
+      try { d = await api("/api/performer/best?" + qs.toString()); }
+      catch (e) { return showError("Couldn't load this performer.\n\n(" + e.message + ")"); }
+      State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+      if (!State.apexes.length) return showError("No embedded moments for this performer.");
+      pickApex = makeQueuePicker(State.apexes);
+      document.getElementById("status").textContent = "🎬 " + (d.performer || "performer") + " · best of";
     } else if (src === "foryou") {
       State.searchMode = true;
       fyReset();
@@ -745,6 +774,7 @@ async function initSources(initial) {
       opts.push(`<option value="collection:${esc(c.safe)}">Collection: ${esc(c.name)} (${c.count})</option>`);
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
+  if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);
   if (initial === "foryou") opts.push(`<option value="foryou">For You — your taste</option>`);
   if (initial === "galaxy") opts.push(`<option value="galaxy">Galaxy selection</option>`);
   sel.innerHTML = opts.join("");
@@ -770,6 +800,10 @@ async function main() {
       neg: parseFloat(params.get("neg")),
       taste: params.get("taste") === "true",
     };
+  }
+  else if (params.get("src") === "performer") {
+    initial = "performer";
+    boardPerformer = { id: params.get("id"), name: params.get("name"), query: params.get("pq") };
   }
   else if (params.get("src") === "foryou") initial = "foryou";
   else if (params.get("src") === "galaxy") initial = "galaxy";

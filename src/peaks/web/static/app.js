@@ -27,6 +27,7 @@ document.querySelectorAll(".tab[data-view]").forEach((b) =>
     if (b.dataset.view === "dashboard") refreshDashboard();
     if (b.dataset.view === "foryou") openForYou();
     if (b.dataset.view === "galaxy" && window.openGalaxy) window.openGalaxy();
+    if (b.dataset.view === "performers") openPerformers();
   })
 );
 
@@ -700,12 +701,103 @@ $("#btn-save-collection").addEventListener("click", async () => {
 async function refreshCollections() {
   try {
     const { collections } = await api("/api/collections");
-    $("#collections").innerHTML = collections.length
+    const el = $("#collections");
+    el.innerHTML = collections.length
       ? "<div class='dim' style='margin:8px 0 4px'>Collections</div>" + collections.map((c) =>
-          `<a class="reel-item" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank">▶ ${esc(c.name)} <span class="dim">${c.count}</span></a>`).join("")
+          `<span class="coll-row" data-safe="${esc(c.safe)}" data-name="${esc(c.name)}">
+            <a class="reel-item" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank">▶ ${esc(c.name)} <span class="dim">${c.count}</span></a>
+            <button class="coll-rename" title="Rename">✏️</button>
+            <button class="coll-del" title="Delete">🗑</button>
+          </span>`).join("")
       : "";
   } catch {}
 }
+// --- Performers tab: leaderboard + best-of collections ----------------------
+let perfLoaded = false;
+async function openPerformers(refresh) {
+  const grid = $("#perf-grid"); if (!grid) return;
+  if (perfLoaded && !refresh) return;   // cached; use ↻ Rebuild to re-scan
+  grid.innerHTML = '<p class="dim">Reading performers…</p>';
+  $("#perf-status").textContent = "";
+  try {
+    const sort = $("#perf-sort").value;
+    const d = await api(`/api/performers?sort=${sort}` + (refresh ? "&refresh=true" : ""));
+    perfLoaded = true;
+    renderPerformers(d.performers || []);
+  } catch (e) { grid.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+function renderPerformers(rows) {
+  const grid = $("#perf-grid");
+  if (!rows.length) { grid.innerHTML = '<p class="dim">No performers found — embed some scenes with performers assigned in Stash.</p>'; return; }
+  const maxMoments = Math.max(...rows.map((r) => r.moments)) || 1;
+  grid.innerHTML = rows.map((r) => {
+    const pct = Math.round((r.moments / maxMoments) * 100);
+    const taste = r.taste_best != null ? `<span class="perf-taste" title="best on-taste moment">★ ${Math.round(r.taste_best * 100)}%</span>` : "";
+    return `<div class="perf-card" data-id="${esc(r.id)}" data-name="${esc(r.name)}">
+      <div class="perf-photo"><img loading="lazy" src="/api/performer/${encodeURIComponent(r.id)}/image" alt="" onerror="this.style.display='none'" /></div>
+      <div class="perf-body">
+        <div class="perf-name" title="${esc(r.name)}">${esc(r.name)} ${taste}</div>
+        <div class="perf-bar"><span style="width:${pct}%"></span></div>
+        <div class="dim perf-stats">${r.moments.toLocaleString()} moments · ${r.scenes} scenes</div>
+        <div class="perf-actions">
+          <button class="perf-best">⭐ Best of</button>
+          <button class="perf-play ghost">▶ Board</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+async function performerBestOf(id, name) {
+  const query = $("#perf-query").value.trim();
+  setActiveView("explore");
+  currentContext = { kind: "performer", id, name, query };
+  $("#results").innerHTML = `<p class="dim">Finding ${esc(name)}'s best moments…</p>`;
+  const qs = new URLSearchParams({ per_scene: 6, count: 500 });
+  if (id) qs.set("id", id);
+  if (name) qs.set("name", name);   // resolve by id or by name; name also labels the result
+  if (query) qs.set("query", query);
+  try {
+    const d = await api("/api/performer/best?" + qs.toString());
+    renderHits(d.items, null, PREVIEW_MAX);
+    $("#search-count").textContent = `${(d.items || []).length.toLocaleString()} best moments for ${d.performer || name}` +
+      (query ? ` · focus: ${query}` : "") + " — Save collection to keep them";
+    if (!d.items.length) toast(`No embedded moments for ${name}`);
+  } catch (e) { toast(e.message, true); }
+}
+$("#perf-grid")?.addEventListener("click", (e) => {
+  const card = e.target.closest(".perf-card"); if (!card) return;
+  const { id, name } = card.dataset;
+  if (e.target.closest(".perf-best")) performerBestOf(id, name);
+  else if (e.target.closest(".perf-play")) {
+    const qs = new URLSearchParams({ src: "performer", id, name });
+    const query = $("#perf-query").value.trim(); if (query) qs.set("pq", query);
+    window.open("/megaboard/?" + qs.toString(), "_blank");
+  }
+});
+$("#btn-perf-search")?.addEventListener("click", async () => {
+  const name = $("#perf-search").value.trim(); if (!name) return;
+  await performerBestOf("", name);   // id blank → backend resolves by name
+});
+$("#perf-search")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-perf-search").click(); });
+$("#perf-sort")?.addEventListener("change", () => openPerformers(true));
+$("#btn-perf-refresh")?.addEventListener("click", () => openPerformers(true));
+
+// delegated collection actions (the list is innerHTML-rendered)
+$("#collections")?.addEventListener("click", async (e) => {
+  const row = e.target.closest(".coll-row"); if (!row) return;
+  const name = row.dataset.name;
+  if (e.target.closest(".coll-rename")) {
+    e.preventDefault();
+    const nn = prompt("Rename collection:", name); if (!nn || nn === name) return;
+    try { await api("/api/collection/rename", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, new_name: nn }) }); refreshCollections(); }
+    catch (err) { toast(err.message, true); }
+  } else if (e.target.closest(".coll-del")) {
+    e.preventDefault();
+    if (!confirm(`Delete collection "${name}"?`)) return;
+    try { await api("/api/collection?name=" + encodeURIComponent(row.dataset.safe), { method: "DELETE" }); refreshCollections(); }
+    catch (err) { toast(err.message, true); }
+  }
+});
 refreshCollections();
 
 // --- For You: taste-centroid recommender + active-learning swipe trainer ----

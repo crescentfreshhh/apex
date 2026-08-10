@@ -721,6 +721,88 @@ def test_collections_save_list_load(tmp_path, monkeypatch):
     assert svc.load_collection("missing") is None
 
 
+def test_collection_rename_and_delete(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    svc.save_collection("My Faves", [{"scene_id": "1", "start": 0, "url": "u"}])
+    safe = svc.list_collections()[0]["safe"]
+
+    # rename changes the display name but keeps the file/safe stem (URLs don't break)
+    r = svc.rename_collection("My Faves", "Best Of")
+    assert r["name"] == "Best Of" and r["safe"] == safe
+    listed = svc.list_collections()
+    assert listed[0]["name"] == "Best Of" and listed[0]["safe"] == safe
+    assert svc.load_collection(safe)["apexes"][0]["scene_id"] == "1"  # contents intact
+
+    # delete removes it
+    assert svc.delete_collection(safe)["removed"] is True
+    assert svc.list_collections() == []
+    assert svc.delete_collection(safe)["removed"] is False  # already gone
+
+
+def _seed_performer_scenes(cfg, scene_ids=("1", "2", "3")):
+    from peaks.cache import EmbeddingCache
+
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    # scene 1 has an on-axis (high-taste) frame + an off one; others middling
+    frames = {
+        "1": [[1, 0, 0, 0], [0, 1, 0, 0]],
+        "2": [[0.9, 0.1, 0, 0], [0.5, 0.5, 0, 0]],
+        "3": [[0.8, 0.2, 0, 0], [0.3, 0.7, 0, 0]],
+    }
+    for sid in scene_ids:
+        v = np.array(frames[sid], dtype="float32")
+        v /= np.linalg.norm(v, axis=1, keepdims=True)
+        cache.save(f"k{sid}", "dinov2", np.array([0.0, 5.0], dtype="float32"), v,
+                   meta={"scene_id": sid, "path": f"/x/{sid}.mp4"})
+
+
+class _PerfClient:
+    def scene_details(self, ids):
+        return {str(i): {"performers_detail": [{"id": "p1", "name": "Jane Doe"}]} for i in ids}
+
+    def scenes_for_performer(self, pid, limit=500):
+        return ["1", "2", "3", "99"]  # 99 not embedded
+
+    def find_performers(self, name=None, limit=500):
+        return [{"id": "p1", "name": "Jane Doe", "image": "/img", "scene_count": 4}]
+
+
+def test_ranked_moments_orders_by_taste(tmp_path):
+    svc, cfg = _service(tmp_path)
+    _seed_performer_scenes(cfg)
+    c = svc._unit(np.array([1, 0, 0, 0], dtype="float32"))
+    hits = svc._ranked_moments_for_scenes(["1", "2", "3"], c, per_scene=1)
+    assert [h.scene_id for h in hits] == ["1", "2", "3"]  # scene 1's best is closest
+    scores = [h.score for h in hits]
+    assert scores == sorted(scores, reverse=True) and scores[0] > 0.99
+
+
+def test_performer_best_ranks_embedded_only(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_performer_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _PerfClient())
+    # taste centroid ~ [1,0,0,0] via a thumbs-up on scene 1's on-axis frame
+    svc.add_label("k1", 0.0, 1, scene_id="1")
+
+    r = svc.performer_best(name="Jane", per_scene=2, count=50)
+    assert r["performer"] == "Jane Doe"
+    sids = {h.scene_id for h in r["hits"]}
+    assert sids and sids <= {"1", "2", "3"} and "99" not in sids   # embedded only
+    assert [h.score for h in r["hits"]] == sorted((h.score for h in r["hits"]), reverse=True)
+
+
+def test_performer_stats_leaderboard(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    _seed_performer_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _PerfClient())
+    rows = svc.performer_stats(rebuild=True)
+    assert len(rows) == 1
+    jane = rows[0]
+    assert jane["name"] == "Jane Doe" and jane["scenes"] == 3 and jane["moments"] == 6
+
+
 def test_find_duplicates_threshold(tmp_path):
     from peaks.cache import EmbeddingCache
 

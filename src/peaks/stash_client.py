@@ -109,6 +109,14 @@ query ScenesByPerformer($pid: ID!, $per_page: Int!) {
 }
 """
 
+_FIND_PERFORMERS_QUERY = """
+query FindPerformers($filter: FindFilterType, $performer_filter: PerformerFilterType) {
+  findPerformers(filter: $filter, performer_filter: $performer_filter) {
+    performers { id name image_path scene_count }
+  }
+}
+"""
+
 _FIND_TAGS_QUERY = """
 query FindTags($filter: FindFilterType, $tag_filter: TagFilterType) {
   findTags(filter: $filter, tag_filter: $tag_filter) {
@@ -318,6 +326,36 @@ class StashClient:
             _SCENES_BY_PERFORMER_QUERY, {"pid": str(performer_id), "per_page": limit}
         )
         return [str(s["id"]) for s in data["findScenes"]["scenes"]]
+
+    def find_performers(self, name: str | None = None, limit: int = 500) -> list[dict]:
+        """Performers as [{id, name, image, scene_count}]. With `name`, fuzzy-match
+        it (regex); otherwise return the library's performers (for the leaderboard)."""
+        pf = None
+        if name:
+            pf = {"name": {"value": name, "modifier": "MATCHES_REGEX"}}
+        data = self.execute(
+            _FIND_PERFORMERS_QUERY,
+            {"filter": {"per_page": limit}, "performer_filter": pf},
+        )
+        out = []
+        for p in data["findPerformers"]["performers"]:
+            out.append({
+                "id": str(p["id"]), "name": p.get("name", ""),
+                "image": p.get("image_path"), "scene_count": p.get("scene_count", 0),
+            })
+        return out
+
+    def performer_image(self, performer_id: str) -> tuple[bytes, str] | None:
+        """Fetch a performer's Stash image bytes (+content-type) through the authed
+        session, so the web app can proxy it without leaking the api key."""
+        try:
+            r = self.session.get(
+                f"{self.base_url}/performer/{performer_id}/image", timeout=self.timeout
+            )
+            r.raise_for_status()
+        except Exception:  # noqa: BLE001 — missing image is not fatal
+            return None
+        return r.content, r.headers.get("content-type", "image/jpeg")
 
     def iter_markers_by_tag(
         self, tag_name: str, page_size: int = 200

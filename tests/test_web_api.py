@@ -192,6 +192,54 @@ def test_search_similar_threshold_payload(cfg, monkeypatch):
     assert strict <= loose
 
 
+def test_collection_rename_delete_endpoints(cfg, tmp_path, monkeypatch):
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    client = TestClient(create_app(cfg))
+    client.post("/api/collection", json={"name": "Faves", "apexes": [{"scene_id": "1", "start": 0, "url": "u"}]})
+    safe = client.get("/api/collections").json()["collections"][0]["safe"]
+
+    client.post("/api/collection/rename", json={"name": "Faves", "new_name": "Top Tier"})
+    got = client.get("/api/collections").json()["collections"][0]
+    assert got["name"] == "Top Tier" and got["safe"] == safe   # link stays stable
+
+    assert client.delete("/api/collection", params={"name": safe}).status_code == 200
+    assert client.get("/api/collections").json()["collections"] == []
+    assert client.delete("/api/collection", params={"name": safe}).status_code == 404
+
+
+def _perf_client_cls():
+    class _C:
+        def scene_details(self, ids):
+            return {str(i): {"performers_detail": [{"id": "p1", "name": "Ava"}]} for i in ids}
+
+        def scenes_for_performer(self, pid, limit=500):
+            return ["1", "2"]
+
+        def find_performers(self, name=None, limit=500):
+            return [{"id": "p1", "name": "Ava", "image": "/i", "scene_count": 2}]
+    return _C
+
+
+def test_performer_best_and_leaderboard_endpoints(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _perf_client_cls()())
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+    client = TestClient(create_app(cfg))
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
+
+    best = client.get("/api/performer/best?name=Ava&per_scene=2").json()
+    assert best["performer"] == "Ava" and best["items"]
+    assert all(it["scene_id"] in {"1", "2"} for it in best["items"])
+    scores = [it["score"] for it in best["items"]]
+    assert scores == sorted(scores, reverse=True)   # ranked
+
+    board = client.get("/api/performers?sort=moments").json()["performers"]
+    assert board and board[0]["name"] == "Ava" and board[0]["scenes"] == 2
+
+
 def test_board_performer_endpoint(cfg, monkeypatch):
     import peaks.web.service as svc_mod
 

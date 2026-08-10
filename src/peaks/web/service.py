@@ -552,6 +552,40 @@ class Service:
         except Exception:
             return None
 
+    def _collection_path(self, name: str):
+        from pathlib import Path
+
+        return self._collections_dir() / f"{_safe_reel_name(Path(name).stem)}.json"
+
+    def delete_collection(self, name: str) -> dict:
+        """Remove a saved collection's file (path-safe, no traversal)."""
+        p = self._collection_path(name)
+        removed = False
+        try:
+            if p.exists():
+                p.unlink()
+                removed = True
+        except OSError:
+            pass
+        return {"removed": removed, "safe": p.stem}
+
+    def rename_collection(self, name: str, new_name: str) -> dict:
+        """Change a collection's DISPLAY name in place — the file/`safe` stem
+        (which the board options and ?collection= URLs key off) stays put, so
+        nothing that references it breaks."""
+        import json
+
+        new_name = (new_name or "").strip()
+        if not new_name:
+            raise ValueError("new name is empty")
+        p = self._collection_path(name)
+        if not p.exists():
+            raise FileNotFoundError(name)
+        data = json.loads(p.read_text())
+        data["name"] = new_name
+        p.write_text(json.dumps(data))
+        return {"name": new_name, "safe": p.stem, "count": data.get("count", 0)}
+
     # --- megaboard sources (shuffle-all / apex tag / collection) -------------
 
     def scene_pool(self, refresh: bool = False) -> list[dict]:
@@ -1331,6 +1365,146 @@ class Service:
         rng = np.random.default_rng()
         rng.shuffle(hits)
         return {"performer": best_name, "hits": hits[:count]}
+
+    def _ranked_moments_for_scenes(
+        self, scene_ids, query_vec, per_scene: int = 6, model: str | None = None,
+    ) -> list["Hit"]:
+        """Top `per_scene` frames of each scene by cosine to `query_vec` (a unit
+        vector — taste centroid or a CLIP text query), as Hits with the real
+        score. The 'best moments' engine (vs `_moments_for_scenes`, which is
+        time-spread with score 0)."""
+        from ..search import Hit
+
+        model = model or self._model_name()
+        idx = self.index(model)
+        if idx.size == 0 or query_vec is None:
+            return []
+        q = self._unit(np.asarray(query_vec, dtype=np.float32).reshape(-1))
+        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        hits: list[Hit] = []
+        for sid in scene_ids:
+            key = sid_key.get(str(sid))
+            if key is None:
+                continue
+            rows = idx._key_rows.get(key)
+            if not rows:
+                continue
+            start, end = rows
+            scores = idx.matrix[start:end] @ q
+            order = np.argsort(-scores)[:per_scene]
+            for j in order:
+                i = start + int(j)
+                hits.append(Hit(
+                    scene_id=idx.scene_ids[i], key=idx.keys[i],
+                    time=float(idx.times[i]), score=float(scores[int(j)]),
+                ))
+        hits.sort(key=lambda h: h.score, reverse=True)
+        return hits
+
+    def _resolve_performer(self, name=None, performer_id=None, scene_id=None):
+        """(performer_id, name, embedded_scene_ids) for a name / id / scene, keeping
+        only her scenes that are embedded. Picks the best-embedded match on a name."""
+        idx = self.index(self._model_name())
+        embedded = {str(m.get("scene_id")) for m in idx.key_meta.values()}
+        candidates = []
+        if scene_id is not None:
+            try:
+                d = self.client().scene_details([str(scene_id)])
+                candidates = [p for p in (d.get(str(scene_id)) or {}).get("performers_detail") or [] if p.get("id")]
+            except Exception:  # noqa: BLE001
+                candidates = []
+        elif performer_id is not None:
+            candidates = [{"id": str(performer_id), "name": name or ""}]
+        elif name:
+            try:
+                candidates = self.client().find_performers(name)
+            except Exception:  # noqa: BLE001
+                candidates = []
+        best = None
+        for p in candidates:
+            try:
+                scenes = [s for s in self.client().scenes_for_performer(p["id"]) if str(s) in embedded]
+            except Exception:  # noqa: BLE001
+                scenes = []
+            if best is None or len(scenes) > len(best[2]):
+                best = (str(p["id"]), p.get("name") or name or "this performer", scenes)
+        return best or (None, None, [])
+
+    def performer_best(
+        self, name=None, performer_id=None, scene_id=None, count: int = 200,
+        per_scene: int = 6, query: str | None = None,
+    ) -> dict:
+        """A performer's BEST moments — her embedded scenes' frames ranked by your
+        taste centroid, or by a CLIP text `query` ('her best lingerie'). Returns
+        `{performer, hits}` ready to save as a collection."""
+        pid, pname, scenes = self._resolve_performer(name, performer_id, scene_id)
+        if not scenes:
+            return {"performer": pname, "hits": []}
+        if query:  # focus on an attribute → rank in CLIP space
+            model = self._clip_name()
+            qvec = self._clip_query_vector(query)
+        else:      # rank by taste closeness in the DINO space
+            model = self._model_name()
+            qvec, _, _ = self._taste_centroid(model)
+        if qvec is None:  # no taste yet and no query → fall back to spread coverage
+            hits = self._moments_for_scenes(scenes, per_scene=per_scene)
+        else:
+            hits = self._ranked_moments_for_scenes(scenes, qvec, per_scene=per_scene, model=model)
+        return {"performer": pname, "hits": hits[:count]}
+
+    def performer_stats(self, rebuild: bool = False) -> list[dict]:
+        """Leaderboard of the library's performers by moments generated: for each
+        performer appearing on an embedded scene, {id, name, scenes, moments, and
+        taste_best/mean when a centroid exists}. Cached (Stash-heavy to build)."""
+        if not rebuild and getattr(self, "_perf_stats_cache", None) is not None:
+            return self._perf_stats_cache
+        model = self._model_name()
+        idx = self.index(model)
+        # scene_id -> (key, n_frames)
+        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        embedded = list(sid_key)
+        if not embedded:
+            self._perf_stats_cache = []
+            return []
+        try:
+            details = self.client().scene_details(embedded)
+        except Exception:  # noqa: BLE001 — Stash down
+            return getattr(self, "_perf_stats_cache", None) or []
+
+        c, _, _ = self._taste_centroid(model)
+        cu = self._unit(c) if c is not None else None
+        # performer id -> {name, scenes:set}
+        perf: dict[str, dict] = {}
+        for sid, meta in details.items():
+            for p in meta.get("performers_detail") or []:
+                if not p.get("id"):
+                    continue
+                e = perf.setdefault(str(p["id"]), {"name": p.get("name", ""), "scenes": set()})
+                e["scenes"].add(str(sid))
+
+        rows = []
+        for pid, e in perf.items():
+            moments = 0
+            best = mean_sum = 0.0
+            for sid in e["scenes"]:
+                rows_span = idx._key_rows.get(sid_key.get(sid, ""))
+                if not rows_span:
+                    continue
+                start, end = rows_span
+                moments += end - start
+                if cu is not None:
+                    s = idx.matrix[start:end] @ cu
+                    best = max(best, float(s.max()))
+                    mean_sum += float(s.sum())
+            rows.append({
+                "id": pid, "name": e["name"], "scenes": len(e["scenes"]),
+                "moments": int(moments),
+                "taste_best": round(best, 4) if cu is not None else None,
+                "taste_mean": round(mean_sum / moments, 4) if (cu is not None and moments) else None,
+            })
+        rows.sort(key=lambda r: r["moments"], reverse=True)
+        self._perf_stats_cache = rows
+        return rows
 
     def taste_words(self, top_k: int = 8, recent: int = 0) -> dict:
         """Your taste centroid described in vocabulary terms (CLIP space) — the
