@@ -415,6 +415,7 @@ function setPlaying(on) {
 
 function reshuffle() {
   if (State.big) collapse(State.big);
+  if (State.source === "foryou") fyRefetch(false);   // pull a genuinely fresh batch
   State.tiles.forEach((t, i) => setTimeout(() => loadApex(t), i * STAGGER_MS));
 }
 
@@ -478,6 +479,70 @@ function randomMoment() {
   };
 }
 
+// --- For You: an endless, non-repeating taste channel -----------------------
+// Instead of the old ~80-item feed + memoryless weighted picker (which starved
+// the tail and looped in ~1-2 min), pull a big varied pool from the API, play
+// each moment once (weighted shuffle) before repeating, and refetch a fresh
+// batch — excluding scenes already shown — when the queue runs low. Endless.
+const FY_CLIP = 20;                      // clip seconds per For You tile
+const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
+function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
+
+function fyHitToApex(h) {
+  const start = +h.time || 0;
+  return {
+    scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + FY_CLIP),
+    duration: FY_CLIP, url: h.stream, score: h.score ?? 1, title: h.title || "",
+  };
+}
+// order key = random^(1/score): higher-taste moments tend to come earlier, but
+// every item still appears exactly once before the queue is exhausted.
+function fyWeightedShuffle(items) {
+  return items
+    .map((a) => [a, Math.pow(Math.random(), 1 / Math.max(a.score ?? 1, 0.05))])
+    .sort((x, y) => y[1] - x[1])
+    .map((o) => o[0]);
+}
+async function fyRefetch(reset) {
+  if (fyState.refetching) return;
+  fyState.refetching = true;
+  try {
+    const ex = [...fyState.exclude].join(",");
+    let d;
+    try { d = await api("/api/foryou/board?count=400" + (ex ? "&exclude=" + encodeURIComponent(ex) : "")); }
+    catch { d = { items: [] }; }
+    let items = (d.items || []).filter((h) => h.scene_id && h.stream).map(fyHitToApex);
+    if (!items.length && fyState.exclude.size) {   // whole library cycled — start fresh
+      fyState.exclude.clear();
+      try { d = await api("/api/foryou/board?count=400"); } catch { d = { items: [] }; }
+      items = (d.items || []).filter((h) => h.scene_id && h.stream).map(fyHitToApex);
+      reset = true;
+    }
+    if (reset) { State.apexes = items; fyState.queue = []; }
+    else State.apexes = State.apexes.concat(items);
+    for (const a of items) fyState.exclude.add(String(a.scene_id));
+    fyState.queue = fyState.queue.concat(fyWeightedShuffle(items));
+    updateStatus();
+  } finally { fyState.refetching = false; }
+}
+function fyPick() {
+  if (fyState.queue.length < 6 && !fyState.refetching) fyRefetch(false);   // prefetch ahead
+  if (!fyState.queue.length) {
+    if (!State.apexes.length) return null;
+    fyState.queue = fyWeightedShuffle(State.apexes);   // nothing fresh yet: recycle the pool
+  }
+  // don't show the same scene as the last few picks (across tiles)
+  for (let i = 0; i < fyState.queue.length && i < 6; i++) {
+    if (!fyState.recent.includes(String(fyState.queue[i].scene_id))) {
+      const cand = fyState.queue.splice(i, 1)[0];
+      fyState.recent.push(String(cand.scene_id));
+      if (fyState.recent.length > 8) fyState.recent.shift();
+      return cand;
+    }
+  }
+  return fyState.queue.shift();   // all recent: take the head anyway
+}
+
 async function loadSource(src, opts = {}) {
   State.source = src;
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
@@ -501,10 +566,19 @@ async function loadSource(src, opts = {}) {
       if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
       pickApex = makePicker(State.apexes);
     } else if (src === "foryou") {
-      let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_foryou") || "null"); } catch {}
-      State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
-      if (!State.apexes.length) return showError("No For You feed to play. Open the For You tab and hit 'Play on megaboard'.");
-      pickApex = makePicker(State.apexes);
+      State.searchMode = true;
+      fyReset();
+      // seed instantly from the on-screen feed if it's there, then pull the big
+      // varied pool from the API for an endless, non-repeating channel.
+      let seed = null; try { seed = JSON.parse(localStorage.getItem("mb_foryou") || "null"); } catch {}
+      if (seed && seed.apexes && seed.apexes.length) {
+        State.apexes = seed.apexes.slice();
+        for (const a of State.apexes) fyState.exclude.add(String(a.scene_id));
+        fyState.queue = fyWeightedShuffle(State.apexes);
+      }
+      await fyRefetch(!State.apexes.length);
+      if (!State.apexes.length) return showError("No For You taste yet. Thumb up moments or save apexes (⚑), then try again.");
+      pickApex = fyPick;
     } else if (src === "galaxy") {
       let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_galaxy") || "null"); } catch {}
       State.apexes = (pl && pl.apexes) || []; State.searchMode = true;

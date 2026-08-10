@@ -527,6 +527,19 @@ def create_app(cfg=None):
     def foryou_words(recent: int = 0, top_k: int = 8):
         return service.taste_words(top_k=top_k, recent=recent)
 
+    @app.get("/api/taste/metrics")
+    def taste_metrics(threshold: float | None = None):
+        """Taste-score distribution + how many moments/scenes meet your bar."""
+        return service.taste_metrics(threshold=threshold)
+
+    @app.get("/api/foryou/board")
+    def foryou_board(count: int = 400, exclude: str = ""):
+        """A big, varied, shuffled pool for the endless For You megaboard —
+        many moments per scene (varied starts), minus scenes already shown."""
+        seen = {s for s in exclude.split(",") if s}
+        r = service.recommend(top_k=count, per_scene=4, shuffle=True, exclude=seen)
+        return {"items": _hit_payload(service, r["hits"])}
+
     @app.get("/api/radio")
     def radio(exclude: str = "", count: int = 30):
         """Next batch for Taste Radio: top taste moments minus the scene_ids in

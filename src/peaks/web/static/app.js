@@ -309,7 +309,7 @@ function renderHits(hits, container) {
     return `<div class="tile" data-sid="${sid}">
       <div class="thumbwrap">
         <img loading="lazy" src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
-        <span class="score">${(h.score * 100).toFixed(0)}%</span>
+        <span class="score ${g.id === "foryou-results" ? scoreBandClass(h.score) : ""}" data-score="${h.score}">${(h.score * 100).toFixed(0)}%</span>
         <span class="t">${fmt(h.time)}</span>
       </div>
       <div class="meta">
@@ -688,6 +688,90 @@ async function loadTasteWords() {
   } catch { el.innerHTML = ""; }
 }
 
+// --- Taste Metrics: make the % legible + count what meets your bar -----------
+let tasteBands = null;   // [{pct,cutoff}] high→low, for tile coloring
+let metricsCdf = null;   // {thresholds,moments_ge,scenes_ge} for the slider
+const pctText = (v) => `${(v * 100).toFixed(0)}%`;
+
+function scoreBandClass(score) {
+  if (!tasteBands) return "";
+  for (const b of tasteBands) if (score >= b.cutoff) return "band-top" + b.pct;
+  return "band-low";
+}
+function recolorForYouTiles() {
+  document.querySelectorAll("#foryou-results .score[data-score]").forEach((el) => {
+    el.className = "score " + scoreBandClass(+el.dataset.score);
+  });
+}
+
+async function loadTasteMetrics() {
+  const body = $("#metrics-body");
+  if (!body) return;
+  try {
+    const m = await api("/api/taste/metrics");
+    if (!m.has_taste) {
+      tasteBands = null;
+      body.innerHTML = `<span class="dim">No taste yet — save some apexes (⚑) or thumb up
+        moments, then this fills in. Labels so far: ${m.labels.positive}👍 / ${m.labels.negative}👎.</span>`;
+      return;
+    }
+    tasteBands = m.bands.map((b) => ({ pct: b.pct, cutoff: b.cutoff }));
+    metricsCdf = m.cdf;
+    const s = m.sources, d = m.distribution;
+    const hi = Math.max(...m.histogram.counts) || 1;
+    const spark = m.histogram.counts.map((c, i) => {
+      const x0 = m.histogram.edges[i];
+      return `<span class="mbar" style="height:${Math.round((c / hi) * 100)}%"
+        title="${pctText(x0)}: ${c} moments"></span>`;
+    }).join("");
+    const bandsRows = m.bands.map((b) =>
+      `<tr><td>${b.label}</td><td>${b.moments.toLocaleString()} moments</td>
+        <td>${b.scenes.toLocaleString()} scenes</td><td class="dim">≥ ${pctText(b.cutoff)}</td></tr>`).join("");
+
+    body.innerHTML = `
+      <div class="m-head">
+        <b>${s.total.toLocaleString()}</b> loved moments feed your taste
+        (<b>${s.apex}</b> apex peaks · <b>${s.thumbs_up}</b> thumbs) ·
+        <b>${m.labels.positive}</b>👍 / <b>${m.labels.negative}</b>👎 ·
+        ${m.labels.has_model ? "trained model" : "centroid only"} ·
+        <b>${m.indexed.frames.toLocaleString()}</b> moments across
+        <b>${m.indexed.scenes.toLocaleString()}</b> scenes indexed
+      </div>
+      <div class="m-spark" title="distribution of taste-closeness across your whole library">${spark}</div>
+      <div class="m-axis dim"><span>${pctText(d.min)}</span><span>median ${pctText(d.p50)}</span><span>${pctText(d.max)}</span></div>
+      <table class="m-bands">${bandsRows}</table>
+      <div class="m-thresh">
+        <label>Count moments at ≥ <input type="range" id="m-slider"
+          min="${d.min}" max="${d.max}" step="0.005" value="${d.p90}" /></label>
+        <span id="m-thresh-out" class="dim"></span>
+      </div>
+      <div class="m-legend dim">tile colours:
+        <span class="score band-top99">top 1%</span>
+        <span class="score band-top95">top 5%</span>
+        <span class="score band-top90">top 10%</span>
+        <span class="score band-top75">top 25%</span>
+        <span class="score band-low">below</span></div>`;
+
+    const slider = $("#m-slider");
+    slider.addEventListener("input", updateThreshOut);
+    updateThreshOut();
+    recolorForYouTiles();
+  } catch (e) { body.innerHTML = `<span class="dim">${esc(e.message)}</span>`; }
+}
+
+function updateThreshOut() {
+  const slider = $("#m-slider"), out = $("#m-thresh-out");
+  if (!slider || !metricsCdf) return;
+  const v = +slider.value;
+  const th = metricsCdf.thresholds;
+  let i = 0; while (i < th.length - 1 && th[i + 1] <= v) i++;   // nearest step ≤ v
+  const mo = metricsCdf.moments_ge[i], sc = metricsCdf.scenes_ge[i];
+  const frames = metricsCdf.moments_ge[0] || 1;
+  const pctile = Math.round((1 - mo / frames) * 100);
+  out.innerHTML = `≥ <b>${pctText(v)}</b> → <b>${mo.toLocaleString()}</b> moments ·
+    <b>${sc.toLocaleString()}</b> scenes · your <b>${pctile}th</b> percentile`;
+}
+
 let swipeHit = null;
 async function loadNextSwipe() {
   const card = $("#swipe-card");
@@ -730,10 +814,13 @@ async function openForYou() {
   loadPicks();
   await loadForYou(true);   // rebuild on open so fresh apexes/thumbs count
   loadTasteWords();
+  loadTasteMetrics();       // fills the metrics panel + colours the tiles
 }
-$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); });
+$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); loadTasteMetrics(); });
 $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
-$("#btn-foryou-board")?.addEventListener("click", () => sendToMegaboard(foryouItems, "mb_foryou", "foryou"));
+// the For You megaboard now pulls its own big, varied pool from /api/foryou/board
+// (endless, non-repeating) — no need to hand off the small on-screen feed.
+$("#btn-foryou-board")?.addEventListener("click", () => window.open("/megaboard/?src=foryou", "_blank"));
 $("#btn-foryou-radio")?.addEventListener("click", () => startRadio());
 
 // --- Taste Picker: a random-frame collage you tap to build your taste --------

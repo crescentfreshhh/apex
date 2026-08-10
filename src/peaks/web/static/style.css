@@ -219,3 +219,24 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .pick-tile.selected::after { content: "✓"; position: absolute; top: 6px; right: 6px;
   width: 22px; height: 22px; border-radius: 50%; background: var(--ok); color: #06120b;
   font-weight: 700; text-align: center; line-height: 22px; font-size: 14px; }
+
+/* Taste Metrics: tile-% bands + the metrics panel */
+.score.band-top99 { background: var(--accent); color: #1a1400; }   /* top 1%  */
+.score.band-top95 { background: var(--ok); color: #06120b; }        /* top 5%  */
+.score.band-top90 { background: var(--accent2); color: #0a1428; }   /* top 10% */
+.score.band-top75 { background: rgba(0,0,0,.7); color: var(--fg); } /* top 25% */
+.score.band-low   { background: rgba(0,0,0,.55); color: var(--dim); }
+
+#metrics-panel .m-head { margin-bottom: 12px; line-height: 1.7; }
+.m-spark { display: flex; align-items: flex-end; gap: 2px; height: 60px;
+  padding: 4px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
+.m-spark .mbar { flex: 1; min-height: 1px; background: var(--accent); opacity: .8;
+  border-radius: 1px 1px 0 0; }
+.m-axis { display: flex; justify-content: space-between; font-size: 12px; margin: 3px 2px 12px; }
+.m-bands { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+.m-bands td { padding: 5px 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.m-bands td:first-child { font-weight: 600; }
+.m-thresh { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.m-thresh input[type=range] { width: 240px; accent-color: var(--accent); vertical-align: middle; }
+.m-legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.m-legend .score { position: static; padding: 1px 7px; border-radius: 5px; font-size: 11px; }

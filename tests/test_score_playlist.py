@@ -334,6 +334,57 @@ def test_recommend_ranks_by_taste_centroid(tmp_path, monkeypatch):
     assert r["hits"][0].score > r["hits"][-1].score
 
 
+def test_taste_metrics_distribution_and_bands(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)  # scene A dir [1,0,0,0], scene B dir [0,1,0,0]
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())  # apex on scene "1" (A)
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    m = svc.taste_metrics()
+    assert m["has_taste"] is True
+    assert m["indexed"]["frames"] == 4 and m["indexed"]["scenes"] == 2
+    assert m["sources"]["apex"] >= 1 and m["sources"]["used_in_centroid"] == m["sources"]["total"]
+
+    # bands: cutoffs non-increasing as the band loosens; moments non-decreasing;
+    # distinct scenes never exceed the moment count.
+    cuts = [b["cutoff"] for b in m["bands"]]           # Top1% .. Top25%
+    moms = [b["moments"] for b in m["bands"]]
+    assert cuts == sorted(cuts, reverse=True)
+    assert moms == sorted(moms)
+    assert all(b["scenes"] <= b["moments"] for b in m["bands"])
+    d = m["distribution"]
+    assert d["p50"] <= d["p90"] <= d["p99"] <= d["max"]
+    assert len(m["histogram"]["counts"]) == 24 and len(m["histogram"]["edges"]) == 25
+    # CDF for the client-side threshold slider: monotonically non-increasing.
+    cdf = m["cdf"]
+    assert len(cdf["thresholds"]) == 101
+    assert cdf["moments_ge"] == sorted(cdf["moments_ge"], reverse=True)
+    assert cdf["scenes_ge"] == sorted(cdf["scenes_ge"], reverse=True)
+
+    # absolute threshold: centroid ~ scene A, so A's 2 frames score ~1, B's ~0.
+    mt = svc.taste_metrics(threshold=0.5)["threshold"]
+    assert mt["value"] == 0.5 and mt["moments"] == 2 and mt["scenes"] == 1
+    assert mt["percentile"] == 50.0
+
+
+def test_taste_metrics_empty_without_taste(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_two_scenes(cfg)
+
+    class _NoMarkers:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+    monkeypatch.setattr(svc, "client", lambda: _NoMarkers())
+    m = svc.taste_metrics()  # no apexes, no thumbs -> no centroid
+    assert m["has_taste"] is False
+    assert m["labels"] == {"positive": 0, "negative": 0, "has_model": False}
+    assert "bands" not in m
+
+
 def test_recommend_shuffle_varies_but_is_seeded(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 

@@ -101,6 +101,53 @@ def test_sample_endpoint_returns_random_frames(cfg, monkeypatch):
     assert len(small) == 2
 
 
+def test_taste_metrics_endpoint(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+
+    class _C:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    client = TestClient(create_app(cfg))
+
+    # no taste yet -> has_taste False, still returns label health
+    assert client.get("/api/taste/metrics").json()["has_taste"] is False
+
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
+    m = client.get("/api/taste/metrics").json()
+    assert m["has_taste"] is True
+    assert len(m["bands"]) == 4 and m["indexed"]["frames"] == 3
+    assert m["sources"]["thumbs_up"] >= 1
+    assert "threshold" not in m  # only present when asked
+
+    mt = client.get("/api/taste/metrics?threshold=0.5").json()["threshold"]
+    assert mt["value"] == 0.5 and 0 <= mt["percentile"] <= 100
+
+
+def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+
+    class _C:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    client = TestClient(create_app(cfg))
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
+
+    items = client.get("/api/foryou/board?count=6").json()["items"]
+    assert items and all(it["scene_id"] and it["stream"] for it in items)
+    sids = ",".join({it["scene_id"] for it in items})
+    assert client.get("/api/foryou/board?count=6&exclude=" + sids).json()["items"] == []
+
+
 def test_autotrain_kicks_after_threshold(cfg, tmp_path):
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
     cfg.modeling.dir = str(tmp_path / "models")

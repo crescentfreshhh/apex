@@ -1263,6 +1263,105 @@ class Service:
             "sources": n,
         }
 
+    def taste_metrics(
+        self, model: str | None = None, threshold: float | None = None
+    ) -> dict:
+        """Make the taste score legible: score every embedded frame against your
+        taste centroid (one matmul) and describe the distribution.
+
+        The For You % is a cosine to your taste centroid — there is no absolute
+        pass/fail, so 'good' is only meaningful *relative to your own library*.
+        This returns the percentile bands that make a raw % interpretable (top
+        1/5/10/25%), counts of moments **and distinct scenes** in each band (the
+        real 'how many meet my taste' number), an optional absolute-threshold
+        count, a histogram for a sparkline, and the label/source health counts.
+        """
+        model = model or self._model_name()
+        counts = self.label_counts()
+        base = {
+            "has_taste": False,
+            "model": model,
+            "labels": {
+                "positive": counts["positive"],
+                "negative": counts["negative"],
+                "has_model": self.has_taste(),
+            },
+        }
+        # rebuild the centroid so the panel reflects labels/markers added since
+        # the feed was last built (the src cache is otherwise only refreshed on a
+        # feed rebuild); cheap, and only runs on a metrics load, not per slider tick.
+        c, n, sources = self._taste_centroid(model, rebuild=True)
+        idx = self.index(model)
+        if c is None or idx.size == 0:
+            return base
+
+        scores = (idx.matrix @ c).astype(np.float32)
+        scene_ids = np.asarray([s if s is not None else "" for s in idx.scene_ids])
+        sorted_scores = np.sort(scores)
+        # per-scene best moment: "scenes on-taste at t" = scenes whose max ≥ t.
+        uniq, inv = np.unique(scene_ids, return_inverse=True)
+        scene_max = np.full(uniq.shape[0], -np.inf, dtype=np.float32)
+        np.maximum.at(scene_max, inv, scores)
+
+        def moments_ge(t: float) -> int:
+            return int(scores.size - np.searchsorted(sorted_scores, t, side="left"))
+
+        def scenes_ge(t: float) -> int:
+            return int((scene_max >= t).sum())
+
+        pcts = {q: float(np.percentile(scores, q)) for q in (50, 75, 90, 95, 99)}
+        bands = [
+            {"label": lbl, "pct": q, "cutoff": round(pcts[q], 4),
+             "moments": moments_ge(pcts[q]), "scenes": scenes_ge(pcts[q])}
+            for lbl, q in (("Top 1%", 99), ("Top 5%", 95), ("Top 10%", 90), ("Top 25%", 75))
+        ]
+
+        # CDF over the score range so the threshold slider counts client-side
+        # (no per-tick server call): moments/scenes with score ≥ each step.
+        lo, hi = float(sorted_scores[0]), float(sorted_scores[-1])
+        steps = np.linspace(lo, hi, 101) if hi > lo else np.array([lo])
+        m_ge = (scores.size - np.searchsorted(sorted_scores, steps, side="left")).astype(int)
+        s_ge = (scene_max[:, None] >= steps[None, :]).sum(axis=0).astype(int)
+
+        n_apex = sum(1 for s in sources if s.get("kind") == "apex")
+        n_thumb = sum(1 for s in sources if s.get("kind") == "thumb")
+        hist_counts, hist_edges = np.histogram(scores, bins=24)
+
+        out = {
+            **base,
+            "has_taste": True,
+            "indexed": {"frames": int(idx.size), "scenes": int(uniq.size)},
+            "sources": {
+                "total": len(sources), "apex": n_apex, "thumbs_up": n_thumb,
+                "used_in_centroid": n,
+            },
+            "distribution": {
+                "min": round(lo, 4), "mean": round(float(scores.mean()), 4),
+                "p50": round(pcts[50], 4), "p75": round(pcts[75], 4),
+                "p90": round(pcts[90], 4), "p95": round(pcts[95], 4),
+                "p99": round(pcts[99], 4), "max": round(hi, 4),
+            },
+            "bands": bands,
+            "histogram": {
+                "edges": [round(float(e), 4) for e in hist_edges],
+                "counts": [int(x) for x in hist_counts],
+            },
+            "cdf": {
+                "thresholds": [round(float(t), 4) for t in steps],
+                "moments_ge": [int(x) for x in m_ge],
+                "scenes_ge": [int(x) for x in s_ge],
+            },
+        }
+        if threshold is not None:
+            t = float(threshold)
+            out["threshold"] = {
+                "value": round(t, 4),
+                "moments": moments_ge(t),
+                "scenes": scenes_ge(t),
+                "percentile": round(float(np.searchsorted(sorted_scores, t, side="left")) / scores.size * 100, 1),
+            }
+        return out
+
     # --- galaxy map: 2D projection of the whole library ----------------------
 
     def _galaxy_path(self, space: str):
