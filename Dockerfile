@@ -42,15 +42,15 @@ COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/refresh_config.py /opt/peaks/refresh_config.py
 RUN chmod +x /entrypoint.sh
 
-# Cap glibc's per-thread malloc arenas. Embedding does many large transient
-# numpy allocs/frees per scene (npz load, stack, concatenate) across threads;
-# glibc otherwise spreads these over many arenas and keeps the freed memory
-# reserved, so RSS only ratchets upward over a long embed and never returns to
-# the OS. ARENA_MAX=2 forces reuse (freed memory is released), which keeps the
-# embed's memory flat instead of climbing into double-digit GB. Trim threshold
-# nudges glibc to hand mapped memory back after big frees.
-ENV MALLOC_ARENA_MAX=2 \
-    MALLOC_TRIM_THRESHOLD_=131072
+# NOTE: the search-index RSS blow-up during an embed is fixed in code —
+# SearchIndex.build preallocates its matrix and Service.index frees the old
+# index before rebuilding, so a rebuild no longer holds 2-3x the matrix. glibc
+# malloc tuning (MALLOC_ARENA_MAX / MALLOC_TRIM_THRESHOLD_) was tried here as
+# extra insurance but roughly doubled per-scene embed time (aggressive trimming
+# munmaps/re-faults on every large free in the decode loop, and fewer arenas
+# serialize allocs across the decode workers), so it's deliberately NOT set. If
+# a very long embed ever shows gradual RSS creep, MALLOC_ARENA_MAX=2 can be set
+# as a container Variable — but expect a decode slowdown for it.
 
 # persist model downloads + all working data under the /config volume
 ENV TORCH_HOME=/config/torch \
