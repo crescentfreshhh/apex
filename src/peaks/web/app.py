@@ -78,6 +78,8 @@ def _collection_model():
     class CollectionIn(BaseModel):
         name: str
         apexes: list = []
+        query: str | None = None      # how it was built (for a future refresh)
+        params: dict | None = None
 
     return CollectionIn
 
@@ -148,6 +150,30 @@ def _hit_payload(service: Service, hits) -> list[dict]:
             }
         )
     return out
+
+
+def _hit_light(service: Service, h) -> dict:
+    """A hit with just what the grid/board need — no Stash metadata lookup, so
+    an unbounded result set costs no per-scene network calls."""
+    return {
+        "scene_id": h.scene_id,
+        "key": h.key,
+        "time": round(h.time, 2),
+        "score": round(h.score, 4),
+        "thumb": f"/api/frame?key={h.key}&t={h.time:g}",
+        "stream": service.stream_url(h.scene_id, start=h.time) if h.scene_id else None,
+        "title": "",
+    }
+
+
+def _search_payload(service: Service, hits, enrich: int = 300) -> dict:
+    """Return the FULL result set, but only fetch Stash metadata for the first
+    `enrich` hits (the on-screen preview). The rest stay lightweight so "all
+    matches" (no cap) never means thousands of Stash lookups."""
+    hits = list(hits)
+    items = _hit_payload(service, hits[:enrich]) if enrich else []
+    items += [_hit_light(service, h) for h in hits[enrich:]]
+    return {"total": len(hits), "items": items}
 
 
 def create_app(cfg=None):
@@ -366,7 +392,9 @@ def create_app(cfg=None):
     def save_collection(body: CollectionIn):
         if not body.name.strip() or not body.apexes:
             raise HTTPException(400, "need a name and at least one moment")
-        return service.save_collection(body.name.strip(), body.apexes)
+        return service.save_collection(
+            body.name.strip(), body.apexes, query=body.query, params=body.params
+        )
 
     @app.get("/api/collections")
     def collections():
@@ -432,27 +460,42 @@ def create_app(cfg=None):
     @app.get("/api/search/similar")
     def search_similar(
         key: str | None = None, t: float = 0.0, scene_id: str | None = None,
-        top_k: int = 60, taste: bool = False,
+        top_k: int = 60, taste: bool = False, per_scene: int = 3,
+        min_score: float = 0.0, enrich: int = 300,
     ):
         # the megaboard knows scene_id, not the cache key — resolve it (same path
         # /api/classify uses) so "more like this moment" works from a board tile.
         if key is None and scene_id is not None:
             key = service._key_for_scene(scene_id, service._model_name())
         if key is None:
-            return []
-        return _hit_payload(service, service.search_by_frame(key, t, top_k=top_k, taste=taste))
+            return {"total": 0, "items": []}
+        tk = None if min_score > 0 else top_k       # min_score → return ALL matches
+        hits = service.search_by_frame(
+            key, t, top_k=tk, taste=taste,
+            per_scene=(per_scene if per_scene > 0 else None),
+            min_score=(min_score if min_score > 0 else None),
+        )
+        return _search_payload(service, hits, enrich=enrich)
 
     @app.get("/api/search/text")
-    def search_text(q: str, top_k: int = 60, taste: bool = False):
+    def search_text(
+        q: str, top_k: int = 60, taste: bool = False, per_scene: int = 3,
+        min_score: float = 0.0, neg_weight: float = 0.5, enrich: int = 300,
+    ):
         if not service.has_clip_index():
             raise HTTPException(
                 400, "no CLIP index — run an embed pass with PEAKS_MODEL=clip"
             )
+        tk = None if min_score > 0 else top_k       # min_score → return ALL matches
         try:
-            hits = service.search_text(q, top_k=top_k, taste=taste)
+            hits = service.search_text(
+                q, top_k=tk, taste=taste, neg_weight=neg_weight,
+                per_scene=(per_scene if per_scene > 0 else None),
+                min_score=(min_score if min_score > 0 else None),
+            )
         except ImportError as exc:
             raise HTTPException(500, f"CLIP unavailable: {exc}")
-        return _hit_payload(service, hits)
+        return _search_payload(service, hits, enrich=enrich)
 
     # --- taste (explicit thumbs → personalized ranking) ---------------------
 

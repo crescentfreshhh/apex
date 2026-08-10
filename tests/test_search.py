@@ -62,6 +62,37 @@ def test_build_tolerates_count_growth_between_passes(tmp_path, monkeypatch):
     assert idx.size == 1 and idx.dim == 3  # sized to the undercount, clamped safely
 
 
+def test_search_min_score_returns_all_above_floor(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    # 5 scenes at varying cosine to the query axis [1,0,0]
+    for i, v in enumerate([[1, 0, 0], [0.9, 0.1, 0], [0.8, 0.2, 0], [0.2, 1, 0], [0, 1, 0]]):
+        _seed(cache, f"k{i}", str(i), [_unit(v)], [0.0])
+    idx = SearchIndex(cache, "dino").build()
+    q = _unit([1, 0, 0])
+
+    # unbounded threshold search returns EVERY frame with cosine >= floor (not top 60).
+    # note vectors are unit-normalized, so [0.8,0.2,0] scores ~0.97, not 0.8.
+    hits = idx.search(q, top_k=None, min_score=0.7)
+    assert len(hits) == 3  # scenes 0,1,2 clear 0.7; 3 (~0.20) and 4 (0.0) don't
+    assert all(h.score >= 0.7 for h in hits)
+    assert [h.scene_id for h in hits] == ["0", "1", "2"]  # ordered best-first
+    # a looser floor returns more; a stricter one fewer
+    assert len(idx.search(q, top_k=None, min_score=0.0)) == 5
+    assert len(idx.search(q, top_k=None, min_score=0.999)) == 1  # only the exact match
+
+
+def test_search_min_score_respects_per_scene(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    # one scene with 4 near-identical high-scoring frames
+    _seed(cache, "k1", "1", [_unit([1, 0, 0])] * 4, [0, 1, 2, 3])
+    _seed(cache, "k2", "2", [_unit([0.95, 0.05, 0])], [0.0])
+    idx = SearchIndex(cache, "dino").build()
+    hits = idx.search(_unit([1, 0, 0]), top_k=None, per_scene=1, min_score=0.5)
+    # per_scene=1 caps scene 1 to a single moment even though 4 qualify
+    assert sum(1 for h in hits if h.scene_id == "1") == 1
+    assert {h.scene_id for h in hits} == {"1", "2"}
+
+
 def test_search_ranks_by_cosine(tmp_path):
     cache = EmbeddingCache(tmp_path)
     _seed(cache, "k1", "1", [_unit([1, 0, 0])], [0.0])

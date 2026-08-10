@@ -294,14 +294,16 @@ function stars(rating100) {
   return s;
 }
 let lastHits = [];
-function renderHits(hits, container) {
+function renderHits(hits, container, previewMax) {
   const g = container || $("#results");
-  lastHits = hits || [];
+  lastHits = hits || [];   // the FULL set (save/push use this)
   const playable = lastHits.some((h) => h.scene_id && h.stream);
   $("#btn-board-search").disabled = !playable;
   $("#btn-save-collection").disabled = !playable;
-  if (!hits.length) { g.innerHTML = '<p class="dim">No results.</p>'; return; }
-  g.innerHTML = hits.map((h) => {
+  if (!lastHits.length) { g.innerHTML = '<p class="dim">No results.</p>'; return; }
+  // render only a preview slice when asked (search can return thousands)
+  const shown = (previewMax && lastHits.length > previewMax) ? lastHits.slice(0, previewMax) : lastHits;
+  g.innerHTML = shown.map((h) => {
     const perf = (h.performers || []).slice(0, 3).join(", ");
     const sub = [h.studio, perf].filter(Boolean).join(" · ") || `scene ${h.scene_id ?? "?"}`;
     const title = h.title || `scene ${h.scene_id ?? "?"}`;
@@ -408,20 +410,46 @@ function wireSceneEdits(sid, root) {
 function wireTileEdits(tile) { wireSceneEdits(tile.dataset.sid, tile); }
 
 let currentContext = {}; // what produced the current hits → drives the heatmap
+const PREVIEW_MAX = 300; // tiles rendered; the full set still lives in lastHits
 const tasteOn = () => ($("#taste-toggle").checked ? "&taste=true" : "");
+// the Explore "search options" — match-strength floor, per-scene cap, negation
+function searchParams() {
+  const min = parseFloat($("#s-min")?.value) || 0;
+  const per = $("#s-per-scene") ? (parseInt($("#s-per-scene").value, 10) || 0) : 3;
+  const neg = $("#s-neg") ? (parseFloat($("#s-neg").value) || 0) : 0.5;
+  return { min, per, neg };
+}
+function searchQuery() {
+  const { min, per, neg } = searchParams();
+  return `&per_scene=${per}&neg_weight=${neg}&enrich=${PREVIEW_MAX}` +
+    (min > 0 ? `&min_score=${min}` : "&top_k=60") + tasteOn();
+}
+function showSearchCount(total) {
+  const el = $("#search-count"); if (!el) return;
+  const min = parseFloat($("#s-min")?.value) || 0;
+  const floor = min > 0 ? ` at ≥ ${Math.round(min * 100)}%` : "";
+  el.textContent = total
+    ? `${total.toLocaleString()} match${total === 1 ? "" : "es"}${floor}` +
+      (total > PREVIEW_MAX ? ` · showing first ${PREVIEW_MAX}` : "")
+    : "";
+}
 async function similar(key, t) {
   setActiveView("explore");
   currentContext = { kind: "frame", key, t };
   $("#results").innerHTML = '<p class="dim">Finding similar moments…</p>';
-  try { renderHits(await api(`/api/search/similar?key=${key}&t=${t}&top_k=60` + tasteOn())); }
-  catch (e) { toast(e.message, true); }
+  try {
+    const d = await api(`/api/search/similar?key=${key}&t=${t}` + searchQuery());
+    renderHits(d.items, null, PREVIEW_MAX); showSearchCount(d.total);
+  } catch (e) { toast(e.message, true); }
 }
 async function textSearch() {
   const q = $("#q").value.trim(); if (!q) return;
   currentContext = { kind: "text", q };
   $("#results").innerHTML = '<p class="dim">Searching…</p>';
-  try { renderHits(await api("/api/search/text?q=" + encodeURIComponent(q) + "&top_k=60" + tasteOn())); }
-  catch (e) { $("#results").innerHTML = ""; toast(e.message, true); }
+  try {
+    const d = await api("/api/search/text?q=" + encodeURIComponent(q) + searchQuery());
+    renderHits(d.items, null, PREVIEW_MAX); showSearchCount(d.total);
+  } catch (e) { $("#results").innerHTML = ""; toast(e.message, true); }
 }
 
 // --- scene viewer (in-app player + score heatmap + save-a-moment) ----------
@@ -527,9 +555,9 @@ async function similarFromViewer() {
   const v = $("#viewer-v"); const t = v.currentTime || +currentHit.time;
   currentContext = { kind: "frame", key: currentHit.key, t };
   try {
-    const hits = await api(`/api/search/similar?key=${currentHit.key}&t=${t.toFixed(2)}&top_k=60` + tasteOn());
-    if (!hits.length) return toast("no similar moments found");
-    renderHits(hits); openViewerAt(0); toast("More like this moment");
+    const d = await api(`/api/search/similar?key=${currentHit.key}&t=${t.toFixed(2)}` + searchQuery());
+    if (!d.items.length) return toast("no similar moments found");
+    renderHits(d.items, null, PREVIEW_MAX); showSearchCount(d.total); openViewerAt(0); toast("More like this moment");
   } catch (e) { toast(e.message, true); }
 }
 async function dupesFromViewer() {
@@ -608,6 +636,11 @@ document.addEventListener("keydown", (e) => {
 });
 $("#btn-text").addEventListener("click", textSearch);
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") textSearch(); });
+wireToggle("#toggle-search-adv", "#search-adv", null);
+$("#s-min")?.addEventListener("input", () => {
+  const v = parseFloat($("#s-min").value) || 0;
+  $("#s-min-val").textContent = v > 0 ? `≥ ${Math.round(v * 100)}% — all matches` : "off (top 60)";
+});
 
 // hand the current results to the megaboard: each tile starts at its matched
 // moment (the stream URL already carries start=<time>). Passed via localStorage
@@ -625,16 +658,41 @@ function sendToMegaboard(hits, storeKey, src) {
   localStorage.setItem(storeKey, JSON.stringify({ tag: src, count: apexes.length, apexes }));
   window.open("/megaboard/?src=" + src, "_blank");
 }
-$("#btn-board-search").addEventListener("click", () => sendToMegaboard(lastHits, "mb_search", "search"));
+// soft net: no hard cap, but confirm before committing a very large set
+const SOFT_MAX = 2000;
+function bigSetOk(n, verb) {
+  if (n <= SOFT_MAX) return true;
+  return confirm(`This will ${verb} ${n.toLocaleString()} moments (~${Math.round(n * 0.2)} KB` +
+    `${n > 8000 ? " — that's a lot" : ""}). Continue?`);
+}
+$("#btn-board-search").addEventListener("click", () => {
+  if (!lastHits.length) return;
+  if (!bigSetOk(lastHits.length, "play")) return;
+  // for a text search, let the board RE-FETCH the full set (no localStorage cap)
+  if (currentContext.kind === "text" && currentContext.q) {
+    const { min, per, neg } = searchParams();
+    const qs = new URLSearchParams({ src: "search", q: currentContext.q, per_scene: per, neg: neg });
+    if (min > 0) qs.set("min_score", min);
+    if ($("#taste-toggle").checked) qs.set("taste", "true");
+    window.open("/megaboard/?" + qs.toString(), "_blank");
+  } else {
+    sendToMegaboard(lastHits, "mb_search", "search");   // frame-similar / small: snapshot
+  }
+});
 $("#btn-save-collection").addEventListener("click", async () => {
+  if (!lastHits.length) return;
+  if (!bigSetOk(lastHits.length, "save")) return;
   const apexes = hitsToApexes(lastHits);
   if (!apexes.length) return;
   const name = prompt("Name this collection:");
   if (!name) return;
+  // remember how it was built (query + filters) for a future refresh
+  const meta = currentContext.kind === "text"
+    ? { query: currentContext.q, params: searchParams() } : {};
   try {
     const r = await api("/api/collection", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, apexes }),
+      body: JSON.stringify({ name, apexes, ...meta }),
     });
     toast(`Saved "${r.name}" (${r.count} moments)`); refreshCollections();
   } catch (e) { toast(e.message, true); }

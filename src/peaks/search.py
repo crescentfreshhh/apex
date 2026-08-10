@@ -124,15 +124,19 @@ class SearchIndex:
     def search(
         self,
         query: np.ndarray,
-        top_k: int = 60,
+        top_k: int | None = 60,
         *,
         per_scene: int | None = None,
         exclude_key: str | None = None,
+        min_score: float | None = None,
     ) -> list[Hit]:
-        """Top-`top_k` moments most similar to `query` (a 1D vector or (1,d)).
+        """Moments most similar to `query` (a 1D vector or (1,d)).
 
-        `per_scene` caps how many hits any single scene contributes, so results
-        span the library instead of clustering in one video. `exclude_key`
+        `top_k` caps how many hits come back; pass `None` for *unbounded* (every
+        qualifying moment). `min_score` returns **all** frames whose cosine is at
+        least that — the "match strength" floor for Explore — instead of a fixed
+        top slice. `per_scene` caps how many hits any single scene contributes, so
+        results span the library instead of clustering in one video. `exclude_key`
         drops a scene from the results (e.g. the one you searched *from*).
         """
         if self.size == 0:
@@ -143,10 +147,15 @@ class SearchIndex:
             q = q / n
         scores = self.matrix @ q  # cosine (rows are unit vectors)
 
-        # take a generous slice, then apply per-scene capping + exclusions
-        pool = min(self.size, max(top_k * 8, top_k + 50))
-        idx = np.argpartition(-scores, pool - 1)[:pool]
-        idx = idx[np.argsort(-scores[idx])]
+        if min_score is not None:
+            # every qualifying frame, ordered best-first (all scores already computed)
+            idx = np.where(scores >= min_score)[0]
+            idx = idx[np.argsort(-scores[idx])]
+        else:
+            # bounded top-k: partition a generous pool, then order just that slice
+            pool = min(self.size, max((top_k or 60) * 8, (top_k or 60) + 50))
+            idx = np.argpartition(-scores, pool - 1)[:pool]
+            idx = idx[np.argsort(-scores[idx])]
 
         hits: list[Hit] = []
         per_scene_counts: dict[str | None, int] = {}
@@ -161,7 +170,7 @@ class SearchIndex:
                     continue
                 per_scene_counts[sid] = c + 1
             hits.append(Hit(scene_id=sid, key=key, time=float(self.times[i]), score=float(scores[i])))
-            if len(hits) >= top_k:
+            if top_k is not None and len(hits) >= top_k:
                 break
         return hits
 
@@ -178,10 +187,13 @@ class SearchIndex:
         return self.matrix[i]
 
     def search_by_frame(
-        self, key: str, time: float, top_k: int = 60, *, per_scene: int | None = 3
+        self, key: str, time: float, top_k: int | None = 60, *,
+        per_scene: int | None = 3, min_score: float | None = None,
     ) -> list[Hit]:
         """Find moments like the frame at (key, time). Excludes its own scene."""
         v = self.vector_at(key, time)
         if v is None:
             return []
-        return self.search(v, top_k=top_k, per_scene=per_scene, exclude_key=key)
+        return self.search(
+            v, top_k=top_k, per_scene=per_scene, exclude_key=key, min_score=min_score
+        )

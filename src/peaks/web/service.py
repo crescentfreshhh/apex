@@ -507,13 +507,20 @@ class Service:
 
         return Path(os.environ.get("PEAKS_COLLECTIONS_DIR", "/config/collections"))
 
-    def save_collection(self, name: str, apexes: list) -> dict:
+    def save_collection(
+        self, name: str, apexes: list, query: str | None = None,
+        params: dict | None = None,
+    ) -> dict:
         import json
 
         d = self._collections_dir()
         d.mkdir(parents=True, exist_ok=True)
         safe = _safe_reel_name(name)
         data = {"name": name, "count": len(apexes), "apexes": apexes}
+        if query:
+            data["query"] = query          # remembered for a future "refresh"
+        if params:
+            data["params"] = params
         (d / f"{safe}.json").write_text(json.dumps(data))
         return {"name": name, "safe": safe, "count": len(apexes)}
 
@@ -773,9 +780,12 @@ class Service:
                 self._index.pop(model, None)
 
     def search_by_frame(
-        self, key: str, time: float, top_k: int = 60, taste: bool = False
+        self, key: str, time: float, top_k: int | None = 60, taste: bool = False,
+        per_scene: int | None = 3, min_score: float | None = None,
     ) -> list[Hit]:
-        hits = self.index().search_by_frame(key, time, top_k=top_k)
+        hits = self.index().search_by_frame(
+            key, time, top_k=top_k, per_scene=per_scene, min_score=min_score
+        )
         if taste:
             hits = self._rerank_by_taste(hits, self._model_name())
         return hits
@@ -865,14 +875,22 @@ class Service:
         except Exception:  # noqa: BLE001 — taste labeling must never break a save
             pass
 
-    def search_text(self, text: str, top_k: int = 60, taste: bool = False) -> list[Hit]:
+    def search_text(
+        self, text: str, top_k: int | None = 60, taste: bool = False,
+        per_scene: int | None = 3, min_score: float | None = None,
+        neg_weight: float = 0.5,
+    ) -> list[Hit]:
         """CLIP text -> nearest moments. Supports blended queries: words
         prefixed with '-' are pushed AWAY from ("beach -crowd -text"), so you
-        can steer results without re-typing the whole prompt. With `taste`, the
-        results are re-ranked by your trained preference model."""
-        vec = self._clip_query_vector(text)
+        can steer results without re-typing the whole prompt (`neg_weight` sets
+        how hard). `min_score` returns *all* moments at least that close (the
+        Explore match-strength floor); `top_k=None` is unbounded. With `taste`,
+        the results are re-ranked by your trained preference model."""
+        vec = self._clip_query_vector(text, neg_weight=neg_weight)
         clip = self._clip_name()
-        hits = self.index(clip).search(vec, top_k=top_k, per_scene=3)
+        hits = self.index(clip).search(
+            vec, top_k=top_k, per_scene=per_scene, min_score=min_score
+        )
         return self._rerank_by_taste(hits, clip) if taste else hits
 
     # --- taste model (explicit thumbs → personalized ranking) ----------------

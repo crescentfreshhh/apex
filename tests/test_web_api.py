@@ -158,11 +158,38 @@ def test_search_similar_accepts_scene_id(cfg, monkeypatch):
     client = TestClient(create_app(cfg))
 
     # scene "1" is embedded (fixture seeds k1 -> scene_id "1"); resolves to its key
-    hits = client.get("/api/search/similar?scene_id=1&t=0&top_k=5").json()
-    assert isinstance(hits, list) and hits
+    d = client.get("/api/search/similar?scene_id=1&t=0&top_k=5").json()
+    hits = d["items"]
+    assert d["total"] == len(hits) and hits
     assert all(h["thumb"].startswith("/api/frame?key=") for h in hits)
     # unknown scene -> empty (not an error)
-    assert client.get("/api/search/similar?scene_id=nope&t=0").json() == []
+    assert client.get("/api/search/similar?scene_id=nope&t=0").json() == {"total": 0, "items": []}
+
+
+def test_search_similar_threshold_payload(cfg, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    # seed extra scenes so a similarity search returns several matches
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    for sid in ("3", "4", "5"):
+        cache.save(f"k{sid}", "dinov2", np.array([0.0], dtype=np.float32),
+                   np.stack([_unit([0.9, 0.1, 0])]), meta={"scene_id": sid, "path": f"/d/{sid}.mp4"})
+    monkeypatch.setattr(svc_mod.Service, "scene_meta",
+                        lambda self, ids: {i: {"title": f"scene {i}", "performers": ["X"]} for i in ids})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+    client = TestClient(create_app(cfg))
+
+    # similar to scene 1 (k1@0), low floor → several matches as {total, items};
+    # only the first `enrich`=1 is enriched, the rest are lightweight.
+    d = client.get("/api/search/similar?scene_id=1&t=0&min_score=0.0&per_scene=0&enrich=1").json()
+    assert d["total"] == len(d["items"]) and d["total"] > 1
+    assert d["items"][0]["title"].startswith("scene")   # preview enriched
+    assert d["items"][1]["title"] == ""                 # tail is lightweight
+    assert d["items"][1]["scene_id"] and d["items"][1]["stream"]  # still playable
+    # a strict floor returns fewer than a loose one
+    strict = client.get("/api/search/similar?scene_id=1&t=0&min_score=0.99").json()["total"]
+    loose = client.get("/api/search/similar?scene_id=1&t=0&min_score=0.0").json()["total"]
+    assert strict <= loose
 
 
 def test_board_performer_endpoint(cfg, monkeypatch):
@@ -255,7 +282,7 @@ def test_similarity_search_returns_hits_with_thumb_urls(client, monkeypatch):
     monkeypatch.setattr(svc.Service, "scene_meta", lambda self, ids: {})
     r = client.get("/api/search/similar", params={"key": "k1", "t": 0.0, "top_k": 5})
     assert r.status_code == 200
-    hits = r.json()
+    hits = r.json()["items"]
     assert hits and hits[0]["scene_id"] == "2"  # own scene k1 excluded
     assert hits[0]["thumb"].startswith("/api/frame?key=k2")
     assert "stream" in hits[0]
@@ -517,7 +544,7 @@ def test_search_forwards_taste_flag(client, monkeypatch):
     monkeypatch.setattr(svc.Service, "scene_meta", lambda self, ids: {})
     monkeypatch.setattr(svc.Service, "stream_url", lambda self, sid, start=None: "s")
 
-    def fake_text(self, q, top_k=60, taste=False):
+    def fake_text(self, q, top_k=60, taste=False, **kw):
         seen["taste"] = taste
         return []
 
@@ -564,7 +591,7 @@ def test_hits_include_editable_metadata(client, monkeypatch):
         svc.Service, "scene_meta",
         lambda self, ids: {i: {"title": "T", "rating100": 40, "o_counter": 2, "organized": True} for i in map(str, ids)},
     )
-    hits = client.get("/api/search/similar", params={"key": "k1", "t": 0.0}).json()
+    hits = client.get("/api/search/similar", params={"key": "k1", "t": 0.0}).json()["items"]
     assert hits[0]["rating100"] == 40 and hits[0]["o_counter"] == 2
     assert hits[0]["organized"] is True
 

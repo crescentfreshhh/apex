@@ -240,3 +240,9 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .m-thresh input[type=range] { width: 240px; accent-color: var(--accent); vertical-align: middle; }
 .m-legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
 .m-legend .score { position: static; padding: 1px 7px; border-radius: 5px; font-size: 11px; }
+
+/* Explore search options */
+#search-adv label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; }
+#search-adv input[type=range] { width: 160px; accent-color: var(--accent); vertical-align: middle; }
+#s-min-val { min-width: 128px; }
+#search-count { font-size: 13px; }

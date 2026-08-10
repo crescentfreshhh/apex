@@ -509,6 +509,7 @@ function randomMoment() {
 const FY_CLIP = 20;                      // clip seconds per For You tile
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
 let fyMinScore = 0;                       // the "taste floor" (0 = off)
+let boardSearch = null;                   // {q,min,per,neg,taste} when replaying a search
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
 function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
@@ -531,6 +532,23 @@ function fyHitToApex(h) {
 }
 // order key = random^(1/score): higher-taste moments tend to come earlier, but
 // every item still appears exactly once before the queue is exhausted.
+// play-each-once picker over a STATIC pool (collections, search results): every
+// clip plays before any repeats, so a big saved set actually shows all of it.
+function makeQueuePicker(apexes) {
+  let queue = fyWeightedShuffle(apexes);
+  const recent = [];
+  return function () {
+    if (!queue.length) queue = fyWeightedShuffle(apexes);   // exhausted → reshuffle
+    for (let i = 0; i < queue.length && i < 6; i++) {
+      if (!recent.includes(String(queue[i].scene_id))) {
+        const c = queue.splice(i, 1)[0];
+        recent.push(String(c.scene_id)); if (recent.length > 8) recent.shift();
+        return c;
+      }
+    }
+    return queue.shift();
+  };
+}
 function fyWeightedShuffle(items) {
   return items
     .map((a) => [a, Math.pow(Math.random(), 1 / Math.max(a.score ?? 1, 0.05))])
@@ -662,12 +680,28 @@ async function loadSource(src, opts = {}) {
       const pl = await api("/api/collection?name=" + encodeURIComponent(src.slice(11)));
       State.apexes = pl.apexes || []; State.searchMode = true;
       if (!State.apexes.length) return showError("This collection has no moments.");
-      pickApex = makePicker(State.apexes);
+      pickApex = makeQueuePicker(State.apexes);   // play every clip before repeating
     } else if (src === "search") {
-      let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_search") || "null"); } catch {}
-      State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
-      if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
-      pickApex = makePicker(State.apexes);
+      State.searchMode = true;
+      if (boardSearch) {
+        // re-fetch the FULL filtered set from the API — no localStorage size cap
+        const qs = new URLSearchParams({
+          q: boardSearch.q, per_scene: boardSearch.per ?? 3,
+          neg_weight: boardSearch.neg ?? 0.5, enrich: 0,
+        });
+        if (boardSearch.min > 0) qs.set("min_score", boardSearch.min);
+        if (boardSearch.taste) qs.set("taste", "true");
+        let d;
+        try { d = await api("/api/search/text?" + qs.toString()); }
+        catch (e) { return showError("Search failed.\n\n(" + e.message + ")"); }
+        State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+        if (!State.apexes.length) return showError("No matches at this match strength.");
+      } else {
+        let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_search") || "null"); } catch {}
+        State.apexes = (pl && pl.apexes) || [];
+        if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
+      }
+      pickApex = makeQueuePicker(State.apexes);
     } else if (src === "foryou") {
       State.searchMode = true;
       fyReset();
@@ -727,7 +761,16 @@ async function main() {
   if (ms > 0) fyMinScore = ms;   // taste floor carried from the app's metrics slider
   syncFloorUI();
   let initial = null;
-  if (params.get("src") === "search") initial = "search";
+  if (params.get("src") === "search") {
+    initial = "search";
+    if (params.get("q")) boardSearch = {   // re-run the Explore search on the board
+      q: params.get("q"),
+      min: parseFloat(params.get("min_score")) || 0,
+      per: parseInt(params.get("per_scene"), 10),
+      neg: parseFloat(params.get("neg")),
+      taste: params.get("taste") === "true",
+    };
+  }
   else if (params.get("src") === "foryou") initial = "foryou";
   else if (params.get("src") === "galaxy") initial = "galaxy";
   else if (params.get("collection")) initial = "collection:" + params.get("collection");
