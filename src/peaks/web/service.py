@@ -1285,6 +1285,53 @@ class Service:
         order = rng.choice(n, size=n, replace=False, p=p)
         return [ranked[int(i)] for i in order]
 
+    def board_pool(
+        self, count: int = 400, model: str | None = None,
+        per_scene: int = 4, exclude: set | None = None,
+        min_score: float = 0.80, seed: int | None = None,
+    ) -> dict:
+        """The endless For You megaboard's supply of moments — threshold-driven,
+        not top-N. `min_score` is a taste floor in centroid-cosine (the same
+        number the thumbnail % shows): every moment at/above it is eligible, so
+        the board spans your *whole* on-taste library instead of recycling the
+        few hundred best. `exclude` (scene_ids already shown) marches the stream
+        forward across batches until the qualifying set is spent. Centroid-only
+        by design: no rerank, no MMR — at ~tens-of-thousands of frames those are
+        too slow, and keeping it pure centroid makes the floor mean exactly what
+        the tiles say. `count` moments come back as a rank-weighted random sample
+        so strong matches surface first but the long tail is always reachable."""
+        model = model or self._model_name()
+        c, n, sources = self._taste_centroid(model)
+        if c is None:
+            return {"hits": [], "sources": 0, "total": 0, "model": model}
+        pool = self.index(model).search(
+            c, top_k=None, per_scene=per_scene,
+            min_score=(min_score if min_score > 0 else None),
+        )
+        if exclude:
+            exclude = {str(s) for s in exclude}
+            pool = [h for h in pool if str(h.scene_id) not in exclude]
+        hits = self._sample_ranked(pool, count, seed)
+        return {"hits": hits, "sources": n, "total": len(pool), "model": model}
+
+    def _sample_ranked(
+        self, ranked: list[Hit], count: int, seed: int | None = None
+    ) -> list[Hit]:
+        """Rank-weighted random sample (without replacement) of `count` moments
+        from a best-first pool: weights decay by rank so strong matches are more
+        likely, but a broad temperature keeps the whole tail reachable — the
+        board never fixates on the same few hundred. Returns fewer than `count`
+        only when the pool is smaller."""
+        n = len(ranked)
+        if n <= count:
+            return ranked
+        rng = np.random.default_rng(seed)
+        temp = float(max(n / 4.0, count, 200.0))  # broad: spread across the pool
+        w = np.exp(-np.arange(n) / temp)
+        p = w / w.sum()
+        order = rng.choice(n, size=count, replace=False, p=p)
+        return [ranked[int(i)] for i in order]
+
     def _diversify(self, hits: list[Hit], model: str, k: int, diversity: float) -> list[Hit]:
         """Maximal Marginal Relevance: pick a top-`k` that balances taste-rank
         against variety, so the feed spans your taste instead of collapsing into

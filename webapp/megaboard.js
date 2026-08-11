@@ -508,7 +508,7 @@ function randomMoment() {
 // batch — excluding scenes already shown — when the queue runs low. Endless.
 const FY_CLIP = 20;                      // clip seconds per For You tile
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
-let fyMinScore = 0;                       // the "taste floor" (0 = off)
+let fyMinScore = 0.80;                     // the "taste floor" (0 = off, whole library)
 let boardSearch = null;                   // {q,min,per,neg,taste} when replaying a search
 let boardPerformer = null;                // {id,name,query} when playing a performer's best
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
@@ -516,7 +516,7 @@ function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
   return "/api/foryou/board?count=400"
     + (ex ? "&exclude=" + encodeURIComponent(ex) : "")
-    + (fyMinScore > 0 ? "&min_score=" + fyMinScore : "");
+    + "&min_score=" + fyMinScore;   // always sent, so 0 truly means "off"
 }
 function syncFloorUI() {
   const s = document.getElementById("floor"), v = document.getElementById("floor-val");
@@ -775,7 +775,8 @@ async function initSources(initial) {
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);
-  if (initial === "foryou") opts.push(`<option value="foryou">For You — your taste</option>`);
+  // For You is always available — you can pivot to your taste from any source.
+  opts.push(`<option value="foryou">For You — your taste</option>`);
   if (initial === "galaxy") opts.push(`<option value="galaxy">Galaxy selection</option>`);
   sel.innerHTML = opts.join("");
   sel.addEventListener("change", () => loadSource(sel.value));

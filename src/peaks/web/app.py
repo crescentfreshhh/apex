@@ -609,14 +609,15 @@ def create_app(cfg=None):
         return service.taste_metrics(threshold=threshold)
 
     @app.get("/api/foryou/board")
-    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.0):
-        """A big, varied, shuffled pool for the endless For You megaboard —
-        many moments per scene (varied starts), minus scenes already shown, and
-        only moments whose taste-closeness is ≥ min_score (the 'taste floor')."""
+    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.80):
+        """A big, varied pool for the endless For You megaboard — threshold-driven:
+        every moment whose taste-closeness is ≥ min_score (the 'taste floor', in
+        the same % the thumbnails show), minus scenes already shown, sampled so the
+        stream spans your whole on-taste library instead of looping the best few.
+        min_score=0 means no floor (the whole library)."""
         seen = {s for s in exclude.split(",") if s}
-        r = service.recommend(
-            top_k=count, per_scene=4, shuffle=True, exclude=seen,
-            min_score=min_score if min_score > 0 else None,
+        r = service.board_pool(
+            count=count, per_scene=4, exclude=seen, min_score=min_score,
         )
         return {"items": _hit_payload(service, r["hits"])}
 

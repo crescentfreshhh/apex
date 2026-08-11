@@ -336,6 +336,52 @@ def test_recommend_ranks_by_taste_centroid(tmp_path, monkeypatch):
     assert r["hits"][0].score > r["hits"][-1].score
 
 
+def test_board_pool_is_threshold_driven_and_spans_the_library(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)  # apex on scene "1" -> centroid ≈ [1,0,0,0]
+
+    # A spread of scenes at known centroid-cosines from 0.55 up to 0.99, well
+    # past the old top-N cap, so we can prove the board reaches the long tail.
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    cosines = np.linspace(0.55, 0.99, 40)
+    for i, cs in enumerate(cosines):
+        d = np.array([cs, float(np.sqrt(1 - cs * cs)), 0, 0], dtype="float32")
+        cache.save(f"S{i}", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+                   np.stack([d, d]), meta={"scene_id": str(100 + i)})
+
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    # taste floor honored: every returned moment is at/above it, per_scene capped.
+    hi = svc.board_pool(count=500, per_scene=2, min_score=0.8, seed=1)
+    assert hi["hits"] and all(h.score >= 0.8 for h in hi["hits"])
+    from collections import Counter
+    assert max(Counter(h.scene_id for h in hi["hits"]).values()) <= 2
+
+    # a lower floor admits strictly more distinct scenes than a higher one.
+    lo = svc.board_pool(count=500, per_scene=2, min_score=0.6, seed=1)
+    assert len({h.scene_id for h in lo["hits"]}) > len({h.scene_id for h in hi["hits"]})
+
+    # min_score=0 => no floor: the whole seeded library is eligible.
+    allp = svc.board_pool(count=500, per_scene=2, min_score=0.0, seed=1)
+    assert len({h.scene_id for h in allp["hits"]}) >= len({h.scene_id for h in lo["hits"]})
+
+    # marching the exclude set forward drains the ≥0.8 set instead of looping.
+    seen, rounds = set(), 0
+    while rounds < 50:
+        r = svc.board_pool(count=500, per_scene=2, min_score=0.8, exclude=seen, seed=1)
+        if not r["hits"]:
+            break
+        seen |= {h.scene_id for h in r["hits"]}
+        rounds += 1
+    assert not svc.board_pool(count=500, per_scene=2, min_score=0.8, exclude=seen)["hits"]
+    assert len(seen) > 2  # spanned many scenes, not just the top couple
+
+
 def test_taste_metrics_distribution_and_bands(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
