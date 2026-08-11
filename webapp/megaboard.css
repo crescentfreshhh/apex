@@ -44,7 +44,24 @@ html, body {
 #bar button:hover { border-color: var(--accent); }
 #bar button.on { color: var(--accent); border-color: var(--accent); }
 
-#status { margin-left: auto; }
+/* Float the readout over the board's bottom-left so the full coverage/model
+   line is always visible — the toolbar is too cramped and clipped its right end. */
+#status {
+  position: fixed;
+  left: 10px;
+  bottom: 10px;
+  margin: 0;
+  max-width: min(94vw, 920px);
+  padding: 5px 10px;
+  background: rgba(10, 10, 12, 0.72);
+  border: 1px solid #2c2c33;
+  border-radius: 7px;
+  color: #cfcfd5;
+  line-height: 1.35;
+  z-index: 5;
+  pointer-events: none;
+}
+#status:empty { display: none; }
 
 #board {
   display: grid;

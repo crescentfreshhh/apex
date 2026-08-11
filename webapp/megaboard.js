@@ -428,12 +428,11 @@ function updateStatus() {
   if (State.source === "foryou" && fyTotals) {
     // separate "matches your taste" (the whole board) from "loaded so far".
     const by = fyTotals.scored_by === "classifier" ? "your trained model"
-      : fyTotals.scored_by === "centroid" ? "taste centroid" : "your taste";
+      : fyTotals.scored_by === "centroid" ? "taste centroid (no trained model yet)" : "your taste";
     const floor = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
     document.getElementById("status").textContent =
-      `${pivot}≈${fmtN(fyTotals.scenes)} scenes · ${fmtN(fyTotals.moments)} moments in your taste board`
-      + ` (by ${by})${floor} · ${State.apexes.length} loaded · ${State.tiles.length} tiles`
-      + ` · right-click a tile to steer`;
+      `${pivot}Scored by ${by}${floor} · ≈${fmtN(fyTotals.scenes)} scenes / ${fmtN(fyTotals.moments)} moments match`
+      + ` · ${State.apexes.length} loaded · ${State.tiles.length} tiles · right-click a tile to steer`;
     return;
   }
   const label = State.shuffle
