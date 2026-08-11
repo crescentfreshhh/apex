@@ -382,6 +382,52 @@ def test_board_pool_is_threshold_driven_and_spans_the_library(tmp_path, monkeypa
     assert len(seen) > 2  # spanned many scenes, not just the top couple
 
 
+def test_board_pool_covers_every_scene_scored_by_classifier(tmp_path, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)
+
+    # a spread of extra scenes, each pointing a different direction (diverse taste)
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    for i, cs in enumerate(np.linspace(0.4, 0.95, 12)):
+        d = np.array([cs, float(np.sqrt(1 - cs * cs)), 0, 0], dtype="float32")
+        cache.save(f"S{i}", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+                   np.stack([d, d]), meta={"scene_id": str(200 + i)})
+
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    # stub the trained model: probability = first component (higher = more "taste")
+    class _Clf:
+        def predict_proba(self, m):
+            return np.clip(np.asarray(m)[:, 0], 0.0, 1.0)
+
+    monkeypatch.setattr(svc, "_taste_model", lambda profile, model: _Clf())
+
+    idx = svc.index(svc._model_name())
+    n_scenes = len({str(s) for s in idx.scene_ids})
+
+    # one peak per scene: every indexed scene appears, scored by the classifier.
+    r = svc.board_pool(count=1000, per_scene=1, min_score=0.0)
+    assert r["scored_by"] == "classifier"
+    assert r["scenes"] == n_scenes and r["moments"] == n_scenes
+    assert len({str(h.scene_id) for h in r["hits"]}) == n_scenes  # ≥1 moment for ALL scenes
+
+    # depth: per_scene=2 gives up to 2 moments/scene but still covers every scene.
+    from collections import Counter
+    r2 = svc.board_pool(count=1000, per_scene=2, min_score=0.0)
+    assert len({str(h.scene_id) for h in r2["hits"]}) == n_scenes
+    assert max(Counter(str(h.scene_id) for h in r2["hits"]).values()) <= 2
+
+    # the floor is an optional tightener: raising it drops low-scoring scenes.
+    tight = svc.board_pool(count=1000, per_scene=1, min_score=0.9)
+    assert tight["scenes"] < n_scenes
+    assert all(h.score >= 0.9 for h in tight["hits"])
+
+
 def test_taste_metrics_distribution_and_bands(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")

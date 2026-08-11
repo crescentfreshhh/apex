@@ -609,17 +609,22 @@ def create_app(cfg=None):
         return service.taste_metrics(threshold=threshold)
 
     @app.get("/api/foryou/board")
-    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.80):
-        """A big, varied pool for the endless For You megaboard — threshold-driven:
-        every moment whose taste-closeness is ≥ min_score (the 'taste floor', in
-        the same % the thumbnails show), minus scenes already shown, sampled so the
-        stream spans your whole on-taste library instead of looping the best few.
-        min_score=0 means no floor (the whole library)."""
+    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.0):
+        """The endless For You megaboard's supply — one peak per scene across your
+        whole vetted library (≥1 moment for every scene), scored by your trained
+        model when you have one. `min_score` is an optional tightener (0 = off →
+        every scene's peak; raise it → only your strongest). `exclude` marches the
+        stream forward. Returns the coverage numbers (`scenes`/`moments` matching at
+        this floor, and how the score was computed) so the board can show them."""
         seen = {s for s in exclude.split(",") if s}
         r = service.board_pool(
             count=count, per_scene=4, exclude=seen, min_score=min_score,
         )
-        return {"items": _hit_payload(service, r["hits"])}
+        return {
+            "items": _hit_payload(service, r["hits"]),
+            "scenes": r.get("scenes", 0), "moments": r.get("moments", 0),
+            "scored_by": r.get("scored_by"),
+        }
 
     @app.get("/api/board/performer")
     def board_performer(scene_id: str, count: int = 300):

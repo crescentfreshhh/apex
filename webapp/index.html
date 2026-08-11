@@ -22,9 +22,9 @@
     </label>
     <button id="toggle">Pause</button>
     <button id="reshuffle">Reshuffle</button>
-    <label id="floor-wrap" hidden title="Only play moments at least this close to your taste">taste floor
-      <input type="range" id="floor" min="0.5" max="0.95" step="0.01" value="0.8" />
-      <span id="floor-val" class="dim">80%</span>
+    <label id="floor-wrap" hidden title="Off = one peak from every scene. Raise it to keep only your strongest scenes.">taste floor
+      <input type="range" id="floor" min="0" max="0.95" step="0.01" value="0" />
+      <span id="floor-val" class="dim">off</span>
     </label>
     <button id="refresh-lib" title="Rebuild from Stash — pick up newly-added scenes / apexes">↻ Refresh</button>
     <button id="mute">Mute all</button>

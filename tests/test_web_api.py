@@ -142,11 +142,15 @@ def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
     client = TestClient(create_app(cfg))
     client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
 
-    items = client.get("/api/foryou/board?count=6").json()["items"]
+    board = client.get("/api/foryou/board?count=6").json()
+    items = board["items"]
     assert items and all(it["scene_id"] and it["stream"] for it in items)
+    # coverage numbers come back so the board can show "how many match my taste"
+    assert board["scenes"] >= 1 and board["moments"] >= board["scenes"]
+    assert board["scored_by"] in ("classifier", "centroid")
     sids = ",".join({it["scene_id"] for it in items})
     assert client.get("/api/foryou/board?count=6&exclude=" + sids).json()["items"] == []
-    # taste floor: an impossibly high floor filters everything out
+    # taste floor is an optional tightener: an impossibly high floor filters all out
     assert client.get("/api/foryou/board?count=6&min_score=2.0").json()["items"] == []
 
 

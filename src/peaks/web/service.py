@@ -33,6 +33,8 @@ class Service:
         self._pool = None  # cached scene pool for the shuffle board
         self._settings_cache = None  # GUI-saved active models (lazily read)
         self._taste_src_cache = {}  # model -> (stacked loved-moment vecs, sources)
+        self._board_score_cache = {}  # model -> (per-moment taste score array, scored_by)
+        self._board_universe_cache = {}  # (model, per_scene) -> ordered per-scene-capped Hits
         self._labels_since_train = 0  # new ratings since the last (auto)train
 
     # --- library / scenes ----------------------------------------------------
@@ -1033,7 +1035,7 @@ class Service:
         else:
             removed = store.remove(profile)  # everything for this profile
         store.save()
-        self._taste_src_cache.clear()
+        self._invalidate_taste_caches()
         self.reset_labels_since_train()
         pos, neg = store.counts(profile)
 
@@ -1073,6 +1075,8 @@ class Service:
         with self._taste_lock:
             for k in [k for k in self._taste if Path(k).name.startswith(prefix)]:
                 self._taste.pop(k, None)
+        if removed:
+            self._invalidate_taste_caches()  # board falls back to centroid scoring
         return removed
 
     def autotrain_due(self, profile: str | None = None) -> bool:
@@ -1118,6 +1122,7 @@ class Service:
         clf.save(out)
         with self._taste_lock:
             self._taste.pop(str(out), None)
+        self._invalidate_taste_caches()  # board must re-score with the new model
         return {"model": model, "profile": profile, **stats}
 
     def _taste_model(self, profile: str, model: str):
@@ -1244,7 +1249,7 @@ class Service:
         if shuffle is None:
             shuffle = rebuild
         if rebuild:
-            self._taste_src_cache.clear()
+            self._invalidate_taste_caches()
         c, n, sources = self._taste_centroid(model, recent=recent, rebuild=rebuild)
         if c is None:
             return {"hits": [], "sources": 0, "total": 0, "model": model, "reranked": False}
@@ -1285,34 +1290,103 @@ class Service:
         order = rng.choice(n, size=n, replace=False, p=p)
         return [ranked[int(i)] for i in order]
 
+    def _invalidate_taste_caches(self) -> None:
+        """Drop the cached taste centroid, per-moment scores and board universe so
+        the next feed/board reflects new ratings or a freshly trained model."""
+        self._taste_src_cache.clear()
+        self._board_score_cache.clear()
+        self._board_universe_cache.clear()
+
+    def _taste_scores(self, model: str):
+        """One taste score per indexed moment, for the whole library. Uses your
+        trained classifier's probability when a model exists (a learned,
+        multi-modal boundary that recognises your *diverse* taste, not just its
+        average), falling back to cosine against the single taste centroid when
+        untrained. Returns (scores[idx.size], scored_by) or (None, None) with no
+        taste yet. Cached per model (one pass over ~millions of frames)."""
+        cached = self._board_score_cache.get(model)
+        if cached is not None:
+            return cached
+        idx = self.index(model)
+        if idx.size == 0:
+            return None, None
+        clf = self._taste_model(self.cfg.markers.tag_name, model)
+        if clf is not None:
+            scores = np.asarray(clf.predict_proba(idx.matrix), dtype=np.float32).reshape(-1)
+            scored_by = "classifier"
+        else:
+            c, _, _ = self._taste_centroid(model)
+            if c is None:
+                return None, None
+            scores = (idx.matrix @ c).astype(np.float32)
+            scored_by = "centroid"
+        out = (scores, scored_by)
+        self._board_score_cache[model] = out
+        return out
+
+    def _board_universe(self, model: str, per_scene: int):
+        """Every scene's best taste-moment (plus up to `per_scene-1` more), ordered
+        best-first across the whole library — so the board is guaranteed ≥1 moment
+        for *every* scene you've indexed, not just the few nearest your taste's
+        centre. (scored_by, list[Hit]) cached per (model, per_scene)."""
+        key = (model, per_scene)
+        cached = self._board_universe_cache.get(key)
+        if cached is not None:
+            return cached
+        scores, scored_by = self._taste_scores(model)
+        if scores is None:
+            return None, []
+        idx = self.index(model)
+        # top-`per_scene` moments per scene, then globally best-first — vectorised
+        # so a million-frame library builds in one pass, not a Python loop.
+        sid_arr = np.asarray([str(s) if s is not None else "" for s in idx.scene_ids])
+        _, inv = np.unique(sid_arr, return_inverse=True)
+        grouped = np.lexsort((-scores, inv))  # by scene, best-first within scene
+        inv_s = inv[grouped]
+        pos = np.arange(inv_s.size)
+        new_grp = np.empty(inv_s.size, dtype=bool)
+        new_grp[0] = True
+        new_grp[1:] = inv_s[1:] != inv_s[:-1]
+        rank_in_scene = pos - np.maximum.accumulate(np.where(new_grp, pos, 0))
+        chosen = grouped[rank_in_scene < per_scene]
+        chosen = chosen[np.argsort(-scores[chosen])]  # global best-first
+        hits = [
+            Hit(scene_id=idx.scene_ids[i], key=idx.keys[i],
+                time=float(idx.times[i]), score=float(scores[i]))
+            for i in chosen.tolist()
+        ]
+        out = (scored_by, hits)
+        self._board_universe_cache[key] = out
+        return out
+
     def board_pool(
         self, count: int = 400, model: str | None = None,
         per_scene: int = 4, exclude: set | None = None,
-        min_score: float = 0.80, seed: int | None = None,
+        min_score: float = 0.0, seed: int | None = None,
     ) -> dict:
-        """The endless For You megaboard's supply of moments — threshold-driven,
-        not top-N. `min_score` is a taste floor in centroid-cosine (the same
-        number the thumbnail % shows): every moment at/above it is eligible, so
-        the board spans your *whole* on-taste library instead of recycling the
-        few hundred best. `exclude` (scene_ids already shown) marches the stream
-        forward across batches until the qualifying set is spent. Centroid-only
-        by design: no rerank, no MMR — at ~tens-of-thousands of frames those are
-        too slow, and keeping it pure centroid makes the floor mean exactly what
-        the tiles say. `count` moments come back as a rank-weighted random sample
-        so strong matches surface first but the long tail is always reachable."""
+        """The endless For You megaboard's supply of moments — full-library
+        coverage, one peak per scene. Every scene contributes its best
+        taste-moment (plus its next-best few for depth), scored by your trained
+        model when you have one; `min_score` is then an *optional tightener*
+        (0 = off → every scene's peak; raise it → only your strongest scenes).
+        `exclude` (scene_ids already shown) marches the stream forward across
+        batches. `count` moments come back as a rank-weighted random sample so
+        strong matches surface first but the whole library stays reachable."""
         model = model or self._model_name()
-        c, n, sources = self._taste_centroid(model)
-        if c is None:
-            return {"hits": [], "sources": 0, "total": 0, "model": model}
-        pool = self.index(model).search(
-            c, top_k=None, per_scene=per_scene,
-            min_score=(min_score if min_score > 0 else None),
-        )
+        scored_by, uni = self._board_universe(model, per_scene)
+        if not uni:
+            return {"hits": [], "scenes": 0, "moments": 0, "model": model, "scored_by": None}
+        pool = [h for h in uni if h.score >= min_score] if min_score > 0 else uni
+        scenes_total = len({str(h.scene_id) for h in pool})
+        moments_total = len(pool)
         if exclude:
             exclude = {str(s) for s in exclude}
             pool = [h for h in pool if str(h.scene_id) not in exclude]
         hits = self._sample_ranked(pool, count, seed)
-        return {"hits": hits, "sources": n, "total": len(pool), "model": model}
+        return {
+            "hits": hits, "scenes": scenes_total, "moments": moments_total,
+            "model": model, "scored_by": scored_by,
+        }
 
     def _sample_ranked(
         self, ranked: list[Hit], count: int, seed: int | None = None

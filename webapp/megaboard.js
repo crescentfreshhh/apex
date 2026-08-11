@@ -424,14 +424,25 @@ function reshuffle() {
 }
 
 function updateStatus() {
+  const pivot = State.pivot ? `${State.pivot} · ` : "";
+  if (State.source === "foryou" && fyTotals) {
+    // separate "matches your taste" (the whole board) from "loaded so far".
+    const by = fyTotals.scored_by === "classifier" ? "your trained model"
+      : fyTotals.scored_by === "centroid" ? "taste centroid" : "your taste";
+    const floor = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
+    document.getElementById("status").textContent =
+      `${pivot}≈${fmtN(fyTotals.scenes)} scenes · ${fmtN(fyTotals.moments)} moments in your taste board`
+      + ` (by ${by})${floor} · ${State.apexes.length} loaded · ${State.tiles.length} tiles`
+      + ` · right-click a tile to steer`;
+    return;
+  }
   const label = State.shuffle
     ? `shuffle · ${(State.pool || []).length} scenes`
     : `${State.apexes.length} ${State.searchMode ? "moments" : "apexes"}`;
-  const pivot = State.pivot ? `${State.pivot} · ` : "";
-  const floor = (State.source === "foryou" && fyMinScore > 0) ? ` · floor ${Math.round(fyMinScore * 100)}%` : "";
   document.getElementById("status").textContent =
-    `${pivot}${label} · ${State.tiles.length} tiles${floor} · right-click a tile to steer`;
+    `${pivot}${label} · ${State.tiles.length} tiles · right-click a tile to steer`;
 }
+function fmtN(n) { return (n ?? 0).toLocaleString(); }
 
 function fmt(sec) {
   sec = Math.max(0, sec || 0);
@@ -508,7 +519,8 @@ function randomMoment() {
 // batch — excluding scenes already shown — when the queue runs low. Endless.
 const FY_CLIP = 20;                      // clip seconds per For You tile
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
-let fyMinScore = 0.80;                     // the "taste floor" (0 = off, whole library)
+let fyMinScore = 0;                        // the "taste floor" tightener (0 = off → every scene's peak)
+let fyTotals = null;                       // {scenes, moments, scored_by} for the current floor
 let boardSearch = null;                   // {q,min,per,neg,taste} when replaying a search
 let boardPerformer = null;                // {id,name,query} when playing a performer's best
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
@@ -570,6 +582,7 @@ async function fyRefetch(reset) {
       items = (d.items || []).filter((h) => h.scene_id && h.stream).map(fyHitToApex);
       reset = true;
     }
+    if (d.scenes != null) fyTotals = { scenes: d.scenes, moments: d.moments, scored_by: d.scored_by };
     if (reset) { State.apexes = items; fyState.queue = []; }
     else State.apexes = State.apexes.concat(items);
     for (const a of items) fyState.exclude.add(String(a.scene_id));
