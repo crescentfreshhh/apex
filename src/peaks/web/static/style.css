@@ -298,3 +298,14 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .cmp-col img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; }
 .cmp-col h3 { margin: 8px 0 2px; }
 #compare-tray { margin-top: 8px; }
+
+/* Explore results bar: match-% filter that speaks the tiles' own % */
+#results-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin: 8px 2px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; }
+#results-bar .rb-slide { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+#results-bar input[type=range] { width: 200px; accent-color: var(--accent); }
+#results-bar #match-min-val { color: var(--fg); min-width: 40px; }
+.coll-row .coll-export { background: none; border: none; cursor: pointer; font-size: 13px; opacity: .5; padding: 2px 4px; }
+.coll-row:hover .coll-export { opacity: 1; }
+.coll-dl { color: var(--accent2); font-size: 12px; text-decoration: none; margin: 0 4px; }

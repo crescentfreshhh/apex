@@ -266,6 +266,26 @@ def test_hall_of_fame_endpoint(cfg, tmp_path, monkeypatch):
     assert any("best of" in n for n in names)
 
 
+def test_collection_export_starts_job(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    captured = {}
+    monkeypatch.setattr(svc_mod.Service, "export_collection",
+                        lambda self, job=None, name="", limit=200: captured.update(name=name, limit=limit) or {"clips": 0})
+    client = TestClient(create_app(cfg))
+    client.post("/api/collection", json={"name": "Reel", "apexes": [{"scene_id": "1", "start": 0, "url": "u"}]})
+
+    r = client.post("/api/collection/export", params={"name": "Reel"})
+    assert r.status_code == 200 and "id" in r.json()  # a job was started
+    import time
+    for _ in range(50):
+        if captured:
+            break
+        time.sleep(0.02)
+    assert captured.get("name") == "Reel"
+
+
 def test_board_performer_endpoint(cfg, monkeypatch):
     import peaks.web.service as svc_mod
 

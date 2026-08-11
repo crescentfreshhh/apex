@@ -413,34 +413,48 @@ function wireTileEdits(tile) { wireSceneEdits(tile.dataset.sid, tile); }
 let currentContext = {}; // what produced the current hits → drives the heatmap
 const PREVIEW_MAX = 300; // tiles rendered; the full set still lives in lastHits
 const tasteOn = () => ($("#taste-toggle").checked ? "&taste=true" : "");
-// the Explore "search options" — match-strength floor, per-scene cap, negation
+let searchResults = [];  // the full ranked pool from the last search
+// the Explore "search options" — per-scene cap, negation (match % is a display filter)
 function searchParams() {
-  const min = parseFloat($("#s-min")?.value) || 0;
   const per = $("#s-per-scene") ? (parseInt($("#s-per-scene").value, 10) || 0) : 3;
   const neg = $("#s-neg") ? (parseFloat($("#s-neg").value) || 0) : 0.5;
-  return { min, per, neg };
+  return { min: matchMin(), per, neg };
 }
 function searchQuery() {
-  const { min, per, neg } = searchParams();
-  return `&per_scene=${per}&neg_weight=${neg}&enrich=${PREVIEW_MAX}` +
-    (min > 0 ? `&min_score=${min}` : "&top_k=60") + tasteOn();
+  const { per, neg } = searchParams();
+  return `&per_scene=${per}&neg_weight=${neg}&enrich=${PREVIEW_MAX}&top_k=1000` + tasteOn();
 }
-function showSearchCount(total) {
-  const el = $("#search-count"); if (!el) return;
-  const min = parseFloat($("#s-min")?.value) || 0;
-  const floor = min > 0 ? ` at ≥ ${Math.round(min * 100)}%` : "";
-  el.textContent = total
-    ? `${total.toLocaleString()} match${total === 1 ? "" : "es"}${floor}` +
-      (total > PREVIEW_MAX ? ` · showing first ${PREVIEW_MAX}` : "")
-    : "";
+// the match-% slider is the SAME number printed on the tiles; it live-hides weaker ones
+const matchMin = () => parseFloat($("#match-min")?.value) || 0;
+function onSearchResults(items) {
+  searchResults = (items || []).slice().sort((a, b) => b.score - a.score);
+  const bar = $("#results-bar");
+  const sl = $("#match-min");
+  if (!searchResults.length) { if (bar) bar.hidden = true; renderHits([]); return; }
+  const scores = searchResults.map((h) => h.score);
+  const lo = Math.floor(Math.min(...scores) * 100) / 100;
+  const hi = Math.ceil(Math.max(...scores) * 100) / 100;
+  sl.min = lo; sl.max = hi; sl.step = 0.01; sl.value = lo;   // start showing everything
+  if (bar) bar.hidden = false;
+  applyMatchFilter();
 }
+function applyMatchFilter() {
+  const v = matchMin();
+  $("#match-min-val").textContent = `${Math.round(v * 100)}%`;
+  const shown = searchResults.filter((h) => h.score >= v);
+  renderHits(shown, null, PREVIEW_MAX);   // sets lastHits to the filtered set (save/push use it)
+  const el = $("#search-count");
+  if (el) el.textContent = `Showing ${Math.min(shown.length, PREVIEW_MAX).toLocaleString()} of ${shown.length.toLocaleString()}` +
+    (shown.length !== searchResults.length ? ` (of ${searchResults.length.toLocaleString()} matches)` : " matches");
+}
+$("#match-min")?.addEventListener("input", applyMatchFilter);
 async function similar(key, t) {
   setActiveView("explore");
   currentContext = { kind: "frame", key, t };
   $("#results").innerHTML = '<p class="dim">Finding similar moments…</p>';
   try {
     const d = await api(`/api/search/similar?key=${key}&t=${t}` + searchQuery());
-    renderHits(d.items, null, PREVIEW_MAX); showSearchCount(d.total);
+    onSearchResults(d.items);
   } catch (e) { toast(e.message, true); }
 }
 async function textSearch() {
@@ -449,7 +463,7 @@ async function textSearch() {
   $("#results").innerHTML = '<p class="dim">Searching…</p>';
   try {
     const d = await api("/api/search/text?q=" + encodeURIComponent(q) + searchQuery());
-    renderHits(d.items, null, PREVIEW_MAX); showSearchCount(d.total);
+    onSearchResults(d.items);
   } catch (e) { $("#results").innerHTML = ""; toast(e.message, true); }
 }
 
@@ -558,7 +572,7 @@ async function similarFromViewer() {
   try {
     const d = await api(`/api/search/similar?key=${currentHit.key}&t=${t.toFixed(2)}` + searchQuery());
     if (!d.items.length) return toast("no similar moments found");
-    renderHits(d.items, null, PREVIEW_MAX); showSearchCount(d.total); openViewerAt(0); toast("More like this moment");
+    setActiveView("explore"); onSearchResults(d.items); openViewerAt(0); toast("More like this moment");
   } catch (e) { toast(e.message, true); }
 }
 async function dupesFromViewer() {
@@ -638,10 +652,6 @@ document.addEventListener("keydown", (e) => {
 $("#btn-text").addEventListener("click", textSearch);
 $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") textSearch(); });
 wireToggle("#toggle-search-adv", "#search-adv", null);
-$("#s-min")?.addEventListener("input", () => {
-  const v = parseFloat($("#s-min").value) || 0;
-  $("#s-min-val").textContent = v > 0 ? `≥ ${Math.round(v * 100)}% — all matches` : "off (top 60)";
-});
 
 // hand the current results to the megaboard: each tile starts at its matched
 // moment (the stream URL already carries start=<time>). Passed via localStorage
@@ -707,6 +717,7 @@ async function refreshCollections() {
           `<span class="coll-row" data-safe="${esc(c.safe)}" data-name="${esc(c.name)}">
             <a class="reel-item" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank">▶ ${esc(c.name)} <span class="dim">${c.count}</span></a>
             <button class="coll-rename" title="Rename">✏️</button>
+            <button class="coll-export" title="Export to a video file">⬇</button>
             <button class="coll-del" title="Delete">🗑</button>
           </span>`).join("")
       : "";
@@ -954,8 +965,31 @@ $("#collections")?.addEventListener("click", async (e) => {
     if (!confirm(`Delete collection "${name}"?`)) return;
     try { await api("/api/collection?name=" + encodeURIComponent(row.dataset.safe), { method: "DELETE" }); refreshCollections(); }
     catch (err) { toast(err.message, true); }
+  } else if (e.target.closest(".coll-export")) {
+    e.preventDefault();
+    exportCollection(name, row.dataset.safe, e.target.closest(".coll-export"));
   }
 });
+async function exportCollection(name, safe, btn) {
+  btn.textContent = "…"; btn.disabled = true;
+  try {
+    await api("/api/collection/export?name=" + encodeURIComponent(name), { method: "POST" });
+    toast(`Exporting "${name}" to video…`);
+    const file = safe + ".mp4";
+    // poll the exports list until the file appears (stream-copy is usually quick)
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const { reels } = await api("/api/reels").catch(() => ({ reels: [] }));
+      if ((reels || []).some((r) => r.name === file)) {
+        btn.outerHTML = `<a class="coll-dl" href="/api/reel/download?name=${encodeURIComponent(safe)}" title="Download video">⬇ video</a>`;
+        toast(`"${name}" exported`);
+        return;
+      }
+    }
+    btn.textContent = "⬇"; btn.disabled = false;
+    toast("Export is taking a while — check back (exports dir).");
+  } catch (err) { btn.textContent = "⬇"; btn.disabled = false; toast(err.message, true); }
+}
 refreshCollections();
 
 // --- For You: taste-centroid recommender + active-learning swipe trainer ----

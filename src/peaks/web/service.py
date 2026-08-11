@@ -478,6 +478,79 @@ class Service:
         log(f"reel: {len(segs)} clips → {out} ({size // 1_000_000} MB)")
         return {"clips": len(segs), "name": name, "path": str(out), "bytes": size}
 
+    def export_collection(
+        self, job=None, name: str = "", limit: int = 200
+    ) -> dict:
+        """Concatenate a saved collection's clips into one downloadable video —
+        the collection-flavoured sibling of export_reel. Highest-scoring moments
+        first, capped at `limit` so a giant collection can't kick off a
+        multi-hour render unasked. Stream-copy (fast), skips codec mismatches."""
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        log = (job.log if job else print)
+        coll = self.load_collection(name)
+        if not coll or not coll.get("apexes"):
+            log(f"no collection '{name}' to export")
+            return {"clips": 0}
+        apexes = sorted(coll["apexes"], key=lambda a: a.get("score", 0), reverse=True)
+        if limit:
+            apexes = apexes[:limit]
+        apexes = [a for a in apexes if a.get("scene_id")]
+
+        details = self.client().scene_details(sorted({str(a["scene_id"]) for a in apexes}))
+        exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
+        exports.mkdir(parents=True, exist_ok=True)
+        safe = _safe_reel_name(Path(name).stem) + ".mp4"
+        out = exports / safe
+        if job:
+            job.progress = {"total": len(apexes), "done": 0}
+
+        ff = getattr(self.cfg.sampling, "ffmpeg", "ffmpeg") if hasattr(self.cfg, "sampling") else "ffmpeg"
+        with tempfile.TemporaryDirectory() as td:
+            segs: list[str] = []
+            for i, a in enumerate(apexes):
+                if job and job.cancelled:
+                    log(f"  ⏹ stop requested — halting after {len(segs)} clips")
+                    break
+                path = (details.get(str(a["scene_id"])) or {}).get("path")
+                if not path or not os.path.exists(path):
+                    log(f"  ! scene {a['scene_id']}: file missing — skipped")
+                    continue
+                start = float(a.get("start") or 0)
+                end = float(a["end"]) if a.get("end") else start + float(a.get("duration") or 20)
+                seg = os.path.join(td, f"seg{i:04d}.ts")
+                r = subprocess.run(
+                    [ff, "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
+                     "-c", "copy", "-f", "mpegts", seg],
+                    capture_output=True,
+                )
+                if r.returncode == 0 and os.path.exists(seg) and os.path.getsize(seg) > 0:
+                    segs.append(seg)
+                    if job:
+                        job.progress["done"] = len(segs)
+                    log(f"  + clip {len(segs)}: scene {a['scene_id']} {start:.0f}-{end:.0f}s")
+                else:
+                    log(f"  ! scene {a['scene_id']} clip failed (codec mismatch?) — skipped")
+            if not segs:
+                log("no clips extracted")
+                return {"clips": 0}
+            listf = os.path.join(td, "list.txt")
+            with open(listf, "w") as f:
+                for s in segs:
+                    f.write(f"file '{s}'\n")
+            cc = subprocess.run(
+                [ff, "-y", "-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", str(out)],
+                capture_output=True,
+            )
+            if cc.returncode != 0:
+                raise RuntimeError("concat failed: " + cc.stderr.decode("replace")[-300:])
+        size = out.stat().st_size if out.exists() else 0
+        log(f"export: {len(segs)} clips → {out} ({size // 1_000_000} MB)")
+        return {"clips": len(segs), "name": safe, "path": str(out), "bytes": size}
+
     def reels(self) -> list[dict]:
         """List exported reels (newest first)."""
         import os
@@ -1420,6 +1493,8 @@ class Service:
                 candidates = self.client().find_performers(name)
             except Exception:  # noqa: BLE001
                 candidates = []
+        excluded = self._excluded_performers()
+        candidates = [p for p in candidates if (p.get("name", "").strip().lower() not in excluded)]
         best = None
         for p in candidates:
             try:
@@ -1452,6 +1527,15 @@ class Service:
             hits = self._ranked_moments_for_scenes(scenes, qvec, per_scene=per_scene, model=model)
         return {"performer": pname, "hits": hits[:count]}
 
+    def _excluded_performers(self) -> set[str]:
+        """Names to hide from the Performers tab — junk 'performers' that are
+        really mis-applied tags (e.g. 'upscale'). Never touches Stash. Configurable
+        via env PEAKS_PERFORMER_EXCLUDE (comma-separated); defaults to 'upscale'."""
+        import os
+
+        raw = os.environ.get("PEAKS_PERFORMER_EXCLUDE", "upscale")
+        return {n.strip().lower() for n in raw.split(",") if n.strip()}
+
     def performer_stats(self, rebuild: bool = False) -> list[dict]:
         """Leaderboard of the library's performers by moments generated: for each
         performer appearing on an embedded scene, {id, name, scenes, moments, and
@@ -1474,11 +1558,12 @@ class Service:
         c, _, _ = self._taste_centroid(model)
         cu = self._unit(c) if c is not None else None
         dim = idx.dim or 1
+        excluded = self._excluded_performers()
         # performer id -> {name, scenes:set, o, rating_sum, rating_n}
         perf: dict[str, dict] = {}
         for sid, meta in details.items():
             for p in meta.get("performers_detail") or []:
-                if not p.get("id"):
+                if not p.get("id") or (p.get("name", "").strip().lower() in excluded):
                     continue
                 e = perf.setdefault(str(p["id"]), {
                     "name": p.get("name", ""), "scenes": set(),

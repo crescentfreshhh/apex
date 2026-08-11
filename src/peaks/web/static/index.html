@@ -298,19 +298,21 @@
       <span id="explore-hint" class="dim"></span>
     </div>
     <div id="search-adv" class="adv" hidden>
-      <label title="Return every moment at least this close to the query. Higher = stricter/fewer; off = the classic top 60.">match strength
-        <input type="range" id="s-min" min="0" max="0.6" step="0.005" value="0" />
-        <span id="s-min-val" class="dim">off (top 60)</span>
-      </label>
       <label title="Cap moments per scene so one long video can't dominate. 0 = unlimited.">per scene
         <input type="number" id="s-per-scene" min="0" max="50" value="3" style="width:64px" />
       </label>
       <label title="How hard a -term pushes results away in a blended query">negation
         <input type="number" id="s-neg" min="0" max="2" step="0.1" value="0.5" style="width:64px" />
       </label>
-      <span id="search-adv-hint" class="dim">match strength off = top 60 · turn it up to return ALL matches above the bar</span>
+      <span id="search-adv-hint" class="dim">the % on each tile is how closely that frame matches your search</span>
     </div>
-    <div id="search-count" class="dim" style="margin:6px 2px"></div>
+    <div id="results-bar" hidden>
+      <span id="search-count" class="dim"></span>
+      <label class="rb-slide">min match
+        <input type="range" id="match-min" min="0" max="1" step="0.01" value="0" />
+        <b id="match-min-val">0%</b>
+      </label>
+    </div>
     <div id="results" class="grid"></div>
   </section>
 

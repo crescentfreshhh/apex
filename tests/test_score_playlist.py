@@ -839,6 +839,58 @@ def test_performer_detail_and_similar(tmp_path, monkeypatch):
     assert sim and sim[0]["id"] == "p2" and -1.0 <= sim[0]["score"] <= 1.0
 
 
+def test_performer_stats_excludes_upscale(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    _seed_performer_scenes(cfg)
+
+    class _C:
+        def scene_details(self, ids):
+            return {str(i): {"performers_detail": [
+                {"id": "p1", "name": "Jane Doe"}, {"id": "upx", "name": "Upscale"}]} for i in ids}
+        def scenes_for_performer(self, pid, limit=500):
+            return ["1", "2", "3"]
+        def find_performers(self, name=None, limit=500):
+            return [{"id": "upx", "name": "Upscale"}]
+
+    monkeypatch.setattr(svc, "client", lambda: _C())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+    names = {r["name"] for r in svc.performer_stats(rebuild=True)}
+    assert "Jane Doe" in names and "Upscale" not in names  # excluded from the leaderboard
+
+
+def test_export_collection_writes_mp4(tmp_path, monkeypatch):
+    import subprocess
+    svc, cfg = _service(tmp_path)
+    monkeypatch.setenv("PEAKS_COLLECTIONS_DIR", str(tmp_path / "coll"))
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exp"))
+    svc.save_collection("My Reel", [
+        {"scene_id": "1", "start": 0, "duration": 20, "url": "u", "score": 0.9},
+        {"scene_id": "2", "start": 5, "end": 25, "url": "u", "score": 0.5},
+    ])
+
+    class _C:
+        def scene_details(self, ids):
+            return {str(i): {"path": str(tmp_path / f"{i}.mp4")} for i in ids}
+    for i in ("1", "2"):
+        (tmp_path / f"{i}.mp4").write_bytes(b"x")   # files must "exist"
+    monkeypatch.setattr(svc, "client", lambda: _C())
+
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        # emulate ffmpeg writing each segment / final output
+        out = cmd[-1]
+        if out.endswith(".ts") or out.endswith(".mp4"):
+            open(out, "wb").write(b"video")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    r = svc.export_collection(name="My Reel", limit=200)
+    assert r["clips"] == 2 and r["name"] == "My-Reel.mp4"
+    assert (tmp_path / "exp" / "My-Reel.mp4").exists()
+    assert svc.reel_path("My-Reel") and any("concat" in " ".join(c) for c in calls)
+
+
 def test_hall_of_fame_and_roulette(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")

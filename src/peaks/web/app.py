@@ -414,6 +414,14 @@ def create_app(cfg=None):
             raise HTTPException(404, "no such collection")
         return r
 
+    @app.post("/api/collection/export")
+    def export_collection(name: str, limit: int = Query(200)):
+        try:
+            job = jobs.start("reel", lambda j: service.export_collection(j, name=name, limit=limit))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
     @app.post("/api/collection/rename")
     def rename_collection(body: dict):
         try:
