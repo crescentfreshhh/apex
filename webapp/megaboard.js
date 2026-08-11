@@ -425,6 +425,11 @@ function reshuffle() {
 
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
+  if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
+    document.getElementById("status").textContent =
+      `${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles · adjust the taste floor to widen/tighten · right-click to steer`;
+    return;
+  }
   if (State.source === "foryou" && fyTotals) {
     // separate "matches your taste" (the whole board) from "loaded so far".
     const by = fyTotals.scored_by === "classifier" ? "your trained model"
@@ -463,16 +468,17 @@ function wireControls() {
       const v = document.getElementById("floor-val");
       if (v) v.textContent = fyMinScore > 0 ? Math.round(fyMinScore * 100) + "%" : "off";
     });
-    floor.addEventListener("change", () => {   // commit → rebuild the pool at the new floor
-      if (State.source !== "foryou") return;
-      fyReset();
-      fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
+    floor.addEventListener("change", () => {   // commit → re-apply the floor to what's driving the board
+      persistFloor(fyMinScore);
+      applyFloor();
     });
   }
   document.getElementById("refresh-lib").addEventListener("click", () => {
+    if (State.pivotSeed) { applyFloor(); return; }   // in a pivot, re-run THIS moment, not the source
     const src = State.source || document.getElementById("source").value;
     loadSource(src, { refresh: true }); // rebuild pool/apexes from Stash
   });
+  document.getElementById("save-board")?.addEventListener("click", saveCurrentBoard);
   document.getElementById("mute").addEventListener("click", () => {
     if (State.big) {
       State.big.video.muted = true;
@@ -533,6 +539,22 @@ function syncFloorUI() {
   const s = document.getElementById("floor"), v = document.getElementById("floor-val");
   if (s) s.value = fyMinScore;
   if (v) v.textContent = fyMinScore > 0 ? Math.round(fyMinScore * 100) + "%" : "off";
+}
+// the taste floor is shared with the app (Taste Metrics slider) via localStorage,
+// so it stays in sync across the tab and the board.
+const FLOOR_KEY = "peaks_taste_floor";
+function persistFloor(v) { try { localStorage.setItem(FLOOR_KEY, String(v)); } catch { /* ignore */ } }
+function readPersistedFloor() {
+  try { const v = parseFloat(localStorage.getItem(FLOOR_KEY)); return isFinite(v) ? v : null; } catch { return null; }
+}
+// re-apply the current floor to whatever is driving the board: a moment pivot
+// re-filters that moment; For You rebuilds its pool; static sources ignore it.
+function applyFloor() {
+  if (State.pivotSeed) { moreLikeThis(State.pivotSeed.scene_id, State.pivotSeed.t); return; }
+  if (State.source === "foryou") {
+    fyReset();
+    fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
+  }
 }
 
 function fyHitToApex(h) {
@@ -620,6 +642,7 @@ function openTileMenu(tile, x, y) {
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
     ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
     ["⭐ Save her best as a collection", () => saveHerBest(apex.scene_id)],
+    ["💾 Save this board as a collection", () => saveCurrentBoard()],
   ];
   if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
 
@@ -654,10 +677,21 @@ function pivotBoard(apexes, label) {
   reshuffle(); updateStatus();
 }
 async function moreLikeThis(scene_id, t) {
+  // remember the seed so the taste-floor slider and Refresh re-filter THIS moment,
+  // not the original board. With a floor set, return every match above it (the
+  // count grows/shrinks with the slider); with it off, a generous default.
+  State.pivotSeed = { scene_id, t };
+  syncFloorVisibility();
   flashStatus("finding similar…");
   try {
-    const d = await api(`/api/search/similar?scene_id=${encodeURIComponent(scene_id)}&t=${t}&top_k=200`);
-    pivotBoard((d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit), "🔎 more like that moment");
+    const qs = new URLSearchParams({ scene_id, t });
+    if (fyMinScore > 0) qs.set("min_score", fyMinScore);
+    else qs.set("top_k", 300);
+    const d = await api("/api/search/similar?" + qs.toString());
+    const items = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+    const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
+    pivotBoard(items, `🔎 more like that moment${flr}`);
+    flashStatus(`🔎 ${items.length} moments like that${flr}`);
   } catch (e) { flashStatus(e.message); }
 }
 async function saveHerBest(scene_id) {
@@ -674,7 +708,25 @@ async function saveHerBest(scene_id) {
     flashStatus(`saved "${name}" (${apexes.length})`);
   } catch (e) { flashStatus(e.message); }
 }
+// Save whatever is currently driving the board — a "more like this" rabbit hole,
+// a performer pivot, a search, For You, anything — as a collection you can replay.
+async function saveCurrentBoard() {
+  const apexes = (State.apexes || []).filter((a) => a.scene_id && (a.url || a.stream));
+  if (!apexes.length) return flashStatus("nothing on the board to save yet");
+  const base = State.pivot ? State.pivot.replace(/^[^A-Za-z0-9]+/, "").trim() : "megaboard";
+  const name = prompt(`Save these ${apexes.length} moments as a collection:`, base + " — collection");
+  if (!name) return;
+  try {
+    await api("/api/collection", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, apexes }),
+    });
+    flashStatus(`saved "${name}" (${apexes.length} moments)`);
+  } catch (e) { flashStatus(e.message); }
+}
 async function moreFromActress(scene_id) {
+  State.pivotSeed = null;   // performer pivot isn't seeded by a single moment
+  syncFloorVisibility();
   flashStatus("finding her scenes…");
   try {
     const d = await api(`/api/board/performer?scene_id=${encodeURIComponent(scene_id)}`);
@@ -689,13 +741,18 @@ function flashStatus(msg) {
   if (el) el.textContent = msg;
 }
 
+function syncFloorVisibility() {
+  const fw = document.getElementById("floor-wrap");
+  // the floor drives For You (taste) and a "more like this moment" pivot (how
+  // close to that moment) — show it for both, hide it for static sources.
+  if (fw) fw.hidden = !(State.source === "foryou" || State.pivotSeed);
+}
 async function loadSource(src, opts = {}) {
   State.source = src;
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
-  State.pivot = null;
+  State.pivot = null; State.pivotSeed = null;
   document.getElementById("error").hidden = true;
-  const fw = document.getElementById("floor-wrap");
-  if (fw) fw.hidden = src !== "foryou";   // taste floor only applies to For You
+  syncFloorVisibility();
   document.getElementById("status").textContent = "loading…";
   try {
     if (src === "shuffle") {
@@ -801,8 +858,18 @@ async function main() {
   wireControls();
   const params = new URLSearchParams(location.search);
   const ms = parseFloat(params.get("min_score"));
-  if (ms > 0) fyMinScore = ms;   // taste floor carried from the app's metrics slider
+  const shared = readPersistedFloor();
+  // priority: explicit URL floor (from "Play on megaboard") > last shared value > off
+  if (ms > 0) fyMinScore = ms;
+  else if (shared != null) fyMinScore = shared;
   syncFloorUI();
+  // live-sync with the app's taste slider in other tabs
+  window.addEventListener("storage", (e) => {
+    if (e.key !== FLOOR_KEY || e.newValue == null) return;
+    const v = parseFloat(e.newValue);
+    if (!isFinite(v) || v === fyMinScore) return;
+    fyMinScore = v; syncFloorUI(); applyFloor();
+  });
   let initial = null;
   if (params.get("src") === "search") {
     initial = "search";

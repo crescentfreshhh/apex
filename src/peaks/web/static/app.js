@@ -1084,7 +1084,8 @@ async function loadTasteMetrics() {
       <table class="m-bands">${bandsRows}</table>
       <div class="m-thresh">
         <label>Count moments at ≥ <input type="range" id="m-slider"
-          min="${d.min}" max="${d.max}" step="0.005" value="${d.p90}" /></label>
+          min="${d.min}" max="${d.max}" step="0.005"
+          value="${Math.min(Math.max(readFloor() ?? d.p90, d.min), d.max)}" /></label>
         <span id="m-thresh-out" class="dim"></span>
       </div>
       <div class="m-legend dim">tile colours:
@@ -1095,11 +1096,27 @@ async function loadTasteMetrics() {
         <span class="score band-low">below</span></div>`;
 
     const slider = $("#m-slider");
-    slider.addEventListener("input", updateThreshOut);
+    slider.addEventListener("input", () => { updateThreshOut(); writeFloor(+slider.value); });
     updateThreshOut();
     recolorForYouTiles();
   } catch (e) { body.innerHTML = `<span class="dim">${esc(e.message)}</span>`; }
 }
+
+// The taste floor is shared with the megaboard (and its tabs) via localStorage,
+// so the Taste Metrics slider and the board's floor stay in sync.
+const FLOOR_KEY = "peaks_taste_floor";
+function readFloor() {
+  try { const v = parseFloat(localStorage.getItem(FLOOR_KEY)); return isFinite(v) ? v : null; }
+  catch { return null; }
+}
+function writeFloor(v) { try { localStorage.setItem(FLOOR_KEY, String(v)); } catch { /* ignore */ } }
+window.addEventListener("storage", (e) => {   // board changed the floor → reflect it live
+  if (e.key !== FLOOR_KEY || e.newValue == null) return;
+  const slider = $("#m-slider");
+  if (!slider) return;
+  const v = Math.min(Math.max(parseFloat(e.newValue), +slider.min), +slider.max);
+  if (isFinite(v) && v !== +slider.value) { slider.value = v; updateThreshOut(); }
+});
 
 function updateThreshOut() {
   const slider = $("#m-slider"), out = $("#m-thresh-out");
