@@ -716,15 +716,22 @@ function openTileMenu(tile, x, y) {
   closeTileMenu();
   const apex = tile.apex;
   const t = (tile.video && isFinite(tile.video.currentTime)) ? tile.video.currentTime : apex.start;
+  // deep-link out to the real Stash scene page, seeked to this moment (?t=seconds)
+  let stashHref = null;
+  try { stashHref = new URL(apex.url, location.href).origin + "/scenes/" + apex.scene_id + "?t=" + Math.round(t); }
+  catch { stashHref = null; }
   const items = [
     ["👍 More of this (my taste)", () => rateMoment(apex.scene_id, t, 1)],
     ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
     ["★ Save as apex", () => saveApex(apex.scene_id, t)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
+  ];
+  if (stashHref) items.push(["📺 Open in Stash (this moment)", () => window.open(stashHref, "_blank", "noopener")]);
+  items.push(
     ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
     ["⭐ Save her best as a collection", () => saveHerBest(apex.scene_id)],
     ["💾 Save this board as a collection", () => saveCurrentBoard()],
-  ];
+  );
   if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
 
   const menu = document.createElement("div");
