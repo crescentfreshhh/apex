@@ -16,17 +16,18 @@ const State = {
   playing: true,
   big: null, // the tile currently enlarged
   hover: null, // last-hovered tile (keyboard actions target this / big)
+  overTile: null, // tile the cursor is over RIGHT NOW (drives hover-to-hear)
   n: 3,
   shuffle: false, // whole-library random mode
   pool: null, // scene pool for shuffle
   searchMode: false,
   source: null, // current source id (for Refresh)
-  muted: true, // global audio mute — only the enlarged tile ever plays sound
-  volume: 1, // global volume for the enlarged tile
+  muted: false, // master mute; when off, hover-to-hear plays the tile under the cursor
+  volume: 1, // volume for whichever single tile is audible
 };
 try {
   const mv = JSON.parse(localStorage.getItem("mb_audio") || "null");
-  if (mv) { State.muted = mv.muted !== false; State.volume = isFinite(mv.volume) ? mv.volume : 1; }
+  if (mv) { State.muted = mv.muted === true; State.volume = isFinite(mv.volume) ? mv.volume : 1; }
 } catch { /* ignore */ }
 function persistAudio() {
   try { localStorage.setItem("mb_audio", JSON.stringify({ muted: State.muted, volume: State.volume })); }
@@ -37,7 +38,18 @@ function focusedTile() {
   const t = State.big || State.hover;
   return t && t.apex && t.apex.scene_id ? t : null;
 }
-// apply the global mute/volume to the one tile that has sound (the enlarged one)
+// Grid audio is single-source: the ONE tile that's audible is the one under the
+// cursor (unless something is enlarged, which owns audio itself, or master mute).
+// Moving off all tiles (overTile null) silences everything — instantly.
+function applyGridAudio() {
+  for (const t of State.tiles) {
+    if (t === State.big || !t.video) continue;   // enlarged tile manages its own audio
+    const on = !State.muted && !State.big && t === State.overTile;
+    t.video.muted = !on;
+    if (on) t.video.volume = State.volume;
+  }
+}
+// apply master mute/volume to the enlarged tile + toolbar UI, then refresh the grid
 function applyAudio() {
   const t = State.big;
   if (t && t.video) { t.video.muted = State.muted; t.video.volume = State.volume; }
@@ -45,6 +57,7 @@ function applyAudio() {
   if (btn) btn.textContent = State.muted ? "🔇 Muted" : "🔊 Sound";
   const vol = document.getElementById("volume");
   if (vol && +vol.value !== State.volume) vol.value = State.volume;
+  applyGridAudio();
 }
 
 // --- weighted, no-immediate-repeat picker ---------------------------------
@@ -95,6 +108,7 @@ function loadApex(tile) {
   v.muted = true;
   v.load();
   if (State.playing) v.play().catch(() => {});
+  if (!State.big) applyGridAudio();   // keep the hovered tile audible across clip changes
 }
 
 function advance(tile) {
@@ -150,7 +164,8 @@ function makeTile(index) {
     e.preventDefault();
     if (tile.apex && tile.apex.scene_id) openTileMenu(tile, e.clientX, e.clientY);
   });
-  el.addEventListener("mouseenter", () => { State.hover = tile; });
+  el.addEventListener("mouseenter", () => { State.hover = tile; State.overTile = tile; applyGridAudio(); });
+  el.addEventListener("mouseleave", () => { if (State.overTile === tile) State.overTile = null; applyGridAudio(); });
   return tile;
 }
 
@@ -199,6 +214,7 @@ function expand(tile) {
   State.big = tile;
   tile.el.classList.add("big");
   layoutBig(tile, true);
+  applyGridAudio();   // enlarged tile owns audio now — silence the rest of the grid
   buildBigUI(tile);
 
   const v = tile.video;
@@ -234,6 +250,7 @@ function collapse(tile) {
   State.big = null;
   tile.video.muted = true;
   loadApex(tile); // resume cycling with a fresh apex
+  applyGridAudio(); // hover-to-hear resumes on the grid
 }
 
 // --- the enlarged tile's overlay UI (controls + editable stats) ------------
