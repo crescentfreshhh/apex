@@ -100,6 +100,9 @@ function loadApex(tile) {
   const apex = pickApex();
   if (!apex) return;
   const v = tile.video;
+  tile.extended = false;          // a fresh cycling clip is never pinned
+  v.loop = false;
+  tile.el.classList.remove("extended");
   tile.apex = apex;
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
   tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`;
@@ -119,6 +122,30 @@ function advance(tile) {
   loadApex(tile);
 }
 
+// pin a good clip: stop cycling and let the scene play out (looping indefinitely)
+function extendTile(tile) {
+  if (!tile.apex) return;
+  const v = tile.video;
+  tile.extended = true;
+  tile.el.classList.add("extended");
+  v.loop = true; // play to the end of the scene, then repeat — never auto-advance
+  if (tile.mode !== "absolute") {
+    // offset = short-clip stream with nothing past the moment; reload the full scene
+    // so it can play forward. The loadedmetadata handler seeks back to apex.start.
+    v.src = sceneStreamUrl(tile.apex.url);
+    v.load();
+  }
+  if (State.playing) v.play().catch(() => {});
+}
+
+// release the pin and resume normal cycling with a fresh apex
+function unextendTile(tile) {
+  tile.extended = false;
+  tile.el.classList.remove("extended");
+  tile.video.loop = false;
+  loadApex(tile);
+}
+
 function makeTile(index) {
   const el = document.createElement("div");
   el.className = "tile";
@@ -132,7 +159,7 @@ function makeTile(index) {
   label.className = "label";
 
   el.append(video, label);
-  const tile = { el, video, label, index, apex: null, mode: "offset", lastAdvance: 0 };
+  const tile = { el, video, label, index, apex: null, mode: "offset", lastAdvance: 0, extended: false };
 
   video.addEventListener("loadedmetadata", () => {
     if (!tile.apex || State.big === tile) return; // big mode drives seeking itself
@@ -145,11 +172,11 @@ function makeTile(index) {
   });
 
   video.addEventListener("timeupdate", () => {
-    if (!tile.apex || State.big === tile) return;
+    if (!tile.apex || State.big === tile || tile.extended) return; // extended: play on, never cycle
     const end = tile.mode === "absolute" ? tile.apex.end : tile.apex.duration;
     if (video.currentTime >= end - 0.25) advance(tile);
   });
-  video.addEventListener("ended", () => advance(tile));
+  video.addEventListener("ended", () => { if (!tile.extended) advance(tile); });
   video.addEventListener("error", () => {
     if (State.big !== tile) setTimeout(() => advance(tile), 500);
   });
@@ -726,6 +753,8 @@ function openTileMenu(tile, x, y) {
     ["★ Save as apex", () => saveApex(apex.scene_id, t)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
   ];
+  if (tile.extended) items.push(["⏹ Stop extending (resume cycling)", () => unextendTile(tile)]);
+  else items.push(["⏱ Extend (keep this scene playing)", () => extendTile(tile)]);
   if (stashHref) items.push(["📺 Open in Stash (this moment)", () => window.open(stashHref, "_blank", "noopener")]);
   items.push(
     ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],

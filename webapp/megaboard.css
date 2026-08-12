@@ -79,6 +79,7 @@ html, body {
   border: 2px solid transparent;
 }
 .tile.big { border-color: var(--accent); z-index: 3; cursor: zoom-out; }
+.tile.extended { border-color: var(--accent); }
 
 .tile video {
   width: 100%;
