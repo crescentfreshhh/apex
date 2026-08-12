@@ -1021,11 +1021,18 @@ class Service:
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
 
-    def delete_taste(self, profile: str | None = None, within_minutes: float | None = None) -> dict:
+    def delete_taste(
+        self,
+        profile: str | None = None,
+        within_minutes: float | None = None,
+        purge_apexes: bool = False,
+    ) -> dict:
         """Erase learned taste: all 👍/👎 ratings for a profile, or only those
         from the last `within_minutes` (an undo). Retrains from what remains if
         both classes survive, else drops the trained model. Saved apex markers in
-        Stash are NOT touched — they're separate curated favourites."""
+        Stash are NOT touched — they're separate curated favourites — unless
+        `purge_apexes` is set on a full wipe, which also deletes every apex marker
+        for the profile (a true scorched-earth reset)."""
         profile = profile or self.cfg.markers.tag_name
         store = self._label_store()
         if within_minutes and within_minutes > 0:
@@ -1050,10 +1057,30 @@ class Service:
         else:
             # full wipe, or not enough labels left to train → remove the model(s)
             model_deleted = self._delete_taste_models(profile)
-        return {
+
+        out = {
             "profile": profile, "removed": removed, "positive": pos, "negative": neg,
             "retrained": retrained, "model_deleted": model_deleted,
         }
+        # scorched-earth: on a full wipe, also delete the apex markers in Stash so
+        # the taste centroid has nothing left to rebuild from (For You goes empty).
+        full_wipe = not (within_minutes and within_minutes > 0)
+        if purge_apexes and full_wipe:
+            try:
+                # apex markers live under the configured marker tag (the same
+                # enumeration the taste centroid reads), not the profile name
+                ids = [
+                    mk["marker_id"]
+                    for mk in self.client().iter_markers_by_tag(self.cfg.markers.tag_name)
+                    if mk.get("marker_id")
+                ]
+                self.client().destroy_scene_markers(ids)
+                out["apexes_removed"] = len(ids)
+                self._invalidate_taste_caches()  # centroid now rebuilds empty
+            except Exception as e:  # noqa: BLE001 — labels/model are already gone
+                out["apexes_removed"] = 0
+                out["apex_error"] = str(e)
+        return out
 
     def _delete_taste_models(self, profile: str) -> bool:
         """Delete every trained taste model for `profile` (across embedding

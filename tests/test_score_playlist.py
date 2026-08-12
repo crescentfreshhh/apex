@@ -614,6 +614,39 @@ def test_delete_taste_full_wipe_removes_model(tmp_path):
     assert svc.label_counts()["positive"] == 0
 
 
+def test_delete_taste_purge_apexes_destroys_markers(tmp_path, monkeypatch):
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)
+    svc.add_label("A", 0.0, 1); svc.add_label("B", 0.0, 0)
+
+    destroyed = []
+
+    class _PurgeClient:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            yield {"marker_id": "11", "scene_id": "1", "seconds": 0.0}
+            yield {"marker_id": "22", "scene_id": "2", "seconds": 8.0}
+
+        def destroy_scene_markers(self, ids, chunk=100):
+            destroyed.extend(ids)
+            return len(ids)
+
+    monkeypatch.setattr(svc, "client", lambda: _PurgeClient())
+
+    r = svc.delete_taste(purge_apexes=True)
+    assert destroyed == ["11", "22"]        # both apex markers deleted from Stash
+    assert r["apexes_removed"] == 2
+    assert r["removed"] == 2 and r["positive"] == 0
+
+    # regression: a plain full wipe must NOT touch apex markers
+    destroyed.clear()
+    svc.add_label("A", 0.0, 1); svc.add_label("B", 0.0, 0)
+    r2 = svc.delete_taste()  # no purge_apexes
+    assert destroyed == []
+    assert "apexes_removed" not in r2
+
+
 def test_delete_taste_recent_window_keeps_and_retrains(tmp_path):
     import time
 

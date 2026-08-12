@@ -554,10 +554,17 @@ def create_app(cfg=None):
         return res
 
     @app.post("/api/taste/delete")
-    def delete_taste(within_minutes: float | None = None, profile: str | None = None):
+    def delete_taste(
+        within_minutes: float | None = None,
+        profile: str | None = None,
+        purge_apexes: bool = False,
+    ):
         """Erase learned taste — all of it (within_minutes omitted/0) or just the
-        last N minutes. Retrains from what's left, or drops the model."""
-        return service.delete_taste(profile=profile, within_minutes=within_minutes)
+        last N minutes. Retrains from what's left, or drops the model. With
+        `purge_apexes` on a full wipe, also deletes the ⭐ apex markers in Stash."""
+        return service.delete_taste(
+            profile=profile, within_minutes=within_minutes, purge_apexes=purge_apexes
+        )
 
     @app.post("/api/train")
     def train_taste(profile: str | None = None, model: str | None = None):

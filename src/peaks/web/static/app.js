@@ -1342,17 +1342,22 @@ $("#btn-swipe-train")?.addEventListener("click", async () => {
 // delete / undo learned taste
 document.querySelectorAll("#taste-manage [data-del]").forEach((b) =>
   b.addEventListener("click", async () => {
-    const v = b.dataset.del, isAll = v === "all";
-    const msg = isAll
+    const v = b.dataset.del, isAll = v === "all", purge = b.dataset.purge === "1";
+    const msg = purge
+      ? "FULL RESET — permanently delete your ENTIRE taste profile (every 👍/👎 rating and the trained model) AND every ⭐ apex marker saved in Stash?\n\nThis deletes your curated favourites from Stash itself and CANNOT be undone."
+      : isAll
       ? "Permanently delete your ENTIRE taste profile — every 👍/👎 rating and the trained model?\n\nThis cannot be undone. (Your saved apex moments in Stash are kept.)"
       : `Delete all ratings from the ${b.textContent.replace("Undo last ", "last ")} and retrain on what's left?`;
     if (!confirm(msg)) return;
     b.disabled = true;
     try {
-      const qs = isAll ? "" : "?within_minutes=" + v;
+      const qs = isAll ? (purge ? "?purge_apexes=1" : "") : "?within_minutes=" + v;
       const r = await api("/api/taste/delete" + qs, { method: "POST" });
       const tail = r.retrained ? " · retrained" : r.model_deleted ? " · taste model cleared" : "";
-      toast(`Deleted ${r.removed} rating${r.removed === 1 ? "" : "s"}${tail}`);
+      const apexTail = r.apex_error
+        ? " · ⚠ apex delete failed"
+        : (typeof r.apexes_removed === "number" ? ` · ${r.apexes_removed} apex marker${r.apexes_removed === 1 ? "" : "s"} deleted` : "");
+      toast(`Deleted ${r.removed} rating${r.removed === 1 ? "" : "s"}${tail}${apexTail}`, !!r.apex_error);
       $("#taste-manage-status").textContent = `${r.positive}👍 / ${r.negative}👎 left`;
       updateTasteUI({ positive: r.positive, negative: r.negative });
       loadNextSwipe(); loadForYou(true); loadTasteWords();
