@@ -634,6 +634,22 @@ def test_label_and_train_endpoints(client, monkeypatch):
     assert r2.status_code == 200 and r2.json()["cv_auc"] == 0.9
 
 
+def test_label_by_scene_id_resolves_key(client, monkeypatch):
+    """The megaboard rates by scene_id (no cache key) — the endpoint resolves it."""
+    from peaks.web import service as svc
+
+    seen = {}
+    monkeypatch.setattr(svc.Service, "add_label",
+                        lambda self, key, t, label, profile=None, scene_id=None:
+                        seen.update(key=key, label=label, scene_id=scene_id) or {"positive": 1, "negative": 0})
+
+    # no key given — resolved from scene_id (fixture seeds scene "1" -> key "k1")
+    r = client.post("/api/label", params={"t": 0.0, "label": 1, "scene_id": "1"})
+    assert r.status_code == 200 and seen["key"] == "k1" and seen["scene_id"] == "1"
+    # neither key nor a resolvable scene_id -> 400
+    assert client.post("/api/label", params={"t": 0.0, "label": 1}).status_code == 400
+
+
 def test_search_forwards_taste_flag(client, monkeypatch):
     from peaks.web import service as svc
 

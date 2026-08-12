@@ -15,12 +15,37 @@ const State = {
   tiles: [],
   playing: true,
   big: null, // the tile currently enlarged
+  hover: null, // last-hovered tile (keyboard actions target this / big)
   n: 3,
   shuffle: false, // whole-library random mode
   pool: null, // scene pool for shuffle
   searchMode: false,
   source: null, // current source id (for Refresh)
+  muted: true, // global audio mute — only the enlarged tile ever plays sound
+  volume: 1, // global volume for the enlarged tile
 };
+try {
+  const mv = JSON.parse(localStorage.getItem("mb_audio") || "null");
+  if (mv) { State.muted = mv.muted !== false; State.volume = isFinite(mv.volume) ? mv.volume : 1; }
+} catch { /* ignore */ }
+function persistAudio() {
+  try { localStorage.setItem("mb_audio", JSON.stringify({ muted: State.muted, volume: State.volume })); }
+  catch { /* ignore */ }
+}
+// the tile keyboard actions target: the enlarged tile, else whatever's hovered
+function focusedTile() {
+  const t = State.big || State.hover;
+  return t && t.apex && t.apex.scene_id ? t : null;
+}
+// apply the global mute/volume to the one tile that has sound (the enlarged one)
+function applyAudio() {
+  const t = State.big;
+  if (t && t.video) { t.video.muted = State.muted; t.video.volume = State.volume; }
+  const btn = document.getElementById("mute");
+  if (btn) btn.textContent = State.muted ? "🔇 Muted" : "🔊 Sound";
+  const vol = document.getElementById("volume");
+  if (vol && +vol.value !== State.volume) vol.value = State.volume;
+}
 
 // --- weighted, no-immediate-repeat picker ---------------------------------
 
@@ -125,6 +150,7 @@ function makeTile(index) {
     e.preventDefault();
     if (tile.apex && tile.apex.scene_id) openTileMenu(tile, e.clientX, e.clientY);
   });
+  el.addEventListener("mouseenter", () => { State.hover = tile; });
   return tile;
 }
 
@@ -178,7 +204,7 @@ function expand(tile) {
   const v = tile.video;
   const apex = tile.apex;
   v.loop = false;
-  v.muted = false;
+  v.muted = State.muted; v.volume = State.volume;   // enlarged tile carries the global audio
   v.src = sceneStreamUrl(apex.url);
   v.load();
   const onMeta = () => {
@@ -233,17 +259,16 @@ function buildBigUI(tile) {
   tile.ui = { meta, controls };
 
   const v = tile.video;
+  v.muted = State.muted; v.volume = State.volume;   // enlarged tile carries the global audio
   controls.querySelector(".mb-play").addEventListener("click", () => {
     if (v.paused) v.play().catch(() => {}); else v.pause();
   });
   v.addEventListener("play", () => (controls.querySelector(".mb-play").textContent = "❚❚"));
   v.addEventListener("pause", () => (controls.querySelector(".mb-play").textContent = "▶"));
   const mute = controls.querySelector(".mb-mute");
-  mute.addEventListener("click", () => {
-    v.muted = !v.muted;
-    mute.textContent = v.muted ? "🔇" : "🔊";
-  });
-  mute.textContent = v.muted ? "🔇" : "🔊";
+  mute.addEventListener("click", () => { State.muted = !State.muted; persistAudio(); applyAudio(); mute.textContent = State.muted ? "🔇" : "🔊"; });
+  mute.textContent = State.muted ? "🔇" : "🔊";
+  applyAudio();
 }
 
 function teardownBigUI(tile) {
@@ -423,11 +448,12 @@ function reshuffle() {
   State.tiles.forEach((t, i) => setTimeout(() => loadApex(t), i * STAGGER_MS));
 }
 
+const STEER = "right-click, or hover + ↑/↓ to rate · S apex · Space/M/R";
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
   if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
     document.getElementById("status").textContent =
-      `${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles · adjust the taste floor to widen/tighten · right-click to steer`;
+      `${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles · floor widens/tightens · ${STEER}`;
     return;
   }
   if (State.source === "foryou" && fyTotals) {
@@ -437,14 +463,14 @@ function updateStatus() {
     const floor = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
     document.getElementById("status").textContent =
       `${pivot}Scored by ${by}${floor} · ≈${fmtN(fyTotals.scenes)} scenes / ${fmtN(fyTotals.moments)} moments match`
-      + ` · ${State.apexes.length} loaded · ${State.tiles.length} tiles · right-click a tile to steer`;
+      + ` · ${State.apexes.length} loaded · ${State.tiles.length} tiles · ${STEER}`;
     return;
   }
   const label = State.shuffle
     ? `shuffle · ${(State.pool || []).length} scenes`
     : `${State.apexes.length} ${State.searchMode ? "moments" : "apexes"}`;
   document.getElementById("status").textContent =
-    `${pivot}${label} · ${State.tiles.length} tiles · right-click a tile to steer`;
+    `${pivot}${label} · ${State.tiles.length} tiles · ${STEER}`;
 }
 function fmtN(n) { return (n ?? 0).toLocaleString(); }
 
@@ -479,18 +505,53 @@ function wireControls() {
     loadSource(src, { refresh: true }); // rebuild pool/apexes from Stash
   });
   document.getElementById("save-board")?.addEventListener("click", saveCurrentBoard);
-  document.getElementById("mute").addEventListener("click", () => {
-    if (State.big) {
-      State.big.video.muted = true;
-      const mb = State.big.ui?.controls.querySelector(".mb-mute");
-      if (mb) mb.textContent = "🔇";
-    }
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    closeTileMenu();
-    if (State.big) collapse(State.big);
-  });
+  document.getElementById("mute").addEventListener("click", toggleMute);
+  const vol = document.getElementById("volume");
+  if (vol) {
+    vol.value = State.volume;
+    vol.addEventListener("input", () => {
+      State.volume = parseFloat(vol.value);
+      if (State.volume > 0 && State.muted) State.muted = false;   // nudging volume un-mutes
+      persistAudio(); applyAudio();
+      const mb = State.big?.ui?.controls.querySelector(".mb-mute");
+      if (mb) mb.textContent = State.muted ? "🔇" : "🔊";
+    });
+  }
+  applyAudio();
+  document.addEventListener("keydown", onKey);
+}
+
+function toggleMute() {
+  State.muted = !State.muted; persistAudio(); applyAudio();
+  const mb = State.big?.ui?.controls.querySelector(".mb-mute");
+  if (mb) mb.textContent = State.muted ? "🔇" : "🔊";
+}
+function nudgeFloor(delta) {
+  const s = document.getElementById("floor");
+  const max = s ? parseFloat(s.max) : 0.95;
+  fyMinScore = Math.min(max, Math.max(0, +(fyMinScore + delta).toFixed(2)));
+  syncFloorUI(); persistFloor(fyMinScore); applyFloor();
+}
+// board keyboard: drive and train without leaving the grid
+function onKey(e) {
+  if (e.key === "Escape") { closeTileMenu(); if (State.big) collapse(State.big); return; }
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button") return;  // let fields/buttons handle their own keys
+  const ft = focusedTile();
+  switch (e.key) {
+    case " ": e.preventDefault(); setPlaying(!State.playing); break;
+    case "m": toggleMute(); break;
+    case "r": reshuffle(); break;
+    case "s": if (ft) saveApex(ft.apex.scene_id, tileTime(ft)); break;
+    case "ArrowUp": if (ft) { e.preventDefault(); rateMoment(ft.apex.scene_id, tileTime(ft), 1); } break;
+    case "ArrowDown": if (ft) { e.preventDefault(); rateMoment(ft.apex.scene_id, tileTime(ft), 0); } break;
+    case "[": nudgeFloor(-0.05); break;
+    case "]": nudgeFloor(0.05); break;
+    default: break;
+  }
+}
+function tileTime(t) {
+  return (t.video && isFinite(t.video.currentTime)) ? t.video.currentTime : (t.apex?.start || 0);
 }
 
 // --- sources: shuffle-all / apex tag / saved collection / search handoff ----
@@ -639,6 +700,9 @@ function openTileMenu(tile, x, y) {
   const apex = tile.apex;
   const t = (tile.video && isFinite(tile.video.currentTime)) ? tile.video.currentTime : apex.start;
   const items = [
+    ["👍 More of this (my taste)", () => rateMoment(apex.scene_id, t, 1)],
+    ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
+    ["★ Save as apex", () => saveApex(apex.scene_id, t)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
     ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
     ["⭐ Save her best as a collection", () => saveHerBest(apex.scene_id)],
@@ -706,6 +770,21 @@ async function saveHerBest(scene_id) {
   try {
     await api("/api/collection", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, apexes }) });
     flashStatus(`saved "${name}" (${apexes.length})`);
+  } catch (e) { flashStatus(e.message); }
+}
+// Train from the board: shape your taste (👍/👎) or bank a moment (★ apex) right
+// where you're watching, using the same endpoints Explore/the viewer use.
+async function rateMoment(scene_id, t, label) {
+  try {
+    await api(`/api/label?scene_id=${encodeURIComponent(scene_id)}&t=${(+t || 0).toFixed(2)}&label=${label}`,
+      { method: "POST" });
+    flashStatus(label ? "👍 added to your taste" : "👎 noted — less like that");
+  } catch (e) { flashStatus(e.message); }
+}
+async function saveApex(scene_id, t) {
+  try {
+    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "POST" });
+    flashStatus("★ saved as apex @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
 // Save whatever is currently driving the board — a "more like this" rabbit hole,

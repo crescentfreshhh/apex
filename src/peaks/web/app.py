@@ -530,7 +530,16 @@ def create_app(cfg=None):
         return counts
 
     @app.post("/api/label")
-    def add_label(key: str, t: float, label: int, scene_id: str | None = None, profile: str | None = None):
+    def add_label(
+        t: float, label: int, key: str | None = None,
+        scene_id: str | None = None, profile: str | None = None,
+    ):
+        # the megaboard rates by scene_id+time (it has no cache key) — resolve it
+        # the same way "more like this moment" does.
+        if key is None and scene_id is not None:
+            key = service._key_for_scene(scene_id, service._model_name())
+        if key is None:
+            raise HTTPException(400, "need a key or a resolvable scene_id")
         res = service.add_label(key, t, label, profile=profile, scene_id=scene_id)
         # hands-off training: once enough new ratings pile up, retrain the taste
         # model in the background so "Train now" is optional. One train at a time.
