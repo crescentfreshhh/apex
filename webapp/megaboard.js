@@ -97,16 +97,10 @@ async function api(path, opts) {
 // --- tiles ----------------------------------------------------------------
 
 function loadApex(tile) {
-  clearTimeout(tile.probe);
   const apex = pickApex();
-  if (!apex) {
-    // queue momentarily drained → don't leave the tile stuck black; retry soon
-    tile.probe = setTimeout(() => loadApex(tile), 600);
-    return;
-  }
+  if (!apex) return;
   const v = tile.video;
   tile.extended = false;          // a fresh cycling clip is never pinned
-  tile.transcoded = false;        // start on the cheap direct stream
   v.loop = false;
   tile.el.classList.remove("extended");
   tile.apex = apex;
@@ -118,28 +112,6 @@ function loadApex(tile) {
   v.load();
   if (State.playing) v.play().catch(() => {});
   if (!State.big) applyGridAudio();   // keep the hovered tile audible across clip changes
-  // watchdog: if nothing has decoded (videoWidth still 0 — often a codec the browser
-  // can't decode, or the concurrent-decoder limit), retry via a transcoded stream.
-  tile.probe = setTimeout(() => probeTile(tile), 2500);
-}
-
-// swap a non-rendering tile to Stash's browser-decodable transcode (fires only on failure)
-function fallbackTranscode(tile) {
-  clearTimeout(tile.probe);
-  if (!tile.apex || tile.transcoded) return;
-  tile.transcoded = true;
-  tile.mode = "offset"; // .mp4?start= is server-seeked to the moment — don't re-seek
-  const v = tile.video;
-  v.src = transcodeUrl(tile.apex.url);
-  v.load();
-  if (State.playing) v.play().catch(() => {});
-  if (!State.big) applyGridAudio();
-}
-
-function probeTile(tile) {
-  // not yet playing a decoded frame (no width, or no current data) → try the transcode.
-  const v = tile.video;
-  if (!tile.transcoded && v && (v.videoWidth === 0 || v.readyState < 2)) fallbackTranscode(tile);
 }
 
 function advance(tile) {
@@ -187,22 +159,17 @@ function makeTile(index) {
   label.className = "label";
 
   el.append(video, label);
-  const tile = { el, video, label, index, apex: null, mode: "offset", lastAdvance: 0, extended: false, transcoded: false, probe: 0 };
+  const tile = { el, video, label, index, apex: null, mode: "offset", lastAdvance: 0, extended: false };
 
   video.addEventListener("loadedmetadata", () => {
     if (!tile.apex || State.big === tile) return; // big mode drives seeking itself
-    if (tile.transcoded) {
-      tile.mode = "offset"; // transcode is already server-seeked to the moment — don't re-seek
-    } else if (Number.isFinite(video.duration) && video.duration > tile.apex.duration + 5) {
+    if (Number.isFinite(video.duration) && video.duration > tile.apex.duration + 5) {
       tile.mode = "absolute";
       video.currentTime = tile.apex.start;
     } else {
       tile.mode = "offset";
     }
   });
-  // real "it's actually decoding/playing" signal (never fires for a codec the browser
-  // can't decode) → cancel the transcode watchdog.
-  video.addEventListener("playing", () => clearTimeout(tile.probe));
 
   video.addEventListener("timeupdate", () => {
     if (!tile.apex || State.big === tile || tile.extended) return; // extended: play on, never cycle
@@ -211,10 +178,7 @@ function makeTile(index) {
   });
   video.addEventListener("ended", () => { if (!tile.extended) advance(tile); });
   video.addEventListener("error", () => {
-    if (State.big === tile) return;
-    // a codec the browser can't decode → try the transcode before giving up on the moment
-    if (!tile.transcoded) fallbackTranscode(tile);
-    else setTimeout(() => advance(tile), 500);
+    if (State.big !== tile) setTimeout(() => advance(tile), 500);
   });
 
   el.addEventListener("click", (e) => {
@@ -272,24 +236,9 @@ function sceneStreamUrl(apexUrl) {
     return apexUrl;
   }
 }
-// A browser-decodable fallback: Stash transcodes /scene/{id}/stream.mp4 to a small
-// H.264 clip. Cheap to decode, so many more tiles fit under the browser's concurrent
-// hardware-decoder limit — and it plays codecs (HEVC/H.265) the raw stream can't.
-// Stash's .mp4 transcode honours ?start=<t> server-side, so it begins at the moment.
-function transcodeUrl(apexUrl) {
-  try {
-    const u = new URL(apexUrl, location.href);
-    u.pathname = u.pathname.replace(/\/stream$/, "/stream.mp4");
-    u.searchParams.set("resolution", "240p");
-    return u.toString();
-  } catch {
-    return apexUrl;
-  }
-}
 
 function expand(tile) {
   State.big = tile;
-  clearTimeout(tile.probe);   // grid watchdog doesn't apply to the enlarged tile
   tile.el.classList.add("big");
   layoutBig(tile, true);
   applyGridAudio();   // enlarged tile owns audio now — silence the rest of the grid
