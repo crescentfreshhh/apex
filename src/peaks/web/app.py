@@ -653,12 +653,15 @@ def create_app(cfg=None):
     def performer_best(
         name: str | None = None, id: str | None = None, scene_id: str | None = None,
         count: int = 200, per_scene: int = 6, query: str | None = None,
+        min_score: float = 0.0, spread: bool = False,
     ):
         """A performer's best moments (taste-ranked, or by a focus `query`) — the
-        preview you save as a collection."""
+        preview you save as a collection. `spread` gives a diverse span of her
+        scenes; `min_score` keeps only her moments at/above that taste floor."""
         r = service.performer_best(
             name=name, performer_id=id, scene_id=scene_id,
             count=count, per_scene=per_scene, query=query or None,
+            min_score=min_score, spread=spread,
         )
         return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
 

@@ -965,6 +965,29 @@ def test_performer_best_ranks_embedded_only(tmp_path, monkeypatch):
     assert [h.score for h in r["hits"]] == sorted((h.score for h in r["hits"]), reverse=True)
 
 
+def test_performer_best_spread_and_floor(tmp_path, monkeypatch):
+    """The megaboard performer board: floor 0 → a diverse span of her scenes;
+    floor > 0 → only her moments matching your taste (tightening toward 100%)."""
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    _seed_performer_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _PerfClient())
+    svc.add_label("k1", 0.0, 1, scene_id="1")   # taste centroid ~ [1,0,0,0]
+
+    # spread → diverse coverage: every embedded scene present, no taste ranking
+    sp = svc.performer_best(name="Jane", spread=True, per_scene=2, count=50)
+    assert {h.scene_id for h in sp["hits"]} == {"1", "2", "3"}
+    assert all(h.score == 0.0 for h in sp["hits"])   # coverage, not taste-scored
+
+    # floor > 0 → only her taste-matching moments survive, still score-sorted
+    hi = svc.performer_best(name="Jane", min_score=0.99, per_scene=2, count=50)
+    assert hi["hits"] and all(h.score >= 0.99 for h in hi["hits"])
+    assert [h.score for h in hi["hits"]] == sorted((h.score for h in hi["hits"]), reverse=True)
+    # tightening drops the middling scenes the 0% spread happily included
+    assert "1" in {h.scene_id for h in hi["hits"]}
+    assert len({h.scene_id for h in hi["hits"]}) < 3
+
+
 def test_performer_stats_leaderboard(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     _seed_performer_scenes(cfg)

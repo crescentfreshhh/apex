@@ -1700,23 +1700,32 @@ class Service:
     def performer_best(
         self, name=None, performer_id=None, scene_id=None, count: int = 200,
         per_scene: int = 6, query: str | None = None,
+        min_score: float = 0.0, spread: bool = False,
     ) -> dict:
-        """A performer's BEST moments — her embedded scenes' frames ranked by your
-        taste centroid, or by a CLIP text `query` ('her best lingerie'). Returns
-        `{performer, hits}` ready to save as a collection."""
+        """A performer's moments — by default her BEST, her embedded scenes' frames
+        ranked by your taste centroid (or by a CLIP text `query`, 'her best
+        lingerie'). `spread=True` instead returns a diverse, time-spread coverage of
+        her scenes (the megaboard's 0% floor); `min_score>0` keeps only taste hits at
+        or above that floor (tightening toward your taste). Returns `{performer,
+        hits}` ready to save as a collection."""
         pid, pname, scenes = self._resolve_performer(name, performer_id, scene_id)
         if not scenes:
             return {"performer": pname, "hits": []}
         if query:  # focus on an attribute → rank in CLIP space
             model = self._clip_name()
             qvec = self._clip_query_vector(query)
+            hits = self._ranked_moments_for_scenes(scenes, qvec, per_scene=per_scene, model=model)
+        elif spread:  # diverse span of her scenes, no taste ranking (floor at 0%)
+            hits = self._moments_for_scenes(scenes, per_scene=per_scene)
         else:      # rank by taste closeness in the DINO space
             model = self._model_name()
             qvec, _, _ = self._taste_centroid(model)
-        if qvec is None:  # no taste yet and no query → fall back to spread coverage
-            hits = self._moments_for_scenes(scenes, per_scene=per_scene)
-        else:
-            hits = self._ranked_moments_for_scenes(scenes, qvec, per_scene=per_scene, model=model)
+            if qvec is None:  # no taste yet → fall back to spread coverage
+                hits = self._moments_for_scenes(scenes, per_scene=per_scene)
+            else:
+                hits = self._ranked_moments_for_scenes(scenes, qvec, per_scene=per_scene, model=model)
+                if min_score > 0:  # tighten toward your taste
+                    hits = [h for h in hits if h.score >= min_score]
         return {"performer": pname, "hits": hits[:count]}
 
     def _excluded_performers(self) -> set[str]:

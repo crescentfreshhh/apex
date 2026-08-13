@@ -105,6 +105,10 @@ function loadApex(tile) {
   tile.el.classList.remove("extended");
   tile.apex = apex;
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
+  // the stream URL already carries ?start=<t> → it begins AT the moment, so the
+  // clip window is 0..duration and we must NOT seek again (that double-seek lands
+  // past the scene end for deep moments → instant advance / black tile).
+  tile.serverSeeked = urlHasStart(apex.url);
   tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`;
   v.loop = false;
   v.src = apex.url;
@@ -129,9 +133,11 @@ function extendTile(tile) {
   tile.extended = true;
   tile.el.classList.add("extended");
   v.loop = true; // play to the end of the scene, then repeat — never auto-advance
-  if (tile.mode !== "absolute") {
-    // offset = short-clip stream with nothing past the moment; reload the full scene
-    // so it can play forward. The loadedmetadata handler seeks back to apex.start.
+  // A server-seeked stream (start=<t>) already runs from the moment to the scene
+  // end, and an absolute full-scene stream is already seeked to the moment — both
+  // can just keep playing (looping back to the moment / scene start). Only a genuine
+  // short-clip offset stream needs the full scene reloaded so there's more to play.
+  if (tile.mode !== "absolute" && !tile.serverSeeked) {
     v.src = sceneStreamUrl(tile.apex.url);
     v.load();
   }
@@ -163,7 +169,9 @@ function makeTile(index) {
 
   video.addEventListener("loadedmetadata", () => {
     if (!tile.apex || State.big === tile) return; // big mode drives seeking itself
-    if (Number.isFinite(video.duration) && video.duration > tile.apex.duration + 5) {
+    if (tile.serverSeeked) {
+      tile.mode = "offset"; // stream already starts at the moment — don't re-seek
+    } else if (Number.isFinite(video.duration) && video.duration > tile.apex.duration + 5) {
       tile.mode = "absolute";
       video.currentTime = tile.apex.start;
     } else {
@@ -234,6 +242,16 @@ function sceneStreamUrl(apexUrl) {
     return u.toString();
   } catch {
     return apexUrl;
+  }
+}
+// true when the stream URL is server-seeked to the moment (start=<t>, t>0) — the
+// stream begins AT the moment, so the tile must play 0..duration and never re-seek.
+function urlHasStart(apexUrl) {
+  try {
+    const s = parseFloat(new URL(apexUrl, location.href).searchParams.get("start"));
+    return isFinite(s) && s > 0;
+  } catch {
+    return false;
   }
 }
 
@@ -657,6 +675,7 @@ function readPersistedFloor() {
 // re-filters that moment; For You rebuilds its pool; static sources ignore it.
 function applyFloor() {
   if (State.pivotSeed) { moreLikeThis(State.pivotSeed.scene_id, State.pivotSeed.t); return; }
+  if (State.source === "performer") { loadSource("performer"); return; }
   if (State.source === "foryou") {
     fyReset();
     fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
@@ -876,9 +895,10 @@ function flashStatus(msg) {
 
 function syncFloorVisibility() {
   const fw = document.getElementById("floor-wrap");
-  // the floor drives For You (taste) and a "more like this moment" pivot (how
-  // close to that moment) — show it for both, hide it for static sources.
-  if (fw) fw.hidden = !(State.source === "foryou" || State.pivotSeed);
+  // the floor drives For You (taste), a "more like this moment" pivot (how close
+  // to that moment), and the performer board (0% = her scenes spread, higher =
+  // her taste-matching moments) — hide it only for truly static sources.
+  if (fw) fw.hidden = !(State.source === "foryou" || State.source === "performer" || State.pivotSeed);
 }
 async function loadSource(src, opts = {}) {
   State.source = src;
@@ -926,6 +946,9 @@ async function loadSource(src, opts = {}) {
       if (boardPerformer?.id) qs.set("id", boardPerformer.id);
       else if (boardPerformer?.name) qs.set("name", boardPerformer.name);
       if (boardPerformer?.query) qs.set("query", boardPerformer.query);
+      // floor at 0% → a diverse span of her scenes; above 0 → her taste-matching moments
+      if (fyMinScore > 0) qs.set("min_score", fyMinScore);
+      else qs.set("spread", "true");
       let d;
       try { d = await api("/api/performer/best?" + qs.toString()); }
       catch (e) { return showError("Couldn't load this performer.\n\n(" + e.message + ")"); }
