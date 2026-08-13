@@ -714,6 +714,20 @@ function fyWeightedShuffle(items) {
     .sort((x, y) => y[1] - x[1])
     .map((o) => o[0]);
 }
+// For You ordering: with a taste floor set, the floor is the quality gate → order
+// uniformly at random (no score bias) so the feed is truly random within it. With
+// the floor off, keep the score-weighted shuffle that surfaces your strongest first.
+function fyShuffle(items) {
+  if (fyMinScore > 0) {
+    const a = items.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+  return fyWeightedShuffle(items);
+}
 async function fyRefetch(reset) {
   if (fyState.refetching) return;
   fyState.refetching = true;
@@ -732,7 +746,7 @@ async function fyRefetch(reset) {
     if (reset) { State.apexes = items; fyState.queue = []; }
     else State.apexes = State.apexes.concat(items);
     for (const a of items) fyState.exclude.add(String(a.scene_id));
-    fyState.queue = fyState.queue.concat(fyWeightedShuffle(items));
+    fyState.queue = fyState.queue.concat(fyShuffle(items));
     updateStatus();
   } finally { fyState.refetching = false; }
 }
@@ -740,7 +754,7 @@ function fyPick() {
   if (fyState.queue.length < 6 && !fyState.refetching) fyRefetch(false);   // prefetch ahead
   if (!fyState.queue.length) {
     if (!State.apexes.length) return null;
-    fyState.queue = fyWeightedShuffle(State.apexes);   // nothing fresh yet: recycle the pool
+    fyState.queue = fyShuffle(State.apexes);   // nothing fresh yet: recycle the pool
   }
   // don't show the same scene as the last few picks (across tiles)
   for (let i = 0; i < fyState.queue.length && i < 6; i++) {
@@ -992,9 +1006,12 @@ async function loadSource(src, opts = {}) {
       if (seed && seed.apexes && seed.apexes.length) {
         State.apexes = seed.apexes.slice();
         for (const a of State.apexes) fyState.exclude.add(String(a.scene_id));
-        fyState.queue = fyWeightedShuffle(State.apexes);
+        fyState.queue = fyShuffle(State.apexes);
       }
-      await fyRefetch(!State.apexes.length);
+      // always pull a fresh batch (reset) so each open is a new random draw rather
+      // than replaying the stale on-screen seed's top moments first.
+      fyState.exclude.clear();
+      await fyRefetch(true);
       if (!State.apexes.length) return showError("No For You taste yet. Thumb up moments or save apexes (⚑), then try again.");
       pickApex = fyPick;
     } else if (src === "galaxy") {

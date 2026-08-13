@@ -1445,11 +1445,15 @@ class Service:
         if exclude:
             exclude = {str(s) for s in exclude}
             pool = [h for h in pool if str(h.scene_id) not in exclude]
-        # Draw a broad, rank-weighted candidate sample (keeps the stream fresh
-        # batch-to-batch), then MMR-select from it so the board spreads across your
-        # taste's modes instead of stacking near-duplicates of one favourite.
         diversity = self.cfg.modeling.feed_diversity
-        if diversity > 0 and len(pool) > count:
+        if min_score > 0:
+            # The floor already gates quality → draw a *uniform-random* sample within
+            # it, so the board is genuinely different every load instead of replaying
+            # the same top-scored moments. (per-scene cap + a huge pool keep it varied.)
+            hits = self._sample_uniform(pool, count, seed)
+        elif diversity > 0 and len(pool) > count:
+            # No floor → surface your strongest: a broad rank-weighted candidate
+            # sample, then MMR-select so it spreads across your taste's modes.
             cand = self._sample_ranked(pool, min(len(pool), 3 * count), seed)
             hits = self._diversify(cand, model, count, diversity)
         else:
@@ -1458,6 +1462,21 @@ class Service:
             "hits": hits, "scenes": scenes_total, "moments": moments_total,
             "model": model, "scored_by": scored_by,
         }
+
+    def _sample_uniform(
+        self, pool: list[Hit], count: int, seed: int | None = None
+    ) -> list[Hit]:
+        """Unbiased random sample (without replacement) of `count` moments in
+        random order — every moment in `pool` equally likely, no rank weighting.
+        Shuffles even when the pool is ≤ `count`. Used when a taste floor is set:
+        the floor is the quality gate, so within it the board should be truly
+        random, not a replay of the top-scored moments."""
+        n = len(pool)
+        if n == 0:
+            return []
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(n, size=min(count, n), replace=False)
+        return [pool[int(i)] for i in idx]
 
     def _sample_ranked(
         self, ranked: list[Hit], count: int, seed: int | None = None

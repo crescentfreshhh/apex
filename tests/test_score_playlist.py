@@ -382,6 +382,34 @@ def test_board_pool_is_threshold_driven_and_spans_the_library(tmp_path, monkeypa
     assert len(seen) > 2  # spanned many scenes, not just the top couple
 
 
+def test_board_pool_uniform_random_within_floor(tmp_path, monkeypatch):
+    """With a floor set, the board is a UNIFORM-random draw within it — different
+    every load (seeded for the test), not a replay of the same top-scored moments."""
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+    _seed_two_scenes(cfg)  # apex on scene "1" → centroid ≈ [1,0,0,0]
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    for i, cs in enumerate(np.linspace(0.55, 0.99, 40)):
+        d = np.array([cs, float(np.sqrt(1 - cs * cs)), 0, 0], dtype="float32")
+        cache.save(f"S{i}", "dinov2", np.array([0.0, 8.0], dtype="float32"),
+                   np.stack([d, d]), meta={"scene_id": str(100 + i)})
+    monkeypatch.setattr(svc, "client", lambda: _MarkerTagClient())
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    ids = lambda r: [(h.scene_id, round(h.time, 1)) for h in r["hits"]]
+    a = svc.board_pool(count=12, per_scene=2, min_score=0.6, seed=1)
+    a2 = svc.board_pool(count=12, per_scene=2, min_score=0.6, seed=1)
+    b = svc.board_pool(count=12, per_scene=2, min_score=0.6, seed=2)
+
+    assert a["hits"] and all(h.score >= 0.6 for h in a["hits"])   # floor honoured
+    assert ids(a) == ids(a2)                                      # reproducible per seed
+    # a different seed draws a different set → it's random, not a fixed top-N
+    assert {s for s, _ in ids(a)} != {s for s, _ in ids(b)}
+
+
 def test_board_pool_covers_every_scene_scored_by_classifier(tmp_path, monkeypatch):
     from peaks.cache import EmbeddingCache
 
