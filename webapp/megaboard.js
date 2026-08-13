@@ -764,18 +764,20 @@ function openTileMenu(tile, x, y) {
   try { stashHref = new URL(apex.url, location.href).origin + "/scenes/" + apex.scene_id + "?t=" + Math.round(t); }
   catch { stashHref = null; }
   const items = [
+    // taste actions
     ["👍 More of this (my taste)", () => rateMoment(apex.scene_id, t, 1)],
     ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
     ["★ Save as apex", () => saveApex(apex.scene_id, t)],
+    // explore more — narrowest to broadest scope
+    ["🎞 More moments in this scene", () => moreInThisScene(apex.scene_id)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
     ["🎬 More of this moment (same actress)", () => moreMomentSameActress(apex.scene_id, t)],
-    ["🎞 More moments in this scene", () => moreInThisScene(apex.scene_id)],
+    ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
   ];
   if (tile.extended) items.push(["⏹ Stop extending (resume cycling)", () => unextendTile(tile)]);
   else items.push(["⏱ Extend (keep this scene playing)", () => extendTile(tile)]);
   if (stashHref) items.push(["📺 Open in Stash (this moment)", () => window.open(stashHref, "_blank", "noopener")]);
   items.push(
-    ["🎬 More from this actress", () => moreFromActress(apex.scene_id)],
     ["⭐ Save her best as a collection", () => saveHerBest(apex.scene_id)],
     ["💾 Save this board as a collection", () => saveCurrentBoard()],
   );
