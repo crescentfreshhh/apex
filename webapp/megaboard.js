@@ -772,6 +772,8 @@ function openTileMenu(tile, x, y) {
     ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
     ["★ Save as apex", () => saveApex(apex.scene_id, t)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
+    ["🎬 More of this moment (same actress)", () => moreMomentSameActress(apex.scene_id, t)],
+    ["🎞 More moments in this scene", () => moreInThisScene(apex.scene_id)],
   ];
   if (tile.extended) items.push(["⏹ Stop extending (resume cycling)", () => unextendTile(tile)]);
   else items.push(["⏱ Extend (keep this scene playing)", () => extendTile(tile)]);
@@ -885,6 +887,31 @@ async function moreFromActress(scene_id) {
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no other embedded scenes for ${d.performer}` : "no performer info for this scene");
     pivotBoard(apexes, "🎬 " + (d.performer || "this actress"));
+  } catch (e) { flashStatus(e.message); }
+}
+// similar moments to THIS one, but only across this scene's performer
+async function moreMomentSameActress(scene_id, t) {
+  State.pivotSeed = null;
+  syncFloorVisibility();
+  flashStatus("finding her moments like this…");
+  try {
+    const qs = new URLSearchParams({ scene_id, t });
+    const d = await api("/api/board/performer_moment?" + qs.toString());
+    const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+    if (!apexes.length) return flashStatus(d.performer ? `no similar moments for ${d.performer}` : "no performer info for this scene");
+    pivotBoard(apexes, "🎬 more like this · " + (d.performer || "same actress"));
+  } catch (e) { flashStatus(e.message); }
+}
+// stay in this scene: a diverse spread of its moments
+async function moreInThisScene(scene_id) {
+  State.pivotSeed = null;
+  syncFloorVisibility();
+  flashStatus("gathering this scene…");
+  try {
+    const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/moments`);
+    const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+    if (!apexes.length) return flashStatus("no other embedded moments in this scene");
+    pivotBoard(apexes, "🎞 more in scene #" + scene_id);
   } catch (e) { flashStatus(e.message); }
 }
 function backToTaste() { loadSource("foryou"); }

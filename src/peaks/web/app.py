@@ -649,6 +649,20 @@ def create_app(cfg=None):
         r = service.performer_board(scene_id, count=count)
         return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
 
+    @app.get("/api/board/performer_moment")
+    def board_performer_moment(scene_id: str, t: float = 0.0, count: int = 300):
+        """Moments across this scene's lead performer, ranked by similarity to THIS
+        moment — the megaboard's 'more of this moment, same actress' pivot."""
+        r = service.performer_moment_matches(scene_id, t, count=count)
+        return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
+
+    @app.get("/api/scene/{scene_id}/moments")
+    def scene_moments(scene_id: str, count: int = 300):
+        """A diverse, time-spread set of moments from ONE scene — the megaboard's
+        'more moments in this scene' pivot."""
+        r = service.scene_moments(scene_id, count=count)
+        return {"items": _hit_payload(service, r["hits"])}
+
     @app.get("/api/performer/best")
     def performer_best(
         name: str | None = None, id: str | None = None, scene_id: str | None = None,

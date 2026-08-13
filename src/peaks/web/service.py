@@ -1631,6 +1631,34 @@ class Service:
         rng.shuffle(hits)
         return {"performer": best_name, "hits": hits[:count]}
 
+    def performer_moment_matches(
+        self, scene_id: str, t: float, count: int = 300, per_scene: int = 6
+    ) -> dict:
+        """'More of THIS moment, same actress': moments across this scene's lead
+        performer's embedded scenes, ranked by visual similarity to the moment at
+        (scene_id, t). Falls back to a spread of her scenes if the moment vector
+        can't be located. `{performer, hits}`."""
+        model = self._model_name()
+        _pid, pname, scenes = self._resolve_performer(scene_id=scene_id)
+        if not scenes:
+            return {"performer": pname, "hits": []}
+        key = self._key_for_scene(scene_id, model)
+        v = self.index(model).vector_at(key, float(t)) if key else None
+        if v is None:  # can't locate the moment → her spread instead
+            hits = self._moments_for_scenes(scenes, per_scene=per_scene, model=model)
+        else:
+            hits = self._ranked_moments_for_scenes(scenes, v, per_scene=per_scene, model=model)
+        return {"performer": pname, "hits": hits[:count]}
+
+    def scene_moments(
+        self, scene_id: str, count: int = 300, per_scene: int = 60
+    ) -> dict:
+        """'More moments in THIS scene': a diverse, time-spread pool of moments
+        drawn from a single scene. `{hits}`."""
+        model = self._model_name()
+        hits = self._moments_for_scenes([str(scene_id)], per_scene=per_scene, model=model)
+        return {"hits": hits[:count]}
+
     def _ranked_moments_for_scenes(
         self, scene_ids, query_vec, per_scene: int = 6, model: str | None = None,
     ) -> list["Hit"]:

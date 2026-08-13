@@ -988,6 +988,29 @@ def test_performer_best_spread_and_floor(tmp_path, monkeypatch):
     assert len({h.scene_id for h in hi["hits"]}) < 3
 
 
+def test_performer_moment_matches_ranks_across_her_scenes(tmp_path, monkeypatch):
+    """'More of this moment (same actress)': her embedded scenes ranked by
+    similarity to a given moment — embedded-only, best match first."""
+    svc, cfg = _service(tmp_path)
+    _seed_performer_scenes(cfg)
+    monkeypatch.setattr(svc, "client", lambda: _PerfClient())
+
+    r = svc.performer_moment_matches("1", 0.0, per_scene=2)   # scene 1 @ 0 ~ [1,0,0,0]
+    assert r["performer"] == "Jane Doe"
+    sids = [h.scene_id for h in r["hits"]]
+    assert sids and set(sids) <= {"1", "2", "3"} and "99" not in sids  # embedded only
+    assert sids[0] == "1"                                              # its own frame is closest
+    assert [h.score for h in r["hits"]] == sorted((h.score for h in r["hits"]), reverse=True)
+
+
+def test_scene_moments_stays_in_one_scene(tmp_path):
+    """'More moments in this scene': a spread drawn only from the given scene."""
+    svc, cfg = _service(tmp_path)
+    _seed_performer_scenes(cfg)
+    r = svc.scene_moments("2", per_scene=10)
+    assert r["hits"] and {h.scene_id for h in r["hits"]} == {"2"}   # only that scene
+
+
 def test_performer_stats_leaderboard(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     _seed_performer_scenes(cfg)
