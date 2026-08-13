@@ -147,7 +147,7 @@ def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
     assert items and all(it["scene_id"] and it["stream"] for it in items)
     # coverage numbers come back so the board can show "how many match my taste"
     assert board["scenes"] >= 1 and board["moments"] >= board["scenes"]
-    assert board["scored_by"] in ("classifier", "centroid")
+    assert board["scored_by"] in ("classifier", "modes", "centroid")
     sids = ",".join({it["scene_id"] for it in items})
     assert client.get("/api/foryou/board?count=6&exclude=" + sids).json()["items"] == []
     # taste floor is an optional tightener: an impossibly high floor filters all out

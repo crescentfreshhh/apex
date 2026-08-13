@@ -503,6 +503,7 @@ function updateStatus() {
   if (State.source === "foryou" && fyTotals) {
     // separate "matches your taste" (the whole board) from "loaded so far".
     const by = fyTotals.scored_by === "classifier" ? "your trained model"
+      : fyTotals.scored_by === "modes" ? "your taste modes (nearest of your interests)"
       : fyTotals.scored_by === "centroid" ? "taste centroid (no trained model yet)" : "your taste";
     const floor = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
     document.getElementById("status").textContent =

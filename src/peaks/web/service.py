@@ -33,6 +33,7 @@ class Service:
         self._pool = None  # cached scene pool for the shuffle board
         self._settings_cache = None  # GUI-saved active models (lazily read)
         self._taste_src_cache = {}  # model -> (stacked loved-moment vecs, sources)
+        self._taste_modes_cache = {}  # model -> K×dim unit "mode" centroids of the loved set
         self._board_score_cache = {}  # model -> (per-moment taste score array, scored_by)
         self._board_universe_cache = {}  # (model, per_scene) -> ordered per-scene-capped Hits
         self._labels_since_train = 0  # new ratings since the last (auto)train
@@ -1255,6 +1256,37 @@ class Service:
         a = arr[-recent:] if (recent and recent < arr.shape[0]) else arr
         return self._unit(a.mean(axis=0)), int(a.shape[0]), sources
 
+    def _taste_modes(self, model: str):
+        """Your loved set as K unit "mode" centroids, not one averaged point — so
+        scoring can reward a moment near *any* of your distinct interests instead
+        of only the bland midpoint between them. With few loved moments each is its
+        own mode (≈ nearest-neighbour); above the cap they're k-means clusters.
+        Returns a K×dim unit matrix, or None when there's no taste yet."""
+        cached = self._taste_modes_cache.get(model)
+        if cached is not None:
+            return cached
+        arr, _ = self._taste_sources(model)
+        L = int(arr.shape[0])
+        if L == 0:
+            return None
+        k = max(1, min(L, int(self.cfg.modeling.taste_modes)))
+        if L <= k:
+            modes = arr  # each loved moment is its own mode
+        else:
+            try:
+                from sklearn.cluster import KMeans
+
+                km = KMeans(n_clusters=k, n_init=4, random_state=0).fit(arr)
+                modes = km.cluster_centers_.astype(np.float32)
+            except Exception:  # noqa: BLE001 — sklearn hiccup → fall back to the mean
+                modes = self._unit(arr.mean(axis=0))[None, :]
+        # unit-normalise rows so a dot with unit frame vectors is cosine similarity
+        norms = np.linalg.norm(modes, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        modes = (modes / norms).astype(np.float32)
+        self._taste_modes_cache[model] = modes
+        return modes
+
     def recommend(
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
@@ -1321,16 +1353,19 @@ class Service:
         """Drop the cached taste centroid, per-moment scores and board universe so
         the next feed/board reflects new ratings or a freshly trained model."""
         self._taste_src_cache.clear()
+        self._taste_modes_cache.clear()
         self._board_score_cache.clear()
         self._board_universe_cache.clear()
 
     def _taste_scores(self, model: str):
         """One taste score per indexed moment, for the whole library. Uses your
         trained classifier's probability when a model exists (a learned,
-        multi-modal boundary that recognises your *diverse* taste, not just its
-        average), falling back to cosine against the single taste centroid when
-        untrained. Returns (scores[idx.size], scored_by) or (None, None) with no
-        taste yet. Cached per model (one pass over ~millions of frames)."""
+        multi-modal boundary that recognises your *diverse* taste), otherwise
+        scores each moment by its similarity to your *nearest loved mode* — so a
+        moment close to any of your distinct interests scores high, not just those
+        near the average of everything. Returns (scores[idx.size], scored_by) or
+        (None, None) with no taste yet. Cached per model (one pass over the
+        library)."""
         cached = self._board_score_cache.get(model)
         if cached is not None:
             return cached
@@ -1342,11 +1377,12 @@ class Service:
             scores = np.asarray(clf.predict_proba(idx.matrix), dtype=np.float32).reshape(-1)
             scored_by = "classifier"
         else:
-            c, _, _ = self._taste_centroid(model)
-            if c is None:
+            modes = self._taste_modes(model)
+            if modes is None:
                 return None, None
-            scores = (idx.matrix @ c).astype(np.float32)
-            scored_by = "centroid"
+            # cosine to every mode, keep each moment's best → spans your whole taste
+            scores = (idx.matrix @ modes.T).max(axis=1).astype(np.float32)
+            scored_by = "modes"
         out = (scores, scored_by)
         self._board_score_cache[model] = out
         return out
@@ -1409,7 +1445,15 @@ class Service:
         if exclude:
             exclude = {str(s) for s in exclude}
             pool = [h for h in pool if str(h.scene_id) not in exclude]
-        hits = self._sample_ranked(pool, count, seed)
+        # Draw a broad, rank-weighted candidate sample (keeps the stream fresh
+        # batch-to-batch), then MMR-select from it so the board spreads across your
+        # taste's modes instead of stacking near-duplicates of one favourite.
+        diversity = self.cfg.modeling.feed_diversity
+        if diversity > 0 and len(pool) > count:
+            cand = self._sample_ranked(pool, min(len(pool), 3 * count), seed)
+            hits = self._diversify(cand, model, count, diversity)
+        else:
+            hits = self._sample_ranked(pool, count, seed)
         return {
             "hits": hits, "scenes": scenes_total, "moments": moments_total,
             "model": model, "scored_by": scored_by,

@@ -111,6 +111,10 @@ class ModelingConfig:
     # 1 = maximally diverse). A little keeps it from collapsing into a bubble.
     # (Env override: PEAKS_FEED_DIVERSITY)
     feed_diversity: float = 0.3
+    # Untrained taste is modelled as up to this many "modes" (k-means clusters of
+    # your loved moments) rather than one average, so the board scores a moment by
+    # its nearest mode and spans your distinct interests. (Env: PEAKS_TASTE_MODES)
+    taste_modes: int = 24
 
 
 @dataclass
@@ -286,6 +290,12 @@ class Config:
                 os.environ.get(
                     "PEAKS_FEED_DIVERSITY",
                     modeling_raw.get("feed_diversity", ModelingConfig.feed_diversity),
+                )
+            ),
+            taste_modes=int(
+                os.environ.get(
+                    "PEAKS_TASTE_MODES",
+                    modeling_raw.get("taste_modes", ModelingConfig.taste_modes),
                 )
             ),
         )

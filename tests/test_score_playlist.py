@@ -428,6 +428,53 @@ def test_board_pool_covers_every_scene_scored_by_classifier(tmp_path, monkeypatc
     assert all(h.score >= 0.9 for h in tight["hits"])
 
 
+class _NoMarkerClient:
+    def iter_markers_by_tag(self, tag, page_size=200):
+        return iter(())
+
+
+def test_board_scores_by_nearest_mode_not_the_average(tmp_path, monkeypatch):
+    """Two distinct loved interests → BOTH light up, not just their midpoint.
+    A single averaged centroid would score the A/B midpoint highest; nearest-mode
+    scoring scores pure-A and pure-B moments above the midpoint — which no single
+    centroid can do. This is the 'spans my whole taste' guarantee."""
+    from peaks.cache import EmbeddingCache
+
+    svc, cfg = _service(tmp_path)
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    cfg.modeling.dir = str(tmp_path / "models")
+
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    A = np.array([1, 0, 0, 0], dtype="float32")
+    B = np.array([0, 1, 0, 0], dtype="float32")
+    mid = np.array([1, 1, 0, 0], dtype="float32") / np.sqrt(2.0)  # 45° between A and B
+    t0 = np.array([0.0], dtype="float32")
+    # two loved moments, one in each cluster; three held-out test scenes
+    cache.save("loveA", "dinov2", t0, np.stack([A]), meta={"scene_id": "10"})
+    cache.save("loveB", "dinov2", t0, np.stack([B]), meta={"scene_id": "11"})
+    cache.save("testA", "dinov2", t0, np.stack([A]), meta={"scene_id": "20"})
+    cache.save("testB", "dinov2", t0, np.stack([B]), meta={"scene_id": "21"})
+    cache.save("mid", "dinov2", t0, np.stack([mid]), meta={"scene_id": "22"})
+
+    monkeypatch.setattr(svc, "client", lambda: _NoMarkerClient())  # thumbs are the only taste
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"u/{sid}")
+
+    # love one moment in each cluster — no trained model, so scoring uses modes
+    svc.add_label("loveA", 0.0, 1)
+    svc.add_label("loveB", 0.0, 1)
+
+    r = svc.board_pool(count=1000, per_scene=1, min_score=0.0)
+    assert r["scored_by"] == "modes"
+    best = {str(h.scene_id): h.score for h in r["hits"]}
+    # both distinct interests beat their midpoint — impossible for one centroid
+    assert best["20"] > best["22"] and best["21"] > best["22"]
+    assert best["20"] > 0.99 and best["21"] > 0.99  # each sits on its own mode
+
+    # the diversify path (pool > count) runs on real vectors and returns `count`
+    d = svc.board_pool(count=2, per_scene=1, min_score=0.0, seed=1)
+    assert len(d["hits"]) == 2 and d["scored_by"] == "modes"
+
+
 def test_taste_metrics_distribution_and_bands(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
