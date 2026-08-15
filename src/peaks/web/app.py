@@ -864,15 +864,55 @@ def create_app(cfg=None):
             return FileResponse(page)
         return JSONResponse({"peaks": "running", "ui": "not built"})
 
+    @app.get("/api/memory")
+    def memory():
+        """RSS vs the watchdog's soft limit (for diagnosing OOMs)."""
+        return service.memory_status()
+
+    @app.post("/api/memory/shed")
+    def memory_shed(drop_indexes: bool = True):
+        """Manually shed caches (and idle indexes) and trim — the watchdog's action."""
+        return service.shed_memory(drop_indexes=drop_indexes)
+
     # --- scheduler (recurring incremental embeds) ---------------------------
 
     watch_seconds = service.cfg.schedule.embed_seconds
     if watch_seconds and watch_seconds > 0:
         _start_scheduler(app, service, jobs, watch_seconds)
 
+    _start_memwatch(app, service)
+
     app.state.service = service
     app.state.jobs = jobs
     return app
+
+
+def _start_memwatch(app, service: Service) -> None:
+    """Watch RSS against a soft limit (auto from the cgroup, or PEAKS_MEM_LIMIT_MB)
+    and shed caches/idle indexes when it's exceeded, before the OOM killer fires."""
+    from . import memwatch
+
+    limit = memwatch.soft_limit_bytes()
+    interval = memwatch.check_seconds()
+    if not limit or interval <= 0:
+        return  # no detectable limit (or disabled) → nothing to police against
+
+    stop = threading.Event()
+    soft = int(limit * 0.9)  # nudge caches out a little before the hard soft-limit
+
+    def _loop():
+        while not stop.wait(interval):
+            try:
+                rss = memwatch.rss_bytes()
+                if rss >= limit:
+                    service.shed_memory(drop_indexes=True)
+                elif rss >= soft:
+                    service.shed_memory(drop_indexes=False)
+            except Exception:  # noqa: BLE001 — a watchdog must never crash the app
+                pass
+
+    threading.Thread(target=_loop, daemon=True, name="peaks-memwatch").start()
+    app.state._memwatch_stop = stop
 
 
 def _start_scheduler(app, service: Service, jobs: JobManager, seconds: float):

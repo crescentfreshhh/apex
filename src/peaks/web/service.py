@@ -888,6 +888,58 @@ class Service:
                 self._index.clear()
             else:
                 self._index.pop(model, None)
+        from . import memwatch  # freeing a whole-library matrix → return it to the OS
+
+        memwatch.malloc_trim()
+
+    # --- memory self-policing ------------------------------------------------
+
+    def memory_status(self) -> dict:
+        """RSS vs the watchdog's soft limit, for the /api/memory readout."""
+        from . import memwatch
+
+        rss = memwatch.rss_bytes()
+        limit = memwatch.soft_limit_bytes()
+        with self._index_lock:
+            resident = sorted(self._index.keys())
+        return {
+            "rss_mb": round(rss / 1048576, 1),
+            "limit_mb": round(limit / 1048576, 1) if limit else None,
+            "pct": round(100 * rss / limit, 1) if limit else None,
+            "indexes": resident,
+        }
+
+    def shed_memory(self, drop_indexes: bool = True) -> dict:
+        """Release derived caches (and, if asked, idle model indexes) and hand the
+        freed pages back to the OS. The watchdog calls this under memory pressure;
+        everything shed here rebuilds lazily on next use. Returns a small report."""
+        import gc
+
+        from . import memwatch
+
+        before = memwatch.rss_bytes()
+        self._invalidate_taste_caches()          # taste + board score/universe caches
+        with self._meta_lock:
+            self._meta = {}
+        self._pool = None
+        self._vocab_cache = None
+        self._perf_stats_cache = None
+        self._perf_centroids = {}
+        dropped: list[str] = []
+        if drop_indexes:
+            keep = self._model_name()            # the model the board/For You needs
+            with self._index_lock:
+                for m in [m for m in self._index if m != keep]:
+                    self._index.pop(m, None)
+                    dropped.append(m)
+        gc.collect()
+        memwatch.malloc_trim()
+        after = memwatch.rss_bytes()
+        return {
+            "freed_mb": round(max(0, before - after) / 1048576, 1),
+            "rss_mb": round(after / 1048576, 1),
+            "dropped_indexes": dropped,
+        }
 
     def search_by_frame(
         self, key: str, time: float, top_k: int | None = 60, taste: bool = False,

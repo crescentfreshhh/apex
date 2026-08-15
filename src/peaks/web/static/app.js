@@ -772,6 +772,15 @@ function renderPerformers(rows) {
   }).join("");
   wirePerfHover(grid);
   startPerfRotation();
+  applyPerfFilter();   // keep the name filter applied across re-sorts/rebuilds
+}
+// live-filter the performer grid by the "Find a performer by name" box
+function applyPerfFilter() {
+  const q = ($("#perf-search")?.value || "").trim().toLowerCase();
+  document.querySelectorAll("#perf-grid .perf-card").forEach((card) => {
+    const name = (card.dataset.name || "").toLowerCase();
+    card.hidden = !!q && !name.includes(q);
+  });
 }
 // rotate every .perf-rot through its thumbs; one shared timer
 let perfRotTimer = null;
@@ -827,6 +836,7 @@ $("#btn-perf-search")?.addEventListener("click", async () => {
   const name = $("#perf-search").value.trim(); if (!name) return;
   await performerBestOf("", name);   // id blank → backend resolves by name
 });
+$("#perf-search")?.addEventListener("input", applyPerfFilter);   // type to narrow the grid
 $("#perf-search")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-perf-search").click(); });
 $("#perf-sort")?.addEventListener("change", () => { perfLoaded = false; openPerformers(); });
 $("#btn-perf-refresh")?.addEventListener("click", () => openPerformers(true));
