@@ -22,6 +22,7 @@ const State = {
   pool: null, // scene pool for shuffle
   searchMode: false,
   source: null, // current source id (for Refresh)
+  entryFloor: null, // taste floor when the source was entered (Refresh restores it, leaving a pivot)
   pivotApplyFloor: null, // how the current pivot re-runs on a floor change (null = floor N/A here)
   muted: false, // master mute; when off, hover-to-hear plays the tile under the cursor
   volume: 1, // volume for whichever single tile is audible
@@ -549,9 +550,14 @@ function wireControls() {
     });
   }
   document.getElementById("refresh-lib").addEventListener("click", () => {
-    if (State.pivot) { applyFloor(); return; }   // in a pivot, re-run THE PIVOT, never the stale source
     const src = State.source || document.getElementById("source").value;
-    loadSource(src, { refresh: true }); // rebuild pool/apexes from Stash
+    // From a pivot, Refresh returns to the board you entered with — restore the
+    // entry-time floor too, then rebuild that source (also picks up new scenes).
+    if ((State.pivot || State.pivotSeed) && State.entryFloor != null && State.entryFloor !== fyMinScore) {
+      fyMinScore = State.entryFloor;
+      syncFloorUI(); persistFloor(fyMinScore);
+    }
+    loadSource(src, { refresh: true });   // exits any pivot → rebuild the entering source
   });
   document.getElementById("save-board")?.addEventListener("click", saveCurrentBoard);
   document.getElementById("mute").addEventListener("click", toggleMute);
@@ -980,6 +986,7 @@ function syncFloorVisibility() {
 }
 async function loadSource(src, opts = {}) {
   State.source = src;
+  State.entryFloor = fyMinScore;   // remember the floor at entry; pivots never re-run this, so Refresh can restore it
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
   State.pivot = null; State.pivotSeed = null; State.pivotApplyFloor = null;
   document.getElementById("error").hidden = true;
