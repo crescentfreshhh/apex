@@ -738,13 +738,13 @@ async function openPerformers(refresh) {
     renderPerformers(d.performers || []);
   } catch (e) { grid.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
-// a photo that rotates through her best-moment thumbs + hover-plays her #1 clip
+// a single static (lazy-loaded) cover thumb + hover-plays her #1 clip
 function perfPhotoHTML(r) {
-  const thumbs = (r.top || []).map((t) => t.thumb).filter(Boolean);
+  const thumb = (r.top || []).map((t) => t.thumb).filter(Boolean)[0];
   const stream = (r.top && r.top[0] && r.top[0].stream) || "";
-  const img = thumbs.length
-    ? `<img class="perf-rot" data-thumbs='${esc(JSON.stringify(thumbs))}' data-i="0" src="${thumbs[0]}" onerror="this.src='/api/performer/${encodeURIComponent(r.id)}/image'" />`
-    : `<img src="/api/performer/${encodeURIComponent(r.id)}/image" onerror="this.style.display='none'" />`;
+  const img = thumb
+    ? `<img loading="lazy" src="${thumb}" onerror="this.src='/api/performer/${encodeURIComponent(r.id)}/image'" />`
+    : `<img loading="lazy" src="/api/performer/${encodeURIComponent(r.id)}/image" onerror="this.style.display='none'" />`;
   const hover = stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : "";
   return `<div class="perf-photo">${img}${hover}</div>`;
 }
@@ -771,7 +771,6 @@ function renderPerformers(rows) {
     </div>`;
   }).join("");
   wirePerfHover(grid);
-  startPerfRotation();
   applyPerfFilter();   // keep the name filter applied across re-sorts/rebuilds
 }
 // live-filter the performer grid by the "Find a performer by name" box
@@ -781,20 +780,6 @@ function applyPerfFilter() {
     const name = (card.dataset.name || "").toLowerCase();
     card.hidden = !!q && !name.includes(q);
   });
-}
-// rotate every .perf-rot through its thumbs; one shared timer
-let perfRotTimer = null;
-function startPerfRotation() {
-  if (perfRotTimer) return;
-  perfRotTimer = setInterval(() => {
-    document.querySelectorAll(".perf-rot").forEach((im) => {
-      if (im.matches(":hover") || im.closest(".perf-card:hover, .perf-hero:hover")) return;
-      let thumbs; try { thumbs = JSON.parse(im.dataset.thumbs); } catch { return; }
-      if (!thumbs || thumbs.length < 2) return;
-      const i = ((+im.dataset.i || 0) + 1) % thumbs.length;
-      im.dataset.i = i; im.src = thumbs[i];
-    });
-  }, 2500);
 }
 function wirePerfHover(container) {
   container.querySelectorAll(".perf-card, .perf-hero").forEach((card) => {
@@ -830,7 +815,7 @@ $("#perf-grid")?.addEventListener("click", (e) => {
   const { id, name } = card.dataset;
   if (e.target.closest(".perf-best")) performerBestOf(id, name);
   else if (e.target.closest(".perf-play")) playPerformerBoard(id, name);
-  else openPerformerDetail(id);   // card body → detail page
+  else openPerformerDetail(id);   // "Open" button or card body → detail page
 });
 $("#btn-perf-search")?.addEventListener("click", async () => {
   const name = $("#perf-search").value.trim(); if (!name) return;
@@ -880,7 +865,7 @@ function renderPerfDetail(d) {
     <div class="row"><button id="pd-back" class="ghost">← Performers</button></div>
     <div class="pd-head">
       <div class="perf-hero">
-        <img class="perf-rot" data-thumbs='${esc(JSON.stringify(thumbs))}' data-i="0" src="${thumbs[0] || `/api/performer/${encodeURIComponent(d.id)}/image`}" />
+        <img loading="lazy" src="${thumbs[0] || `/api/performer/${encodeURIComponent(d.id)}/image`}" />
         ${stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : ""}
       </div>
       <div class="pd-info">

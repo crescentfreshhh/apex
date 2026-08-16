@@ -633,8 +633,8 @@ function randomMoment() {
 // each moment once (weighted shuffle) before repeating, and refetch a fresh
 // batch — excluding scenes already shown — when the queue runs low. Endless.
 const FY_CLIP = 20;                      // clip seconds per For You tile
-const PIVOT_PER_SCENE = 40;              // performer board: moments sampled per scene, well-spaced
-const PIVOT_COUNT = 3000;                // performer board: max moments pulled (tab "Board" + pivot)
+const PIVOT_PER_SCENE = 100;             // performer board: moments sampled per scene, well-spaced
+const PIVOT_COUNT = 6000;                // performer board: max moments pulled (tab "Board" + pivot)
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
 let fyMinScore = 0;                        // the "taste floor" tightener (0 = off → every scene's peak)
 let fyTotals = null;                       // {scenes, moments, scored_by} for the current floor
