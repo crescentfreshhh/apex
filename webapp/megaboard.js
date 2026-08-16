@@ -17,6 +17,7 @@ const State = {
   big: null, // the tile currently enlarged
   hover: null, // last-hovered tile (keyboard actions target this / big)
   overTile: null, // tile the cursor is over RIGHT NOW (drives hover-to-hear)
+  menuTile: null, // tile whose right-click menu is open (keeps its audio playing while it's up)
   n: 3,
   shuffle: false, // whole-library random mode
   pool: null, // scene pool for shuffle
@@ -44,9 +45,12 @@ function focusedTile() {
 // cursor (unless something is enlarged, which owns audio itself, or master mute).
 // Moving off all tiles (overTile null) silences everything — instantly.
 function applyGridAudio() {
+  // the menu's tile keeps audio while its right-click menu is open (the cursor is
+  // over the menu, not the tile, so overTile goes null) — fall back to it.
+  const audible = State.overTile || State.menuTile;
   for (const t of State.tiles) {
     if (t === State.big || !t.video) continue;   // enlarged tile manages its own audio
-    const on = !State.muted && !State.big && t === State.overTile;
+    const on = !State.muted && !State.big && t === audible;
     t.video.muted = !on;
     if (on) t.video.volume = State.volume;
   }
@@ -772,9 +776,11 @@ function fyPick() {
 function closeTileMenu() {
   document.querySelectorAll(".mb-menu").forEach((m) => m.remove());
   document.removeEventListener("click", closeTileMenu, true);
+  if (State.menuTile) { State.menuTile = null; applyGridAudio(); }   // resume normal hover-to-hear
 }
 function openTileMenu(tile, x, y) {
   closeTileMenu();
+  State.menuTile = tile;   // keep this tile audible while its menu is up
   const apex = tile.apex;
   const t = (tile.video && isFinite(tile.video.currentTime)) ? tile.video.currentTime : apex.start;
   // deep-link out to the real Stash scene page, seeked to this moment (?t=seconds)
@@ -817,6 +823,7 @@ function openTileMenu(tile, x, y) {
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
   menu.style.left = Math.min(x, innerWidth - mw - 8) + "px";
   menu.style.top = Math.min(y, innerHeight - mh - 8) + "px";
+  applyGridAudio();   // keep this tile audible now, before mouseleave nulls overTile
   setTimeout(() => document.addEventListener("click", closeTileMenu, true), 0);
   // confirm apex status out-of-band; flip the toggle to "Remove" only if it is one
   checkApex(apex.scene_id, apex.start).then((is) => {
