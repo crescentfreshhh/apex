@@ -22,6 +22,7 @@ const State = {
   pool: null, // scene pool for shuffle
   searchMode: false,
   source: null, // current source id (for Refresh)
+  pivotApplyFloor: null, // how the current pivot re-runs on a floor change (null = floor N/A here)
   muted: false, // master mute; when off, hover-to-hear plays the tile under the cursor
   volume: 1, // volume for whichever single tile is audible
 };
@@ -496,8 +497,11 @@ const STEER = "right-click, or hover + ↑/↓ to rate · S apex · Space/M/R";
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
   if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
+    // the label already carries any ≥NN% floor; only add the "widens/tightens" hint
+    // where the floor actually applies (moment pivot or a floor-aware pivot).
+    const hint = (State.pivotSeed || State.pivotApplyFloor) ? " · floor widens/tightens" : "";
     document.getElementById("status").textContent =
-      `${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles · floor widens/tightens · ${STEER}`;
+      `${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles${hint} · ${STEER}`;
     return;
   }
   if (State.source === "foryou" && fyTotals) {
@@ -545,7 +549,7 @@ function wireControls() {
     });
   }
   document.getElementById("refresh-lib").addEventListener("click", () => {
-    if (State.pivotSeed) { applyFloor(); return; }   // in a pivot, re-run THIS moment, not the source
+    if (State.pivot) { applyFloor(); return; }   // in a pivot, re-run THE PIVOT, never the stale source
     const src = State.source || document.getElementById("source").value;
     loadSource(src, { refresh: true }); // rebuild pool/apexes from Stash
   });
@@ -656,12 +660,18 @@ function readPersistedFloor() {
 // re-apply the current floor to whatever is driving the board: a moment pivot
 // re-filters that moment; For You rebuilds its pool; static sources ignore it.
 function applyFloor() {
+  // a seeded moment pivot re-filters THAT moment
   if (State.pivotSeed) { moreLikeThis(State.pivotSeed.scene_id, State.pivotSeed.t); return; }
+  // any other pivot re-runs only how it registered — NEVER fall through to a source
+  // rebuild, which would swap the board out from under the pivot (the taste-floor bug).
+  if (State.pivot) { if (State.pivotApplyFloor) State.pivotApplyFloor(); return; }
   if (State.source === "performer") { loadSource("performer"); return; }
   if (State.source === "foryou") {
     fyReset();
     fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
+    return;
   }
+  // static sources (shuffle / collection / search / galaxy / tag:apex): floor is a no-op (and hidden)
 }
 
 function fyHitToApex(h) {
@@ -818,6 +828,7 @@ async function moreLikeThis(scene_id, t) {
   // not the original board. With a floor set, return every match above it (the
   // count grows/shrinks with the slider); with it off, a generous default.
   State.pivotSeed = { scene_id, t };
+  State.pivotApplyFloor = null;   // pivotSeed drives the re-run for this pivot
   syncFloorVisibility();
   flashStatus("finding similar…");
   try {
@@ -878,18 +889,26 @@ async function saveCurrentBoard() {
 }
 async function moreFromActress(scene_id) {
   State.pivotSeed = null;   // performer pivot isn't seeded by a single moment
+  // floor-aware, consistent with the Performer tab: 0% = her diverse span,
+  // above 0 = her taste-matching moments. Re-runs at the new floor on a slider change.
+  State.pivotApplyFloor = () => moreFromActress(scene_id);
   syncFloorVisibility();
   flashStatus("finding her scenes…");
   try {
-    const d = await api(`/api/board/performer?scene_id=${encodeURIComponent(scene_id)}`);
+    const qs = new URLSearchParams({ scene_id, count: 500, per_scene: 6 });
+    if (fyMinScore > 0) qs.set("min_score", fyMinScore);
+    else qs.set("spread", "true");
+    const d = await api("/api/performer/best?" + qs.toString());
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
-    if (!apexes.length) return flashStatus(d.performer ? `no other embedded scenes for ${d.performer}` : "no performer info for this scene");
-    pivotBoard(apexes, "🎬 " + (d.performer || "this actress"));
+    if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer info for this scene");
+    const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
+    pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + flr);
   } catch (e) { flashStatus(e.message); }
 }
 // similar moments to THIS one, but only across this scene's performer
 async function moreMomentSameActress(scene_id, t) {
   State.pivotSeed = null;
+  State.pivotApplyFloor = null;   // diverse coverage (score 0) — floor N/A, hidden
   syncFloorVisibility();
   flashStatus("finding her moments like this…");
   try {
@@ -903,6 +922,7 @@ async function moreMomentSameActress(scene_id, t) {
 // stay in this scene: a diverse spread of its moments
 async function moreInThisScene(scene_id) {
   State.pivotSeed = null;
+  State.pivotApplyFloor = null;   // single-scene spread (score 0) — floor N/A, hidden
   syncFloorVisibility();
   flashStatus("gathering this scene…");
   try {
@@ -920,15 +940,19 @@ function flashStatus(msg) {
 
 function syncFloorVisibility() {
   const fw = document.getElementById("floor-wrap");
-  // the floor drives For You (taste), a "more like this moment" pivot (how close
-  // to that moment), and the performer board (0% = her scenes spread, higher =
-  // her taste-matching moments) — hide it only for truly static sources.
-  if (fw) fw.hidden = !(State.source === "foryou" || State.source === "performer" || State.pivotSeed);
+  // Key on the PIVOT first — State.source is stale during a pivotBoard pivot. Show the
+  // floor only where it means something: a moment pivot (closeness), a floor-aware pivot
+  // (moreFromActress), or the taste sources For You / Performer. Hide it for the
+  // diverse-coverage pivots and all static sources.
+  const show = State.pivotSeed ? true
+    : State.pivot ? (State.pivotApplyFloor != null)
+    : (State.source === "foryou" || State.source === "performer");
+  if (fw) fw.hidden = !show;
 }
 async function loadSource(src, opts = {}) {
   State.source = src;
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
-  State.pivot = null; State.pivotSeed = null;
+  State.pivot = null; State.pivotSeed = null; State.pivotApplyFloor = null;
   document.getElementById("error").hidden = true;
   syncFloorVisibility();
   document.getElementById("status").textContent = "loading…";
