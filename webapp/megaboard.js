@@ -633,8 +633,8 @@ function randomMoment() {
 // each moment once (weighted shuffle) before repeating, and refetch a fresh
 // batch — excluding scenes already shown — when the queue runs low. Endless.
 const FY_CLIP = 20;                      // clip seconds per For You tile
-const PIVOT_PER_SCENE = 20;              // "more from this actress": moments sampled per scene (broad)
-const PIVOT_COUNT = 1500;                // "more from this actress": max moments pulled for the pivot
+const PIVOT_PER_SCENE = 40;              // performer board: moments sampled per scene, well-spaced
+const PIVOT_COUNT = 3000;                // performer board: max moments pulled (tab "Board" + pivot)
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
 let fyMinScore = 0;                        // the "taste floor" tightener (0 = off → every scene's peak)
 let fyTotals = null;                       // {scenes, moments, scored_by} for the current floor
@@ -996,7 +996,7 @@ async function loadSource(src, opts = {}) {
       pickApex = makeQueuePicker(State.apexes);
     } else if (src === "performer") {
       State.searchMode = true;
-      const qs = new URLSearchParams({ count: 500, per_scene: 6 });
+      const qs = new URLSearchParams({ count: PIVOT_COUNT, per_scene: PIVOT_PER_SCENE });
       if (boardPerformer?.id) qs.set("id", boardPerformer.id);
       else if (boardPerformer?.name) qs.set("name", boardPerformer.name);
       if (boardPerformer?.query) qs.set("query", boardPerformer.query);
