@@ -633,6 +633,8 @@ function randomMoment() {
 // each moment once (weighted shuffle) before repeating, and refetch a fresh
 // batch — excluding scenes already shown — when the queue runs low. Endless.
 const FY_CLIP = 20;                      // clip seconds per For You tile
+const PIVOT_PER_SCENE = 20;              // "more from this actress": moments sampled per scene (broad)
+const PIVOT_COUNT = 1500;                // "more from this actress": max moments pulled for the pivot
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
 let fyMinScore = 0;                        // the "taste floor" tightener (0 = off → every scene's peak)
 let fyTotals = null;                       // {scenes, moments, scored_by} for the current floor
@@ -887,22 +889,25 @@ async function saveCurrentBoard() {
     flashStatus(`saved "${name}" (${apexes.length} moments)`);
   } catch (e) { flashStatus(e.message); }
 }
-async function moreFromActress(scene_id) {
+// Broad by default: her FULL spread across every embedded scene, floor OFF —
+// pivoting shouldn't confine you to the curated taste feed. The floor slider stays
+// available as an optional tightener (tighten=true, via State.pivotApplyFloor).
+async function moreFromActress(scene_id, tighten = false) {
   State.pivotSeed = null;   // performer pivot isn't seeded by a single moment
-  // floor-aware, consistent with the Performer tab: 0% = her diverse span,
-  // above 0 = her taste-matching moments. Re-runs at the new floor on a slider change.
-  State.pivotApplyFloor = () => moreFromActress(scene_id);
+  State.pivotApplyFloor = () => moreFromActress(scene_id, true);
   syncFloorVisibility();
   flashStatus("finding her scenes…");
   try {
-    const qs = new URLSearchParams({ scene_id, count: 500, per_scene: 6 });
-    if (fyMinScore > 0) qs.set("min_score", fyMinScore);
-    else qs.set("spread", "true");
+    const useFloor = tighten && fyMinScore > 0;   // only tighten when you nudge the slider
+    const qs = new URLSearchParams({ scene_id, count: PIVOT_COUNT, per_scene: PIVOT_PER_SCENE });
+    if (useFloor) qs.set("min_score", fyMinScore);
+    else qs.set("spread", "true");   // broad, unfiltered span of her scenes
     const d = await api("/api/performer/best?" + qs.toString());
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer info for this scene");
-    const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
-    pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + flr);
+    const tag = useFloor ? ` ≥ ${Math.round(fyMinScore * 100)}%` : " · full spread";
+    pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + tag);
+    flashStatus(`🎬 ${apexes.length} moments from ${d.performer || "her"}${useFloor ? ` ≥ ${Math.round(fyMinScore * 100)}%` : " · full spread"}`);
   } catch (e) { flashStatus(e.message); }
 }
 // similar moments to THIS one, but only across this scene's performer
