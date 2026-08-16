@@ -1037,6 +1037,38 @@ class Service:
         except Exception:  # noqa: BLE001 — taste labeling must never break a save
             pass
 
+    def find_apex(
+        self, scene_id: str, time: float, tag: str | None = None, tol: float = 2.0
+    ) -> dict | None:
+        """The apex-tagged marker on `scene_id` nearest `time` (within `tol`
+        seconds), or None. Lets the board offer 'remove as apex' only for
+        moments that really are apexes."""
+        tag = tag or self.cfg.markers.tag_name
+        try:
+            markers = self.client().markers_for_scene(str(scene_id))
+        except Exception:  # noqa: BLE001 — Stash down / unknown scene
+            return None
+        best, best_d = None, float(tol)
+        for m in markers:
+            if m.get("primary_tag") != tag:
+                continue
+            d = abs(float(m["seconds"]) - float(time))
+            if d <= best_d:
+                best, best_d = m, d
+        return best
+
+    def remove_apex(
+        self, scene_id: str, time: float, tag: str | None = None, tol: float = 2.0
+    ) -> dict:
+        """Delete the apex marker on `scene_id` nearest `time` — the inverse of
+        create_apex. Returns {removed, marker_id}. The taste 👍 that the original
+        save recorded is left in place (undo it with 👎 if you want)."""
+        m = self.find_apex(scene_id, time, tag=tag, tol=tol)
+        if not m:
+            return {"removed": 0, "marker_id": None}
+        self.client().destroy_scene_markers([m["marker_id"]])
+        return {"removed": 1, "marker_id": m["marker_id"]}
+
     def search_text(
         self, text: str, top_k: int | None = 60, taste: bool = False,
         per_scene: int | None = 3, min_score: float | None = None,

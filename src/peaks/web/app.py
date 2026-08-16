@@ -725,7 +725,10 @@ def create_app(cfg=None):
         """Next batch for Taste Radio: top taste moments minus the scene_ids in
         `exclude` (comma-separated), so the stream never replays what you've seen."""
         seen = {s for s in exclude.split(",") if s}
-        r = service.recommend(top_k=count, exclude=seen)
+        # shuffle=True → rank-weighted random order (fresh entropy each fetch), so
+        # the stream varies every session instead of replaying the same top-ranked
+        # sequence; strong taste matches still stay likely near the front.
+        r = service.recommend(top_k=count, exclude=seen, shuffle=True)
         return {"items": _hit_payload(service, r["hits"])}
 
     # --- galaxy map ---------------------------------------------------------
@@ -816,6 +819,21 @@ def create_app(cfg=None):
             return {"marker": service.create_apex(scene_id, t, end=end, tag=tag)}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash marker create failed: {exc}")
+
+    @app.get("/api/scene/{scene_id}/apex")
+    def check_apex(scene_id: str, t: float, tag: str | None = None):
+        """Is the moment at `t` an apex? Powers the board's conditional
+        'remove as apex' menu item."""
+        m = service.find_apex(scene_id, t, tag=tag)
+        return {"is_apex": bool(m), "marker_id": (m or {}).get("marker_id"),
+                "seconds": (m or {}).get("seconds")}
+
+    @app.delete("/api/scene/{scene_id}/apex")
+    def remove_apex(scene_id: str, t: float, tag: str | None = None):
+        try:
+            return service.remove_apex(scene_id, t, tag=tag)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash marker delete failed: {exc}")
 
     @app.post("/api/scene/{scene_id}/o")
     def add_o(scene_id: str):

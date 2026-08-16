@@ -775,11 +775,14 @@ function openTileMenu(tile, x, y) {
   let stashHref = null;
   try { stashHref = new URL(apex.url, location.href).origin + "/scenes/" + apex.scene_id + "?t=" + Math.round(t); }
   catch { stashHref = null; }
+  // "Save as apex" flips to "Remove as apex" once we confirm this moment already
+  // is one (checked async below, anchored on the moment's canonical start).
+  const apexState = { is: false };
   const items = [
     // taste actions
     ["👍 More of this (my taste)", () => rateMoment(apex.scene_id, t, 1)],
     ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
-    ["★ Save as apex", () => saveApex(apex.scene_id, t)],
+    ["★ Save as apex", () => apexState.is ? removeApex(apex.scene_id, apex.start) : saveApex(apex.scene_id, t), "apex"],
     // explore more — narrowest to broadest scope
     ["🎞 More moments in this scene", () => moreInThisScene(apex.scene_id)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
@@ -797,9 +800,10 @@ function openTileMenu(tile, x, y) {
 
   const menu = document.createElement("div");
   menu.className = "mb-menu";
-  items.forEach(([label, fn]) => {
+  items.forEach(([label, fn, role]) => {
     const b = document.createElement("button");
     b.textContent = label;
+    if (role) b.dataset.role = role;
     b.addEventListener("click", (e) => { e.stopPropagation(); closeTileMenu(); fn(); });
     menu.appendChild(b);
   });
@@ -808,6 +812,13 @@ function openTileMenu(tile, x, y) {
   menu.style.left = Math.min(x, innerWidth - mw - 8) + "px";
   menu.style.top = Math.min(y, innerHeight - mh - 8) + "px";
   setTimeout(() => document.addEventListener("click", closeTileMenu, true), 0);
+  // confirm apex status out-of-band; flip the toggle to "Remove" only if it is one
+  checkApex(apex.scene_id, apex.start).then((is) => {
+    if (!is || !menu.isConnected) return;
+    apexState.is = true;
+    const b = menu.querySelector('[data-role="apex"]');
+    if (b) b.textContent = "✖ Remove as apex";
+  });
 }
 
 function apexFromHit(h) {
@@ -871,6 +882,19 @@ async function saveApex(scene_id, t) {
   try {
     await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "POST" });
     flashStatus("★ saved as apex @ " + fmt(t));
+  } catch (e) { flashStatus(e.message); }
+}
+// does an apex marker sit at this moment? (drives the menu's Save/Remove toggle)
+async function checkApex(scene_id, t) {
+  try {
+    const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`);
+    return !!(d && d.is_apex);
+  } catch { return false; }
+}
+async function removeApex(scene_id, t) {
+  try {
+    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "DELETE" });
+    flashStatus("✖ removed apex @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
 // Save whatever is currently driving the board — a "more like this" rabbit hole,

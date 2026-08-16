@@ -77,6 +77,19 @@ query FindSceneMarkers($filter: FindFilterType, $marker_filter: SceneMarkerFilte
 }
 """
 
+_SCENE_MARKERS_FOR_SCENE_QUERY = """
+query SceneMarkersForScene($id: ID!) {
+  findScene(id: $id) {
+    scene_markers {
+      id
+      seconds
+      end_seconds
+      primary_tag { name }
+    }
+  }
+}
+"""
+
 _SCENE_DETAILS_QUERY = """
 query SceneDetails($ids: [ID!]) {
   findScenes(ids: $ids, filter: {per_page: -1}) {
@@ -405,6 +418,25 @@ class StashClient:
             if not markers or seen >= result["count"]:
                 break
             page += 1
+
+    def markers_for_scene(self, scene_id: str) -> list[dict]:
+        """All scene markers on one scene, as
+        {marker_id, seconds, end_seconds, primary_tag}. Scene-scoped (one query),
+        so the board can cheaply ask 'is this moment an apex?' on right-click."""
+        data = self.execute(_SCENE_MARKERS_FOR_SCENE_QUERY, {"id": str(scene_id)})
+        scene = data.get("findScene") or {}
+        out = []
+        for m in scene.get("scene_markers") or []:
+            pt = m.get("primary_tag") or {}
+            out.append({
+                "marker_id": str(m["id"]),
+                "seconds": float(m.get("seconds") or 0.0),
+                "end_seconds": (
+                    float(m["end_seconds"]) if m.get("end_seconds") else None
+                ),
+                "primary_tag": pt.get("name", ""),
+            })
+        return out
 
     # --- writes (used in step 3) --------------------------------------------
 
