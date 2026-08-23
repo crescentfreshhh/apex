@@ -32,6 +32,19 @@ RUN apt-get update \
 RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 \
     --index-url https://download.pytorch.org/whl/cu128
 
+# Pre-bake the default model weights so a container update never re-downloads the
+# ~5GB (CLIP ViT-H-14 + DINOv2 ViT-L/14). Kept BEFORE the code COPY so editing src
+# doesn't invalidate this heavy layer. The entrypoint seeds /config from this copy
+# at start (a local copy, no network). Override the variants with --build-arg to
+# bake a different backbone/checkpoint.
+ARG BAKE_DINO_MODEL=dinov2_vitl14
+ARG BAKE_CLIP_MODEL=ViT-H-14
+ARG BAKE_CLIP_PRETRAINED=laion2b_s32b_b79k
+RUN pip install --no-cache-dir open_clip_torch \
+ && mkdir -p /opt/peaks/model-preload/torch /opt/peaks/model-preload/hf \
+ && TORCH_HOME=/opt/peaks/model-preload/torch HF_HOME=/opt/peaks/model-preload/hf \
+    python -c "import torch, open_clip; torch.hub.load('facebookresearch/dinov2', '$BAKE_DINO_MODEL'); open_clip.create_model_and_transforms('$BAKE_CLIP_MODEL', pretrained='$BAKE_CLIP_PRETRAINED')"
+
 WORKDIR /opt/peaks
 COPY pyproject.toml README.md config.example.toml ./
 COPY src ./src
