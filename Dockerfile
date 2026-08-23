@@ -32,19 +32,6 @@ RUN apt-get update \
 RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 \
     --index-url https://download.pytorch.org/whl/cu128
 
-# Pre-bake the default model weights so a container update never re-downloads the
-# ~5GB (CLIP ViT-H-14 + DINOv2 ViT-L/14). Kept BEFORE the code COPY so editing src
-# doesn't invalidate this heavy layer. The entrypoint seeds /config from this copy
-# at start (a local copy, no network). Override the variants with --build-arg to
-# bake a different backbone/checkpoint.
-ARG BAKE_DINO_MODEL=dinov2_vitl14
-ARG BAKE_CLIP_MODEL=ViT-H-14
-ARG BAKE_CLIP_PRETRAINED=laion2b_s32b_b79k
-RUN pip install --no-cache-dir open_clip_torch \
- && mkdir -p /opt/peaks/model-preload/torch /opt/peaks/model-preload/hf \
- && TORCH_HOME=/opt/peaks/model-preload/torch HF_HOME=/opt/peaks/model-preload/hf \
-    python -c "import torch, open_clip; torch.hub.load('facebookresearch/dinov2', '$BAKE_DINO_MODEL'); open_clip.create_model_and_transforms('$BAKE_CLIP_MODEL', pretrained='$BAKE_CLIP_PRETRAINED')"
-
 WORKDIR /opt/peaks
 COPY pyproject.toml README.md config.example.toml ./
 COPY src ./src
@@ -65,9 +52,14 @@ RUN chmod +x /entrypoint.sh
 # a very long embed ever shows gradual RSS creep, MALLOC_ARENA_MAX=2 can be set
 # as a container Variable — but expect a decode slowdown for it.
 
-# persist model downloads + all working data under the /config volume
+# All model caches under the /config volume so they download once and persist
+# across updates: TORCH_HOME (DINOv2/torch.hub), HF_HOME (open_clip via HF hub),
+# and XDG_CACHE_HOME so open_clip's ~/.cache/clip fallback for URL-hosted CLIP
+# checkpoints doesn't escape to the ephemeral /root/.cache and re-download.
 ENV TORCH_HOME=/config/torch \
-    HF_HOME=/config/hf
+    HF_HOME=/config/hf \
+    HF_HUB_CACHE=/config/hf/hub \
+    XDG_CACHE_HOME=/config/.cache
 
 ENV PEAKS_WEBAPP_DIR=/config/webapp
 WORKDIR /config

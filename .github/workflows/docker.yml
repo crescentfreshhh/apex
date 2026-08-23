@@ -45,3 +45,8 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+          # Reuse unchanged layers across runs so the heavy CUDA-torch/deps layers
+          # keep stable digests — a code-only update then ships only the small
+          # changed layers, so `docker pull` stays small.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
