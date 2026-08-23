@@ -810,6 +810,8 @@ function openTileMenu(tile, x, y) {
     ["💾 Save this board as a collection", () => saveCurrentBoard()],
   );
   if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
+  // always last: flag the whole scene for later cleanup by 1-starring it in Stash
+  items.push(["🗑 Mark for deletion (1★ in Stash)", () => markForDeletion(apex.scene_id)]);
 
   const menu = document.createElement("div");
   menu.className = "mb-menu";
@@ -909,6 +911,16 @@ async function removeApex(scene_id, t) {
   try {
     await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "DELETE" });
     flashStatus("✖ removed apex @ " + fmt(t));
+  } catch (e) { flashStatus(e.message); }
+}
+// flag a scene for later cleanup: set its Stash rating to 1★ (rating100 = 20)
+async function markForDeletion(scene_id) {
+  try {
+    await api(`/api/scene/${encodeURIComponent(scene_id)}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rating100: 20 }),
+    });
+    flashStatus("🗑 marked for deletion (1★) · #" + scene_id);
   } catch (e) { flashStatus(e.message); }
 }
 // Save whatever is currently driving the board — a "more like this" rabbit hole,
