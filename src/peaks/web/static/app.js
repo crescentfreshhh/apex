@@ -1,4 +1,4 @@
-/* Opus / peaks control panel + explorer. Vanilla JS, no build step. */
+/* Peaks control panel + explorer. Vanilla JS, no build step. */
 
 const $ = (s) => document.querySelector(s);
 const api = async (path, opts) => {
@@ -279,7 +279,7 @@ async function refreshReels() {
   try {
     const { reels } = await api("/api/reels");
     $("#reels").innerHTML = reels.length
-      ? "<div class='dim' style='margin:8px 0 4px'>Exported reels</div>" + reels.map((r) =>
+      ? "<div class='dim' style='margin:8px 0 4px'>Exported videos</div>" + reels.map((r) =>
           `<a class="reel-item" href="/api/reel/download?name=${encodeURIComponent(r.name)}" download>
              ⬇ ${esc(r.name)} <span class="dim">${(r.bytes / 1e6).toFixed(0)} MB</span></a>`).join("")
       : "";
@@ -330,7 +330,7 @@ function renderHits(hits, container, previewMax) {
         <button class="thumb up" title="Add to my taste (trains your model)">👍</button>
         <button class="thumb down" title="Not my taste">👎</button>
         <button data-key="${h.key}" data-t="${h.time}">Find similar</button>
-        <button class="apex-btn" title="Save as apex — Stash marker + adds to your taste">⚑ Apex</button>
+        <button class="apex-btn" title="Save moment — Stash marker + adds to your taste">★ Save</button>
         ${h.stream ? `<button class="play-btn">Play ▸</button>` : ""}
       </div>
     </div>`;
@@ -552,7 +552,7 @@ async function loadViewerMeta(sid) {
 }
 async function saveMoment(sid, t) {
   if (!sid) return toast("no scene id for this result", true);
-  try { await api(`/api/scene/${sid}/apex?t=${(t || 0).toFixed(2)}`, { method: "POST" }); toast("Saved apex + added to taste @ " + fmt(t)); }
+  try { await api(`/api/scene/${sid}/apex?t=${(t || 0).toFixed(2)}`, { method: "POST" }); toast("Saved moment + added to taste @ " + fmt(t)); }
   catch (e) { toast(e.message, true); }
 }
 let viewerIndex = -1;
@@ -696,7 +696,7 @@ $("#btn-save-collection").addEventListener("click", async () => {
   if (!bigSetOk(lastHits.length, "save")) return;
   const apexes = hitsToApexes(lastHits);
   if (!apexes.length) return;
-  const name = prompt("Name this collection:");
+  const name = prompt("Name this playlist:");
   if (!name) return;
   // remember how it was built (query + filters) for a future refresh
   const meta = currentContext.kind === "text"
@@ -714,7 +714,7 @@ async function refreshCollections() {
     const { collections } = await api("/api/collections");
     const el = $("#collections");
     el.innerHTML = collections.length
-      ? "<div class='dim' style='margin:8px 0 4px'>Collections</div>" + collections.map((c) =>
+      ? "<div class='dim' style='margin:8px 0 4px'>Playlists</div>" + collections.map((c) =>
           `<span class="coll-row" data-safe="${esc(c.safe)}" data-name="${esc(c.name)}">
             <a class="reel-item" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank">▶ ${esc(c.name)} <span class="dim">${c.count}</span></a>
             <button class="coll-rename" title="Rename">✏️</button>
@@ -802,7 +802,7 @@ async function performerBestOf(id, name) {
     const d = await api("/api/performer/best?" + qs.toString());
     renderHits(d.items, null, PREVIEW_MAX);
     $("#search-count").textContent = `${(d.items || []).length.toLocaleString()} best moments for ${d.performer || name}` +
-      (query ? ` · focus: ${query}` : "") + " — Save collection to keep them";
+      (query ? ` · focus: ${query}` : "") + " — Save playlist to keep them";
     if (!d.items.length) toast(`No embedded moments for ${name}`);
   } catch (e) { toast(e.message, true); }
 }
@@ -831,9 +831,9 @@ $("#btn-perf-roulette")?.addEventListener("click", async () => {
   catch (e) { toast(e.message, true); }
 });
 $("#btn-perf-hof")?.addEventListener("click", async () => {
-  if (!confirm("Auto-build best-of collections for your top 10 performers?")) return;
+  if (!confirm("Auto-build best-of playlists for your top 10 performers?")) return;
   $("#perf-status").textContent = "building hall of fame…";
-  try { const r = await api("/api/performers/hall-of-fame", { method: "POST" }); $("#perf-status").textContent = `🏆 created ${r.created.length} collections`; refreshCollections(); }
+  try { const r = await api("/api/performers/hall-of-fame", { method: "POST" }); $("#perf-status").textContent = `🏆 created ${r.created.length} playlists`; refreshCollections(); }
   catch (e) { toast(e.message, true); $("#perf-status").textContent = ""; }
 });
 
@@ -905,7 +905,7 @@ function sparkHTML(counts) {
 async function saveCollectionPrompt(items, defName) {
   const apexes = hitsToApexes(items);
   if (!apexes.length) return toast("nothing to save");
-  const name = prompt("Save collection:", defName); if (!name) return;
+  const name = prompt("Save playlist:", defName); if (!name) return;
   try { const r = await api("/api/collection", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, apexes }) }); toast(`Saved "${r.name}" (${r.count})`); refreshCollections(); }
   catch (e) { toast(e.message, true); }
 }
@@ -958,7 +958,7 @@ $("#collections")?.addEventListener("click", async (e) => {
     catch (err) { toast(err.message, true); }
   } else if (e.target.closest(".coll-del")) {
     e.preventDefault();
-    if (!confirm(`Delete collection "${name}"?`)) return;
+    if (!confirm(`Delete playlist "${name}"?`)) return;
     try { await api("/api/collection?name=" + encodeURIComponent(row.dataset.safe), { method: "DELETE" }); refreshCollections(); }
     catch (err) { toast(err.message, true); }
   } else if (e.target.closest(".coll-export")) {

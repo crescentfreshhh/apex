@@ -1,4 +1,4 @@
-/* Opus megaboard — a grid of looping "apex" tiles that continuously cycles.
+/* Peaks megaboard — a grid of looping moment tiles that continuously cycles.
  *
  * Click a tile to ENLARGE it in place: the video swaps to the whole scene so
  * you can scrub freely (this scene's other apexes show as chapter ticks), and a
@@ -357,7 +357,7 @@ function setupScrubber(tile) {
     const tick = document.createElement("span");
     tick.className = "mb-tick";
     tick.style.left = `${(a.start / dur) * 100}%`;
-    tick.title = `apex @ ${fmt(a.start)}`;
+    tick.title = `moment @ ${fmt(a.start)}`;
     tick.addEventListener("click", (e) => {
       e.stopPropagation();
       try { v.currentTime = a.start; } catch {}
@@ -498,7 +498,7 @@ function reshuffle() {
   State.tiles.forEach((t, i) => setTimeout(() => loadApex(t), i * STAGGER_MS));
 }
 
-const STEER = "right-click, or hover + ↑/↓ to rate · S apex · Space/M/R";
+const STEER = "right-click, or hover + ↑/↓ to rate · S save · Space/M/R";
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
   if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
@@ -522,7 +522,7 @@ function updateStatus() {
   }
   const label = State.shuffle
     ? `shuffle · ${(State.pool || []).length} scenes`
-    : `${State.apexes.length} ${State.searchMode ? "moments" : "apexes"}`;
+    : `${State.apexes.length} ${State.searchMode ? "moments" : "saved moments"}`;
   document.getElementById("status").textContent =
     `${pivot}${label} · ${State.tiles.length} tiles · ${STEER}`;
 }
@@ -788,14 +788,14 @@ function openTileMenu(tile, x, y) {
   let stashHref = null;
   try { stashHref = new URL(apex.url, location.href).origin + "/scenes/" + apex.scene_id + "?t=" + Math.round(t); }
   catch { stashHref = null; }
-  // "Save as apex" flips to "Remove as apex" once we confirm this moment already
-  // is one (checked async below, anchored on the moment's canonical start).
+  // "Save moment" flips to "Unsave moment" once we confirm this moment is already
+  // saved (checked async below, anchored on the moment's canonical start).
   const apexState = { is: false };
   const items = [
     // taste actions
     ["👍 More of this (my taste)", () => rateMoment(apex.scene_id, t, 1)],
     ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
-    ["★ Save as apex", () => apexState.is ? removeApex(apex.scene_id, apex.start) : saveApex(apex.scene_id, t), "apex"],
+    ["★ Save moment", () => apexState.is ? removeApex(apex.scene_id, apex.start) : saveApex(apex.scene_id, t), "apex"],
     // explore more — narrowest to broadest scope
     ["🎞 More moments in this scene", () => moreInThisScene(apex.scene_id)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
@@ -806,8 +806,8 @@ function openTileMenu(tile, x, y) {
   else items.push(["⏱ Extend (keep this scene playing)", () => extendTile(tile)]);
   if (stashHref) items.push(["📺 Open in Stash (this moment)", () => window.open(stashHref, "_blank", "noopener")]);
   items.push(
-    ["⭐ Save her best as a collection", () => saveHerBest(apex.scene_id)],
-    ["💾 Save this board as a collection", () => saveCurrentBoard()],
+    ["⭐ Save her best as a playlist", () => saveHerBest(apex.scene_id)],
+    ["💾 Save this board as a playlist", () => saveCurrentBoard()],
   );
   if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
   // always last: flag the whole scene for later cleanup by 1-starring it in Stash
@@ -833,7 +833,7 @@ function openTileMenu(tile, x, y) {
     if (!is || !menu.isConnected) return;
     apexState.is = true;
     const b = menu.querySelector('[data-role="apex"]');
-    if (b) b.textContent = "✖ Remove as apex";
+    if (b) b.textContent = "✖ Unsave moment";
   });
 }
 
@@ -878,7 +878,7 @@ async function saveHerBest(scene_id) {
   catch (e) { return flashStatus(e.message); }
   const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
   if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer here");
-  const name = prompt(`Save ${d.performer || "her"}'s best as a collection:`, (d.performer || "performer") + " — best of");
+  const name = prompt(`Save ${d.performer || "her"}'s best as a playlist:`, (d.performer || "performer") + " — best of");
   if (!name) return;
   try {
     await api("/api/collection", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, apexes }) });
@@ -897,7 +897,7 @@ async function rateMoment(scene_id, t, label) {
 async function saveApex(scene_id, t) {
   try {
     await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "POST" });
-    flashStatus("★ saved as apex @ " + fmt(t));
+    flashStatus("★ saved moment @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
 // does an apex marker sit at this moment? (drives the menu's Save/Remove toggle)
@@ -910,7 +910,7 @@ async function checkApex(scene_id, t) {
 async function removeApex(scene_id, t) {
   try {
     await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "DELETE" });
-    flashStatus("✖ removed apex @ " + fmt(t));
+    flashStatus("✖ unsaved moment @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
 // flag a scene for later cleanup: set its Stash rating to 1★ (rating100 = 20)
@@ -929,7 +929,7 @@ async function saveCurrentBoard() {
   const apexes = (State.apexes || []).filter((a) => a.scene_id && (a.url || a.stream));
   if (!apexes.length) return flashStatus("nothing on the board to save yet");
   const base = State.pivot ? State.pivot.replace(/^[^A-Za-z0-9]+/, "").trim() : "megaboard";
-  const name = prompt(`Save these ${apexes.length} moments as a collection:`, base + " — collection");
+  const name = prompt(`Save these ${apexes.length} moments as a playlist:`, base + " — playlist");
   if (!name) return;
   try {
     await api("/api/collection", {
@@ -1099,7 +1099,7 @@ async function loadSource(src, opts = {}) {
       const pl = await api("/api/board/apexes?tag=" + encodeURIComponent(tag));
       State.apexes = pl.apexes || [];
       if (!State.apexes.length)
-        return showError(`No apexes for tag "${tag}".\n\nMark some with ⚑ Apex in Explore — or pick "Shuffle" above to play everything.`);
+        return showError(`No saved moments for tag "${tag}".\n\nSave some with ★ in Explore — or pick "Shuffle" above to play everything.`);
       pickApex = makePicker(State.apexes);
     }
   } catch (err) {
@@ -1113,9 +1113,9 @@ async function initSources(initial) {
   const opts = [`<option value="shuffle">Shuffle — whole library</option>`];
   try {
     const s = await api("/api/board/sources");
-    opts.push(`<option value="tag:${esc(s.tag)}">Apexes: ${esc(s.tag)}</option>`);
+    opts.push(`<option value="tag:${esc(s.tag)}">Saved moments</option>`);
     for (const c of s.collections || [])
-      opts.push(`<option value="collection:${esc(c.safe)}">Collection: ${esc(c.name)} (${c.count})</option>`);
+      opts.push(`<option value="collection:${esc(c.safe)}">Playlist: ${esc(c.name)} (${c.count})</option>`);
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);

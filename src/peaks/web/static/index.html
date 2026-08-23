@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Opus — peaks</title>
+  <title>Peaks</title>
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <header id="topbar">
-    <span class="brand">Opus</span>
+    <span class="brand">Peaks</span>
     <nav>
       <button class="tab active" data-view="foryou">For You</button>
       <button class="tab" data-view="galaxy">Galaxy</button>
@@ -151,7 +151,7 @@
 
     <div class="panel">
       <h2>Score</h2>
-      <p class="dim">Find your apexes and write markers into Stash. Run once with
+      <p class="dim">Find your peaks and write markers into Stash. Run once with
         <em>write</em> off first — the log shows a calibration read-out (your
         actual score distribution) so you can set thresholds that match.</p>
       <div class="row">
@@ -188,7 +188,7 @@
     <div class="panel">
       <h2>For You <span class="tag-exp">experimental</span></h2>
       <p class="dim">A recommender built from your own taste — the average of every
-        moment you've saved as an apex or thumbed up, matched against your whole
+        moment you've saved or thumbed up, matched against your whole
         library. No query needed. The more you save and rate, the sharper it gets.</p>
       <div class="row">
         <button id="btn-foryou-rebuild" class="primary">Rebuild from my taste</button>
@@ -236,13 +236,13 @@
       <h2>Manage taste</h2>
       <p class="dim">Undo a bad session, or wipe your learned taste to start fresh.
         This deletes your 👍/👎 ratings (and retrains on what's left) — your saved
-        apex moments in Stash are <strong>not</strong> touched.</p>
+        saved moments in Stash are <strong>not</strong> touched.</p>
       <div class="row">
         <button class="ghost" data-del="20">Undo last 20 min</button>
         <button class="ghost" data-del="60">Undo last 1 hr</button>
         <button class="ghost" data-del="360">Undo last 6 hr</button>
         <button class="danger" data-del="all">Delete entire taste profile</button>
-        <button class="danger" data-del="all" data-purge="1">🔥 Full reset (also delete ⭐ apexes)</button>
+        <button class="danger" data-del="all" data-purge="1">🔥 Full reset (also delete ⭐ saved moments)</button>
         <span id="taste-manage-status" class="dim"></span>
       </div>
     </div>
@@ -284,7 +284,7 @@
       <input id="q" placeholder="Describe a moment… use -word to exclude (e.g. beach -crowd)" />
       <button id="btn-text" class="primary">Search</button>
       <button id="btn-board-search" class="ghost" disabled title="Open the current results as a megaboard, each tile starting at its matched moment">Play on megaboard</button>
-      <button id="btn-save-collection" class="ghost" disabled title="Save the current results as a named collection you can reopen">Save collection</button>
+      <button id="btn-save-collection" class="ghost" disabled title="Save the current results as a named playlist you can reopen">Save playlist</button>
       <label class="check" title="Re-rank results by your trained taste"><input type="checkbox" id="taste-toggle" /> ★ My taste</label>
       <button id="btn-train" class="ghost" title="Train your preference model from the thumbs you've given">Train</button>
       <button id="toggle-search-adv" class="ghost">Options ▾</button>
@@ -315,7 +315,7 @@
       <h2>Performers</h2>
       <p class="dim">How the performers in your library stack up by the moments they
         generate — and, once you've built a taste, how on-taste those moments are. Build a
-        collection of anyone's <strong>best moments</strong> in one click.</p>
+        playlist of anyone's <strong>best moments</strong> in one click.</p>
       <div class="row">
         <input id="perf-search" placeholder="Find a performer by name…" />
         <button id="btn-perf-search" class="primary">Best of →</button>
@@ -329,7 +329,7 @@
           <option value="engagement">Engagement ⊙</option>
         </select>
         <button id="btn-perf-roulette" class="ghost" title="Surprise me — a random on-taste performer, endless on the board">🎲 Roulette</button>
-        <button id="btn-perf-hof" class="ghost" title="Auto-build best-of collections for your top performers">🏆 Hall of Fame</button>
+        <button id="btn-perf-hof" class="ghost" title="Auto-build best-of playlists for your top performers">🏆 Hall of Fame</button>
         <button id="btn-perf-refresh" class="ghost" title="Re-scan the library from Stash">↻ Rebuild</button>
         <span id="perf-status" class="dim"></span>
       </div>
@@ -344,7 +344,7 @@
     <div class="panel">
       <h2>📈 Statistics</h2>
       <p class="dim">How your library is growing and what your taste is made of. A
-        <em>peak</em> is a scored apex segment — a high-scoring stretch the algorithm
+        <em>peak</em> is a scored standout — a high-scoring stretch the algorithm
         extracts from a scene. Each card with a ▶ plays its moments on the megaboard as
         its own playlist.</p>
       <div class="row">
@@ -359,10 +359,10 @@
   <section id="board" class="view">
     <div class="panel">
       <h2>Megaboard</h2>
-      <p class="dim">Builds the grid's playlist from your <code>apex</code> markers,
-        then opens the board in its own optimized page. Scoring with <em>write</em>
-        rebuilds this automatically — use this button to refresh on demand or for
-        another tag.</p>
+      <p class="dim">Builds the grid's playlist from your saved moments (the
+        <code>apex</code> tag markers), then opens the board in its own optimized page.
+        Scoring with <em>write</em> rebuilds this automatically — use this button to
+        refresh on demand or for another tag.</p>
       <div class="row">
         <input id="board-tag" placeholder="tag (default: apex)" />
         <button id="btn-playlist" class="primary">Build megaboard</button>
@@ -372,10 +372,10 @@
       <pre id="playlist-log" class="log" hidden></pre>
       <div id="collections" class="reels"></div>
 
-      <p class="dim" style="margin-top:16px">Or stitch the tag's apexes into a single
-        highlight reel (fast stream-copy from the source files).</p>
+      <p class="dim" style="margin-top:16px">Or stitch the tag's saved moments into a
+        single highlight video (fast stream-copy from the source files).</p>
       <div class="row">
-        <button id="btn-reel" class="primary">Export reel</button>
+        <button id="btn-reel" class="primary">Export video</button>
         <button id="btn-reel-stop" class="ghost" hidden>Stop</button>
         <span id="reel-status" class="dim"></span>
       </div>
@@ -403,7 +403,7 @@
         <span id="viewer-time" class="dim">0:00 / 0:00</span>
         <button id="viewer-similar" class="ghost" title="Find more moments like the one on screen right now">⟳ Similar from here</button>
         <button id="viewer-dupes" class="ghost" title="Find near-identical moments in other scenes">⧉ Dupes</button>
-        <button id="viewer-save" class="primary" title="Save this moment as an apex in Stash — also adds it to your taste (s)">★ Save moment</button>
+        <button id="viewer-save" class="primary" title="Save this moment in Stash — also adds it to your taste (s)">★ Save moment</button>
       </div>
     </div>
     <aside class="viewer-side">
