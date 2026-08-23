@@ -573,9 +573,9 @@ def create_app(cfg=None):
         return service.taste_visual(per_mode=per_mode)
 
     @app.get("/api/taste/labels")
-    def taste_labels(profile: str | None = None):
-        """Your taste labels as editable frames, for the For You label editor."""
-        return service.list_labels(profile)
+    def taste_labels(profile: str | None = None, limit: int | None = None, offset: int = 0):
+        """Your taste labels as editable frames (paginated), for the For You editor."""
+        return service.list_labels(profile, limit=limit, offset=offset)
 
     @app.delete("/api/label")
     def remove_label(t: float, key: str | None = None,

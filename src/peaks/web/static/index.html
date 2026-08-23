@@ -198,7 +198,8 @@
           <input type="checkbox" id="foryou-recent" /> lately only</label>
         <span id="foryou-status" class="dim"></span>
       </div>
-      <div id="foryou-words" class="fy-words"></div>
+      <div class="row" style="margin-top:12px"><button id="toggle-taste-visual" class="ghost">▸ What you like</button></div>
+      <div id="foryou-words" class="fy-words" hidden></div>
     </div>
 
     <div class="panel" id="swipe-panel">
@@ -240,10 +241,12 @@
         frames after retraining — you're not fixing one frame, you're steering a neighborhood.</p>
       <div class="row">
         <span id="taste-labels-counts" class="dim"></span>
+        <button id="toggle-taste-labels" class="ghost">▸ your labels</button>
         <button id="btn-taste-train" class="primary" title="Retrain so your edits take effect">Train now</button>
-        <button id="btn-taste-labels-refresh" class="ghost">↻ Refresh</button>
+        <button id="btn-taste-labels-refresh" class="ghost" hidden>↻ Refresh</button>
       </div>
-      <div id="taste-labels" class="taste-labels"></div>
+      <div id="taste-labels" class="taste-labels" hidden></div>
+      <div class="row"><button id="btn-taste-labels-more" class="ghost" hidden>Load more</button></div>
     </div>
 
     <div class="panel" id="taste-manage">

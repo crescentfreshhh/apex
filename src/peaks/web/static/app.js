@@ -1045,31 +1045,48 @@ async function loadTasteVisual() {
          </span>`).join("") + `</div>`).join("");
   } catch { el.innerHTML = ""; }
 }
-// the editable label gallery: your explicit 👍/👎, flip or remove
-async function loadTasteLabels() {
+// cheap header counts (no frame decodes) — shown even while the gallery is collapsed
+async function loadLabelCounts() {
+  const el = $("#taste-labels-counts");
+  if (!el) return;
+  try { const d = await api("/api/labels"); el.textContent = `${d.positive}👍 / ${d.negative}👎`; }
+  catch { /* leave as-is */ }
+}
+// the editable label gallery: your explicit 👍/👎, flip or remove — paginated so
+// it doesn't decode every thumbnail at once. reset=true reloads from the top.
+const LABELS_PAGE = 30;
+let labelsOffset = 0;
+async function loadTasteLabels(reset = true) {
   const el = $("#taste-labels");
   if (!el) return;
-  el.innerHTML = '<span class="dim">Loading…</span>';
+  if (reset) { labelsOffset = 0; el.innerHTML = '<span class="dim">Loading…</span>'; }
   try {
-    const d = await api("/api/taste/labels");
+    const d = await api(`/api/taste/labels?limit=${LABELS_PAGE}&offset=${labelsOffset}`);
     const cnt = $("#taste-labels-counts");
     if (cnt) cnt.textContent = `${d.positive}👍 / ${d.negative}👎`;
-    if (!d.labels.length) { el.innerHTML = '<span class="dim">No labels yet — save moments (★) or thumb some up.</span>'; return; }
-    el.innerHTML = d.labels.map((l) =>
+    if (reset) el.innerHTML = "";
+    if (!d.total) { if (reset) el.innerHTML = '<span class="dim">No labels yet — save moments (★) or thumb some up.</span>'; return; }
+    el.insertAdjacentHTML("beforeend", d.labels.map((l) =>
       `<span class="taste-label ${l.label ? "pos" : "neg"}" data-key="${esc(l.key)}" data-t="${l.time}" data-sid="${esc(l.scene_id || "")}" data-label="${l.label}">
          <img loading="lazy" src="${l.thumb}" onerror="this.closest('.taste-label').style.opacity=.25" />
          <button class="tl-flip" title="Flip 👍/👎">${l.label ? "👍" : "👎"}</button>
          <button class="tl-x" title="Remove this label">✕</button>
-       </span>`).join("");
-  } catch (e) { el.innerHTML = `<span class="dim">${esc(e.message)}</span>`; }
+       </span>`).join(""));
+    labelsOffset += d.labels.length;
+    const more = $("#btn-taste-labels-more");
+    if (more) more.hidden = labelsOffset >= d.total;
+  } catch (e) { if (reset) el.innerHTML = `<span class="dim">${esc(e.message)}</span>`; }
 }
+// collapse handles for the two lazy taste panels (assigned at module load)
+let tasteVisualCollapse = null, tasteLabelsCollapse = null;
 // retrain so label edits take effect (shared by the swipe trainer + label editor)
 async function trainNow(btn) {
   if (btn) btn.disabled = true;
   try {
     const s = await api("/api/train", { method: "POST" });
     toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
-    loadForYou(false); loadTasteVisual();
+    loadForYou(false); loadLabelCounts();
+    tasteVisualCollapse?.reloadIfOpen();   // refresh only the panels you're actually viewing
   } catch (e) { toast(e.message, true); }
   if (btn) btn.disabled = false;
 }
@@ -1094,18 +1111,44 @@ $("#taste-labels")?.addEventListener("click", async (e) => {
       cell.dataset.label = String(next);
       cell.classList.toggle("pos", !!next); cell.classList.toggle("neg", !next);
       cell.querySelector(".tl-flip").textContent = next ? "👍" : "👎";
-      loadTasteLabels();   // refresh counts
+      loadLabelCounts();   // cheap counts refresh (no re-decode of the page)
     } catch (err) { toast(err.message, true); }
   } else if (e.target.closest(".tl-x")) {
     try {
       await api("/api/label?" + new URLSearchParams({ key, t }), { method: "DELETE" });
       cell.remove();
-      loadTasteLabels();
+      loadLabelCounts();
     } catch (err) { toast(err.message, true); }
   }
 });
 $("#btn-taste-train")?.addEventListener("click", (e) => trainNow(e.currentTarget));
-$("#btn-taste-labels-refresh")?.addEventListener("click", () => loadTasteLabels());
+$("#btn-taste-labels-refresh")?.addEventListener("click", () => loadTasteLabels(true));
+$("#btn-taste-labels-more")?.addEventListener("click", () => loadTasteLabels(false));
+
+// collapsible sections with a lazy first-open loader + remembered state
+function wireCollapse(btnSel, panelSel, opts = {}) {
+  const btn = $(btnSel), panel = $(panelSel);
+  if (!btn || !panel) return null;
+  let loaded = false;
+  const set = (open) => {
+    panel.hidden = !open;
+    btn.textContent = (open ? "▾ " : "▸ ") + (opts.label || "");
+    try { if (opts.storeKey) localStorage.setItem(opts.storeKey, open ? "1" : "0"); } catch { /* ignore */ }
+    if (opts.onToggle) opts.onToggle(open);
+    if (open && !loaded) { loaded = true; opts.onFirstOpen?.(); }
+  };
+  btn.addEventListener("click", () => set(panel.hidden));
+  let remembered = false;
+  try { remembered = opts.storeKey ? localStorage.getItem(opts.storeKey) === "1" : false; } catch { /* ignore */ }
+  set(!!remembered);
+  return { isOpen: () => !panel.hidden, reloadIfOpen: () => { if (!panel.hidden) opts.onFirstOpen?.(); } };
+}
+tasteVisualCollapse = wireCollapse("#toggle-taste-visual", "#foryou-words",
+  { label: "What you like", storeKey: "fy_show_visual", onFirstOpen: loadTasteVisual });
+tasteLabelsCollapse = wireCollapse("#toggle-taste-labels", "#taste-labels",
+  { label: "your labels", storeKey: "fy_show_labels",
+    onFirstOpen: () => loadTasteLabels(true),
+    onToggle: (open) => { const r = $("#btn-taste-labels-refresh"); if (r) r.hidden = !open; } });
 
 // --- Taste bands: colour For You tiles by how on-taste each moment is --------
 let tasteBands = null;   // [{pct,cutoff}] high→low, for tile coloring
@@ -1328,13 +1371,15 @@ async function swipeRate(label) {
 async function openForYou() {
   loadNextSwipe();
   loadPicks();
-  await loadForYou(true);   // rebuild on open so fresh saves/thumbs count
-  loadTasteVisual();
-  loadTasteLabels();        // the editable 👍/👎 gallery
-  loadTasteBands();         // colours the For You tiles by taste band
+  await loadForYou(false);   // cached taste = fast open; "Rebuild" forces a fresh rebuild
+  loadTasteBands();          // colours the For You tiles by taste band (cheap)
+  loadLabelCounts();         // header counts only; the taste panels load frames on expand
 }
-$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteVisual(); loadTasteBands(); });
-$("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteVisual(); });
+$("#btn-foryou-rebuild")?.addEventListener("click", () => {
+  loadForYou(true); loadTasteBands(); loadLabelCounts();
+  tasteVisualCollapse?.reloadIfOpen(); tasteLabelsCollapse?.reloadIfOpen();
+});
+$("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); tasteVisualCollapse?.reloadIfOpen(); });
 // the For You megaboard pulls its own big, varied pool from /api/foryou/board
 // (endless, non-repeating). Carry the shared taste floor (set on the Statistics
 // tab or the board itself) so it opens as selective as you set it.

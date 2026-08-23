@@ -2391,19 +2391,23 @@ class Service:
         arr, _ = self._taste_sources(model)
         return {"modes": out, "sources": int(arr.shape[0])}
 
-    def list_labels(self, profile: str | None = None) -> dict:
-        """Your taste labels as editable frames — newest first — so the For You
-        label editor can show and prune them. `{labels:[{key,time,scene_id,label,
-        thumb}], positive, negative, has_model}`."""
+    def list_labels(
+        self, profile: str | None = None, limit: int | None = None, offset: int = 0
+    ) -> dict:
+        """Your taste labels as editable frames — newest first, paginated so the
+        For You editor loads on demand instead of decoding every thumbnail at once.
+        `{labels:[{key,time,scene_id,label,thumb}], total, positive, negative,
+        has_model}`."""
         profile = profile or self.cfg.markers.tag_name
         labs = sorted(self._label_store().for_profile(profile), key=lambda x: (x.ts or 0.0), reverse=True)
+        pos = sum(1 for lab in labs if lab.label == 1)
+        page = labs[offset:] if limit is None else labs[offset:offset + max(0, int(limit))]
         items = [{
             "key": lab.key, "time": round(float(lab.time), 2), "scene_id": lab.scene_id,
             "label": int(lab.label), "thumb": f"/api/frame?key={lab.key}&t={lab.time:g}",
-        } for lab in labs]
-        pos = sum(1 for lab in labs if lab.label == 1)
-        return {"labels": items, "positive": pos, "negative": len(labs) - pos,
-                "has_model": self.has_taste(profile)}
+        } for lab in page]
+        return {"labels": items, "total": len(labs), "positive": pos,
+                "negative": len(labs) - pos, "has_model": self.has_taste(profile)}
 
     def remove_label(self, key: str, time: float, profile: str | None = None) -> dict:
         """Delete one taste label (the editor's ×). Invalidates the taste caches
