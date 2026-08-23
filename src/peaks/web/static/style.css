@@ -278,6 +278,20 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
   font-size: 13px; opacity: .5; padding: 2px 4px; }
 .coll-row:hover .coll-rename, .coll-row:hover .coll-del { opacity: 1; }
 
+/* Playlists browser — cards with a cover frame */
+.pl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-top: 6px; }
+.pl-card.coll-row { display: block; margin: 0; }
+.pl-cover { position: relative; display: block; aspect-ratio: 16/10; border-radius: 10px; overflow: hidden;
+  background: var(--panel2); border: 1px solid var(--line); }
+.pl-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pl-cover:hover { border-color: var(--accent); }
+.pl-play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 26px; color: #fff; text-shadow: 0 1px 6px rgba(0,0,0,.8); opacity: .85; }
+.pl-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.pl-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-count { flex: none; }
+.pl-actions { margin-left: auto; flex: none; white-space: nowrap; }
+
 /* Performers leaderboard */
 .perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
 .perf-grid[hidden] { display: none; }  /* class display must not defeat the hidden attr */

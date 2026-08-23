@@ -714,13 +714,22 @@ async function refreshCollections() {
     const { collections } = await api("/api/collections");
     const el = $("#collections");
     el.innerHTML = collections.length
-      ? "<div class='dim' style='margin:8px 0 4px'>Playlists</div>" + collections.map((c) =>
-          `<span class="coll-row" data-safe="${esc(c.safe)}" data-name="${esc(c.name)}">
-            <a class="reel-item" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank">▶ ${esc(c.name)} <span class="dim">${c.count}</span></a>
-            <button class="coll-rename" title="Rename">✏️</button>
-            <button class="coll-export" title="Export to a video file">⬇</button>
-            <button class="coll-del" title="Delete">🗑</button>
-          </span>`).join("")
+      ? "<div class='dim' style='margin:8px 0 4px'>Playlists</div><div class='pl-grid'>" + collections.map((c) =>
+          `<div class="coll-row pl-card" data-safe="${esc(c.safe)}" data-name="${esc(c.name)}">
+            <a class="pl-cover" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank" title="Play on megaboard">
+              ${c.thumb ? `<img loading="lazy" src="${c.thumb}" onerror="this.style.display='none'" />` : ""}
+              <span class="pl-play">▶</span>
+            </a>
+            <div class="pl-meta">
+              <span class="pl-name" title="${esc(c.name)}">${esc(c.name)}</span>
+              <span class="dim pl-count">${c.count} moments</span>
+              <span class="pl-actions">
+                <button class="coll-rename" title="Rename">✏️</button>
+                <button class="coll-export" title="Export to a video file">⬇</button>
+                <button class="coll-del" title="Delete">🗑</button>
+              </span>
+            </div>
+          </div>`).join("") + "</div>"
       : "";
   } catch {}
 }
@@ -1002,7 +1011,7 @@ async function loadForYou(rebuild) {
     if (!d.items.length) {
       grid.innerHTML = "";
       $("#foryou-status").textContent =
-        "No taste yet — save some apexes (⚑) or thumb up moments, then rebuild.";
+        "No taste yet — save some moments (★) or thumb up moments, then rebuild.";
       return;
     }
     $("#foryou-status").textContent =

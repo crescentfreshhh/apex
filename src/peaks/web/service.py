@@ -607,13 +607,28 @@ class Service:
         if not d.is_dir():
             return []
         out = []
+        model = self._model_name()
         for p in sorted(d.glob("*.json")):
             try:
                 j = json.loads(p.read_text())
             except Exception:
                 continue
+            apexes = j.get("apexes") or []
+            thumb = None
+            for a in apexes[:4]:   # first embedded moment → a cover frame
+                sid = a.get("scene_id")
+                if sid is None:
+                    continue
+                try:
+                    key = self._key_for_scene(str(sid), model)
+                except Exception:  # noqa: BLE001
+                    key = None
+                if key:
+                    t = a.get("start", a.get("time", 0)) or 0
+                    thumb = f"/api/frame?key={key}&t={float(t):g}"
+                    break
             out.append({"name": j.get("name", p.stem), "safe": p.stem,
-                        "count": j.get("count", len(j.get("apexes", [])))})
+                        "count": j.get("count", len(apexes)), "thumb": thumb})
         return out
 
     def load_collection(self, name: str):
