@@ -16,6 +16,7 @@
       <button class="tab" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="performers">Performers</button>
+      <button class="tab" data-view="statistics">Statistics</button>
       <button class="tab" data-view="board">Megaboard</button>
     </nav>
     <span id="conn" class="dim"></span>
@@ -200,15 +201,6 @@
       <div id="foryou-words" class="fy-words"></div>
     </div>
 
-    <div class="panel" id="metrics-panel">
-      <h2>📊 Taste Metrics</h2>
-      <p class="dim">The % on each tile is how close that moment sits to your taste
-        average (a cosine, not a probability) — so it only means something <em>relative to
-        your own library</em>. Below is your whole-library distribution, the bands that
-        make a % readable, and how many moments/scenes clear a bar you set.</p>
-      <div id="metrics-body" class="dim">Reading your taste…</div>
-    </div>
-
     <div class="panel" id="swipe-panel">
       <h2>Swipe trainer <span class="tag-exp">active learning</span></h2>
       <p class="dim">The trainer shows you the frames it's <em>least sure</em> about —
@@ -345,6 +337,22 @@
     </div>
     <div id="perf-grid" class="perf-grid"></div>
     <div id="perf-detail" hidden></div>
+  </section>
+
+  <!-- STATISTICS -->
+  <section id="statistics" class="view">
+    <div class="panel">
+      <h2>📈 Statistics</h2>
+      <p class="dim">How your library is growing and what your taste is made of. A
+        <em>peak</em> is a scored apex segment — a high-scoring stretch the algorithm
+        extracts from a scene. Each card with a ▶ plays its moments on the megaboard as
+        its own playlist.</p>
+      <div class="row">
+        <button id="btn-stats-refresh" class="ghost" title="Recompute">↻ Refresh</button>
+        <span id="stats-status" class="dim"></span>
+      </div>
+    </div>
+    <div id="stats-body" class="dim">Crunching your library…</div>
   </section>
 
   <!-- MEGABOARD -->

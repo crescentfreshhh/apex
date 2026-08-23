@@ -650,6 +650,7 @@ let fyMinScore = 0;                        // the "taste floor" tightener (0 = o
 let fyTotals = null;                       // {scenes, moments, scored_by} for the current floor
 let boardSearch = null;                   // {q,min,per,neg,taste} when replaying a search
 let boardPerformer = null;                // {id,name,query} when playing a performer's best
+let boardStat = null;                     // {metric,id,label} when playing a Statistics-tab stat
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
 function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
@@ -1048,6 +1049,17 @@ async function loadSource(src, opts = {}) {
       if (!State.apexes.length) return showError("No embedded moments for this performer.");
       pickApex = makeQueuePicker(State.apexes);
       document.getElementById("status").textContent = "🎬 " + (d.performer || "performer") + " · best of";
+    } else if (src === "stat") {
+      State.searchMode = true;
+      const qs = new URLSearchParams({ metric: boardStat?.metric || "fresh" });
+      if (boardStat?.id) qs.set("id", boardStat.id);
+      let d;
+      try { d = await api("/api/stats/board?" + qs.toString()); }
+      catch (e) { return showError("Couldn't load this statistic.\n\n(" + e.message + ")"); }
+      State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+      if (!State.apexes.length) return showError("No moments for this statistic yet.");
+      pickApex = makeQueuePicker(State.apexes);
+      document.getElementById("status").textContent = "📈 " + (boardStat?.label || boardStat?.metric || "stat");
     } else if (src === "foryou") {
       State.searchMode = true;
       fyReset();
@@ -1095,6 +1107,7 @@ async function initSources(initial) {
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);
+  if (initial === "stat") opts.push(`<option value="stat">Stat: ${esc(boardStat?.label || "statistic")}</option>`);
   // For You is always available — you can pivot to your taste from any source.
   opts.push(`<option value="foryou">For You — your taste</option>`);
   if (initial === "galaxy") opts.push(`<option value="galaxy">Galaxy selection</option>`);
@@ -1135,6 +1148,13 @@ async function main() {
   else if (params.get("src") === "performer") {
     initial = "performer";
     boardPerformer = { id: params.get("id"), name: params.get("name"), query: params.get("pq") };
+  }
+  else if (params.get("src") === "stat") {
+    initial = "stat";
+    const metric = params.get("metric") || "fresh";
+    const LABELS = { fresh: "fresh peaks", actress: "top actress", most_peaks_actress: "most peaks",
+      most_ontaste_actress: "most on-taste actress", most_ontaste_scene: "most on-taste scene" };
+    boardStat = { metric, id: params.get("id"), label: LABELS[metric] || metric };
   }
   else if (params.get("src") === "foryou") initial = "foryou";
   else if (params.get("src") === "galaxy") initial = "galaxy";

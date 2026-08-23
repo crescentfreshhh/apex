@@ -104,6 +104,22 @@ class EmbeddingCache:
             return []
         return sorted(p.stem for p in model_dir.glob("*.npz"))
 
+    def mtimes(self, model_name: str) -> dict[str, float]:
+        """`{key: last-modified unix time}` for every cached scene — i.e. when
+        Peaks last wrote that scene's embedding into the build. The Statistics
+        tab uses this as the "analyzed at" signal to show the pipeline keeps
+        picking up newly-added scenes over time."""
+        model_dir = self.root / model_name
+        if not model_dir.exists():
+            return {}
+        out: dict[str, float] = {}
+        for p in model_dir.glob("*.npz"):
+            try:
+                out[p.stem] = p.stat().st_mtime
+            except OSError:
+                continue
+        return out
+
     def models(self) -> list[str]:
         """Names of every model that has a cache directory (dinov2, clip, ...)."""
         if not self.root.exists():

@@ -1440,6 +1440,7 @@ class Service:
         self._taste_modes_cache.clear()
         self._board_score_cache.clear()
         self._board_universe_cache.clear()
+        self._peak_index_cache = None   # peaks depend on the taste scorer
 
     def _taste_scores(self, model: str):
         """One taste score per indexed moment, for the whole library. Uses your
@@ -1959,7 +1960,273 @@ class Service:
         self._perf_stats_cache = rows
         self._perf_centroids = centroids
         self._perf_rows_by_id = {r["id"]: r for r in rows}
+        # her embedded scene ids, for the Statistics tab's per-performer peak counts
+        self._perf_scenes_by_id = {pid: set(e["scenes"]) for pid, e in perf.items()}
         return rows
+
+    # --- Statistics tab: peaks over the whole library --------------------------
+
+    def _peak_score_fn(self, model: str):
+        """(score_frames, source_label) for the peaks pipeline, or (None, reason).
+        Mirrors `score`'s scorer selection, then falls back to the For You taste
+        model and finally the taste centroid, so peaks are computable whenever any
+        taste exists."""
+        from pathlib import Path
+
+        from ..classifier import TasteClassifier
+        from ..pipeline import safe_tag
+
+        tag = self.cfg.markers.tag_name
+        p = Path(self.cfg.modeling.dir) / f"{safe_tag(tag)}.pkl"
+        if p.exists():
+            try:
+                return TasteClassifier.load(p).predict_proba, "score model"
+            except Exception:  # noqa: BLE001 — fall through to taste-based scorers
+                pass
+        clf = self._taste_model(tag, model)
+        if clf is not None:
+            return clf.predict_proba, "taste model"
+        c, _, _ = self._taste_centroid(model)
+        if c is not None:
+            cu = self._unit(c)
+            return (lambda vecs: np.asarray(vecs, dtype=np.float32) @ cu), "taste centroid"
+        return None, "no taste yet"
+
+    def _peak_index(self, model: str | None = None, rebuild: bool = False) -> dict:
+        """`{peaks: {scene_id: [{t, score}, ...]}, total, scenes, source}` — the
+        apex segments (peaks) the scorer extracts from every embedded scene, via
+        the same `score_scene` pipeline `peaks score` uses. Cached, keyed on the
+        index size so new embeds recompute it. When `normalize=none` the hysteresis
+        thresholds are drawn from the library score distribution (p90/p75) so the
+        stat is meaningful whichever scorer is active."""
+        from dataclasses import replace
+
+        from ..pipeline import score_scene
+        from ..scoring import extract_segments, smooth
+
+        model = model or self._model_name()
+        idx = self.index(model)
+        cached = getattr(self, "_peak_index_cache", None)
+        if not rebuild and cached is not None and cached[0] == idx.size:
+            return cached[1]
+
+        fn, source = self._peak_score_fn(model)
+        if fn is None or idx.size == 0:
+            out = {"peaks": {}, "total": 0, "scenes": 0, "source": source}
+            self._peak_index_cache = (idx.size, out)
+            return out
+
+        sc = self.cfg.scoring
+        peaks: dict[str, list] = {}
+        total = 0
+        if sc.normalize in ("", "none"):
+            flat = np.asarray(fn(idx.matrix), dtype=np.float32).reshape(-1)
+            high = float(np.percentile(flat, 90.0)) if flat.size else sc.high
+            low = float(np.percentile(flat, 75.0)) if flat.size else sc.low
+            for key, (start, end) in idx._key_rows.items():
+                sid = str((idx.key_meta.get(key) or {}).get("scene_id"))
+                if not sid or sid == "None":
+                    continue
+                series = smooth(flat[start:end], sc.smooth_window)
+                segs = extract_segments(
+                    series, idx.times[start:end], high=high, low=low,
+                    min_duration=sc.min_duration, merge_gap=sc.merge_gap,
+                    max_duration=sc.max_duration or None, pad=sc.pad,
+                )
+                if segs:
+                    peaks[sid] = [
+                        {"t": round(float(s.midpoint), 2), "score": round(float(s.peak_score), 4)}
+                        for s in segs
+                    ]
+                    total += len(segs)
+        else:  # scene-z: thresholds are std-devs; honour the configured scoring
+            scoring = replace(sc)
+            for key, (start, end) in idx._key_rows.items():
+                sid = str((idx.key_meta.get(key) or {}).get("scene_id"))
+                if not sid or sid == "None":
+                    continue
+                segs = score_scene(idx.times[start:end], idx.matrix[start:end], fn, scoring)
+                if segs:
+                    peaks[sid] = [
+                        {"t": round(float(s.midpoint), 2), "score": round(float(s.peak_score), 4)}
+                        for s in segs
+                    ]
+                    total += len(segs)
+
+        out = {"peaks": peaks, "total": total, "scenes": len(peaks), "source": source}
+        self._peak_index_cache = (idx.size, out)
+        return out
+
+    def _scene_mtimes(self, model: str) -> dict[str, float]:
+        """scene_id -> when Peaks last wrote its embedding (the 'analyzed at'
+        signal for the freshness stats)."""
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        idx = self.index(model)
+        key_sid = {k: str((m or {}).get("scene_id")) for k, m in idx.key_meta.items()}
+        out: dict[str, float] = {}
+        for key, t in cache.mtimes(model).items():
+            sid = key_sid.get(key)
+            if sid and sid != "None":
+                out[sid] = max(out.get(sid, 0.0), t)
+        return out
+
+    def statistics(self) -> dict:
+        """Everything the Statistics tab shows: build health/backlog, a freshness
+        timeline proving Peaks keeps ingesting new scenes, the peak leaderboards,
+        and the standout on-taste scene."""
+        import time
+
+        model = self._model_name()
+        idx = self.index(model)
+        pk = self._peak_index(model)
+        peaks = pk["peaks"]
+        now = time.time()
+
+        embedded = {str(m.get("scene_id")) for m in idx.key_meta.values() if m.get("scene_id")}
+        try:
+            total_library = self.client().scene_count()
+        except Exception:  # noqa: BLE001 — Stash down
+            total_library = None
+        from ..failures import failure_log_for
+
+        rows = self.performer_stats()
+        perf_scenes = getattr(self, "_perf_scenes_by_id", {})
+        rows_by_id = getattr(self, "_perf_rows_by_id", {})
+
+        # freshness — scenes analyzed into the build over time (cache mtimes)
+        scene_mtime = self._scene_mtimes(model)
+
+        def window(days: float) -> dict:
+            cutoff = now - days * 86400
+            sids = [s for s, t in scene_mtime.items() if t >= cutoff]
+            return {"scenes": len(sids), "peaks": sum(len(peaks.get(s, ())) for s in sids)}
+
+        weeks = 12
+        buckets = [0] * weeks
+        for t in scene_mtime.values():
+            w = int((now - t) // (7 * 86400))
+            if 0 <= w < weeks:
+                buckets[weeks - 1 - w] += 1  # oldest → newest
+        last_sid = max(scene_mtime, key=scene_mtime.get) if scene_mtime else None
+
+        # performer peak leaderboard
+        peak_rows = []
+        for pid, scenes in perf_scenes.items():
+            p = sum(len(peaks.get(s, ())) for s in scenes)
+            if p <= 0:
+                continue
+            r = rows_by_id.get(pid, {})
+            peak_rows.append({
+                "id": pid, "name": r.get("name", ""), "peaks": p,
+                "scenes": len(scenes), "taste": r.get("taste_mean"),
+            })
+        peak_rows.sort(key=lambda r: r["peaks"], reverse=True)
+        taste_rows = [r for r in rows if r.get("taste_mean") is not None]
+        top_taste = max(taste_rows, key=lambda r: r["taste_mean"], default=None)
+
+        # most on-taste scene — the single highest peak in the library
+        best_sid, best_score = None, -1.0
+        for sid, lst in peaks.items():
+            for seg in lst:
+                if seg["score"] > best_score:
+                    best_score, best_sid = seg["score"], sid
+
+        titles = {}
+        want = [s for s in (best_sid, last_sid) if s]
+        if want:
+            try:
+                titles = self.client().scene_details(want)
+            except Exception:  # noqa: BLE001
+                titles = {}
+
+        def _scene_card(sid, extra=None):
+            if not sid:
+                return None
+            m = titles.get(sid) or {}
+            perfs = ", ".join(p.get("name", "") for p in (m.get("performers_detail") or []) if p.get("name"))
+            card = {"scene_id": sid, "title": m.get("title") or f"scene {sid}", "performers": perfs}
+            if extra:
+                card.update(extra)
+            return card
+
+        return {
+            "peak_term": "peaks",  # a "peak" = a scored apex segment
+            "peak_source": pk["source"],
+            "build": {
+                "embedded_scenes": len(embedded),
+                "library_scenes": total_library,
+                "backlog": (total_library - len(embedded)) if total_library is not None else None,
+                "frames": idx.size,
+                "performers": len(perf_scenes),
+                "total_peaks": pk["total"],
+                "failures": len(failure_log_for(self.cfg)),
+            },
+            "freshness": {
+                "timeline_weeks": buckets,
+                "last_24h": window(1),
+                "last_7d": window(7),
+                "last_30d": window(30),
+                "last_analyzed": _scene_card(
+                    last_sid, {"at": scene_mtime.get(last_sid)} if last_sid else None
+                ),
+            },
+            "top_actress_by_peaks": peak_rows[0] if peak_rows else None,
+            "leaderboard": peak_rows[:10],
+            "top_actress_by_taste": (
+                {"id": top_taste["id"], "name": top_taste["name"], "taste": top_taste["taste_mean"]}
+                if top_taste else None
+            ),
+            "most_ontaste_scene": _scene_card(
+                best_sid, {"score": round(best_score, 4)} if best_sid else None
+            ),
+        }
+
+    def stats_board(self, metric: str, id: str | None = None, count: int = 1500) -> dict:
+        """Moments for a Statistics-tab card, so each stat is playable on the
+        megaboard as its own distinct playlist. `{performer?, hits}`."""
+        from ..search import Hit
+
+        model = self._model_name()
+        idx = self.index(model)
+
+        if metric in ("actress", "most_peaks_actress", "most_ontaste_actress"):
+            pid = id
+            if metric != "actress":
+                st = self.statistics()
+                pick = st["top_actress_by_peaks"] if metric == "most_peaks_actress" else st["top_actress_by_taste"]
+                pid = (pick or {}).get("id")
+            if not pid:
+                return {"hits": []}
+            return self.performer_best(
+                performer_id=pid, count=count, per_scene=40, min_score=0.0, spread=True
+            )
+
+        if metric == "most_ontaste_scene":
+            sid = id
+            if not sid:
+                sid = (self.statistics().get("most_ontaste_scene") or {}).get("scene_id")
+            if not sid:
+                return {"hits": []}
+            return {"hits": self.scene_moments(str(sid), count=count)["hits"]}
+
+        if metric == "fresh":
+            pk = self._peak_index(model)
+            peaks = pk["peaks"]
+            scene_mtime = self._scene_mtimes(model)
+            sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+            order = sorted(scene_mtime, key=scene_mtime.get, reverse=True)
+            hits: list[Hit] = []
+            for sid in order:
+                key = sid_key.get(sid)
+                if key is None:
+                    continue
+                for seg in peaks.get(sid, ()):  # this scene's peaks, newest scenes first
+                    hits.append(Hit(scene_id=sid, key=key, time=float(seg["t"]), score=float(seg["score"])))
+                    if len(hits) >= count:
+                        return {"hits": hits}
+            return {"hits": hits}
+
+        return {"hits": []}
 
     def similar_performers(self, performer_id: str, k: int = 8) -> list[dict]:
         """Performers whose moments sit closest to hers in embedding space —

@@ -261,6 +261,19 @@ def create_app(cfg=None):
     def stats():
         return service.stats()
 
+    @app.get("/api/statistics")
+    def statistics():
+        """Everything the Statistics tab renders — build health, the freshness
+        timeline, peak leaderboards, and standout scene."""
+        return service.statistics()
+
+    @app.get("/api/stats/board")
+    def stats_board(metric: str, id: str | None = None, count: int = 1500):
+        """Moments for a Statistics-tab card, so each stat plays on the megaboard
+        as its own distinct playlist (src=stat&metric=…)."""
+        r = service.stats_board(metric, id=id, count=count)
+        return {"performer": r.get("performer"), "items": _hit_payload(service, r.get("hits", []))}
+
     @app.get("/api/capabilities")
     def capabilities():
         idx = service.index()

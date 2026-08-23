@@ -227,7 +227,6 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .score.band-top75 { background: rgba(0,0,0,.7); color: var(--fg); } /* top 25% */
 .score.band-low   { background: rgba(0,0,0,.55); color: var(--dim); }
 
-#metrics-panel .m-head { margin-bottom: 12px; line-height: 1.7; }
 .m-spark { display: flex; align-items: flex-end; gap: 2px; height: 60px;
   padding: 4px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
 .m-spark .mbar { flex: 1; min-height: 1px; background: var(--accent); opacity: .8;
@@ -240,6 +239,16 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .m-thresh input[type=range] { width: 240px; accent-color: var(--accent); vertical-align: middle; }
 .m-legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
 .m-legend .score { position: static; padding: 1px 7px; border-radius: 5px; font-size: 11px; }
+
+/* Statistics tab */
+#stats-body { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.stat-card h3 { margin: 0 0 8px; font-size: 16px; }
+.stat-card .perf-actions { margin-top: 10px; }
+.stat-play { white-space: nowrap; }
+.stat-lb { margin-top: 10px; }
+.stat-lb td { vertical-align: middle; }
+.stat-lb td:last-child { text-align: right; }
+.warn { color: var(--accent); }
 
 /* Explore search options */
 #search-adv label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; }

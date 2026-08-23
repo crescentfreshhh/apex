@@ -28,6 +28,7 @@ document.querySelectorAll(".tab[data-view]").forEach((b) =>
     if (b.dataset.view === "foryou") openForYou();
     if (b.dataset.view === "galaxy" && window.openGalaxy) window.openGalaxy();
     if (b.dataset.view === "performers") openPerformers();
+    if (b.dataset.view === "statistics") openStatistics();
   })
 );
 
@@ -1025,9 +1026,9 @@ async function loadTasteWords() {
   } catch { el.innerHTML = ""; }
 }
 
-// --- Taste Metrics: make the % legible + count what meets your bar -----------
+// --- Taste bands: colour For You tiles by how on-taste each moment is --------
 let tasteBands = null;   // [{pct,cutoff}] high→low, for tile coloring
-let metricsCdf = null;   // {thresholds,moments_ge,scenes_ge} for the slider
+let metricsCdf = null;   // {thresholds,moments_ge,scenes_ge} for the Statistics coverage slider
 const pctText = (v) => `${(v * 100).toFixed(0)}%`;
 
 function scoreBandClass(score) {
@@ -1040,65 +1041,17 @@ function recolorForYouTiles() {
     el.className = "score " + scoreBandClass(+el.dataset.score);
   });
 }
-
-async function loadTasteMetrics() {
-  const body = $("#metrics-body");
-  if (!body) return;
+// The old "Taste Metrics" panel is gone; we still fetch its bands so For You tiles
+// stay colour-graded, and its useful coverage read-out now lives on Statistics.
+async function loadTasteBands() {
   try {
     const m = await api("/api/taste/metrics");
-    if (!m.has_taste) {
-      tasteBands = null;
-      body.innerHTML = `<span class="dim">No taste yet — save some apexes (⚑) or thumb up
-        moments, then this fills in. Labels so far: ${m.labels.positive}👍 / ${m.labels.negative}👎.</span>`;
-      return;
-    }
-    tasteBands = m.bands.map((b) => ({ pct: b.pct, cutoff: b.cutoff }));
-    metricsCdf = m.cdf;
-    const s = m.sources, d = m.distribution;
-    const hi = Math.max(...m.histogram.counts) || 1;
-    const spark = m.histogram.counts.map((c, i) => {
-      const x0 = m.histogram.edges[i];
-      return `<span class="mbar" style="height:${Math.round((c / hi) * 100)}%"
-        title="${pctText(x0)}: ${c} moments"></span>`;
-    }).join("");
-    const bandsRows = m.bands.map((b) =>
-      `<tr><td>${b.label}</td><td>${b.moments.toLocaleString()} moments</td>
-        <td>${b.scenes.toLocaleString()} scenes</td><td class="dim">≥ ${pctText(b.cutoff)}</td></tr>`).join("");
-
-    body.innerHTML = `
-      <div class="m-head">
-        <b>${s.total.toLocaleString()}</b> loved moments feed your taste
-        (<b>${s.apex}</b> apex peaks · <b>${s.thumbs_up}</b> thumbs) ·
-        <b>${m.labels.positive}</b>👍 / <b>${m.labels.negative}</b>👎 ·
-        ${m.labels.has_model ? "trained model" : "centroid only"} ·
-        <b>${m.indexed.frames.toLocaleString()}</b> moments across
-        <b>${m.indexed.scenes.toLocaleString()}</b> scenes indexed
-      </div>
-      <div class="m-spark" title="distribution of taste-closeness across your whole library">${spark}</div>
-      <div class="m-axis dim"><span>${pctText(d.min)}</span><span>median ${pctText(d.p50)}</span><span>${pctText(d.max)}</span></div>
-      <table class="m-bands">${bandsRows}</table>
-      <div class="m-thresh">
-        <label>Count moments at ≥ <input type="range" id="m-slider"
-          min="${d.min}" max="${d.max}" step="0.005"
-          value="${Math.min(Math.max(readFloor() ?? d.p90, d.min), d.max)}" /></label>
-        <span id="m-thresh-out" class="dim"></span>
-      </div>
-      <div class="m-legend dim">tile colours:
-        <span class="score band-top99">top 1%</span>
-        <span class="score band-top95">top 5%</span>
-        <span class="score band-top90">top 10%</span>
-        <span class="score band-top75">top 25%</span>
-        <span class="score band-low">below</span></div>`;
-
-    const slider = $("#m-slider");
-    slider.addEventListener("input", () => { updateThreshOut(); writeFloor(+slider.value); });
-    updateThreshOut();
+    tasteBands = m.has_taste ? m.bands.map((b) => ({ pct: b.pct, cutoff: b.cutoff })) : null;
     recolorForYouTiles();
-  } catch (e) { body.innerHTML = `<span class="dim">${esc(e.message)}</span>`; }
+  } catch { /* leave tiles uncolored */ }
 }
 
-// The taste floor is shared with the megaboard (and its tabs) via localStorage,
-// so the Taste Metrics slider and the board's floor stay in sync.
+// The taste floor is shared with the megaboard (and its tabs) via localStorage.
 const FLOOR_KEY = "peaks_taste_floor";
 function readFloor() {
   try { const v = parseFloat(localStorage.getItem(FLOOR_KEY)); return isFinite(v) ? v : null; }
@@ -1107,15 +1060,14 @@ function readFloor() {
 function writeFloor(v) { try { localStorage.setItem(FLOOR_KEY, String(v)); } catch { /* ignore */ } }
 window.addEventListener("storage", (e) => {   // board changed the floor → reflect it live
   if (e.key !== FLOOR_KEY || e.newValue == null) return;
-  const slider = $("#m-slider");
+  const slider = $("#stats-floor");
   if (!slider) return;
   const v = Math.min(Math.max(parseFloat(e.newValue), +slider.min), +slider.max);
   if (isFinite(v) && v !== +slider.value) { slider.value = v; updateThreshOut(); }
 });
-
 function updateThreshOut() {
-  const slider = $("#m-slider"), out = $("#m-thresh-out");
-  if (!slider || !metricsCdf) return;
+  const slider = $("#stats-floor"), out = $("#stats-floor-out");
+  if (!slider || !out || !metricsCdf) return;
   const v = +slider.value;
   const th = metricsCdf.thresholds;
   let i = 0; while (i < th.length - 1 && th[i + 1] <= v) i++;   // nearest step ≤ v
@@ -1124,6 +1076,135 @@ function updateThreshOut() {
   const pctile = Math.round((1 - mo / frames) * 100);
   out.innerHTML = `≥ <b>${pctText(v)}</b> → <b>${mo.toLocaleString()}</b> moments ·
     <b>${sc.toLocaleString()}</b> scenes · your <b>${pctile}th</b> percentile`;
+}
+
+// --- Statistics tab ---------------------------------------------------------
+const num = (n) => (n == null ? "—" : Number(n).toLocaleString());
+function agoText(unixSec) {
+  if (!unixSec) return "";
+  const s = Date.now() / 1000 - unixSec;
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+// ▶ button that opens a distinct megaboard playlist for a stat
+function statBoardBtn(metric, id, label) {
+  const qs = new URLSearchParams({ src: "stat", metric });
+  if (id) qs.set("id", id);
+  return `<a class="ghost stat-play" target="_blank" href="/megaboard/?${qs.toString()}">▶ ${esc(label || "Play")}</a>`;
+}
+async function openStatistics(refresh) {
+  const body = $("#stats-body");
+  if (!body) return;
+  if (!refresh && body.dataset.loaded) return;
+  $("#stats-status").textContent = "";
+  body.innerHTML = '<p class="dim">Crunching your library…</p>';
+  try {
+    const [st, metrics] = await Promise.all([
+      api("/api/statistics"),
+      api("/api/taste/metrics").catch(() => null),
+    ]);
+    renderStatistics(st, metrics);
+    body.dataset.loaded = "1";
+  } catch (e) { body.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+$("#btn-stats-refresh")?.addEventListener("click", () => openStatistics(true));
+
+function renderStatistics(st, metrics) {
+  const body = $("#stats-body");
+  const b = st.build, f = st.freshness;
+  const cov = (b.library_scenes && b.library_scenes > 0)
+    ? Math.round((b.embedded_scenes / b.library_scenes) * 100) : null;
+  const hi = Math.max(...(f.timeline_weeks || [0]), 1);
+  const spark = (f.timeline_weeks || []).map((c) =>
+    `<span class="mbar" style="height:${Math.round((c / hi) * 100)}%" title="${c} scene(s)"></span>`).join("");
+  const last = f.last_analyzed;
+
+  // build health
+  const buildCard = `
+    <div class="panel stat-card">
+      <h3>Peaks build</h3>
+      <div class="pd-stats">
+        ${statTile("scenes analyzed", num(b.embedded_scenes) + (cov != null ? ` <span class="dim">/ ${num(b.library_scenes)} · ${cov}%</span>` : ""))}
+        ${b.backlog != null && b.backlog > 0 ? statTile("awaiting analysis", num(b.backlog)) : ""}
+        ${statTile("total peaks", num(b.total_peaks))}
+        ${statTile("frames indexed", num(b.frames))}
+        ${statTile("performers", num(b.performers))}
+        ${b.failures ? statTile("failures", `<span class="warn">${num(b.failures)}</span>`) : ""}
+      </div>
+      <p class="dim" style="margin-top:8px">peaks scored via ${esc(st.peak_source)}.</p>
+    </div>`;
+
+  // freshness / ongoing incorporation
+  const freshCard = `
+    <div class="panel stat-card">
+      <h3>Still ingesting your library</h3>
+      <p class="dim">Scenes Peaks has analyzed into the build, by week (oldest → newest).</p>
+      <div class="m-spark">${spark || '<span class="dim">no data yet</span>'}</div>
+      <div class="pd-stats" style="margin-top:10px">
+        ${statTile("last 24h", `${num(f.last_24h.scenes)} scenes · ${num(f.last_24h.peaks)} peaks`)}
+        ${statTile("last 7 days", `${num(f.last_7d.scenes)} scenes · ${num(f.last_7d.peaks)} peaks`)}
+        ${statTile("last 30 days", `${num(f.last_30d.scenes)} scenes · ${num(f.last_30d.peaks)} peaks`)}
+      </div>
+      ${last ? `<p class="dim" style="margin-top:8px">last analyzed:
+        <b>${esc(last.title)}</b>${last.performers ? " · " + esc(last.performers) : ""}
+        <span class="dim">${agoText(last.at)}</span></p>` : ""}
+      <div class="perf-actions">${statBoardBtn("fresh", null, "Play fresh peaks")}</div>
+    </div>`;
+
+  // performers by peaks
+  const top = st.top_actress_by_peaks;
+  const rows = (st.leaderboard || []).map((r, i) =>
+    `<tr><td class="dim">${i + 1}</td><td>${esc(r.name || "—")}</td>
+      <td><b>${num(r.peaks)}</b> peaks</td><td class="dim">${num(r.scenes)} scenes</td>
+      <td>${r.taste != null ? "★ " + pctText(r.taste) : ""}</td>
+      <td>${statBoardBtn("actress", r.id, "Play")}</td></tr>`).join("");
+  const perfCard = `
+    <div class="panel stat-card">
+      <h3>Peaks by performer</h3>
+      ${top ? `<p>Most peaks: <b>${esc(top.name)}</b> — <b>${num(top.peaks)}</b> peaks across
+        ${num(top.scenes)} scenes ${statBoardBtn("most_peaks_actress", null, "Play her peaks")}</p>` : '<p class="dim">No peaks yet.</p>'}
+      ${st.top_actress_by_taste ? `<p class="dim">Most on-taste: <b>${esc(st.top_actress_by_taste.name)}</b>
+        (★ ${pctText(st.top_actress_by_taste.taste)}) ${statBoardBtn("most_ontaste_actress", null, "Play")}</p>` : ""}
+      ${rows ? `<table class="m-bands stat-lb">${rows}</table>` : ""}
+    </div>`;
+
+  // most on-taste scene
+  const sc = st.most_ontaste_scene;
+  const sceneCard = sc ? `
+    <div class="panel stat-card">
+      <h3>Most on-taste scene</h3>
+      <p>Your library's single highest peak — <b>${esc(sc.title)}</b>${sc.performers ? " · " + esc(sc.performers) : ""}
+        ${sc.score != null ? `<span class="dim">(peak ${pctText(sc.score)})</span>` : ""}</p>
+      <div class="perf-actions">${statBoardBtn("most_ontaste_scene", sc.scene_id, "Play its best moments")}</div>
+    </div>` : "";
+
+  // taste coverage (salvaged from Taste Metrics) — the shared floor slider
+  let coverageCard = "";
+  if (metrics && metrics.has_taste) {
+    metricsCdf = metrics.cdf;
+    const d = metrics.distribution;
+    const v = Math.min(Math.max(readFloor() ?? d.p90, d.min), d.max);
+    coverageCard = `
+      <div class="panel stat-card">
+        <h3>Taste coverage</h3>
+        <p class="dim">How much of your library clears a taste bar — the same floor the megaboard uses.</p>
+        <div class="m-thresh"><label>Count moments at ≥
+          <input type="range" id="stats-floor" min="${d.min}" max="${d.max}" step="0.005" value="${v}" /></label>
+          <span id="stats-floor-out" class="dim"></span></div>
+      </div>`;
+  }
+
+  body.innerHTML = buildCard + freshCard + perfCard + sceneCard + coverageCard;
+
+  const slider = $("#stats-floor");
+  if (slider) {
+    slider.addEventListener("input", () => { updateThreshOut(); writeFloor(+slider.value); });
+    updateThreshOut();
+  }
+}
+function statTile(label, value) {
+  return `<span class="pd-stat">${label} <b>${value}</b></span>`;
 }
 
 let swipeHit = null;
@@ -1168,15 +1249,15 @@ async function openForYou() {
   loadPicks();
   await loadForYou(true);   // rebuild on open so fresh apexes/thumbs count
   loadTasteWords();
-  loadTasteMetrics();       // fills the metrics panel + colours the tiles
+  loadTasteBands();         // colours the For You tiles by taste band
 }
-$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); loadTasteMetrics(); });
+$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); loadTasteBands(); });
 $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
 // the For You megaboard pulls its own big, varied pool from /api/foryou/board
-// (endless, non-repeating). Carry the current Taste Metrics slider value as the
-// board's starting "taste floor" so it opens as selective as you set it.
+// (endless, non-repeating). Carry the shared taste floor (set on the Statistics
+// tab or the board itself) so it opens as selective as you set it.
 $("#btn-foryou-board")?.addEventListener("click", () => {
-  const floor = $("#m-slider")?.value;
+  const floor = readFloor();
   window.open("/megaboard/?src=foryou" + (floor ? "&min_score=" + floor : ""), "_blank");
 });
 $("#btn-foryou-radio")?.addEventListener("click", () => startRadio());
