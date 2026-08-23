@@ -158,6 +158,22 @@ input, select { background: var(--panel2); color: var(--fg); border: 1px solid v
 .fy-words { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 12px; }
 .fy-chip { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: var(--panel2);
   border: 1px solid var(--line); color: var(--accent); }
+
+/* Visual taste: "what you like" frame strips + the editable label gallery */
+.taste-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-top: 8px; }
+.taste-frame, .taste-label { position: relative; flex: none; display: inline-block; }
+.taste-frame img { width: 132px; height: 88px; object-fit: cover; border-radius: 8px; display: block;
+  border: 1px solid var(--line); }
+.tf-x, .tl-x, .tl-flip { position: absolute; border: none; cursor: pointer; border-radius: 6px;
+  font-size: 12px; line-height: 1; padding: 2px 5px; opacity: 0; transition: opacity .15s; }
+.taste-frame:hover .tf-x, .taste-label:hover .tl-x, .taste-label:hover .tl-flip { opacity: 1; }
+.tf-x, .tl-x { top: 4px; right: 4px; background: rgba(0,0,0,.72); color: #fff; }
+.taste-labels { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.taste-label img { width: 108px; height: 72px; object-fit: cover; border-radius: 8px; display: block;
+  border: 2px solid var(--line); }
+.taste-label.pos img { border-color: var(--ok); }
+.taste-label.neg img { border-color: var(--accent); }
+.tl-flip { bottom: 4px; left: 4px; opacity: 1; background: rgba(0,0,0,.72); }
 .swipe-stage { display: flex; justify-content: center; margin-top: 12px; }
 .swipe-card { width: 100%; max-width: 960px; aspect-ratio: 16/9; background: #000;
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden; position: relative;

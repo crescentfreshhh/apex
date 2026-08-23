@@ -2347,6 +2347,61 @@ class Service:
                 created.append(saved)
         return {"created": created}
 
+    def taste_visual(self, per_mode: int = 6, model: str | None = None) -> dict:
+        """Your taste shown as *frames*, not CLIP words: for each taste "mode"
+        (a distinct cluster of what you like), the nearest frames in the library.
+        `{modes: [{frames:[{key,time,scene_id,score,thumb}]}], sources}`."""
+        model = model or self._model_name()
+        idx = self.index(model)
+        modes = self._taste_modes(model)
+        if modes is None or idx.size == 0:
+            return {"modes": [], "sources": 0}
+        out, seen = [], set()
+        for m in modes:
+            frames = []
+            for h in idx.search(self._unit(m), top_k=per_mode * 3, per_scene=1):
+                sig = (h.key, round(h.time, 1))
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                frames.append({
+                    "key": h.key, "time": round(float(h.time), 2), "scene_id": h.scene_id,
+                    "score": round(float(h.score), 3),
+                    "thumb": f"/api/frame?key={h.key}&t={h.time:g}",
+                })
+                if len(frames) >= per_mode:
+                    break
+            if frames:
+                out.append({"frames": frames})
+        arr, _ = self._taste_sources(model)
+        return {"modes": out, "sources": int(arr.shape[0])}
+
+    def list_labels(self, profile: str | None = None) -> dict:
+        """Your taste labels as editable frames — newest first — so the For You
+        label editor can show and prune them. `{labels:[{key,time,scene_id,label,
+        thumb}], positive, negative, has_model}`."""
+        profile = profile or self.cfg.markers.tag_name
+        labs = sorted(self._label_store().for_profile(profile), key=lambda x: (x.ts or 0.0), reverse=True)
+        items = [{
+            "key": lab.key, "time": round(float(lab.time), 2), "scene_id": lab.scene_id,
+            "label": int(lab.label), "thumb": f"/api/frame?key={lab.key}&t={lab.time:g}",
+        } for lab in labs]
+        pos = sum(1 for lab in labs if lab.label == 1)
+        return {"labels": items, "positive": pos, "negative": len(labs) - pos,
+                "has_model": self.has_taste(profile)}
+
+    def remove_label(self, key: str, time: float, profile: str | None = None) -> dict:
+        """Delete one taste label (the editor's ×). Invalidates the taste caches
+        so the centroid/visual refresh; the model updates on the next retrain."""
+        profile = profile or self.cfg.markers.tag_name
+        store = self._label_store()
+        removed = store.remove_one(key, float(time), profile)
+        if removed:
+            store.save()
+            self._invalidate_taste_caches()
+        pos, neg = store.counts(profile)
+        return {"removed": bool(removed), "positive": pos, "negative": neg}
+
     def taste_words(self, top_k: int = 8, recent: int = 0) -> dict:
         """Your taste centroid described in vocabulary terms (CLIP space) — the
         'what you're into' readout. `recent` limits to your latest N loved

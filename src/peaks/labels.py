@@ -86,6 +86,15 @@ class LabelStore:
         pos = sum(1 for l in labs if l.label == 1)
         return pos, len(labs) - pos
 
+    def remove_one(self, key: str, time: float, profile: str) -> bool:
+        """Delete one specific label (key, time, profile). Returns True if it
+        existed. Caller should save(). Used by the taste label editor."""
+        k = self._id(key, time, profile)
+        if k in self._labels:
+            del self._labels[k]
+            return True
+        return False
+
     def remove(self, profile: str, newer_than: float | None = None) -> int:
         """Delete labels for `profile`. With `newer_than` (unix ts), only those
         rated at/after it — an "undo the last N minutes". Returns how many were

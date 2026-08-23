@@ -566,6 +566,26 @@ def create_app(cfg=None):
                 pass  # a train is already running; the next rating retries
         return res
 
+    @app.get("/api/taste/visual")
+    def taste_visual(per_mode: int = 6):
+        """Your taste as frames (nearest to each taste mode) — the visual
+        replacement for the CLIP 'known for' words."""
+        return service.taste_visual(per_mode=per_mode)
+
+    @app.get("/api/taste/labels")
+    def taste_labels(profile: str | None = None):
+        """Your taste labels as editable frames, for the For You label editor."""
+        return service.list_labels(profile)
+
+    @app.delete("/api/label")
+    def remove_label(t: float, key: str | None = None,
+                     scene_id: str | None = None, profile: str | None = None):
+        if key is None and scene_id is not None:
+            key = service._key_for_scene(scene_id, service._model_name())
+        if key is None:
+            raise HTTPException(400, "need a key or a resolvable scene_id")
+        return service.remove_label(key, t, profile=profile)
+
     @app.post("/api/taste/delete")
     def delete_taste(
         within_minutes: float | None = None,

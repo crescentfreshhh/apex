@@ -232,6 +232,20 @@
       <div id="pick-grid" class="grid pick-grid"></div>
     </div>
 
+    <div class="panel" id="taste-labels-panel">
+      <h2>Your taste labels</h2>
+      <p class="dim">Every 👍/👎 you've given, as frames — the raw signal behind "For You".
+        Click a badge to flip it, ✕ to remove it, then <strong>Train now</strong>. Because the
+        model learns over visual <em>similarity</em>, a correction carries to similar-looking
+        frames after retraining — you're not fixing one frame, you're steering a neighborhood.</p>
+      <div class="row">
+        <span id="taste-labels-counts" class="dim"></span>
+        <button id="btn-taste-train" class="primary" title="Retrain so your edits take effect">Train now</button>
+        <button id="btn-taste-labels-refresh" class="ghost">↻ Refresh</button>
+      </div>
+      <div id="taste-labels" class="taste-labels"></div>
+    </div>
+
     <div class="panel" id="taste-manage">
       <h2>Manage taste</h2>
       <p class="dim">Undo a bad session, or wipe your learned taste to start fresh.

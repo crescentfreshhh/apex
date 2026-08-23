@@ -1016,15 +1016,87 @@ async function loadForYou(rebuild) {
   } catch (e) { grid.innerHTML = ""; toast(e.message, true); }
 }
 
-async function loadTasteWords() {
+// --- Visual taste: what the model thinks you like, shown as frames ----------
+// (replaces the old CLIP "what you're into" words, which weren't accurate)
+async function loadTasteVisual() {
   const el = $("#foryou-words");
+  if (!el) return;
   try {
-    const d = await api("/api/foryou/words?recent=" + recentN());
-    if (!d.labels || !d.labels.length) { el.innerHTML = ""; return; }
-    el.innerHTML = `<span class="dim">${recentN() ? "Lately you're into" : "What you're into"}:</span> ` +
-      d.labels.map(([w, s]) => `<span class="fy-chip" title="${(s * 100).toFixed(0)}% match">${esc(w)}</span>`).join("");
+    const d = await api("/api/taste/visual?per_mode=6");
+    if (!d.modes || !d.modes.length) { el.innerHTML = ""; return; }
+    el.innerHTML =
+      `<div class="dim" style="margin-bottom:6px">What you like — your taste as frames
+        (${d.sources} loved moments). Hit ✕ on any that are <em>wrong</em> to correct it.</div>` +
+      d.modes.map((m) => `<div class="taste-strip">` + m.frames.map((f) =>
+        `<span class="taste-frame">
+           <img loading="lazy" src="${f.thumb}" title="${(f.score * 100).toFixed(0)}% match"
+             onerror="this.closest('.taste-frame').style.display='none'" />
+           <button class="tf-x" title="Not my taste — down-vote this frame"
+             data-key="${esc(f.key)}" data-t="${f.time}" data-sid="${esc(f.scene_id || "")}">✕</button>
+         </span>`).join("") + `</div>`).join("");
   } catch { el.innerHTML = ""; }
 }
+// the editable label gallery: your explicit 👍/👎, flip or remove
+async function loadTasteLabels() {
+  const el = $("#taste-labels");
+  if (!el) return;
+  el.innerHTML = '<span class="dim">Loading…</span>';
+  try {
+    const d = await api("/api/taste/labels");
+    const cnt = $("#taste-labels-counts");
+    if (cnt) cnt.textContent = `${d.positive}👍 / ${d.negative}👎`;
+    if (!d.labels.length) { el.innerHTML = '<span class="dim">No labels yet — save moments (★) or thumb some up.</span>'; return; }
+    el.innerHTML = d.labels.map((l) =>
+      `<span class="taste-label ${l.label ? "pos" : "neg"}" data-key="${esc(l.key)}" data-t="${l.time}" data-sid="${esc(l.scene_id || "")}" data-label="${l.label}">
+         <img loading="lazy" src="${l.thumb}" onerror="this.closest('.taste-label').style.opacity=.25" />
+         <button class="tl-flip" title="Flip 👍/👎">${l.label ? "👍" : "👎"}</button>
+         <button class="tl-x" title="Remove this label">✕</button>
+       </span>`).join("");
+  } catch (e) { el.innerHTML = `<span class="dim">${esc(e.message)}</span>`; }
+}
+// retrain so label edits take effect (shared by the swipe trainer + label editor)
+async function trainNow(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const s = await api("/api/train", { method: "POST" });
+    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    loadForYou(false); loadTasteVisual();
+  } catch (e) { toast(e.message, true); }
+  if (btn) btn.disabled = false;
+}
+// down-vote a "what you like" frame (correct a wrong association)
+$("#foryou-words")?.addEventListener("click", async (e) => {
+  const x = e.target.closest(".tf-x"); if (!x) return;
+  const { key, t, sid } = x.dataset;
+  try {
+    await api("/api/label?" + new URLSearchParams({ key, t, label: 0, ...(sid ? { scene_id: sid } : {}) }), { method: "POST" });
+    x.closest(".taste-frame").style.display = "none";
+    toast("👎 noted — Train now to apply to similar frames");
+  } catch (err) { toast(err.message, true); }
+});
+// flip / remove an explicit label
+$("#taste-labels")?.addEventListener("click", async (e) => {
+  const cell = e.target.closest(".taste-label"); if (!cell) return;
+  const { key, t, sid } = cell.dataset;
+  if (e.target.closest(".tl-flip")) {
+    const next = cell.dataset.label === "1" ? 0 : 1;
+    try {
+      await api("/api/label?" + new URLSearchParams({ key, t, label: next, ...(sid ? { scene_id: sid } : {}) }), { method: "POST" });
+      cell.dataset.label = String(next);
+      cell.classList.toggle("pos", !!next); cell.classList.toggle("neg", !next);
+      cell.querySelector(".tl-flip").textContent = next ? "👍" : "👎";
+      loadTasteLabels();   // refresh counts
+    } catch (err) { toast(err.message, true); }
+  } else if (e.target.closest(".tl-x")) {
+    try {
+      await api("/api/label?" + new URLSearchParams({ key, t }), { method: "DELETE" });
+      cell.remove();
+      loadTasteLabels();
+    } catch (err) { toast(err.message, true); }
+  }
+});
+$("#btn-taste-train")?.addEventListener("click", (e) => trainNow(e.currentTarget));
+$("#btn-taste-labels-refresh")?.addEventListener("click", () => loadTasteLabels());
 
 // --- Taste bands: colour For You tiles by how on-taste each moment is --------
 let tasteBands = null;   // [{pct,cutoff}] high→low, for tile coloring
@@ -1238,7 +1310,7 @@ async function swipeRate(label) {
     if (c.autotrain) {
       // the model refits in the background (a second or two); refresh the feed +
       // taste words shortly after so the freshly-sharpened ranking shows.
-      setTimeout(() => { loadForYou(false); loadTasteWords(); }, 4000);
+      setTimeout(() => { loadForYou(false); loadTasteVisual(); }, 4000);
     }
   } catch (e) { toast(e.message, true); }
   loadNextSwipe();
@@ -1247,12 +1319,13 @@ async function swipeRate(label) {
 async function openForYou() {
   loadNextSwipe();
   loadPicks();
-  await loadForYou(true);   // rebuild on open so fresh apexes/thumbs count
-  loadTasteWords();
+  await loadForYou(true);   // rebuild on open so fresh saves/thumbs count
+  loadTasteVisual();
+  loadTasteLabels();        // the editable 👍/👎 gallery
   loadTasteBands();         // colours the For You tiles by taste band
 }
-$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteWords(); loadTasteBands(); });
-$("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteWords(); });
+$("#btn-foryou-rebuild")?.addEventListener("click", () => { loadForYou(true); loadTasteVisual(); loadTasteBands(); });
+$("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); loadTasteVisual(); });
 // the For You megaboard pulls its own big, varied pool from /api/foryou/board
 // (endless, non-repeating). Carry the shared taste floor (set on the Statistics
 // tab or the board itself) so it opens as selective as you set it.
@@ -1324,7 +1397,7 @@ async function addPicks() {
     }
     updateTasteUI(c);
     $("#pick-status").textContent = `+${chosen.length} added · ${c.positive}👍` + (trained ? " · training…" : "");
-    if (trained) setTimeout(() => { loadForYou(false); loadTasteWords(); }, 4000);
+    if (trained) setTimeout(() => { loadForYou(false); loadTasteVisual(); }, 4000);
   } catch (e) { toast(e.message, true); }
   loadPicks();   // fresh collage
 }
@@ -1436,7 +1509,7 @@ document.querySelectorAll("#taste-manage [data-del]").forEach((b) =>
       toast(`Deleted ${r.removed} rating${r.removed === 1 ? "" : "s"}${tail}${apexTail}`, !!r.apex_error);
       $("#taste-manage-status").textContent = `${r.positive}👍 / ${r.negative}👎 left`;
       updateTasteUI({ positive: r.positive, negative: r.negative });
-      loadNextSwipe(); loadForYou(true); loadTasteWords();
+      loadNextSwipe(); loadForYou(true); loadTasteVisual();
     } catch (e) { toast(e.message, true); }
     b.disabled = false;
   })
