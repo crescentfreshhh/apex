@@ -80,6 +80,8 @@ def _collection_model():
         apexes: list = []
         query: str | None = None      # how it was built (for a future refresh)
         params: dict | None = None
+        live: bool = False            # re-derive from `source` on every open
+        source: dict | None = None    # {kind, …} spec for a live playlist
 
     return CollectionIn
 
@@ -410,8 +412,17 @@ def create_app(cfg=None):
         if not body.name.strip() or not body.apexes:
             raise HTTPException(400, "need a name and at least one moment")
         return service.save_collection(
-            body.name.strip(), body.apexes, query=body.query, params=body.params
+            body.name.strip(), body.apexes, query=body.query, params=body.params,
+            live=body.live, source=body.source,
         )
+
+    @app.get("/api/collection/derive")
+    def derive_collection(name: str):
+        """Re-run a live playlist's saved source spec → fresh moments."""
+        hits = service.derive_collection(name)
+        if hits is None:
+            raise HTTPException(404, "not a live playlist")
+        return {"items": _hit_payload(service, hits)}
 
     @app.get("/api/collections")
     def collections():

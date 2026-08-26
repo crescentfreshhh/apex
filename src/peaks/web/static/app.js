@@ -749,8 +749,8 @@ async function refreshCollections() {
               <span class="pl-play">▶</span>
             </a>
             <div class="pl-meta">
-              <span class="pl-name" title="${esc(c.name)}">${esc(c.name)}</span>
-              <span class="dim pl-count">${c.count} moments</span>
+              <span class="pl-name" title="${esc(c.name)}">${c.live ? '<span class="pl-live" title="Live — re-derives on open">🔴</span> ' : ""}${esc(c.name)}</span>
+              <span class="dim pl-count">${c.live ? "live" : c.count + " moments"}</span>
               <span class="pl-actions">
                 <button class="coll-rename" title="Rename">✏️</button>
                 <button class="coll-export" title="Export to a video file">⬇</button>

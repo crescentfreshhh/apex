@@ -23,6 +23,7 @@ const State = {
   pool: null, // scene pool for shuffle
   searchMode: false,
   source: null, // current source id (for Refresh)
+  sourceSpec: null, // {kind,…} descriptor of what's driving the board (for a live playlist)
   entryFloor: null, // taste floor when the source was entered (Refresh restores it, leaving a pivot)
   pivotApplyFloor: null, // how the current pivot re-runs on a floor change (null = floor N/A here)
   muted: false, // master mute; when off, hover-to-hear plays the tile under the cursor
@@ -809,6 +810,7 @@ function openTileMenu(tile, x, y) {
     ["⭐ Save her best as a playlist", () => saveHerBest(apex.scene_id)],
     ["💾 Save this board as a playlist", () => saveCurrentBoard()],
   );
+  if (State.sourceSpec) items.push(["🔴 Save as LIVE playlist (re-derives each open)", () => saveLivePlaylist()]);
   if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
   // always last: flag the whole scene for later cleanup by 1-starring it in Stash
   items.push(["🗑 Mark for deletion (1★ in Stash)", () => markForDeletion(apex.scene_id)]);
@@ -857,6 +859,7 @@ async function moreLikeThis(scene_id, t) {
   // not the original board. With a floor set, return every match above it (the
   // count grows/shrinks with the slider); with it off, a generous default.
   State.pivotSeed = { scene_id, t };
+  State.sourceSpec = { kind: "similar", scene_id, t };
   State.pivotApplyFloor = null;   // pivotSeed drives the re-run for this pivot
   syncFloorVisibility();
   flashStatus("finding similar…");
@@ -939,11 +942,28 @@ async function saveCurrentBoard() {
     flashStatus(`saved "${name}" (${apexes.length} moments)`);
   } catch (e) { flashStatus(e.message); }
 }
+// Save the board's SOURCE (not a frozen snapshot): a live playlist re-derives its
+// moments from your current taste + library every time you open it.
+async function saveLivePlaylist() {
+  if (!State.sourceSpec) return flashStatus("this board can't be saved live");
+  const apexes = (State.apexes || []).filter((a) => a.scene_id && (a.url || a.stream));
+  const base = State.pivot ? State.pivot.replace(/^[^A-Za-z0-9]+/, "").trim() : "live";
+  const name = prompt("Save as a LIVE playlist (re-derives each open):", base + " — live");
+  if (!name) return;
+  try {
+    await api("/api/collection", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, apexes, live: true, source: State.sourceSpec }),
+    });
+    flashStatus(`🔴 saved live playlist "${name}"`);
+  } catch (e) { flashStatus(e.message); }
+}
 // Broad by default: her FULL spread across every embedded scene, floor OFF —
 // pivoting shouldn't confine you to the curated taste feed. The floor slider stays
 // available as an optional tightener (tighten=true, via State.pivotApplyFloor).
 async function moreFromActress(scene_id, tighten = false) {
   State.pivotSeed = null;   // performer pivot isn't seeded by a single moment
+  State.sourceSpec = { kind: "performer", scene_id };
   State.pivotApplyFloor = () => moreFromActress(scene_id, true);
   syncFloorVisibility();
   flashStatus("finding her scenes…");
@@ -963,6 +983,7 @@ async function moreFromActress(scene_id, tighten = false) {
 // similar moments to THIS one, but only across this scene's performer
 async function moreMomentSameActress(scene_id, t) {
   State.pivotSeed = null;
+  State.sourceSpec = { kind: "performer_moment", scene_id, t };
   State.pivotApplyFloor = null;   // diverse coverage (score 0) — floor N/A, hidden
   syncFloorVisibility();
   flashStatus("finding her moments like this…");
@@ -977,6 +998,7 @@ async function moreMomentSameActress(scene_id, t) {
 // stay in this scene: a diverse spread of its moments
 async function moreInThisScene(scene_id) {
   State.pivotSeed = null;
+  State.sourceSpec = { kind: "scene", scene_id };
   State.pivotApplyFloor = null;   // single-scene spread (score 0) — floor N/A, hidden
   syncFloorVisibility();
   flashStatus("gathering this scene…");
@@ -1004,8 +1026,17 @@ function syncFloorVisibility() {
     : (State.source === "foryou" || State.source === "performer");
   if (fw) fw.hidden = !show;
 }
+// the re-derivable descriptor for a live playlist (null = this board can't go live)
+function specForSource(src) {
+  if (src === "performer") return { kind: "performer", id: boardPerformer?.id || null, name: boardPerformer?.name || null, query: boardPerformer?.query || null };
+  if (src === "search" && boardSearch) return { kind: "search", q: boardSearch.q, min: boardSearch.min, per: boardSearch.per, neg: boardSearch.neg, taste: boardSearch.taste };
+  if (src === "foryou") return { kind: "foryou" };
+  if (src === "stat") return { kind: "stat", metric: boardStat?.metric || "fresh", id: boardStat?.id || null };
+  return null;  // shuffle / tag / collection / galaxy — not live-derivable
+}
 async function loadSource(src, opts = {}) {
   State.source = src;
+  State.sourceSpec = specForSource(src);   // pivots override this below
   State.entryFloor = fyMinScore;   // remember the floor at entry; pivots never re-run this, so Refresh can restore it
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
   State.pivot = null; State.pivotSeed = null; State.pivotApplyFloor = null;
@@ -1020,9 +1051,18 @@ async function loadSource(src, opts = {}) {
       State.shuffle = true;
       pickApex = randomMoment;
     } else if (src.startsWith("collection:")) {
-      const pl = await api("/api/collection?name=" + encodeURIComponent(src.slice(11)));
-      State.apexes = pl.apexes || []; State.searchMode = true;
-      if (!State.apexes.length) return showError("This collection has no moments.");
+      const safe = src.slice(11);
+      const pl = await api("/api/collection?name=" + encodeURIComponent(safe));
+      let apexes = pl.apexes || [];
+      if (pl.live) {   // re-derive from the saved source spec, not the frozen snapshot
+        try {
+          const d = await api("/api/collection/derive?name=" + encodeURIComponent(safe));
+          const fresh = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+          if (fresh.length) apexes = fresh;
+        } catch (e) { /* fall back to the stored snapshot */ }
+      }
+      State.apexes = apexes; State.searchMode = true;
+      if (!State.apexes.length) return showError("This playlist has no moments.");
       pickApex = makeQueuePicker(State.apexes);   // play every clip before repeating
     } else if (src === "search") {
       State.searchMode = true;

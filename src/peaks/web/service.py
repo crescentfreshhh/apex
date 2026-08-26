@@ -629,7 +629,7 @@ class Service:
 
     def save_collection(
         self, name: str, apexes: list, query: str | None = None,
-        params: dict | None = None,
+        params: dict | None = None, live: bool = False, source: dict | None = None,
     ) -> dict:
         import json
 
@@ -641,8 +641,48 @@ class Service:
             data["query"] = query          # remembered for a future "refresh"
         if params:
             data["params"] = params
+        if live and source:                # a live playlist re-derives from its source
+            data["live"] = True
+            data["source"] = source
         (d / f"{safe}.json").write_text(json.dumps(data))
-        return {"name": name, "safe": safe, "count": len(apexes)}
+        return {"name": name, "safe": safe, "count": len(apexes), "live": bool(live and source)}
+
+    def derive_collection(self, name: str):
+        """Re-run a live playlist's saved source spec → fresh Hits (newest taste /
+        library). None when the playlist isn't live or doesn't exist."""
+        c = self.load_collection(name)
+        if not c or not c.get("live"):
+            return None
+        s = c.get("source") or {}
+        kind = s.get("kind")
+        try:
+            if kind == "performer":
+                q = s.get("query") or None
+                r = self.performer_best(
+                    performer_id=s.get("id"), name=s.get("name"), scene_id=s.get("scene_id"),
+                    count=1500, per_scene=40, query=q, spread=(q is None),
+                )
+                return r["hits"]
+            if kind == "search":
+                return self.search_text(
+                    s.get("q", ""), top_k=int(s.get("top_k") or 300),
+                    taste=bool(s.get("taste")), per_scene=int(s.get("per") or 3),
+                    min_score=(s.get("min") or None), neg_weight=float(s.get("neg") or 0.5),
+                )
+            if kind == "foryou":
+                return self.board_pool(count=int(s.get("count") or 1500))["hits"]
+            if kind == "stat":
+                return self.stats_board(s.get("metric", "fresh"), id=s.get("id"))["hits"]
+            if kind == "scene":
+                return self.scene_moments(str(s.get("scene_id")))["hits"]
+            if kind == "performer_moment":
+                return self.performer_moment_matches(str(s.get("scene_id")), float(s.get("t") or 0.0))["hits"]
+            if kind == "similar":
+                key = self._key_for_scene(str(s.get("scene_id")), self._model_name())
+                return self.search_by_frame(key, float(s.get("t") or 0.0), top_k=300, per_scene=3) if key else []
+        except Exception:  # noqa: BLE001 — a bad spec shouldn't 500 the board
+            return []
+        return []
 
     def list_collections(self) -> list[dict]:
         import json
@@ -672,7 +712,8 @@ class Service:
                     thumb = f"/api/frame?key={key}&t={float(t):g}"
                     break
             out.append({"name": j.get("name", p.stem), "safe": p.stem,
-                        "count": j.get("count", len(apexes)), "thumb": thumb})
+                        "count": j.get("count", len(apexes)), "thumb": thumb,
+                        "live": bool(j.get("live"))})
         return out
 
     def load_collection(self, name: str):
