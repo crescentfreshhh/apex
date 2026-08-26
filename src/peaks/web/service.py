@@ -1386,6 +1386,49 @@ class Service:
         self._taste_modes_cache[model] = modes
         return modes
 
+    def _hidden_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "hidden_scenes.json"
+
+    def hidden_scene_ids(self) -> set[str]:
+        """Scenes you 1★'d ('mark for deletion') — hidden from every peaks feed,
+        board, and pivot. A local set (no per-request Stash call), populated by
+        peaks' own mark-for-deletion; loaded once and cached in memory."""
+        cached = getattr(self, "_hidden_set", None)
+        if cached is not None:
+            return cached
+        import json
+
+        ids: set[str] = set()
+        p = self._hidden_path()
+        try:
+            if p.exists():
+                ids = {str(x) for x in json.loads(p.read_text())}
+        except Exception:  # noqa: BLE001 — a bad/missing file just means nothing hidden
+            ids = set()
+        self._hidden_set = ids
+        return ids
+
+    def set_scene_hidden(self, scene_id: str, hidden: bool) -> None:
+        """Add/remove a scene from the hidden set (persisted). Driven by the
+        rating: 1★ ('mark for deletion') hides it, a higher/cleared rating unhides."""
+        import json
+
+        ids = set(self.hidden_scene_ids())
+        sid = str(scene_id)
+        if hidden:
+            ids.add(sid)
+        else:
+            ids.discard(sid)
+        self._hidden_set = ids
+        p = self._hidden_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(sorted(ids)))
+        except Exception:  # noqa: BLE001 — persistence best-effort
+            pass
+
     def recommend(
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
@@ -2904,6 +2947,9 @@ class Service:
         """Write editable fields to Stash, then return fresh metadata."""
         self.client().update_scene(scene_id, **fields)
         self.invalidate_meta(scene_id)
+        if "rating100" in fields:
+            r = int(fields.get("rating100") or 0)
+            self.set_scene_hidden(scene_id, 0 < r <= 20)  # 1★ = mark for deletion
         return self.scene_meta([scene_id]).get(str(scene_id), {})
 
     def add_o(self, scene_id: str) -> int:

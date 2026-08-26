@@ -125,6 +125,10 @@ LoginIn = _login_model()
 
 
 def _hit_payload(service: Service, hits) -> list[dict]:
+    # hide scenes you 1★'d ("mark for deletion") from every feed / board / pivot
+    hidden = service.hidden_scene_ids()
+    if hidden:
+        hits = [h for h in hits if str(h.scene_id) not in hidden]
     meta = service.scene_meta([h.scene_id for h in hits if h.scene_id])
     out = []
     for h in hits:
