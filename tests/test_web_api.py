@@ -154,6 +154,53 @@ def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
     assert client.get("/api/foryou/board?count=6&min_score=2.0").json()["items"] == []
 
 
+def test_profiles_are_isolated(cfg, tmp_path, monkeypatch):
+    """Each taste profile keeps its own labels + feed; the default is untouched
+    when a second profile is trained, and deleting a profile erases its taste."""
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+
+    class _C:  # offline: no markers for any tag
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+        def stream_url(self, sid, start=None):
+            return f"http://s/{sid}?t={start}"
+
+        def destroy_scene_markers(self, ids):
+            return len(ids)
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    client = TestClient(create_app(cfg))
+
+    default = client.get("/api/profiles").json()["default"]
+    assert client.get("/api/profiles").json()["profiles"] == [default]
+
+    # a new profile shows up and is selectable
+    made = client.post("/api/profiles", params={"name": "kinks"}).json()["profiles"]
+    assert "kinks" in made
+
+    # a 👍 filed under "kinks" trains only that profile — the default stays empty
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1,
+                                      "scene_id": "1", "profile": "kinks"})
+    assert client.get("/api/labels", params={"profile": "kinks"}).json()["positive"] == 1
+    assert client.get("/api/labels").json()["positive"] == 0
+    # and only "kinks" has a feed
+    assert client.get("/api/foryou", params={"profile": "kinks"}).json()["items"]
+    assert client.get("/api/foryou").json()["items"] == []
+
+    # deleting drops it from the registry and erases its labels
+    client.request("DELETE", "/api/profiles", params={"name": "kinks"})
+    assert "kinks" not in client.get("/api/profiles").json()["profiles"]
+    assert client.get("/api/labels", params={"profile": "kinks"}).json()["positive"] == 0
+
+    # the default profile can't be deleted
+    assert client.request("DELETE", "/api/profiles",
+                          params={"name": default}).status_code == 400
+
+
 def test_search_similar_accepts_scene_id(cfg, monkeypatch):
     import peaks.web.service as svc_mod
 

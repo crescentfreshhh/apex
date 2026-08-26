@@ -219,6 +219,47 @@ class Service:
         pending = max(0, total - embedded) if total is not None else None
         return {"embedded": embedded, "total": total, "pending": pending}
 
+    # --- taste profiles (each = its own labels + Stash tag + model + feed) -----
+
+    def list_profiles(self) -> list[str]:
+        """All taste profiles — the default tag, any registered in settings.json,
+        and any that already have labels — default first."""
+        default = self.cfg.markers.tag_name
+        reg = self._settings().get("profiles") or []
+        profs = {default} | set(reg) | set(self._label_store().profiles())
+        return sorted(profs, key=lambda p: (p != default, p.lower()))
+
+    def _write_profile_registry(self, names: list[str]) -> None:
+        import json
+
+        s = dict(self._settings())
+        s["profiles"] = names
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+
+    def create_profile(self, name: str) -> list[str]:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("empty profile name")
+        reg = list(self._settings().get("profiles") or [])
+        if name not in reg:
+            reg.append(name)
+            self._write_profile_registry(reg)
+        return self.list_profiles()
+
+    def delete_profile(self, name: str, purge_apexes: bool = False) -> dict:
+        """Delete a profile: drop it from the registry and erase its taste
+        (labels + trained model; its Stash markers too when `purge_apexes`)."""
+        if name == self.cfg.markers.tag_name:
+            raise ValueError("can't delete the default profile")
+        reg = [p for p in (self._settings().get("profiles") or []) if p != name]
+        self._write_profile_registry(reg)
+        self.delete_taste(profile=name, purge_apexes=purge_apexes)
+        self._invalidate_taste_caches()
+        return {"profiles": self.list_profiles()}
+
     def _clip_name(self) -> str:
         """Cache/index name for the active CLIP variant (namespaced so a bigger
         model doesn't collide with an existing ViT-B-32 'clip' cache)."""
@@ -1252,11 +1293,12 @@ class Service:
         full_wipe = not (within_minutes and within_minutes > 0)
         if purge_apexes and full_wipe:
             try:
-                # apex markers live under the configured marker tag (the same
-                # enumeration the taste centroid reads), not the profile name
+                # apex markers live under the profile's marker tag — the same
+                # enumeration the taste centroid reads (the default profile's tag
+                # is the configured marker tag; others tag by profile name)
                 ids = [
                     mk["marker_id"]
-                    for mk in self.client().iter_markers_by_tag(self.cfg.markers.tag_name)
+                    for mk in self.client().iter_markers_by_tag(profile)
                     if mk.get("marker_id")
                 ]
                 self.client().destroy_scene_markers(ids)
@@ -1382,13 +1424,16 @@ class Service:
 
     # --- "For You": taste centroid, recommendations, active learning ---------
 
-    def _taste_sources(self, model: str, rebuild: bool = False):
+    def _taste_sources(self, model: str, rebuild: bool = False, profile: str | None = None):
         """Unit vectors of your loved moments in `model` space — apex markers
         plus thumbs-up labels — stacked oldest→newest, with a parallel list of
-        their {key,time,scene_id,kind}. Cached per model; `rebuild` re-reads the
-        Stash markers and the label store."""
-        if not rebuild and model in self._taste_src_cache:
-            return self._taste_src_cache[model]
+        their {key,time,scene_id,kind}. Scoped to a taste `profile` (its Stash
+        marker tag + its label set); cached per (model, profile); `rebuild`
+        re-reads the Stash markers and the label store."""
+        profile = profile or self.cfg.markers.tag_name
+        ckey = (model, profile)
+        if not rebuild and ckey in self._taste_src_cache:
+            return self._taste_src_cache[ckey]
         idx = self.index(model)
         sid_key: dict[str, str] = {}
         for k, m in idx.key_meta.items():
@@ -1412,7 +1457,7 @@ class Service:
 
         # apex markers — the moments you explicitly saved
         try:
-            for mk in self.client().iter_markers_by_tag(self.cfg.markers.tag_name):
+            for mk in self.client().iter_markers_by_tag(profile):
                 sid = mk.get("scene_id")
                 if sid:
                     _add(sid_key.get(str(sid)), mk.get("seconds") or 0.0, str(sid), "apex")
@@ -1420,7 +1465,7 @@ class Service:
             pass
         # thumbs-up labels — from the swipe trainer / viewer
         try:
-            for lab in self._label_store().for_profile(self.cfg.markers.tag_name):
+            for lab in self._label_store().for_profile(profile):
                 if lab.label == 1:
                     _add(lab.key, lab.time, lab.scene_id, "thumb")
         except Exception:  # noqa: BLE001
@@ -1428,28 +1473,31 @@ class Service:
 
         dim = idx.dim or 1
         arr = np.stack(vecs).astype(np.float32) if vecs else np.zeros((0, dim), dtype=np.float32)
-        self._taste_src_cache[model] = (arr, sources)
+        self._taste_src_cache[ckey] = (arr, sources)
         return arr, sources
 
-    def _taste_centroid(self, model: str, recent: int = 0, rebuild: bool = False):
+    def _taste_centroid(self, model: str, recent: int = 0, rebuild: bool = False, profile: str | None = None):
         """(unit centroid, count, sources). `recent`>0 averages only your latest
-        N loved moments — the 'what you're into lately' view."""
-        arr, sources = self._taste_sources(model, rebuild=rebuild)
+        N loved moments — the 'what you're into lately' view. `profile` scopes it
+        to one taste profile (default = the configured tag)."""
+        arr, sources = self._taste_sources(model, rebuild=rebuild, profile=profile)
         if arr.shape[0] == 0:
             return None, 0, sources
         a = arr[-recent:] if (recent and recent < arr.shape[0]) else arr
         return self._unit(a.mean(axis=0)), int(a.shape[0]), sources
 
-    def _taste_modes(self, model: str):
+    def _taste_modes(self, model: str, profile: str | None = None):
         """Your loved set as K unit "mode" centroids, not one averaged point — so
         scoring can reward a moment near *any* of your distinct interests instead
         of only the bland midpoint between them. With few loved moments each is its
         own mode (≈ nearest-neighbour); above the cap they're k-means clusters.
         Returns a K×dim unit matrix, or None when there's no taste yet."""
-        cached = self._taste_modes_cache.get(model)
+        profile = profile or self.cfg.markers.tag_name
+        ckey = (model, profile)
+        cached = self._taste_modes_cache.get(ckey)
         if cached is not None:
             return cached
-        arr, _ = self._taste_sources(model)
+        arr, _ = self._taste_sources(model, profile=profile)
         L = int(arr.shape[0])
         if L == 0:
             return None
@@ -1468,7 +1516,7 @@ class Service:
         norms = np.linalg.norm(modes, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         modes = (modes / norms).astype(np.float32)
-        self._taste_modes_cache[model] = modes
+        self._taste_modes_cache[ckey] = modes
         return modes
 
     def _hidden_path(self):
@@ -1519,6 +1567,7 @@ class Service:
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
         exclude: set | None = None, shuffle: bool | None = None,
         seed: int | None = None, min_score: float | None = None,
+        profile: str | None = None,
     ) -> dict:
         """Moments across the whole library ranked for you — retrieve-then-rerank:
         the taste centroid pulls a generous candidate pool (fast, spans the
@@ -1536,7 +1585,7 @@ class Service:
             shuffle = rebuild
         if rebuild:
             self._invalidate_taste_caches()
-        c, n, sources = self._taste_centroid(model, recent=recent, rebuild=rebuild)
+        c, n, sources = self._taste_centroid(model, recent=recent, rebuild=rebuild, profile=profile)
         if c is None:
             return {"hits": [], "sources": 0, "total": 0, "model": model, "reranked": False}
         # retrieve a pool larger than we'll show, so the reranker has room to
@@ -1547,8 +1596,8 @@ class Service:
             pool = [h for h in pool if str(h.scene_id) not in exclude]
         if min_score is not None:  # taste floor: only moments this close to your taste
             pool = [h for h in pool if h.score >= min_score]
-        reranked = self._taste_model(self.cfg.markers.tag_name, model) is not None
-        ranked = self._rerank_by_taste(pool, model) if reranked else pool
+        reranked = self._taste_model(profile or self.cfg.markers.tag_name, model) is not None
+        ranked = self._rerank_by_taste(pool, model, profile=profile) if reranked else pool
         if shuffle:
             ranked = self._shuffle_ranked(ranked, top_k, seed)
         diversity = self.cfg.modeling.feed_diversity
@@ -1585,46 +1634,48 @@ class Service:
         self._board_universe_cache.clear()
         self._peak_index_cache = None   # peaks depend on the taste scorer
 
-    def _taste_scores(self, model: str):
+    def _taste_scores(self, model: str, profile: str | None = None):
         """One taste score per indexed moment, for the whole library. Uses your
         trained classifier's probability when a model exists (a learned,
         multi-modal boundary that recognises your *diverse* taste), otherwise
         scores each moment by its similarity to your *nearest loved mode* — so a
         moment close to any of your distinct interests scores high, not just those
         near the average of everything. Returns (scores[idx.size], scored_by) or
-        (None, None) with no taste yet. Cached per model (one pass over the
-        library)."""
-        cached = self._board_score_cache.get(model)
+        (None, None) with no taste yet. Cached per (model, profile)."""
+        profile = profile or self.cfg.markers.tag_name
+        ckey = (model, profile)
+        cached = self._board_score_cache.get(ckey)
         if cached is not None:
             return cached
         idx = self.index(model)
         if idx.size == 0:
             return None, None
-        clf = self._taste_model(self.cfg.markers.tag_name, model)
+        clf = self._taste_model(profile, model)
         if clf is not None:
             scores = np.asarray(clf.predict_proba(idx.matrix), dtype=np.float32).reshape(-1)
             scored_by = "classifier"
         else:
-            modes = self._taste_modes(model)
+            modes = self._taste_modes(model, profile=profile)
             if modes is None:
                 return None, None
             # cosine to every mode, keep each moment's best → spans your whole taste
             scores = (idx.matrix @ modes.T).max(axis=1).astype(np.float32)
             scored_by = "modes"
         out = (scores, scored_by)
-        self._board_score_cache[model] = out
+        self._board_score_cache[ckey] = out
         return out
 
-    def _board_universe(self, model: str, per_scene: int):
+    def _board_universe(self, model: str, per_scene: int, profile: str | None = None):
         """Every scene's best taste-moment (plus up to `per_scene-1` more), ordered
         best-first across the whole library — so the board is guaranteed ≥1 moment
         for *every* scene you've indexed, not just the few nearest your taste's
-        centre. (scored_by, list[Hit]) cached per (model, per_scene)."""
-        key = (model, per_scene)
+        centre. (scored_by, list[Hit]) cached per (model, per_scene, profile)."""
+        profile = profile or self.cfg.markers.tag_name
+        key = (model, per_scene, profile)
         cached = self._board_universe_cache.get(key)
         if cached is not None:
             return cached
-        scores, scored_by = self._taste_scores(model)
+        scores, scored_by = self._taste_scores(model, profile=profile)
         if scores is None:
             return None, []
         idx = self.index(model)
@@ -1653,7 +1704,7 @@ class Service:
     def board_pool(
         self, count: int = 400, model: str | None = None,
         per_scene: int = 4, exclude: set | None = None,
-        min_score: float = 0.0, seed: int | None = None,
+        min_score: float = 0.0, seed: int | None = None, profile: str | None = None,
     ) -> dict:
         """The endless For You megaboard's supply of moments — full-library
         coverage, one peak per scene. Every scene contributes its best
@@ -1664,7 +1715,7 @@ class Service:
         batches. `count` moments come back as a rank-weighted random sample so
         strong matches surface first but the whole library stays reachable."""
         model = model or self._model_name()
-        scored_by, uni = self._board_universe(model, per_scene)
+        scored_by, uni = self._board_universe(model, per_scene, profile=profile)
         if not uni:
             return {"hits": [], "scenes": 0, "moments": 0, "model": model, "scored_by": None}
         pool = [h for h in uni if h.score >= min_score] if min_score > 0 else uni
@@ -1756,7 +1807,8 @@ class Service:
             max_sim = np.maximum(max_sim, c @ c[j])
         return [hits[i] for i in chosen]
 
-    def next_uncertain(self, model: str | None = None, pool: int = 800) -> dict | None:
+    def next_uncertain(self, model: str | None = None, pool: int = 800,
+                       profile: str | None = None) -> dict | None:
         """The unlabeled frame the taste model is least sure about — active
         learning: rating the ambiguous ones teaches it fastest. Falls back to
         centroid-ambiguity, then random, when there's no model/centroid yet."""
@@ -1764,7 +1816,7 @@ class Service:
         idx = self.index(model, refresh=True)  # pick up frames from an in-progress embed
         if idx.size == 0:
             return None
-        profile = self.cfg.markers.tag_name
+        profile = profile or self.cfg.markers.tag_name
         labeled = self._label_store().labeled_ids(profile)
         rng = np.random.default_rng()
         rows = rng.choice(idx.size, size=min(pool, idx.size), replace=False)
@@ -1775,7 +1827,7 @@ class Service:
         else:
             # use the centroid only if it's already cached — never trigger a
             # (network) marker rebuild from the swipe loop.
-            cached = self._taste_src_cache.get(model)
+            cached = self._taste_src_cache.get((model, profile))
             if cached is not None and cached[0].shape[0] > 0:
                 c = self._unit(cached[0].mean(axis=0))
                 sims = idx.matrix[rows] @ c
@@ -2490,13 +2542,13 @@ class Service:
                 created.append(saved)
         return {"created": created}
 
-    def taste_visual(self, per_mode: int = 6, model: str | None = None) -> dict:
+    def taste_visual(self, per_mode: int = 6, model: str | None = None, profile: str | None = None) -> dict:
         """Your taste shown as *frames*, not CLIP words: for each taste "mode"
         (a distinct cluster of what you like), the nearest frames in the library.
         `{modes: [{frames:[{key,time,scene_id,score,thumb}]}], sources}`."""
         model = model or self._model_name()
         idx = self.index(model)
-        modes = self._taste_modes(model)
+        modes = self._taste_modes(model, profile=profile)
         if modes is None or idx.size == 0:
             return {"modes": [], "sources": 0}
         out, seen = [], set()
@@ -2516,7 +2568,7 @@ class Service:
                     break
             if frames:
                 out.append({"frames": frames})
-        arr, _ = self._taste_sources(model)
+        arr, _ = self._taste_sources(model, profile=profile)
         return {"modes": out, "sources": int(arr.shape[0])}
 
     def list_labels(

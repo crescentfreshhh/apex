@@ -28,7 +28,13 @@ const State = {
   pivotApplyFloor: null, // how the current pivot re-runs on a floor change (null = floor N/A here)
   muted: false, // master mute; when off, hover-to-hear plays the tile under the cursor
   volume: 1, // volume for whichever single tile is audible
+  profile: "", // active taste profile (from ?profile=…) — scopes the For You board + saves
 };
+try { State.profile = new URLSearchParams(location.search).get("profile") || ""; } catch { /* ignore */ }
+// query fragment for the active profile (empty = server default)
+function profileParam() { return State.profile ? "&profile=" + encodeURIComponent(State.profile) : ""; }
+// same, as the apex-marker `tag` (saved moments are filed under the profile's tag)
+function tagParam() { return State.profile ? "&tag=" + encodeURIComponent(State.profile) : ""; }
 try {
   const mv = JSON.parse(localStorage.getItem("mb_audio") || "null");
   if (mv) { State.muted = mv.muted === true; State.volume = isFinite(mv.volume) ? mv.volume : 1; }
@@ -657,7 +663,8 @@ function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
   return "/api/foryou/board?count=400"
     + (ex ? "&exclude=" + encodeURIComponent(ex) : "")
-    + "&min_score=" + fyMinScore;   // always sent, so 0 truly means "off"
+    + "&min_score=" + fyMinScore    // always sent, so 0 truly means "off"
+    + profileParam();
 }
 function syncFloorUI() {
   const s = document.getElementById("floor"), v = document.getElementById("floor-val");
@@ -892,27 +899,27 @@ async function saveHerBest(scene_id) {
 // where you're watching, using the same endpoints Explore/the viewer use.
 async function rateMoment(scene_id, t, label) {
   try {
-    await api(`/api/label?scene_id=${encodeURIComponent(scene_id)}&t=${(+t || 0).toFixed(2)}&label=${label}`,
+    await api(`/api/label?scene_id=${encodeURIComponent(scene_id)}&t=${(+t || 0).toFixed(2)}&label=${label}` + profileParam(),
       { method: "POST" });
     flashStatus(label ? "👍 added to your taste" : "👎 noted — less like that");
   } catch (e) { flashStatus(e.message); }
 }
 async function saveApex(scene_id, t) {
   try {
-    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "POST" });
+    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "POST" });
     flashStatus("★ saved moment @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
 // does an apex marker sit at this moment? (drives the menu's Save/Remove toggle)
 async function checkApex(scene_id, t) {
   try {
-    const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`);
+    const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam());
     return !!(d && d.is_apex);
   } catch { return false; }
 }
 async function removeApex(scene_id, t) {
   try {
-    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}`, { method: "DELETE" });
+    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "DELETE" });
     flashStatus("✖ unsaved moment @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }

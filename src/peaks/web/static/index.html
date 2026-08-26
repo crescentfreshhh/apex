@@ -199,6 +199,12 @@
       <p class="dim">A recommender built from your own taste — the average of every
         moment you've saved or thumbed up, matched against your whole
         library. No query needed. The more you save and rate, the sharper it gets.</p>
+      <div class="row" id="profile-row" title="Each profile keeps its own 👍/👎, saved moments, trained model, and feed">
+        <label class="dim" for="profile-select">Taste profile</label>
+        <select id="profile-select"></select>
+        <button id="btn-profile-new" class="ghost" title="Create a new taste profile">+ New</button>
+        <button id="btn-profile-del" class="ghost" title="Delete this profile (keeps its saved moments in Stash)" hidden>🗑</button>
+      </div>
       <div class="row">
         <button id="btn-foryou-rebuild" class="primary">Rebuild from my taste</button>
         <button id="btn-foryou-board" class="ghost" title="Play the current For You feed on the megaboard">▶ Play on megaboard</button>

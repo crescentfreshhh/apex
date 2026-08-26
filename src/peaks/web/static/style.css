@@ -106,6 +106,9 @@ button.primary:disabled { opacity: .5; cursor: default; }
   gap: 10px; margin-top: 12px; padding: 12px; background: var(--panel2);
   border: 1px solid var(--line); border-radius: 8px; }
 .adv[hidden] { display: none; }  /* class display must not defeat the hidden attr */
+#profile-row { align-items: center; gap: 8px; margin-bottom: 10px; }
+#profile-row select { padding: 5px 8px; font-size: 13px; }
+#profile-row .ghost { padding: 5px 8px; }
 .adv label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
 .adv select, .adv input { font-size: 13px; }
 .adv-hint { margin-top: 8px; font-size: 12px; }

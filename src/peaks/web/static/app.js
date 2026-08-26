@@ -17,6 +17,28 @@ const toast = (msg, bad) => {
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 3500);
 };
 
+// --- taste profiles ---------------------------------------------------------
+// The active taste profile scopes the whole For You surface (feed, radio, labels,
+// visual taste) and the tag saved moments are filed under. Default = the server's
+// configured marker tag; other profiles carry their own 👍/👎, saved moments, and
+// trained model. Persisted per-browser.
+const PROFILE = {
+  name: (() => { try { return localStorage.getItem("peaks_profile") || ""; } catch { return ""; } })(),
+  default: "",   // filled in by loadProfiles()
+  isDefault() { return !this.name || this.name === this.default; },
+  set(name) {
+    this.name = name || "";
+    try { localStorage.setItem("peaks_profile", this.name); } catch { /* ignore */ }
+  },
+};
+// query fragment for taste calls — omitted for the default so existing behaviour
+// (and cache keys) are untouched.
+function pparam(extra = {}) {
+  return PROFILE.isDefault() ? { ...extra } : { profile: PROFILE.name, ...extra };
+}
+// the Stash marker tag a saved moment is filed under (undefined = server default)
+function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
+
 // --- tabs -------------------------------------------------------------------
 document.querySelectorAll(".tab[data-view]").forEach((b) =>
   b.addEventListener("click", () => {
@@ -381,7 +403,7 @@ function renderHits(hits, container, previewMax) {
 async function thumb(key, time, label, sceneId, btn) {
   if (btn) { btn.classList.add("flash"); setTimeout(() => btn.classList.remove("flash"), 600); }
   try {
-    const qs = new URLSearchParams({ key, t: (+time).toFixed(2), label });
+    const qs = new URLSearchParams(pparam({ key, t: (+time).toFixed(2), label }));
     if (sceneId) qs.set("scene_id", sceneId);
     const c = await api("/api/label?" + qs, { method: "POST" });
     toast(label ? "👍 More like this — noted" : "👎 Less like this — noted");
@@ -394,7 +416,7 @@ function updateTasteUI(c) {
 $("#btn-train").addEventListener("click", async () => {
   const btn = $("#btn-train"); btn.disabled = true;
   try {
-    const s = await api("/api/train", { method: "POST" });
+    const s = await api("/api/train?" + new URLSearchParams(pparam()), { method: "POST" });
     toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
   } catch (e) { toast(e.message, true); }
   btn.disabled = false;
@@ -580,8 +602,12 @@ async function loadViewerMeta(sid) {
 }
 async function saveMoment(sid, t) {
   if (!sid) return toast("no scene id for this result", true);
-  try { await api(`/api/scene/${sid}/apex?t=${(t || 0).toFixed(2)}`, { method: "POST" }); toast("Saved moment + added to taste @ " + fmt(t)); }
-  catch (e) { toast(e.message, true); }
+  try {
+    const p = { t: (t || 0).toFixed(2) };
+    if (ptag()) p.tag = ptag();   // file the moment under the active profile's tag
+    await api(`/api/scene/${sid}/apex?` + new URLSearchParams(p), { method: "POST" });
+    toast("Saved moment + added to taste @ " + fmt(t) + (PROFILE.isDefault() ? "" : ` · ${PROFILE.name}`));
+  } catch (e) { toast(e.message, true); }
 }
 let viewerIndex = -1;
 let currentHit = null;
@@ -1033,7 +1059,7 @@ async function loadForYou(rebuild) {
   const grid = $("#foryou-results");
   grid.innerHTML = '<p class="dim">Reading your taste…</p>';
   try {
-    const qs = new URLSearchParams({ top_k: 80, recent: recentN(), rebuild: rebuild ? "true" : "false" });
+    const qs = new URLSearchParams(pparam({ top_k: 80, recent: recentN(), rebuild: rebuild ? "true" : "false" }));
     const d = await api("/api/foryou?" + qs);
     foryouItems = d.items || [];
     if (!d.items.length) {
@@ -1059,7 +1085,7 @@ async function loadTasteVisual() {
   const el = $("#foryou-words");
   if (!el) return;
   try {
-    const d = await api("/api/taste/visual?per_mode=6");
+    const d = await api("/api/taste/visual?" + new URLSearchParams(pparam({ per_mode: 6 })));
     if (!d.modes || !d.modes.length) { el.innerHTML = ""; return; }
     el.innerHTML =
       `<div class="dim" style="margin-bottom:6px">What you like — your taste as frames
@@ -1077,7 +1103,7 @@ async function loadTasteVisual() {
 async function loadLabelCounts() {
   const el = $("#taste-labels-counts");
   if (!el) return;
-  try { const d = await api("/api/labels"); el.textContent = `${d.positive}👍 / ${d.negative}👎`; }
+  try { const d = await api("/api/labels?" + new URLSearchParams(pparam())); el.textContent = `${d.positive}👍 / ${d.negative}👎`; }
   catch { /* leave as-is */ }
 }
 // the editable label gallery: your explicit 👍/👎, flip or remove — paginated so
@@ -1089,7 +1115,7 @@ async function loadTasteLabels(reset = true) {
   if (!el) return;
   if (reset) { labelsOffset = 0; el.innerHTML = '<span class="dim">Loading…</span>'; }
   try {
-    const d = await api(`/api/taste/labels?limit=${LABELS_PAGE}&offset=${labelsOffset}`);
+    const d = await api("/api/taste/labels?" + new URLSearchParams(pparam({ limit: LABELS_PAGE, offset: labelsOffset })));
     const cnt = $("#taste-labels-counts");
     if (cnt) cnt.textContent = `${d.positive}👍 / ${d.negative}👎`;
     if (reset) el.innerHTML = "";
@@ -1111,7 +1137,7 @@ let tasteVisualCollapse = null, tasteLabelsCollapse = null;
 async function trainNow(btn) {
   if (btn) btn.disabled = true;
   try {
-    const s = await api("/api/train", { method: "POST" });
+    const s = await api("/api/train?" + new URLSearchParams(pparam()), { method: "POST" });
     toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
     loadForYou(false); loadLabelCounts();
     tasteVisualCollapse?.reloadIfOpen();   // refresh only the panels you're actually viewing
@@ -1123,7 +1149,7 @@ $("#foryou-words")?.addEventListener("click", async (e) => {
   const x = e.target.closest(".tf-x"); if (!x) return;
   const { key, t, sid } = x.dataset;
   try {
-    await api("/api/label?" + new URLSearchParams({ key, t, label: 0, ...(sid ? { scene_id: sid } : {}) }), { method: "POST" });
+    await api("/api/label?" + new URLSearchParams(pparam({ key, t, label: 0, ...(sid ? { scene_id: sid } : {}) })), { method: "POST" });
     x.closest(".taste-frame").style.display = "none";
     toast("👎 noted — Train now to apply to similar frames");
   } catch (err) { toast(err.message, true); }
@@ -1135,7 +1161,7 @@ $("#taste-labels")?.addEventListener("click", async (e) => {
   if (e.target.closest(".tl-flip")) {
     const next = cell.dataset.label === "1" ? 0 : 1;
     try {
-      await api("/api/label?" + new URLSearchParams({ key, t, label: next, ...(sid ? { scene_id: sid } : {}) }), { method: "POST" });
+      await api("/api/label?" + new URLSearchParams(pparam({ key, t, label: next, ...(sid ? { scene_id: sid } : {}) })), { method: "POST" });
       cell.dataset.label = String(next);
       cell.classList.toggle("pos", !!next); cell.classList.toggle("neg", !next);
       cell.querySelector(".tl-flip").textContent = next ? "👍" : "👎";
@@ -1143,7 +1169,7 @@ $("#taste-labels")?.addEventListener("click", async (e) => {
     } catch (err) { toast(err.message, true); }
   } else if (e.target.closest(".tl-x")) {
     try {
-      await api("/api/label?" + new URLSearchParams({ key, t }), { method: "DELETE" });
+      await api("/api/label?" + new URLSearchParams(pparam({ key, t })), { method: "DELETE" });
       cell.remove();
       loadLabelCounts();
     } catch (err) { toast(err.message, true); }
@@ -1364,7 +1390,7 @@ async function loadNextSwipe() {
   const card = $("#swipe-card");
   card.classList.add("dim"); card.textContent = "Finding a frame to rate…";
   try {
-    const d = await api("/api/foryou/next");
+    const d = await api("/api/foryou/next?" + new URLSearchParams(pparam()));
     swipeHit = d.item;
     if (!swipeHit) {
       card.textContent = "Embed some scenes first, then come back to train.";
@@ -1381,10 +1407,10 @@ async function loadNextSwipe() {
 async function swipeRate(label) {
   if (!swipeHit) return;
   try {
-    const c = await api("/api/label?" + new URLSearchParams({
+    const c = await api("/api/label?" + new URLSearchParams(pparam({
       key: swipeHit.key, t: (+swipeHit.time).toFixed(2), label,
       ...(swipeHit.scene_id ? { scene_id: swipeHit.scene_id } : {}),
-    }), { method: "POST" });
+    })), { method: "POST" });
     updateTasteUI(c);
     $("#swipe-status").textContent = `${c.positive}👍 / ${c.negative}👎` + (c.autotrain ? " · training…" : "");
     if (c.autotrain) {
@@ -1396,7 +1422,61 @@ async function swipeRate(label) {
   loadNextSwipe();
 }
 
+// --- taste-profile switcher -------------------------------------------------
+let profilesLoaded = false;
+async function loadProfiles() {
+  const sel = $("#profile-select");
+  if (!sel) return;
+  try {
+    const d = await api("/api/profiles");
+    PROFILE.default = d.default || "";
+    const names = d.profiles || [PROFILE.default];
+    // drop a stale stored profile that no longer exists → fall back to default
+    if (PROFILE.name && !names.includes(PROFILE.name)) PROFILE.set("");
+    const cur = PROFILE.isDefault() ? PROFILE.default : PROFILE.name;
+    sel.innerHTML = names.map((n) =>
+      `<option value="${esc(n)}"${n === cur ? " selected" : ""}>${esc(n)}${n === PROFILE.default ? " (default)" : ""}</option>`).join("");
+    $("#btn-profile-del").hidden = PROFILE.isDefault();
+    profilesLoaded = true;
+  } catch { /* profiles are optional — leave the default in effect */ }
+}
+// re-scope the whole For You surface to the active profile
+function reloadForProfile() {
+  $("#btn-profile-del").hidden = PROFILE.isDefault();
+  loadNextSwipe(); loadForYou(false); loadTasteBands(); loadLabelCounts();
+  tasteVisualCollapse?.reloadIfOpen(); tasteLabelsCollapse?.reloadIfOpen();
+}
+$("#profile-select")?.addEventListener("change", (e) => {
+  const v = e.target.value;
+  PROFILE.set(v === PROFILE.default ? "" : v);
+  reloadForProfile();
+});
+$("#btn-profile-new")?.addEventListener("click", async () => {
+  const name = (prompt("Name for the new taste profile:") || "").trim();
+  if (!name) return;
+  try {
+    await api("/api/profiles?" + new URLSearchParams({ name }), { method: "POST" });
+    PROFILE.set(name);
+    await loadProfiles();
+    reloadForProfile();
+    toast(`Switched to “${name}” — save moments or thumb some up to teach it.`);
+  } catch (e) { toast(e.message, true); }
+});
+$("#btn-profile-del")?.addEventListener("click", async () => {
+  if (PROFILE.isDefault()) return;
+  const name = PROFILE.name;
+  if (!confirm(`Delete taste profile “${name}”?\n\nIts 👍/👎 ratings and trained model are erased. Saved ⭐ moments stay in Stash.`)) return;
+  try {
+    await api("/api/profiles?" + new URLSearchParams({ name }), { method: "DELETE" });
+    PROFILE.set("");
+    await loadProfiles();
+    reloadForProfile();
+    toast(`Deleted “${name}” — back to the default profile.`);
+  } catch (e) { toast(e.message, true); }
+});
+
 async function openForYou() {
+  if (!profilesLoaded) await loadProfiles();
   loadNextSwipe();
   loadPicks();
   await loadForYou(false);   // cached taste = fast open; "Rebuild" forces a fresh rebuild
@@ -1413,7 +1493,8 @@ $("#foryou-recent")?.addEventListener("change", () => { loadForYou(false); taste
 // tab or the board itself) so it opens as selective as you set it.
 $("#btn-foryou-board")?.addEventListener("click", () => {
   const floor = readFloor();
-  window.open("/megaboard/?src=foryou" + (floor ? "&min_score=" + floor : ""), "_blank");
+  window.open("/megaboard/?src=foryou" + (floor ? "&min_score=" + floor : "")
+    + (PROFILE.isDefault() ? "" : "&profile=" + encodeURIComponent(PROFILE.name)), "_blank");
 });
 $("#btn-foryou-radio")?.addEventListener("click", () => startRadio());
 
@@ -1471,10 +1552,10 @@ async function addPicks() {
     // so concurrent posts would clobber each other (lost updates).
     let c = null, trained = false;
     for (const it of chosen) {
-      c = await api("/api/label?" + new URLSearchParams({
+      c = await api("/api/label?" + new URLSearchParams(pparam({
         key: it.key, t: (+it.time).toFixed(2), label: 1,
         ...(it.scene_id ? { scene_id: it.scene_id } : {}),
-      }), { method: "POST" });
+      })), { method: "POST" });
       trained = trained || !!(c && c.autotrain);
     }
     updateTasteUI(c);
@@ -1493,7 +1574,7 @@ const RADIO_CLIP_SECS = 20;
 
 async function radioFetch() {
   const ex = encodeURIComponent([...radioSeen].join(","));
-  const d = await api("/api/radio?count=30&exclude=" + ex);
+  const d = await api("/api/radio?" + new URLSearchParams(pparam({ count: 30 })) + "&exclude=" + ex);
   return (d.items || []).filter((h) => h.scene_id && h.stream);
 }
 async function startRadio() {
@@ -1564,7 +1645,7 @@ $("#btn-swipe-skip")?.addEventListener("click", () => loadNextSwipe());
 $("#btn-swipe-train")?.addEventListener("click", async () => {
   const btn = $("#btn-swipe-train"); btn.disabled = true;
   try {
-    const s = await api("/api/train", { method: "POST" });
+    const s = await api("/api/train?" + new URLSearchParams(pparam()), { method: "POST" });
     toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
     loadNextSwipe();
   } catch (e) { toast(e.message, true); }
@@ -1582,8 +1663,8 @@ document.querySelectorAll("#taste-manage [data-del]").forEach((b) =>
     if (!confirm(msg)) return;
     b.disabled = true;
     try {
-      const qs = isAll ? (purge ? "?purge_apexes=1" : "") : "?within_minutes=" + v;
-      const r = await api("/api/taste/delete" + qs, { method: "POST" });
+      const params = pparam(isAll ? (purge ? { purge_apexes: 1 } : {}) : { within_minutes: v });
+      const r = await api("/api/taste/delete?" + new URLSearchParams(params), { method: "POST" });
       const tail = r.retrained ? " · retrained" : r.model_deleted ? " · taste model cleared" : "";
       const apexTail = r.apex_error
         ? " · ⚠ apex delete failed"

@@ -582,10 +582,10 @@ def create_app(cfg=None):
         return res
 
     @app.get("/api/taste/visual")
-    def taste_visual(per_mode: int = 6):
+    def taste_visual(per_mode: int = 6, profile: str | None = None):
         """Your taste as frames (nearest to each taste mode) — the visual
         replacement for the CLIP 'known for' words."""
-        return service.taste_visual(per_mode=per_mode)
+        return service.taste_visual(per_mode=per_mode, profile=profile)
 
     @app.get("/api/taste/labels")
     def taste_labels(profile: str | None = None, limit: int | None = None, offset: int = 0):
@@ -623,11 +623,34 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
 
+    # --- taste profiles (separate 👍/👎, saved moments, model, feed) ---------
+
+    @app.get("/api/profiles")
+    def list_profiles():
+        """Every taste profile — the default first — for the For You switcher."""
+        return {"profiles": service.list_profiles(), "default": service.cfg.markers.tag_name}
+
+    @app.post("/api/profiles")
+    def create_profile(name: str):
+        try:
+            return {"profiles": service.create_profile(name),
+                    "default": service.cfg.markers.tag_name}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.delete("/api/profiles")
+    def delete_profile(name: str, purge_apexes: bool = False):
+        try:
+            return service.delete_profile(name, purge_apexes=purge_apexes)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
     # --- "For You": taste-centroid recommendations + active-learning trainer -
 
     @app.get("/api/foryou")
-    def foryou(top_k: int = 60, recent: int = 0, rebuild: bool = False):
-        r = service.recommend(top_k=top_k, recent=recent, rebuild=rebuild)
+    def foryou(top_k: int = 60, recent: int = 0, rebuild: bool = False,
+               profile: str | None = None):
+        r = service.recommend(top_k=top_k, recent=recent, rebuild=rebuild, profile=profile)
         return {
             "items": _hit_payload(service, r["hits"]),
             "sources": r["sources"], "total": r["total"], "model": r["model"],
@@ -635,10 +658,10 @@ def create_app(cfg=None):
         }
 
     @app.get("/api/foryou/next")
-    def foryou_next():
+    def foryou_next(profile: str | None = None):
         # deliberately lightweight (no scene_meta fetch) so rapid swiping never
         # blocks on Stash — the viewer loads full metadata on click.
-        hit = service.next_uncertain()
+        hit = service.next_uncertain(profile=profile)
         if not hit:
             return {"item": None}
         sid = hit["scene_id"]
@@ -673,7 +696,8 @@ def create_app(cfg=None):
         return service.taste_metrics(threshold=threshold)
 
     @app.get("/api/foryou/board")
-    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.0):
+    def foryou_board(count: int = 400, exclude: str = "", min_score: float = 0.0,
+                     profile: str | None = None):
         """The endless For You megaboard's supply — one peak per scene across your
         whole vetted library (≥1 moment for every scene), scored by your trained
         model when you have one. `min_score` is an optional tightener (0 = off →
@@ -682,7 +706,7 @@ def create_app(cfg=None):
         this floor, and how the score was computed) so the board can show them."""
         seen = {s for s in exclude.split(",") if s}
         r = service.board_pool(
-            count=count, per_scene=4, exclude=seen, min_score=min_score,
+            count=count, per_scene=4, exclude=seen, min_score=min_score, profile=profile,
         )
         return {
             "items": _hit_payload(service, r["hits"]),
@@ -769,14 +793,14 @@ def create_app(cfg=None):
         return Response(content=data, media_type=ctype)
 
     @app.get("/api/radio")
-    def radio(exclude: str = "", count: int = 30):
+    def radio(exclude: str = "", count: int = 30, profile: str | None = None):
         """Next batch for Taste Radio: top taste moments minus the scene_ids in
         `exclude` (comma-separated), so the stream never replays what you've seen."""
         seen = {s for s in exclude.split(",") if s}
         # shuffle=True → rank-weighted random order (fresh entropy each fetch), so
         # the stream varies every session instead of replaying the same top-ranked
         # sequence; strong taste matches still stay likely near the front.
-        r = service.recommend(top_k=count, exclude=seen, shuffle=True)
+        r = service.recommend(top_k=count, exclude=seen, shuffle=True, profile=profile)
         return {"items": _hit_payload(service, r["hits"])}
 
     # --- galaxy map ---------------------------------------------------------
