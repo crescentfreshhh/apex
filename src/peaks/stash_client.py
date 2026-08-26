@@ -111,6 +111,14 @@ query SceneDetails($ids: [ID!]) {
 }
 """
 
+_SCENES_EXIST_QUERY = """
+query ScenesExist($ids: [ID!]) {
+  findScenes(ids: $ids, filter: {per_page: -1}) {
+    scenes { id }
+  }
+}
+"""
+
 _SCENES_BY_PERFORMER_QUERY = """
 query ScenesByPerformer($pid: ID!, $per_page: Int!) {
   findScenes(
@@ -330,6 +338,16 @@ class StashClient:
                 "cover": paths.get("screenshot"),
             }
         return out
+
+    def existing_scene_ids(self, ids: list[str]) -> set[str]:
+        """Of the given scene ids, the subset that still exist in Stash — so a
+        caller can tell which have been deleted from the library. Empty ids → an
+        empty set (no query)."""
+        ids = [str(i) for i in ids if i]
+        if not ids:
+            return set()
+        data = self.execute(_SCENES_EXIST_QUERY, {"ids": ids})
+        return {str(s["id"]) for s in data["findScenes"]["scenes"]}
 
     def scenes_for_performer(self, performer_id: str, limit: int = 500) -> list[str]:
         """Scene ids featuring a performer — powers 'more from this actress'."""

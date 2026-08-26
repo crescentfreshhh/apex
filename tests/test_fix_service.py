@@ -13,12 +13,24 @@ class _FakeEmbedder:
     name = "dinov2"
 
 
-def _service(tmp_path):
+class _FakeClient:
+    """Stands in for the Stash client so run_fix's deleted-scene check is offline.
+    `gone` is the set of scene ids to report as no longer in the library."""
+
+    def __init__(self, gone=frozenset()):
+        self.gone = set(gone)
+
+    def existing_scene_ids(self, ids):
+        return {str(i) for i in ids if str(i) not in self.gone}
+
+
+def _service(tmp_path, gone=frozenset()):
     cfg = Config()
     cfg.embedding.cache_dir = str(tmp_path / "cache" / "embeddings")
     cfg.embedding.model = "dino"
     svc = Service(cfg)
     svc._embedder = lambda model=None: _FakeEmbedder()  # no torch
+    svc.client = lambda: _FakeClient(gone)  # offline Stash existence check
     return svc, cfg
 
 
@@ -141,7 +153,7 @@ def test_run_embed_multi_runs_each_model(tmp_path, monkeypatch):
 
 def test_run_fix_empty_log(tmp_path):
     svc, _ = _service(tmp_path)
-    assert svc.run_fix() == {"fixed": 0, "failed": 0, "total": 0}
+    assert svc.run_fix() == {"fixed": 0, "failed": 0, "pruned": 0, "total": 0}
 
 
 def test_run_fix_dry_run_touches_nothing(tmp_path):
@@ -151,3 +163,37 @@ def test_run_fix_dry_run_touches_nothing(tmp_path):
     result = svc.run_fix(dry_run=True)
     assert result["total"] == 1 and result["fixed"] == 0
     assert flog.keys() == {"fp1"}  # dry run leaves the log intact
+
+
+def test_run_fix_prunes_scenes_deleted_from_stash(tmp_path, monkeypatch):
+    real = tmp_path / "real.mp4"
+    real.write_bytes(b"x")
+    # scene "2" no longer exists in Stash → should be pruned, not retried
+    svc, cfg = _service(tmp_path, gone={"2"})
+    flog = failure_log_for(cfg)
+    flog.record("fp_ok", "1", str(real), error="seek fail")
+    flog.record("fp_deleted", "2", str(real), error="seek fail")
+
+    import peaks.pipeline as pl
+    monkeypatch.setattr(pl, "embed_library", lambda *a, **k: {"embedded": 1})
+
+    result = svc.run_fix()
+    assert result["fixed"] == 1 and result["pruned"] == 1 and result["failed"] == 0
+    assert flog.keys() == set()  # fixed one cleared, deleted one pruned
+
+
+def test_run_fix_keeps_all_when_stash_unreachable(tmp_path, monkeypatch):
+    # if the Stash existence check fails, prune nothing (a scene may only be
+    # transiently missing) — retry as before.
+    svc, cfg = _service(tmp_path)
+
+    def _boom():
+        raise RuntimeError("stash down")
+
+    svc.client = _boom
+    flog = failure_log_for(cfg)
+    flog.record("fp_bad", "9", "/nope/missing.mp4", error="e")
+
+    result = svc.run_fix()
+    assert result["pruned"] == 0 and result["failed"] == 1
+    assert flog.keys() == {"fp_bad"}  # nothing pruned

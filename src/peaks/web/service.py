@@ -918,21 +918,44 @@ class Service:
         entries = flog.entries()
         if limit:
             entries = entries[:limit]
-        result = {"fixed": 0, "failed": 0, "total": len(entries)}
+        result = {"fixed": 0, "failed": 0, "pruned": 0, "total": len(entries)}
         if not entries:
             log("no recorded failures — nothing to fix")
             return result
         if job:
             job.progress = {"total": len(entries), "done": 0}
 
+        # Scenes deleted from the library will fail forever (there's nothing left
+        # to decode), so the counter never drops. Ask Stash which of these scene
+        # ids still exist; the rest are stale and get pruned from the log instead
+        # of retried. If Stash is unreachable we skip pruning (retry everything)
+        # rather than risk dropping a scene that's only transiently missing.
+        alive: set[str] | None = None
+        want = [e.get("scene_id") for e in entries if e.get("scene_id")]
+        if want:
+            try:
+                alive = self.client().existing_scene_ids(want)
+            except Exception as exc:  # noqa: BLE001 — Stash down: don't prune
+                log(f"  (couldn't check Stash for deleted scenes: {exc} — retrying all)")
+                alive = None
+
         # (mode, hwaccel, pipeline): distinct decode strategies, cheap → tolerant
         ladder = [
             ("sparse", "", "raw"),      # sparse seek, no NVDEC
             ("interval", "", "jpeg"),   # full linear decode, most forgiving
         ]
+        def _is_stale(e) -> bool:
+            # deleted from Stash → nothing to retry, prune it
+            sid = e.get("scene_id")
+            return alive is not None and sid is not None and str(sid) not in alive
+
         if dry_run:
             for e in entries:
-                log(f"  · would retry scene {e.get('scene_id')} ({e.get('path')})")
+                if _is_stale(e):
+                    log(f"  · would prune scene {e.get('scene_id')} — gone from Stash "
+                        f"({e.get('path')})")
+                else:
+                    log(f"  · would retry scene {e.get('scene_id')} ({e.get('path')})")
             return result
 
         import os
@@ -946,6 +969,13 @@ class Service:
                 log(f"  ⏹ stop requested — halting after {result['fixed']} fixed")
                 break
             key = e["key"]
+            if _is_stale(e):
+                flog.resolve(key)
+                log(f"  🗑 scene {e.get('scene_id')}: deleted from Stash — pruned from the log")
+                result["pruned"] += 1
+                if job:
+                    job.progress["done"] = result["fixed"] + result["failed"] + result["pruned"]
+                continue
             scene = _scene_from_entry(e)
             if not scene.path or not os.path.exists(scene.path):
                 log(f"  ? scene {e.get('scene_id')}: file missing at {scene.path} "
@@ -988,7 +1018,9 @@ class Service:
                     )
                     result["failed"] += 1
             if job:
-                job.progress["done"] = result["fixed"] + result["failed"]
+                job.progress["done"] = result["fixed"] + result["failed"] + result["pruned"]
+        log(f"done — fixed {result['fixed']}, pruned {result['pruned']} deleted, "
+            f"{result['failed']} still failing of {result['total']}")
         return result
 
     # --- search index --------------------------------------------------------

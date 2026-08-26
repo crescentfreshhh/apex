@@ -564,9 +564,11 @@ def cmd_fix(args) -> int:
     if args.dry_run:
         return 0
     print(
-        f"\nDone. fixed={stats['fixed']} still_failing={stats['failed']} "
-        f"of {stats['total']}"
+        f"\nDone. fixed={stats['fixed']} pruned={stats.get('pruned', 0)} "
+        f"still_failing={stats['failed']} of {stats['total']}"
     )
+    if stats.get("pruned"):
+        print("  (pruned = deleted from Stash, dropped from the log)")
     if stats["failed"]:
         print("  (survivors kept in the log — inspect with `peaks fix --list`)")
     return 0
