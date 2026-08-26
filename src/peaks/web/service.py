@@ -175,6 +175,50 @@ class Service:
         self._index = {}
         return self.get_models()
 
+    def schedule_settings(self) -> dict:
+        """Current recurring-embed settings (settings.json overriding config).
+        The web scheduler reads this live, so a UI change applies without a
+        restart. `embed_hours` 0 = off."""
+        s = self._settings()
+        sc = self.cfg.schedule
+        hours = float(s.get("embed_hours", sc.embed_hours) or 0.0)
+        return {
+            "embed_hours": hours,
+            "embed_seconds": hours * 3600.0,
+            "sync": bool(s.get("sync", sc.sync)),
+            "prune": bool(s.get("prune", sc.prune)),
+        }
+
+    def save_schedule(self, embed_hours=None, sync=None, prune=None) -> dict:
+        """Persist recurring-embed settings to /config/settings.json."""
+        import json
+
+        s = dict(self._settings())
+        if embed_hours is not None:
+            s["embed_hours"] = max(0.0, float(embed_hours))
+        if sync is not None:
+            s["sync"] = bool(sync)
+        if prune is not None:
+            s["prune"] = bool(prune)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.schedule_settings()
+
+    def embed_status(self) -> dict:
+        """How much of the Stash library is embedded — {embedded, total, pending}
+        — the 'N new scenes not yet embedded' number. `total`/`pending` are None
+        if Stash is unreachable."""
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        embedded = len(cache.keys(self._model_name()))
+        try:
+            total = self.client().scene_count()
+        except Exception:  # noqa: BLE001 — Stash down
+            total = None
+        pending = max(0, total - embedded) if total is not None else None
+        return {"embedded": embedded, "total": total, "pending": pending}
+
     def _clip_name(self) -> str:
         """Cache/index name for the active CLIP variant (namespaced so a bigger
         model doesn't collide with an existing ViT-B-32 'clip' cache)."""

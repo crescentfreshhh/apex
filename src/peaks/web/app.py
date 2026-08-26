@@ -931,9 +931,20 @@ def create_app(cfg=None):
 
     # --- scheduler (recurring incremental embeds) ---------------------------
 
-    watch_seconds = service.cfg.schedule.embed_seconds
-    if watch_seconds and watch_seconds > 0:
-        _start_scheduler(app, service, jobs, watch_seconds)
+    @app.get("/api/schedule")
+    def get_schedule():
+        """Recurring-embed settings + how much of the library is embedded."""
+        return {**service.schedule_settings(), **service.embed_status()}
+
+    @app.post("/api/schedule")
+    def set_schedule(
+        embed_hours: float | None = None,
+        sync: bool | None = None,
+        prune: bool | None = None,
+    ):
+        return service.save_schedule(embed_hours=embed_hours, sync=sync, prune=prune)
+
+    _start_scheduler(app, service, jobs)  # always on; it reads the interval live
 
     _start_memwatch(app, service)
 
@@ -970,29 +981,38 @@ def _start_memwatch(app, service: Service) -> None:
     app.state._memwatch_stop = stop
 
 
-def _start_scheduler(app, service: Service, jobs: JobManager, seconds: float):
-    stop = threading.Event()
+def _start_scheduler(app, service: Service, jobs: JobManager):
+    """Recurring incremental-embed scheduler. Always running; it polls the
+    settings each minute and reads the interval/enabled state live, so the
+    Dashboard toggle takes effect without a container restart (interval 0 = off)."""
+    import time as _t
 
-    sync = service.cfg.schedule.sync
-    prune = service.cfg.schedule.prune
+    stop = threading.Event()
+    state = {"last": 0.0}
 
     def _embed_then_sync(job):
+        s = service.schedule_settings()
         stats = service.run_embed(job)
-        if sync:
+        if s.get("sync"):
             job.log("--- reconciling cache with Stash (sync) ---")
-            stats["sync"] = service.run_sync(job, prune=prune)
+            stats["sync"] = service.run_sync(job, prune=s.get("prune", False))
         return stats
 
     def _loop():
-        # small initial delay so startup isn't slammed
-        if stop.wait(30):
+        if stop.wait(30):  # small initial delay so startup isn't slammed
             return
-        while not stop.wait(seconds):
-            if jobs.running("embed") is None:
-                try:
-                    jobs.start("embed", _embed_then_sync)
-                except RuntimeError:
-                    pass  # a run is already going
+        while not stop.wait(60):  # poll every minute; interval read live
+            try:
+                secs = service.schedule_settings().get("embed_seconds", 0.0)
+            except Exception:  # noqa: BLE001
+                secs = 0.0
+            if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
+                if jobs.running("embed") is None:
+                    try:
+                        jobs.start("embed", _embed_then_sync)
+                        state["last"] = _t.time()
+                    except RuntimeError:
+                        pass  # a run is already going
 
     threading.Thread(target=_loop, daemon=True, name="peaks-scheduler").start()
     app.state._scheduler_stop = stop

@@ -59,8 +59,36 @@ async function refreshDashboard() {
   }
   if (typeof refreshReels === "function") refreshReels();
   if (typeof refreshCollections === "function") refreshCollections();
+  if (typeof loadSchedule === "function") loadSchedule();
   if (typeof reattachJobs === "function") reattachJobs();
 }
+
+// recurring-embed schedule + how much of the library is embedded
+async function loadSchedule() {
+  try {
+    const d = await api("/api/schedule");
+    const pend = $("#embed-pending");
+    if (pend) pend.textContent = d.total == null
+      ? `${(d.embedded || 0).toLocaleString()} scenes embedded (Stash unreachable for a total)`
+      : `${(d.embedded || 0).toLocaleString()} / ${d.total.toLocaleString()} scenes embedded · ${(d.pending || 0).toLocaleString()} not yet embedded`;
+    const on = $("#sched-on"), h = $("#sched-hours"), sy = $("#sched-sync"), pr = $("#sched-prune");
+    if (on) on.checked = d.embed_hours > 0;
+    if (h) h.value = d.embed_hours > 0 ? d.embed_hours : 6;
+    if (sy) sy.checked = !!d.sync;
+    if (pr) pr.checked = !!d.prune;
+  } catch { /* dashboard offline */ }
+}
+$("#btn-sched-save")?.addEventListener("click", async () => {
+  const on = $("#sched-on").checked;
+  const hours = on ? (parseFloat($("#sched-hours").value) || 6) : 0;
+  try {
+    await api("/api/schedule?" + new URLSearchParams({
+      embed_hours: hours, sync: $("#sched-sync").checked, prune: $("#sched-prune").checked,
+    }), { method: "POST" });
+    $("#sched-status").textContent = on ? `on · every ${hours}h` : "off";
+    loadSchedule();
+  } catch (e) { toast(e.message, true); }
+});
 
 function wireJob(btn, statusEl, logEl, start, stopBtn) {
   btn.addEventListener("click", async () => {

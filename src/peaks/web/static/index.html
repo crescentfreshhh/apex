@@ -59,6 +59,15 @@
         <button id="toggle-adv" class="ghost" type="button">Advanced ▾</button>
         <span id="embed-status" class="dim"></span>
       </div>
+      <div class="row"><span id="embed-pending" class="dim"></span></div>
+      <div class="row" title="Automatically embed newly-added Stash scenes on a schedule — the web app does it in the background, no CLI, no restart.">
+        <label class="check"><input type="checkbox" id="sched-on" /> Auto-embed new scenes</label>
+        <label>every <input id="sched-hours" type="number" min="0.5" step="0.5" style="width:64px" /> h</label>
+        <label class="check" title="After each pass, refresh moved scenes' paths (and drop deleted ones if prune is on)"><input type="checkbox" id="sched-sync" /> sync</label>
+        <label class="check" title="Drop cache entries for scenes deleted from Stash (destructive)"><input type="checkbox" id="sched-prune" /> prune</label>
+        <button id="btn-sched-save" class="ghost">Save schedule</button>
+        <span id="sched-status" class="dim"></span>
+      </div>
       <div id="embed-adv" class="adv" hidden>
         <label>Model
           <select id="adv-model">
