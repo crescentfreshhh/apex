@@ -393,3 +393,13 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .se-controls { margin-top: 8px; }
 .se-readout { margin-top: 8px; font-size: 13px; }
 .se-video { width: 100%; max-height: 300px; margin-top: 10px; background: #000; border-radius: 6px; }
+
+/* Trim tab: worst-first subtractive reclamation */
+.trim-stage { margin: 14px 0; }
+.trim-card { display: flex; gap: 16px; align-items: center; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-height: 140px; cursor: pointer; }
+.trim-card.dim { justify-content: center; }
+.trim-card img { width: 260px; max-width: 45%; aspect-ratio: 16/9; object-fit: cover;
+  border-radius: 8px; background: #000; }
+.trim-card .trim-meta .title { font-weight: 600; font-size: 16px; }
+.trim-controls { margin-top: 6px; }

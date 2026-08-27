@@ -17,6 +17,7 @@
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="performers">Performers</button>
       <button class="tab" data-view="statistics">Statistics</button>
+      <button class="tab" data-view="trim">Trim</button>
       <button class="tab" data-view="board">Megaboard</button>
     </nav>
     <span id="conn" class="dim"></span>
@@ -410,6 +411,30 @@
         <div id="reclaim-summary" class="reclaim-summary" hidden></div>
         <div id="reclaim-lists" class="reclaim-lists"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- TRIM (subtractive reclamation) -->
+  <section id="trim" class="view">
+    <div class="panel">
+      <h2>✂️ Trim — chip away the dead weight</h2>
+      <p class="dim">Peaks routes you to your <strong>lowest-taste</strong> moments first — the most
+        likely dead weight. Condemn what's junk and the marks pile up into the ledger below. This is
+        <strong>subtractive</strong>: you only ever remove what you explicitly mark, and you can't lose
+        anything you didn't look at.</p>
+      <div class="reclaim-dryrun"><strong>DRY RUN</strong> — marks only. Nothing is trimmed or deleted;
+        cut bands snap inward to keyframes so a future lossless pass drops only fully-condemned spans.</div>
+      <div id="trim-ledger" class="reclaim-summary"></div>
+      <div id="trim-stage" class="trim-stage">
+        <div id="trim-card" class="trim-card dim">Loading the worst of your library…</div>
+      </div>
+      <div class="row trim-controls">
+        <button id="btn-trim-cut" class="ghost" title="Condemn ~30s around this moment (keyframe-snapped)">✂️ Cut ~30s here</button>
+        <button id="btn-trim-trash" class="ghost" title="Condemn the whole scene">🗑 Trash scene</button>
+        <button id="btn-trim-skip" class="ghost" title="Keep — next worst">➡️ Keep / next</button>
+        <button id="btn-trim-open" class="ghost" title="Open in the player to cut precisely on the heat bar">🔍 Open in player</button>
+      </div>
+      <span id="trim-status" class="dim"></span>
     </div>
   </section>
 

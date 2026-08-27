@@ -1682,6 +1682,221 @@ class Service:
             return True
         return False
 
+    # --- reclamation cut-marks (the subtractive "remove this stretch" model) --
+    # You mark dead weight as you browse; the marks accumulate here and feed a
+    # dry-run reclaimable-GB ledger. NOTHING is trimmed/deleted — a later,
+    # explicitly-enabled pass will rebuild each file as [0,dur] minus its cuts.
+    def _cut_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "reclaim_cut.json"
+
+    def _cut_store(self) -> dict:
+        """scene_id -> {segments: [[start,end],…], whole: bool, ts}. Ranges the
+        user has condemned. Loaded once, cached in memory."""
+        cached = getattr(self, "_cut_cache", None)
+        if cached is not None:
+            return cached
+        import json
+
+        store: dict = {}
+        p = self._cut_path()
+        try:
+            if p.exists():
+                data = json.loads(p.read_text())
+                if isinstance(data, dict):
+                    store = data
+        except Exception:  # noqa: BLE001 — a bad/missing file just means no cuts yet
+            store = {}
+        self._cut_cache = store
+        return store
+
+    def _write_cut_store(self, store: dict) -> None:
+        import json
+
+        self._cut_cache = store
+        p = self._cut_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(store, indent=2, sort_keys=True))
+        except Exception:  # noqa: BLE001 — persistence best-effort
+            pass
+
+    def _scene_keyframes(self, scene_id: str) -> list[float]:
+        """Keyframe timestamps (seconds) of a scene's video, via ffprobe — the
+        boundaries a lossless `-c copy` cut can land on. Cached per scene; empty
+        list if the file/ffprobe is unavailable (callers then don't snap)."""
+        cache = getattr(self, "_kf_cache", None)
+        if cache is None:
+            cache = self._kf_cache = {}
+        sid = str(scene_id)
+        if sid in cache:
+            return cache[sid]
+        kfs: list[float] = []
+        path = self._scene_path(sid)
+        if path:
+            import subprocess
+
+            ff = getattr(self.cfg.sampling, "ffprobe", "ffprobe") if hasattr(self.cfg, "sampling") else "ffprobe"
+            try:
+                r = subprocess.run(
+                    [ff, "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
+                     "-show_entries", "frame=pts_time", "-of", "csv=print_section=0", path],
+                    capture_output=True, text=True, timeout=120,
+                )
+                for line in r.stdout.splitlines():
+                    line = line.strip().rstrip(",")
+                    if line:
+                        try:
+                            kfs.append(float(line))
+                        except ValueError:
+                            pass
+                kfs.sort()
+            except Exception:  # noqa: BLE001 — no ffprobe / bad file: no snapping
+                kfs = []
+        cache[sid] = kfs
+        return kfs
+
+    def _snap_cut_inward(self, scene_id: str, start: float, end: float) -> list[float]:
+        """Snap a condemned range inward to keyframes so a lossless cut only ever
+        drops *fully-condemned* GOPs — start→first keyframe ≥ start, end→last
+        keyframe ≤ end. Conservative: never removes a frame outside [start,end].
+        With no keyframe data, returns the range unchanged."""
+        a, b = float(min(start, end)), float(max(start, end))
+        kfs = self._scene_keyframes(scene_id)
+        if not kfs:
+            return [a, b]
+        lo = next((k for k in kfs if k >= a), None)         # first kf at/after start
+        hi = next((k for k in reversed(kfs) if k <= b), None)  # last kf at/before end
+        if lo is None or hi is None or hi <= lo:
+            return []  # no whole GOP fully inside the marked span → nothing to cut
+        return [lo, hi]
+
+    def get_cut_segments(self, scene_id: str) -> dict | None:
+        """A scene's condemned ranges, or None if it's never been marked."""
+        return self._cut_store().get(str(scene_id))
+
+    def add_cut_segment(self, scene_id: str, start: float, end: float) -> dict:
+        """Condemn a stretch [start,end] of a scene (keyframe-snapped inward, then
+        merged with any existing cuts). Records the mark only — trims nothing."""
+        from time import time as _now
+
+        sid = str(scene_id)
+        snapped = self._snap_cut_inward(sid, start, end)
+        store = dict(self._cut_store())
+        entry = dict(store.get(sid) or {})
+        segs = list(entry.get("segments") or [])
+        if snapped:
+            segs.append(snapped)
+        entry["segments"] = self._clean_segments(segs)
+        entry.setdefault("whole", False)
+        entry["ts"] = _now()
+        store[sid] = entry
+        self._write_cut_store(store)
+        return entry
+
+    def trash_scene(self, scene_id: str) -> dict:
+        """Condemn a whole scene (the entire file is dead weight)."""
+        from time import time as _now
+
+        sid = str(scene_id)
+        store = dict(self._cut_store())
+        entry = dict(store.get(sid) or {})
+        entry["whole"] = True
+        entry.setdefault("segments", [])
+        entry["ts"] = _now()
+        store[sid] = entry
+        self._write_cut_store(store)
+        return entry
+
+    def remove_cut(self, scene_id: str) -> bool:
+        """Un-condemn a scene entirely (drop all its cut-marks / whole flag)."""
+        store = dict(self._cut_store())
+        if str(scene_id) in store:
+            del store[str(scene_id)]
+            self._write_cut_store(store)
+            return True
+        return False
+
+    def reclaim_ledger(self, top: int = 20) -> dict:
+        """DRY-RUN tally of everything condemned so far: estimated reclaimable
+        bytes (whole scene = full size; partial = marked_fraction × size), total
+        marked duration, scene count, and the biggest contributors. Reads sizes
+        from disk; writes/deletes NOTHING."""
+        import os
+
+        store = self._cut_store()
+        if not store:
+            return {"scenes": 0, "reclaim_bytes": 0, "cut_secs": 0.0, "top": []}
+        details = {}
+        try:
+            details = self.client().scene_details(sorted(store.keys()))
+        except Exception:  # noqa: BLE001 — Stash down: durations/sizes unavailable
+            details = {}
+        rows = []
+        total_bytes = total_secs = 0.0
+        for sid, entry in store.items():
+            d = details.get(sid) or {}
+            path = d.get("path")
+            size = 0
+            if path and os.path.exists(path):
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+            duration = float(d.get("duration") or 0.0)
+            whole = bool(entry.get("whole"))
+            cut_secs = duration if whole else float(sum(b - a for a, b in entry.get("segments") or []))
+            frac = 1.0 if whole else ((cut_secs / duration) if duration > 0 else 0.0)
+            reclaim = size if whole else int(size * frac)
+            total_bytes += reclaim
+            total_secs += cut_secs
+            rows.append({
+                "scene_id": sid, "title": d.get("title") or "", "whole": whole,
+                "cut_secs": round(cut_secs, 1), "size": size, "reclaim_bytes": reclaim,
+            })
+        rows.sort(key=lambda r: r["reclaim_bytes"], reverse=True)
+        return {
+            "scenes": len(rows), "reclaim_bytes": int(total_bytes),
+            "cut_secs": round(total_secs, 1), "top": rows[:top] if top else rows,
+        }
+
+    def trash_queue(self, count: int = 30, exclude: set | None = None,
+                    profile: str | None = None, model: str | None = None) -> dict:
+        """Worst-first: your *lowest*-taste moments across the library — the dead
+        weight, one moment per scene, ascending. The inverse of the peak board, so
+        every swipe removes the most likely garbage. Skips scenes in `exclude` and
+        scenes already fully trashed."""
+        model = model or self._model_name()
+        idx = self.index(model)
+        if idx.size == 0:
+            return {"items": [], "scored_by": None}
+        scores, scored_by = self._taste_scores(model, profile=profile)
+        if scores is None:
+            return {"items": [], "scored_by": None}
+        exclude = set(exclude or set())
+        cut = self._cut_store()
+        whole_trashed = {sid for sid, e in cut.items() if e.get("whole")}
+        order = np.argsort(np.asarray(scores, dtype=np.float32))  # ascending = worst first
+        items: list[dict] = []
+        seen: set[str] = set()
+        for j in order:
+            i = int(j)
+            sid = str(idx.scene_ids[i]) if idx.scene_ids[i] is not None else None
+            if not sid or sid in seen or sid in exclude or sid in whole_trashed:
+                continue
+            seen.add(sid)
+            key, t = idx.keys[i], float(idx.times[i])
+            items.append({
+                "scene_id": sid, "key": key, "time": round(t, 2),
+                "score": round(float(scores[i]), 4),
+                "thumb": f"/api/frame?key={key}&t={t:g}",
+                "stream": self.stream_url(sid, start=t) if sid else None,
+            })
+            if len(items) >= count:
+                break
+        return {"items": items, "scored_by": scored_by}
+
     def recommend(
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,

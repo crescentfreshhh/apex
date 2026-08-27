@@ -51,6 +51,7 @@ document.querySelectorAll(".tab[data-view]").forEach((b) =>
     if (b.dataset.view === "galaxy" && window.openGalaxy) window.openGalaxy();
     if (b.dataset.view === "performers") openPerformers();
     if (b.dataset.view === "statistics") openStatistics();
+    if (b.dataset.view === "trim") openTrim();
   })
 );
 
@@ -676,7 +677,7 @@ function openViewer(hit) {
   $("#viewer-dupes").onclick = dupesFromViewer;
   $("#viewer-save").onclick = () => saveMoment(hit.scene_id, v.currentTime);
   $("#viewer-up").onclick = (e) => thumb(hit.key, v.currentTime, 1, hit.scene_id, e.currentTarget);
-  $("#viewer-down").onclick = (e) => thumb(hit.key, v.currentTime, 0, hit.scene_id, e.currentTarget);
+  $("#viewer-down").onclick = (e) => { thumb(hit.key, v.currentTime, 0, hit.scene_id, e.currentTarget); proposeCut(hit.scene_id, v.currentTime); };
   try { $("#viewer-stash").href = new URL(hit.stream, location.href).origin + "/scenes/" + hit.scene_id; }
   catch { $("#viewer-stash").href = "#"; }
   loadViewerMeta(hit.scene_id);
@@ -1630,6 +1631,109 @@ $("#btn-reclaim-export")?.addEventListener("click", () => {
 });
 wireCollapse("#toggle-reclaim", "#reclaim-body",
   { label: "Reclaim disk", storeKey: "stats_show_reclaim" });
+
+// --- Trim: worst-first subtractive reclamation (dry-run marks only) ---------
+const CUT_PAD = 15;               // default half-window (s) for "Cut ~30s here"
+let trimQueue = [], trimPos = 0, trimSeen = new Set(), trimHit = null;
+
+async function refreshLedger() {
+  const el = $("#trim-ledger");
+  if (!el) return;
+  try {
+    const d = await api("/api/reclaim/ledger?top=1");
+    el.innerHTML = d.scenes
+      ? `<div class="reclaim-big">~${fmtBytes(d.reclaim_bytes)} <span class="dim">marked for reclaim</span></div>
+         <div class="dim">${num(d.scenes)} scene(s) · ${fmtDur(d.cut_secs)} of footage condemned · dry run</div>`
+      : `<div class="dim">Nothing marked yet — condemn some dead weight below.</div>`;
+  } catch { /* leave as-is */ }
+}
+async function trimFetch() {
+  const ex = encodeURIComponent([...trimSeen].join(","));
+  const d = await api("/api/trash?count=30&exclude=" + ex);
+  return (d.items || []).filter((h) => h.scene_id && h.stream);
+}
+async function openTrim() {
+  await refreshLedger();
+  trimSeen = new Set(); trimQueue = []; trimPos = 0;
+  const card = $("#trim-card");
+  card.className = "trim-card dim"; card.textContent = "Finding your worst moments…";
+  try {
+    trimQueue = await trimFetch();
+    trimQueue.forEach((h) => trimSeen.add(String(h.scene_id)));
+  } catch (e) { card.textContent = e.message; return; }
+  if (!trimQueue.length) {
+    card.textContent = "No taste yet — thumb some moments so peaks can rank the dead weight.";
+    return;
+  }
+  showTrim(0);
+}
+function showTrim(i) {
+  trimPos = i;
+  const card = $("#trim-card");
+  if (i >= trimQueue.length) { card.className = "trim-card dim"; card.textContent = "Caught up — reshuffling…"; refillTrim(true); return; }
+  trimHit = trimQueue[i];
+  card.className = "trim-card";
+  card.innerHTML = `<img src="${trimHit.thumb}" alt="" onerror="this.style.opacity=.15"/>
+    <div class="trim-meta">
+      <div class="title">${esc(trimHit.title || ("scene " + trimHit.scene_id))}</div>
+      <div class="dim">worst moment @ ${fmt(trimHit.time)} · taste ${pctText(trimHit.score)}</div>
+    </div>`;
+  card.onclick = () => openTrimInViewer();
+}
+async function refillTrim(reset) {
+  try {
+    const more = await trimFetch();
+    if (!more.length) { if (reset) { trimSeen = new Set(); } $("#trim-card").textContent = "Nothing left to review."; return; }
+    more.forEach((h) => trimSeen.add(String(h.scene_id)));
+    trimQueue = trimQueue.concat(more);
+    showTrim(trimPos);
+  } catch (e) { toast(e.message, true); }
+}
+function nextTrim() {
+  if (trimPos + 3 >= trimQueue.length) refillTrim(false);
+  showTrim(trimPos + 1);
+}
+function openTrimInViewer() {
+  if (!trimHit) return;
+  openViewer({ scene_id: trimHit.scene_id, key: trimHit.key, time: trimHit.time,
+    stream: trimHit.stream, title: trimHit.title || "", performers: [] });
+}
+async function trimCut() {
+  if (!trimHit) return;
+  const t = +trimHit.time || 0;
+  try {
+    const e = await api(`/api/scene/${encodeURIComponent(trimHit.scene_id)}/cut?` +
+      new URLSearchParams({ start: Math.max(0, t - CUT_PAD), end: t + CUT_PAD }), { method: "POST" });
+    const segs = (e.segments || []).length;
+    $("#trim-status").textContent = segs ? "✂️ cut marked (keyframe-snapped)" : "span too small for a whole keyframe GOP — nothing marked";
+    refreshLedger();
+  } catch (err) { toast(err.message, true); }
+  nextTrim();
+}
+async function trimTrash() {
+  if (!trimHit) return;
+  try {
+    await api(`/api/scene/${encodeURIComponent(trimHit.scene_id)}/trash`, { method: "POST" });
+    $("#trim-status").textContent = "🗑 whole scene condemned (dry run)";
+    refreshLedger();
+  } catch (err) { toast(err.message, true); }
+  nextTrim();
+}
+// a 👎 while watching also proposes a keyframe-snapped cut around that moment
+// (dry run) — one gesture both trains taste and marks library shrinkage.
+async function proposeCut(sceneId, t) {
+  if (!sceneId) return;
+  t = +t || 0;
+  try {
+    const e = await api(`/api/scene/${encodeURIComponent(sceneId)}/cut?` +
+      new URLSearchParams({ start: Math.max(0, t - CUT_PAD), end: t + CUT_PAD }), { method: "POST" });
+    if ((e.segments || []).length) toast("👎 + ✂️ proposed a cut here (dry run)");
+  } catch { /* cut is best-effort alongside the down-vote */ }
+}
+$("#btn-trim-cut")?.addEventListener("click", trimCut);
+$("#btn-trim-trash")?.addEventListener("click", trimTrash);
+$("#btn-trim-skip")?.addEventListener("click", () => nextTrim());
+$("#btn-trim-open")?.addEventListener("click", () => openTrimInViewer());
 
 let swipeHit = null;
 async function loadNextSwipe() {

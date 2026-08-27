@@ -240,3 +240,95 @@ def test_scene_frame_jpeg_any_timestamp(tmp_path, monkeypatch):
     assert out == b"JPG"
     # resolved the scene's path and decoded at the requested (never-embedded) time
     assert seen["call"][1] == 87.5 and seen["call"][0].endswith("s2.mp4")
+
+
+# --- Phase 5c: subtractive cut-marks + worst-first queue + dry-run ledger ----
+
+class _QIdx:
+    """A fake index exposing the positional arrays trash_queue reads."""
+    def __init__(self, scene_ids, times):
+        self.size = len(scene_ids)
+        self.scene_ids = scene_ids
+        self.keys = [f"k{s}" for s in scene_ids]
+        self.times = times
+
+
+def test_cut_snaps_inward_to_keyframes(tmp_path, monkeypatch):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    svc = _service(tmp_path, {}, details)
+    monkeypatch.setattr(svc, "_scene_keyframes", lambda sid: [0.0, 10.0, 20.0, 30.0])
+    # marking [5,27] may only drop the fully-enclosed GOP [10,20]
+    entry = svc.add_cut_segment("2", 5, 27)
+    assert entry["segments"] == [[10.0, 20.0]]
+    # never widens beyond the marked span
+    assert 10.0 >= 5 and 20.0 <= 27
+    # a span too small to enclose a whole GOP records nothing
+    entry2 = svc.add_cut_segment("2", 21, 29)
+    assert entry2["segments"] == [[10.0, 20.0]]  # unchanged
+
+
+def test_cut_without_keyframes_keeps_range(tmp_path, monkeypatch):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    svc = _service(tmp_path, {}, details)
+    monkeypatch.setattr(svc, "_scene_keyframes", lambda sid: [])  # no ffprobe data
+    entry = svc.add_cut_segment("2", 5, 27)
+    assert entry["segments"] == [[5.0, 27.0]]
+
+
+def test_cut_store_merge_and_remove(tmp_path, monkeypatch):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    svc = _service(tmp_path, {}, details)
+    monkeypatch.setattr(svc, "_scene_keyframes", lambda sid: [])
+    svc.add_cut_segment("2", 10, 20)
+    svc.add_cut_segment("2", 18, 30)   # overlaps → merges
+    assert svc.get_cut_segments("2")["segments"] == [[10.0, 30.0]]
+    assert svc.remove_cut("2") is True
+    assert svc.get_cut_segments("2") is None
+
+
+def test_trash_scene_whole(tmp_path):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    svc = _service(tmp_path, {}, details)
+    entry = svc.trash_scene("2")
+    assert entry["whole"] is True
+    assert svc.get_cut_segments("2")["whole"] is True
+
+
+def test_trash_queue_worst_first_one_per_scene(tmp_path, monkeypatch):
+    details = {s: {"path": _mkfile(tmp_path, f"s{s}.mp4", 1000), "duration": 100.0, "title": s}
+               for s in ["1", "2", "3"]}
+    svc = _service(tmp_path, {}, details)
+    # two moments for scene 1, one each for 2 and 3
+    idx = _QIdx(["1", "2", "1", "3"], [0.0, 0.0, 5.0, 0.0])
+    monkeypatch.setattr(svc, "index", lambda model=None, refresh=False: idx)
+    import numpy as np
+    # scene 3 lowest, then 2, then 1 — ascending = worst first
+    monkeypatch.setattr(svc, "_taste_scores",
+                        lambda model, profile=None: (np.array([0.8, 0.5, 0.9, 0.1], np.float32), "classifier"))
+    monkeypatch.setattr(svc, "stream_url", lambda sid, start=None: f"http://s/{sid}")
+    q = svc.trash_queue(count=10)
+    ids = [it["scene_id"] for it in q["items"]]
+    assert ids == ["3", "2", "1"]      # worst first, one per scene
+    # a whole-trashed scene drops out of the queue
+    svc.trash_scene("3")
+    q2 = svc.trash_queue(count=10)
+    assert "3" not in {it["scene_id"] for it in q2["items"]}
+
+
+def test_reclaim_ledger_dry_run(tmp_path, monkeypatch):
+    details = {
+        "1": {"path": _mkfile(tmp_path, "s1.mp4", 1000), "duration": 100.0, "title": "part"},
+        "2": {"path": _mkfile(tmp_path, "s2.mp4", 4000), "duration": 100.0, "title": "whole"},
+    }
+    svc = _service(tmp_path, {}, details)
+    monkeypatch.setattr(svc, "_scene_keyframes", lambda sid: [])
+    svc.add_cut_segment("1", 0, 25)   # 25% of a 1000-byte file → ~250
+    svc.trash_scene("2")               # whole 4000-byte file
+    led = svc.reclaim_ledger()
+    assert led["scenes"] == 2
+    assert led["reclaim_bytes"] == 250 + 4000
+    assert led["cut_secs"] == 125.0    # 25 + full 100
+    # biggest contributor first
+    assert led["top"][0]["scene_id"] == "2"
+    # nothing was written to disk beyond the cut-store json
+    assert not (tmp_path / "exports").exists()

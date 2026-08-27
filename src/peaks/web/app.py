@@ -315,6 +315,46 @@ def create_app(cfg=None):
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
+    # --- subtractive trimming: worst-first queue + cut-marks + dry-run ledger
+
+    @app.get("/api/trash")
+    def trash_queue(count: int = 30, exclude: str = ""):
+        """Worst-first: your lowest-taste moments (the dead weight), one per scene,
+        so every swipe removes the most likely garbage. `exclude` marches forward."""
+        seen = {s for s in exclude.split(",") if s}
+        return service.trash_queue(count=count, exclude=seen)
+
+    @app.post("/api/scene/{scene_id}/cut")
+    def add_cut(scene_id: str, start: float, end: float):
+        """Condemn a stretch of a scene (keyframe-snapped inward). Records the mark
+        only — trims/deletes nothing."""
+        return service.add_cut_segment(scene_id, start, end)
+
+    @app.post("/api/scene/{scene_id}/trash")
+    def trash_scene(scene_id: str):
+        """Condemn a whole scene as dead weight (dry-run mark only)."""
+        return service.trash_scene(scene_id)
+
+    @app.delete("/api/scene/{scene_id}/cut")
+    def remove_cut(scene_id: str):
+        """Un-condemn a scene (drop all its cut-marks)."""
+        return {"removed": service.remove_cut(scene_id)}
+
+    @app.get("/api/scene/{scene_id}/cuts")
+    def scene_cuts(scene_id: str):
+        """A scene's cut-marks + its keyframe timestamps (for snapping in the UI)."""
+        entry = service.get_cut_segments(scene_id) or {}
+        return {
+            "segments": entry.get("segments") or [], "whole": bool(entry.get("whole")),
+            "keyframes": service._scene_keyframes(scene_id),
+        }
+
+    @app.get("/api/reclaim/ledger")
+    def reclaim_ledger(top: int = 20):
+        """DRY-RUN tally of everything condemned so far — estimated reclaimable GB,
+        scenes touched, biggest contributors. Writes/deletes nothing."""
+        return service.reclaim_ledger(top=top)
+
     @app.get("/api/reclamation/scene")
     def reclamation_scene(scene_id: str, floor: float | None = None, strip: int = 24):
         """Everything the reel editor needs for one scene (duration, stream, peaks'
