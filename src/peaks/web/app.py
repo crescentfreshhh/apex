@@ -315,6 +315,37 @@ def create_app(cfg=None):
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
+    @app.get("/api/reclamation/scene")
+    def reclamation_scene(scene_id: str, floor: float | None = None, strip: int = 24):
+        """Everything the reel editor needs for one scene (duration, stream, peaks'
+        seeded segments, the current keep-set, filmstrip timestamps). Read-only."""
+        return service.reclamation_scene(scene_id, floor=floor, strip=strip)
+
+    @app.post("/api/reclamation/keep")
+    def reclamation_keep(scene_id: str, body: dict):
+        """Persist the human-edited keep-set for a scene (segments + approved flag).
+        Records the decision only — cuts/marks nothing."""
+        return service.save_keep_segments(
+            scene_id, body.get("segments") or [], approved=bool(body.get("approved")),
+        )
+
+    @app.delete("/api/reclamation/keep")
+    def reclamation_keep_reset(scene_id: str):
+        """Forget a scene's saved keep-set — reset the editor to peaks' suggestion."""
+        return {"cleared": service.clear_keep_segments(scene_id)}
+
+    @app.get("/api/scene/{scene_id}/frame")
+    def scene_frame(scene_id: str, t: float, size: int = 320):
+        """A JPEG at any timestamp of a scene, decoded straight from the file — so
+        the reclaim filmstrip can show dead zones that were never embedded."""
+        try:
+            data = service.scene_frame_jpeg(scene_id, t, size=size)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"could not decode frame: {exc}")
+        return Response(content=data, media_type="image/jpeg")
+
     @app.get("/api/reclamation/export")
     def reclamation_export(floor: float | None = None, waste_ratio: float = 0.4):
         """The full report as a downloadable CSV (inert — no library/Stash writes)."""

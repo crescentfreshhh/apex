@@ -27,6 +27,9 @@ class _Client:
     def scene_details(self, ids):
         return {i: self._d[i] for i in ids if i in self._d}
 
+    def stream_url(self, sid, start=None):
+        return f"http://s/{sid}?start={start}"
+
 
 def _service(tmp_path, segments, details, hidden=frozenset()):
     cfg = Config()
@@ -157,3 +160,83 @@ def test_reel_scene_real_path_uses_stream_copy(tmp_path, monkeypatch):
     joined = " ".join(" ".join(c) for c in cmds)
     assert "-c copy" in joined
     assert "libx264" not in joined and "-crf" not in joined
+
+
+def test_keep_set_store_roundtrip(tmp_path):
+    details = {"7": {"path": _mkfile(tmp_path, "s7.mp4", 1000), "duration": 100.0, "title": "s"}}
+    svc = _service(tmp_path, {}, details)
+    assert svc.get_keep_segments("7") is None
+    entry = svc.save_keep_segments("7", [[10, 20], [5, 8]], approved=True)
+    # normalised: sorted, and stored
+    assert entry["segments"] == [[5.0, 8.0], [10.0, 20.0]]
+    assert entry["approved"] is True
+    # a fresh Service instance reads the persisted file
+    again = _service(tmp_path, {}, details)
+    got = again.get_keep_segments("7")
+    assert got["segments"] == [[5.0, 8.0], [10.0, 20.0]] and got["approved"] is True
+    assert svc.clear_keep_segments("7") is True
+    assert svc.get_keep_segments("7") is None
+
+
+def test_reel_scene_uses_explicit_keepset(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    # peaks would propose one segment, but the human keep-set overrides it
+    segments = {"2": [Segment(start=0, end=5, peak_score=0.9, mean_score=0.9)]}
+    svc = _service(tmp_path, segments, details)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no ffmpeg in dry-run")))
+
+    plan = svc.reel_scene("2", dry_run=True, segments=[[10, 30], [40, 45]])
+    assert [[s["start"], s["end"]] for s in plan["segments"]] == [[10.0, 30.0], [40.0, 45.0]]
+    assert plan["kept_secs"] == 25.0
+    assert plan["est_bytes"] == 250  # 1000 * 25/100
+
+
+def test_reel_scene_falls_back_to_saved_keepset(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    segments = {"2": [Segment(start=0, end=5, peak_score=0.9, mean_score=0.9)]}
+    svc = _service(tmp_path, segments, details)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no ffmpeg in dry-run")))
+    svc.save_keep_segments("2", [[50, 70]])
+    plan = svc.reel_scene("2", dry_run=True)   # no explicit segments → saved set
+    assert [[s["start"], s["end"]] for s in plan["segments"]] == [[50.0, 70.0]]
+
+
+def test_reclamation_scene_payload(tmp_path):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "sc"}}
+    segments = {"2": [Segment(start=10, end=20, peak_score=0.9, mean_score=0.9)]}
+    svc = _service(tmp_path, segments, details)
+    d = svc.reclamation_scene("2", strip=5)
+    assert d["seeded_segments"] == [[10.0, 20.0]]
+    assert d["keep_segments"] == [[10.0, 20.0]]  # no saved edit → the seed
+    assert d["has_keepset"] is False and d["approved"] is False
+    assert len(d["filmstrip_times"]) == 5 and d["filmstrip_times"][0] == 0.0
+    assert d["stream"] and d["duration"] == 100.0
+    # once saved, the payload reflects the human keep-set
+    svc.save_keep_segments("2", [[0, 40]], approved=True)
+    d2 = svc.reclamation_scene("2", strip=5)
+    assert d2["keep_segments"] == [[0.0, 40.0]] and d2["approved"] is True
+    assert d2["has_keepset"] is True
+
+
+def test_scene_frame_jpeg_any_timestamp(tmp_path, monkeypatch):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    svc = _service(tmp_path, {}, details)
+    seen = {}
+
+    def _fake_frame(path, time, size=320):
+        seen["call"] = (path, time, size)
+        return b"JPG"
+
+    monkeypatch.setattr(svc, "frame_jpeg", _fake_frame)
+    out = svc.scene_frame_jpeg("2", 87.5, size=160)
+    assert out == b"JPG"
+    # resolved the scene's path and decoded at the requested (never-embedded) time
+    assert seen["call"][1] == 87.5 and seen["call"][0].endswith("s2.mp4")

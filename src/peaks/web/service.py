@@ -1594,6 +1594,94 @@ class Service:
         except Exception:  # noqa: BLE001 — persistence best-effort
             pass
 
+    # --- reclamation keep-sets (the human-edited "what to keep" per scene) ---
+    def _keep_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "reclaim_keep.json"
+
+    def _keep_store(self) -> dict:
+        """scene_id -> {segments: [[start,end],…], approved: bool, ts}. The reel
+        editor's saved decisions — kept separate from apex markers so the keep-set
+        never feeds the taste model. Loaded once, cached in memory."""
+        cached = getattr(self, "_keep_cache", None)
+        if cached is not None:
+            return cached
+        import json
+
+        store: dict = {}
+        p = self._keep_path()
+        try:
+            if p.exists():
+                data = json.loads(p.read_text())
+                if isinstance(data, dict):
+                    store = data
+        except Exception:  # noqa: BLE001 — a bad/missing file just means no edits yet
+            store = {}
+        self._keep_cache = store
+        return store
+
+    def _write_keep_store(self, store: dict) -> None:
+        import json
+
+        self._keep_cache = store
+        p = self._keep_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(store, indent=2, sort_keys=True))
+        except Exception:  # noqa: BLE001 — persistence best-effort
+            pass
+
+    @staticmethod
+    def _clean_segments(segments) -> list[list[float]]:
+        """Normalise a caller-supplied keep-set: coerce to [start,end] float pairs
+        with end>start, sorted by start, and merge any that overlap/touch."""
+        pairs = []
+        for s in segments or []:
+            try:
+                a, b = (float(s[0]), float(s[1])) if not isinstance(s, dict) \
+                    else (float(s.get("start")), float(s.get("end")))
+            except (TypeError, ValueError, KeyError):
+                continue
+            if b > a >= 0:
+                pairs.append([a, b])
+        pairs.sort()
+        merged: list[list[float]] = []
+        for a, b in pairs:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        return merged
+
+    def get_keep_segments(self, scene_id: str) -> dict | None:
+        """The saved keep-set for a scene, or None if it's never been edited."""
+        return self._keep_store().get(str(scene_id))
+
+    def save_keep_segments(self, scene_id: str, segments, approved: bool = False) -> dict:
+        """Persist the human-edited keep-set for a scene. Writes nothing to the
+        library or Stash — only records the decision for a later commit step."""
+        from time import time as _now
+
+        store = dict(self._keep_store())
+        entry = {
+            "segments": self._clean_segments(segments),
+            "approved": bool(approved),
+            "ts": _now(),
+        }
+        store[str(scene_id)] = entry
+        self._write_keep_store(store)
+        return entry
+
+    def clear_keep_segments(self, scene_id: str) -> bool:
+        """Forget a scene's saved keep-set (reset to peaks' suggestion)."""
+        store = dict(self._keep_store())
+        if str(scene_id) in store:
+            del store[str(scene_id)]
+            self._write_keep_store(store)
+            return True
+        return False
+
     def recommend(
         self, top_k: int = 60, model: str | None = None,
         per_scene: int = 2, recent: int = 0, rebuild: bool = False,
@@ -2371,10 +2459,13 @@ class Service:
             kept_secs = float(sum(s.duration for s in segs))
             peak_score = max((float(s.peak_score) for s in segs), default=0.0)
             title = d.get("title") or ""
+            saved = self.get_keep_segments(sid)
             base = {
                 "scene_id": sid, "title": title, "path": path,
                 "size": size, "duration": round(duration, 1),
                 "kept_secs": round(kept_secs, 1), "peak_score": round(peak_score, 4),
+                "has_keepset": saved is not None,
+                "approved": bool(saved and saved.get("approved")),
             }
             if not segs:
                 no_peak.append({**base, "kept_frac": 0.0, "reclaim_bytes": size})
@@ -2405,6 +2496,15 @@ class Service:
             "totals": totals,
         }
 
+    def _seeded_segments(self, scene_id: str, floor: float | None, model: str):
+        """Peaks' proposed keep-segments for one scene (the gold blocks the editor
+        seeds from), filtered by `floor`, chronological."""
+        segments, _ = self._scene_segments(model)
+        segs = segments.get(str(scene_id), [])
+        if floor is not None:
+            segs = [s for s in segs if s.peak_score >= floor]
+        return sorted(segs, key=lambda s: s.start)
+
     def reel_scene(
         self,
         scene_id: str,
@@ -2412,11 +2512,17 @@ class Service:
         dry_run: bool = True,
         job=None,
         model: str | None = None,
+        segments=None,
     ) -> dict:
         """Plan (or, when `dry_run=False`, produce) a per-scene *peak reel*: a new
-        file holding only this scene's qualifying peak segments, in chronological
-        order, losslessly stream-copied (`-c copy`, no re-encode). Peaks NEVER
-        touches the original — the reel is a separate file in the exports dir.
+        file holding only this scene's kept segments, in chronological order,
+        losslessly stream-copied (`-c copy`, no re-encode). Peaks NEVER touches the
+        original — the reel is a separate file in the exports dir.
+
+        The keep-set is, in priority order: an explicit `segments` override (the
+        human-edited set), else this scene's saved keep-set, else peaks' proposed
+        segments. So once you've edited the reel in the review UI, that's exactly
+        what gets planned/cut.
 
         The POC default is `dry_run=True`: it returns the plan (the segments it
         would keep, the estimated output bytes, the path it would write) and runs
@@ -2425,13 +2531,20 @@ class Service:
         import os
         from pathlib import Path
 
+        from ..scoring import Segment
+
         log = (job.log if job else (lambda *_: None))
         model = model or self._model_name()
         sid = str(scene_id)
-        segments, _ = self._scene_segments(model)
-        segs = segments.get(sid, [])
-        if floor is not None:
-            segs = [s for s in segs if s.peak_score >= floor]
+        if segments is None:  # no explicit override → fall back to a saved keep-set
+            saved = self.get_keep_segments(sid)
+            if saved is not None:
+                segments = saved.get("segments")
+        if segments is not None:  # explicit / saved keep-set (manual pairs)
+            pairs = self._clean_segments(segments)
+            segs = [Segment(start=a, end=b, peak_score=0.0, mean_score=0.0) for a, b in pairs]
+        else:  # peaks' proposal
+            segs = self._seeded_segments(sid, floor, model)
         segs = sorted(segs, key=lambda s: s.start)  # chronological
         d = (self.client().scene_details([sid]) or {}).get(sid) or {}
         path = d.get("path")
@@ -2463,6 +2576,60 @@ class Service:
         plan["bytes"] = os.path.getsize(written) if os.path.exists(written) else 0
         plan["out_path"] = written
         return plan
+
+    def _scene_path(self, scene_id: str, model: str | None = None) -> str | None:
+        """A scene's file path — from the local index first (no network), falling
+        back to a Stash lookup."""
+        model = model or self._model_name()
+        key = self._key_for_scene(scene_id, model)
+        if key:
+            p = self.path_for_key(key)
+            if p:
+                return p
+        try:
+            return (self.client().scene_details([str(scene_id)]) or {}).get(str(scene_id), {}).get("path")
+        except Exception:  # noqa: BLE001 — Stash down
+            return None
+
+    def scene_frame_jpeg(self, scene_id: str, time: float, size: int = 320) -> bytes:
+        """A JPEG at (scene, time), decoded straight from the file — works at ANY
+        timestamp, embedded or not (so the reclaim filmstrip can show the dead
+        zones that were never sampled). Raises if the file can't be resolved."""
+        path = self._scene_path(scene_id)
+        if not path:
+            raise ValueError(f"scene {scene_id}: file not found")
+        return self.frame_jpeg(path, time, size=size)
+
+    def reclamation_scene(self, scene_id: str, floor: float | None = None,
+                          strip: int = 24, model: str | None = None) -> dict:
+        """Everything the reel editor needs for one scene, in a single call: its
+        duration/size/stream, peaks' proposed segments (the gold seed), the current
+        keep-set (a saved human edit if present, else the seed), and evenly-spaced
+        filmstrip timestamps. Read-only."""
+        import os
+
+        model = model or self._model_name()
+        sid = str(scene_id)
+        d = (self.client().scene_details([sid]) or {}).get(sid) or {}
+        path = d.get("path")
+        duration = float(d.get("duration") or 0.0)
+        size = os.path.getsize(path) if (path and os.path.exists(path)) else 0
+        seeded = [[round(s.start, 2), round(s.end, 2)] for s in self._seeded_segments(sid, floor, model)]
+        saved = self.get_keep_segments(sid)
+        keep = saved["segments"] if saved else seeded
+        kept_secs = float(sum(b - a for a, b in keep))
+        kept_frac = (kept_secs / duration) if duration > 0 else 0.0
+        n = max(2, int(strip))
+        times = ([round(duration * i / (n - 1), 2) for i in range(n)] if duration > 0 else [])
+        return {
+            "scene_id": sid, "title": d.get("title") or "", "duration": round(duration, 1),
+            "size": size, "stream": self.stream_url(sid) if sid else None,
+            "seeded_segments": seeded, "keep_segments": keep,
+            "approved": bool(saved and saved.get("approved")),
+            "has_keepset": saved is not None,
+            "kept_secs": round(kept_secs, 1), "kept_frac": round(kept_frac, 3),
+            "est_bytes": int(size * kept_frac), "filmstrip_times": times,
+        }
 
     def _reel_segments(self, path: str, segments, out: str, log=None) -> str:
         """Lossless stream-copy of each [start,end] segment from `path`, concatenated

@@ -1404,18 +1404,20 @@ function reclaimFloorQS(extra = {}) {
 }
 function reclaimRow(r, sparse) {
   const kept = sparse ? ` · keeps ${Math.round((r.kept_frac || 0) * 100)}% (${fmtDur(r.kept_secs)})` : "";
+  const badge = r.approved ? ` <span class="reclaim-ok">✓ reviewed</span>`
+    : r.has_keepset ? ` <span class="reclaim-dry">✎ edited</span>` : "";
   return `<div class="reclaim-row" data-sid="${esc(r.scene_id)}">
-    <div class="reclaim-meta">
-      <div class="reclaim-title">${esc(r.title || ("scene " + r.scene_id))}</div>
-      <div class="dim reclaim-sub">${fmtBytes(r.size)} · ${fmtDur(r.duration)}${kept}
-        · <b>reclaim ${fmtBytes(r.reclaim_bytes)}</b></div>
-      ${sparse ? `<div class="reclaim-plan dim" hidden></div>` : ""}
+    <div class="reclaim-head">
+      <div class="reclaim-meta">
+        <div class="reclaim-title">${esc(r.title || ("scene " + r.scene_id))}${badge}</div>
+        <div class="dim reclaim-sub">${fmtBytes(r.size)} · ${fmtDur(r.duration)}${kept}
+          · <b>reclaim ${fmtBytes(r.reclaim_bytes)}</b></div>
+      </div>
+      <div class="reclaim-actions">
+        <button class="ghost btn-reclaim-review" title="See it and edit what to keep before anything is cut">👁 Review${sparse ? " / edit reel" : ""}</button>
+      </div>
     </div>
-    <div class="reclaim-actions">
-      ${sparse
-        ? `<button class="ghost btn-reclaim-preview" title="Dry-run: show the segments a lossless peak reel would keep">Preview reel</button>`
-        : `<span class="dim">whole file dead weight</span>`}
-    </div>
+    <div class="reclaim-editor" hidden></div>
   </div>`;
 }
 async function loadReclamation() {
@@ -1449,25 +1451,179 @@ async function loadReclamation() {
       section("Sparse scenes — reel to reclaim", d.sparse || [], true);
   } catch (e) { status.textContent = ""; toast(e.message, true); }
 }
-// preview a per-scene reel (dry-run: shows the segment plan, writes nothing)
+// open/close the per-scene visual review + keep-set editor
 $("#reclaim-lists")?.addEventListener("click", async (e) => {
-  const btn = e.target.closest(".btn-reclaim-preview");
+  const btn = e.target.closest(".btn-reclaim-review");
   if (!btn) return;
   const row = btn.closest(".reclaim-row"), sid = row?.dataset.sid;
-  const plan = row?.querySelector(".reclaim-plan");
-  if (!sid || !plan) return;
-  btn.disabled = true;
+  const host = row?.querySelector(".reclaim-editor");
+  if (!sid || !host) return;
+  if (!host.hidden) { host.hidden = true; host.innerHTML = ""; btn.classList.remove("on"); return; }
+  btn.classList.add("on"); host.hidden = false;
+  host.innerHTML = `<div class="dim" style="padding:8px">Loading frames…</div>`;
   try {
-    const d = await api("/api/reclamation/reel?" + reclaimFloorQS({ scene_id: sid, dry_run: "true" }),
-      { method: "POST" });
-    const segs = (d.segments || []).map((s) => `${fmtDur(s.start)}–${fmtDur(s.end)}`).join(", ");
-    plan.hidden = false;
-    plan.innerHTML = `<b>${d.segments.length}</b> segment(s), ~${fmtDur(d.kept_secs)} kept →
-      est. ${fmtBytes(d.est_bytes)} (from ${fmtBytes(d.size)}). <span class="reclaim-dry">dry run — no file written</span>
-      <br>${segs}`;
-  } catch (err) { toast(err.message, true); }
-  btn.disabled = false;
+    const d = await api("/api/reclamation/scene?" + reclaimFloorQS({ scene_id: sid }));
+    segmentEditor(host, d);
+  } catch (err) { host.innerHTML = `<div class="dim">${esc(err.message)}</div>`; }
 });
+
+// The reel editor: peaks seeds the gold keep-blocks; you extend / shrink / add /
+// delete them and the reel is built from YOUR set. Dry-run — Save records the
+// decision, nothing is cut. Reuses the Taste-Radio clip-hop for the preview.
+function segmentEditor(host, d) {
+  const dur = +d.duration || 0;
+  const sid = d.scene_id;
+  let segs = (d.keep_segments || []).map((s) => [+s[0], +s[1]]);
+  const seeded = (d.seeded_segments || []).map((s) => [+s[0], +s[1]]);
+  host.innerHTML = `
+    <div class="se-strip"></div>
+    <div class="se-track" title="Drag on empty space to add a keep-segment"></div>
+    <div class="se-scrub dim"></div>
+    <div class="row se-controls">
+      <button class="ghost se-add">＋ Add segment</button>
+      <button class="ghost se-play">▶ Play reel</button>
+      <button class="ghost se-playfull">Play full</button>
+      <button class="primary se-save">Save keep-set</button>
+      <button class="ghost se-reset" title="Back to peaks' suggestion">Reset</button>
+      <label class="check" title="Mark this scene visually confirmed"><input type="checkbox" class="se-approve"/> approved</label>
+    </div>
+    <div class="se-readout dim"></div>
+    <video class="se-video" preload="metadata" controls hidden></video>
+    <div class="reclaim-dryrun" style="margin-top:8px"><strong>DRY RUN</strong> — Save records your
+      keep-set only. Nothing is cut or deleted. Stream-copy cuts snap to the nearest keyframe (±~1–2s).</div>`;
+  const track = host.querySelector(".se-track");
+  const strip = host.querySelector(".se-strip");
+  const scrub = host.querySelector(".se-scrub");
+  const readout = host.querySelector(".se-readout");
+  const video = host.querySelector(".se-video");
+  strip.innerHTML = (d.filmstrip_times || []).map((t) =>
+    `<img loading="lazy" src="/api/scene/${encodeURIComponent(sid)}/frame?t=${t}&size=160"
+       title="${fmtDur(t)}" onerror="this.style.visibility='hidden'"/>`).join("");
+
+  const clampT = (t) => Math.max(0, Math.min(dur, t));
+  const pct = (t) => (dur > 0 ? (t / dur) * 100 : 0);
+  const timeAt = (clientX) => {
+    const r = track.getBoundingClientRect();
+    return clampT(((clientX - r.left) / r.width) * dur);
+  };
+  function normalize() {  // sort + merge overlaps, drop tiny
+    segs = segs.map(([a, b]) => [clampT(Math.min(a, b)), clampT(Math.max(a, b))])
+      .filter(([a, b]) => b - a >= 0.5).sort((x, y) => x[0] - y[0]);
+    const out = [];
+    for (const [a, b] of segs) {
+      if (out.length && a <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], b);
+      else out.push([a, b]);
+    }
+    segs = out;
+  }
+  function updateReadout() {
+    const kept = segs.reduce((s, [a, b]) => s + (b - a), 0);
+    const frac = dur > 0 ? kept / dur : 0;
+    const est = Math.round((d.size || 0) * frac);
+    readout.innerHTML = `<b>${segs.length}</b> segment(s) · keep <b>${fmtDur(kept)}</b>
+      (${Math.round(frac * 100)}%) → reel ~<b>${fmtBytes(est)}</b> · reclaim ~<b>${fmtBytes((d.size || 0) - est)}</b>`;
+  }
+  function render() {
+    normalize();
+    track.querySelectorAll(".se-block").forEach((b) => b.remove());
+    segs.forEach(([a, b], i) => {
+      const el = document.createElement("div");
+      el.className = "se-block"; el.dataset.i = i;
+      el.style.left = pct(a) + "%"; el.style.width = (pct(b) - pct(a)) + "%";
+      el.innerHTML = `<span class="se-h se-l"></span><span class="se-x" title="Delete">×</span><span class="se-h se-r"></span>`;
+      track.appendChild(el);
+    });
+    updateReadout();
+  }
+
+  let drag = null;  // {mode, i, startX, orig}
+  track.addEventListener("pointerdown", (e) => {
+    const block = e.target.closest(".se-block");
+    if (e.target.classList.contains("se-x")) {   // delete
+      segs.splice(+block.dataset.i, 1); render(); return;
+    }
+    if (block) {
+      const i = +block.dataset.i;
+      const mode = e.target.classList.contains("se-l") ? "l"
+        : e.target.classList.contains("se-r") ? "r" : "move";
+      drag = { mode, i, startX: e.clientX, orig: segs[i].slice() };
+    } else {   // empty track → create a new segment
+      const t = timeAt(e.clientX);
+      segs.push([t, Math.min(dur, t + 1)]);
+      render();
+      drag = { mode: "r", i: segs.length - 1, startX: e.clientX, orig: segs[segs.length - 1].slice() };
+    }
+    track.setPointerCapture(e.pointerId);
+  });
+  track.addEventListener("pointermove", (e) => {
+    if (!drag) { return; }
+    const dt = ((e.clientX - drag.startX) / track.getBoundingClientRect().width) * dur;
+    const [a0, b0] = drag.orig; const s = segs[drag.i]; if (!s) return;
+    if (drag.mode === "move") { const w = b0 - a0; let a = clampT(a0 + dt); s[0] = a; s[1] = clampT(a + w); }
+    else if (drag.mode === "l") s[0] = clampT(Math.min(a0 + dt, s[1] - 0.5));
+    else s[1] = clampT(Math.max(b0 + dt, s[0] + 0.5));
+    const el = track.querySelector(`.se-block[data-i="${drag.i}"]`);
+    if (el) { el.style.left = pct(s[0]) + "%"; el.style.width = (pct(s[1]) - pct(s[0])) + "%"; }
+    updateReadout();
+  });
+  const endDrag = () => { if (drag) { drag = null; render(); } };
+  track.addEventListener("pointerup", endDrag);
+  track.addEventListener("pointercancel", endDrag);
+  // hover scrub: show the time under the cursor
+  track.addEventListener("pointermove", (e) => { if (!drag) scrub.textContent = fmtDur(timeAt(e.clientX)); });
+
+  host.querySelector(".se-add").onclick = () => {
+    const a = segs.length ? Math.min(dur, segs[segs.length - 1][1] + 1) : 0;
+    segs.push([a, Math.min(dur, a + Math.max(3, dur * 0.02))]); render();
+  };
+  host.querySelector(".se-reset").onclick = async () => {
+    try { await api("/api/reclamation/keep?" + new URLSearchParams({ scene_id: sid }), { method: "DELETE" }); }
+    catch { /* ignore */ }
+    segs = seeded.map((s) => s.slice()); render(); toast("Reset to peaks' suggestion");
+  };
+  host.querySelector(".se-save").onclick = async (ev) => {
+    const approved = host.querySelector(".se-approve").checked;
+    ev.currentTarget.disabled = true;
+    try {
+      await api("/api/reclamation/keep?" + new URLSearchParams({ scene_id: sid }),
+        { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ segments: segs, approved }) });
+      toast("Keep-set saved" + (approved ? " · approved (dry run — nothing cut)" : " (dry run)"));
+    } catch (err) { toast(err.message, true); }
+    ev.currentTarget.disabled = false;
+  };
+
+  // --- preview players (reuse the radio-style clip hop) ---
+  let hop = null;
+  function stopHop() { if (hop) { clearInterval(hop); hop = null; } }
+  video.addEventListener("pause", stopHop);
+  host.querySelector(".se-playfull").onclick = () => {
+    stopHop(); video.hidden = false;
+    if (!video.src) video.src = sceneStreamUrl(d.stream);
+    video.currentTime = 0; video.play().catch(() => {});
+  };
+  host.querySelector(".se-play").onclick = () => {
+    normalize();
+    if (!segs.length) return toast("No segments to play — add one first.");
+    video.hidden = false;
+    if (!video.src) video.src = sceneStreamUrl(d.stream);
+    let idx = 0;
+    const playSeg = () => {
+      const seg = segs[idx]; if (!seg) { video.pause(); return; }
+      try { video.currentTime = seg[0]; } catch { /* not ready */ }
+      video.play().catch(() => {});
+    };
+    stopHop();
+    hop = setInterval(() => {
+      const seg = segs[idx]; if (!seg) { stopHop(); video.pause(); return; }
+      if (video.currentTime >= seg[1] - 0.05) { idx++; if (idx >= segs.length) { stopHop(); video.pause(); } else playSeg(); }
+    }, 120);
+    video.onloadedmetadata = playSeg;
+    if (video.readyState >= 1) playSeg();
+  };
+
+  render();
+}
 $("#btn-reclaim-run")?.addEventListener("click", () => loadReclamation());
 $("#btn-reclaim-export")?.addEventListener("click", () => {
   window.open("/api/reclamation/export?" + reclaimFloorQS(), "_blank");
