@@ -280,6 +280,62 @@ def create_app(cfg=None):
         r = service.stats_board(metric, id=id, count=count)
         return {"performer": r.get("performer"), "items": _hit_payload(service, r.get("hits", []))}
 
+    # --- reclamation (DRY-RUN proof of concept: reports, never writes) -------
+
+    @app.get("/api/reclamation")
+    def reclamation(
+        floor: float | None = None,
+        waste_ratio: float = 0.4,
+        min_scene_secs: float = 0.0,
+        limit: int = 0,
+    ):
+        """Read-only 'where's my disk going' report: no-peak scenes (whole-file
+        dead weight) and sparse scenes (a per-scene peak reel would keep only a
+        fraction), scored at the shared taste `floor`. Writes/marks/deletes
+        nothing."""
+        return service.reclamation_report(
+            floor=floor, waste_ratio=waste_ratio,
+            min_scene_secs=min_scene_secs, limit=limit,
+        )
+
+    @app.post("/api/reclamation/reel")
+    def reclamation_reel(scene_id: str, floor: float | None = None, dry_run: bool = True):
+        """Plan a per-scene peak reel. `dry_run` (the default, and all the POC UI
+        ever sends) returns the segment plan + estimated bytes and writes nothing.
+        Only an explicit dry_run=false would cut the lossless reel."""
+        try:
+            if dry_run:
+                return service.reel_scene(scene_id, floor=floor, dry_run=True)
+            job = jobs.start(
+                "reel", lambda j: service.reel_scene(scene_id, floor=floor, dry_run=False, job=j)
+            )
+            return job.as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/reclamation/export")
+    def reclamation_export(floor: float | None = None, waste_ratio: float = 0.4):
+        """The full report as a downloadable CSV (inert — no library/Stash writes)."""
+        import csv
+        import io
+
+        rep = service.reclamation_report(floor=floor, waste_ratio=waste_ratio)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["bucket", "scene_id", "title", "path", "size_bytes",
+                    "duration_secs", "kept_secs", "kept_frac", "reclaim_bytes"])
+        for bucket in ("no_peak", "sparse"):
+            for r in rep.get(bucket, []):
+                w.writerow([bucket, r["scene_id"], r.get("title", ""), r.get("path", ""),
+                            r["size"], r["duration"], r["kept_secs"],
+                            r.get("kept_frac", 0.0), r["reclaim_bytes"]])
+        return Response(
+            content=buf.getvalue(), media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="reclamation.csv"'},
+        )
+
     @app.get("/api/capabilities")
     def capabilities():
         idx = service.index()

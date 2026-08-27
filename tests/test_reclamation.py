@@ -1,0 +1,159 @@
+"""Reclamation report + per-scene peak reel (dry-run POC).
+
+Service-level tests with the scorer/index/Stash stubbed (no torch, no ffmpeg,
+no Stash) — mirrors tests/test_fix_service.py.
+"""
+
+import pytest
+
+pytest.importorskip("fastapi")
+
+from peaks.config import Config  # noqa: E402
+from peaks.scoring import Segment  # noqa: E402
+from peaks.web.service import Service  # noqa: E402
+
+
+class _Idx:
+    def __init__(self, sids):
+        self.size = max(len(sids), 1)
+        # key_meta: one key per scene, carrying its scene_id
+        self.key_meta = {f"k{s}": {"scene_id": s} for s in sids}
+
+
+class _Client:
+    def __init__(self, details):
+        self._d = details
+
+    def scene_details(self, ids):
+        return {i: self._d[i] for i in ids if i in self._d}
+
+
+def _service(tmp_path, segments, details, hidden=frozenset()):
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache" / "embeddings")
+    cfg.modeling.dir = str(tmp_path / "models")
+    svc = Service(cfg)
+    sids = list(details.keys())
+    svc.index = lambda model=None, refresh=False: _Idx(sids)
+    svc._scene_segments = lambda model=None, rebuild=False: (segments, "taste model")
+    svc.hidden_scene_ids = lambda: set(hidden)
+    svc.client = lambda: _Client(details)
+    svc._model_name = lambda alias=None: "dinov2"
+    return svc
+
+
+def _mkfile(tmp_path, name, size):
+    p = tmp_path / name
+    p.write_bytes(b"\0" * size)
+    return str(p)
+
+
+def test_reclamation_buckets(tmp_path):
+    details = {
+        "1": {"path": _mkfile(tmp_path, "s1.mp4", 2000), "duration": 100.0, "title": "dead"},
+        "2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "sparse"},
+        "3": {"path": _mkfile(tmp_path, "s3.mp4", 1000), "duration": 100.0, "title": "peaky"},
+    }
+    segments = {
+        # "1" has no segments → no_peak
+        "2": [Segment(start=0, end=10, peak_score=0.5, mean_score=0.5)],   # 10% kept → sparse
+        "3": [Segment(start=0, end=60, peak_score=0.9, mean_score=0.9)],   # 60% kept → keep whole
+    }
+    svc = _service(tmp_path, segments, details)
+    rep = svc.reclamation_report(waste_ratio=0.4)
+
+    assert [r["scene_id"] for r in rep["no_peak"]] == ["1"]
+    assert rep["no_peak"][0]["reclaim_bytes"] == 2000
+    assert [r["scene_id"] for r in rep["sparse"]] == ["2"]
+    assert rep["sparse"][0]["est_bytes"] == 100  # 1000 * 0.10
+    assert rep["sparse"][0]["reclaim_bytes"] == 900
+    # "3" is peaky enough → in neither bucket
+    assert "3" not in {r["scene_id"] for r in rep["no_peak"] + rep["sparse"]}
+    t = rep["totals"]
+    assert t["no_peak_bytes"] == 2000 and t["sparse_bytes"] == 900
+    assert t["total_bytes"] == 2900 and t["considered"] == 3
+
+
+def test_reclamation_floor_moves_scene_to_no_peak(tmp_path):
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    segments = {"2": [Segment(start=0, end=10, peak_score=0.5, mean_score=0.5)]}
+    svc = _service(tmp_path, segments, details)
+    # a high floor filters the 0.5 peak out entirely → whole file dead weight
+    rep = svc.reclamation_report(floor=0.9, waste_ratio=0.4)
+    assert [r["scene_id"] for r in rep["no_peak"]] == ["2"]
+    assert not rep["sparse"]
+
+
+def test_reclamation_excludes_hidden_and_missing(tmp_path):
+    details = {
+        "1": {"path": _mkfile(tmp_path, "s1.mp4", 2000), "duration": 100.0, "title": "dead"},
+        "2": {"path": "/nope/missing.mp4", "duration": 100.0, "title": "gone"},
+        "3": {"path": _mkfile(tmp_path, "s3.mp4", 500), "duration": 100.0, "title": "hidden"},
+    }
+    segments = {}  # all no-peak
+    svc = _service(tmp_path, segments, details, hidden={"3"})
+    rep = svc.reclamation_report()
+    ids = {r["scene_id"] for r in rep["no_peak"]}
+    assert ids == {"1"}                      # 3 hidden, 2 unresolved
+    assert rep["totals"]["unresolved"] == 1
+    assert rep["totals"]["considered"] == 1
+
+
+def test_reel_scene_dry_run_writes_nothing(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    details = {"2": {"path": _mkfile(tmp_path, "s2.mp4", 1000), "duration": 100.0, "title": "s"}}
+    segments = {"2": [
+        Segment(start=30, end=40, peak_score=0.8, mean_score=0.8),
+        Segment(start=5, end=10, peak_score=0.7, mean_score=0.7),
+    ]}
+    svc = _service(tmp_path, segments, details)
+
+    def _boom(*a, **k):
+        raise AssertionError("subprocess.run must NOT run in dry-run")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    plan = svc.reel_scene("2", dry_run=True)
+    assert plan["dry_run"] is True
+    # chronological order (5–10 before 30–40)
+    assert [s["start"] for s in plan["segments"]] == [5.0, 30.0]
+    assert plan["kept_secs"] == 15.0
+    assert plan["est_bytes"] == 150  # 1000 * (15/100)
+    # nothing written to the reels dir
+    assert not (tmp_path / "exports" / "reels").exists()
+
+
+def test_reel_scene_real_path_uses_stream_copy(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    src = _mkfile(tmp_path, "s2.mp4", 1000)
+    details = {"2": {"path": src, "duration": 100.0, "title": "s"}}
+    segments = {"2": [Segment(start=5, end=10, peak_score=0.7, mean_score=0.7)]}
+    svc = _service(tmp_path, segments, details)
+
+    cmds = []
+
+    def _fake_run(cmd, *a, **k):
+        cmds.append(cmd)
+        # write the ffmpeg output file (last arg) so the caller sees a real file
+        with open(cmd[-1], "wb") as f:
+            f.write(b"\0" * 50)
+
+        class _R:
+            returncode = 0
+            stderr = b""
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out = svc.reel_scene("2", dry_run=False)
+    assert out["dry_run"] is False
+    assert out["out_path"].endswith(".mp4")
+    assert "/reels/" in out["out_path"] and out["out_path"] != src  # never the source
+    # every ffmpeg invocation is a lossless stream copy — no re-encode flags
+    joined = " ".join(" ".join(c) for c in cmds)
+    assert "-c copy" in joined
+    assert "libx264" not in joined and "-crf" not in joined

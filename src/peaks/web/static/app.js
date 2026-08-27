@@ -1385,6 +1385,96 @@ function statTile(label, value) {
   return `<span class="pd-stat">${label} <b>${value}</b></span>`;
 }
 
+// --- Reclaim disk (DRY RUN): report the dead weight, write nothing ----------
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+  if (n >= 1e6) return (n / 1e6).toFixed(0) + " MB";
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + " KB";
+  return n + " B";
+}
+function fmtDur(s) {
+  s = Math.round(Number(s) || 0);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return h ? `${h}h${String(m).padStart(2, "0")}m` : `${m}m${String(ss).padStart(2, "0")}s`;
+}
+function reclaimFloorQS(extra = {}) {
+  const f = readFloor();
+  return new URLSearchParams({ ...(f != null ? { floor: f } : {}), ...extra });
+}
+function reclaimRow(r, sparse) {
+  const kept = sparse ? ` · keeps ${Math.round((r.kept_frac || 0) * 100)}% (${fmtDur(r.kept_secs)})` : "";
+  return `<div class="reclaim-row" data-sid="${esc(r.scene_id)}">
+    <div class="reclaim-meta">
+      <div class="reclaim-title">${esc(r.title || ("scene " + r.scene_id))}</div>
+      <div class="dim reclaim-sub">${fmtBytes(r.size)} · ${fmtDur(r.duration)}${kept}
+        · <b>reclaim ${fmtBytes(r.reclaim_bytes)}</b></div>
+      ${sparse ? `<div class="reclaim-plan dim" hidden></div>` : ""}
+    </div>
+    <div class="reclaim-actions">
+      ${sparse
+        ? `<button class="ghost btn-reclaim-preview" title="Dry-run: show the segments a lossless peak reel would keep">Preview reel</button>`
+        : `<span class="dim">whole file dead weight</span>`}
+    </div>
+  </div>`;
+}
+async function loadReclamation() {
+  const status = $("#reclaim-status"), summary = $("#reclaim-summary"), lists = $("#reclaim-lists");
+  if (!lists) return;
+  status.textContent = "Scanning your library at the current taste floor…";
+  lists.innerHTML = ""; summary.hidden = true;
+  try {
+    const d = await api("/api/reclamation?" + reclaimFloorQS());
+    const t = d.totals || {};
+    if (!t.considered) {
+      status.textContent = d.source && d.source !== "no taste yet"
+        ? "No scenes to analyze yet." : "No taste yet — save or thumb up some moments first.";
+      return;
+    }
+    status.textContent = "";
+    const floorTxt = d.floor != null ? `at floor ${pctText(d.floor)}` : "(all detected peaks count)";
+    summary.hidden = false;
+    summary.innerHTML =
+      `<div class="reclaim-big">~${fmtBytes(t.total_bytes)} <span class="dim">reclaimable ${floorTxt}</span></div>
+       <div class="dim">${fmtBytes(t.no_peak_bytes)} from <b>${num(t.no_peak_scenes)}</b> no-peak scenes ·
+        ${fmtBytes(t.sparse_bytes)} by reeling <b>${num(t.sparse_scenes)}</b> sparse scenes ·
+        ${num(t.considered)} scanned${t.unresolved ? ` · ${num(t.unresolved)} unresolved` : ""}</div>`;
+    $("#btn-reclaim-export").hidden = false;
+    const section = (title, rows, sparse) => rows.length
+      ? `<div class="reclaim-list"><h3>${title} <span class="dim">(${rows.length})</span></h3>
+          ${rows.map((r) => reclaimRow(r, sparse)).join("")}</div>`
+      : "";
+    lists.innerHTML =
+      section("No-peak scenes — whole-file dead weight", d.no_peak || [], false) +
+      section("Sparse scenes — reel to reclaim", d.sparse || [], true);
+  } catch (e) { status.textContent = ""; toast(e.message, true); }
+}
+// preview a per-scene reel (dry-run: shows the segment plan, writes nothing)
+$("#reclaim-lists")?.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".btn-reclaim-preview");
+  if (!btn) return;
+  const row = btn.closest(".reclaim-row"), sid = row?.dataset.sid;
+  const plan = row?.querySelector(".reclaim-plan");
+  if (!sid || !plan) return;
+  btn.disabled = true;
+  try {
+    const d = await api("/api/reclamation/reel?" + reclaimFloorQS({ scene_id: sid, dry_run: "true" }),
+      { method: "POST" });
+    const segs = (d.segments || []).map((s) => `${fmtDur(s.start)}–${fmtDur(s.end)}`).join(", ");
+    plan.hidden = false;
+    plan.innerHTML = `<b>${d.segments.length}</b> segment(s), ~${fmtDur(d.kept_secs)} kept →
+      est. ${fmtBytes(d.est_bytes)} (from ${fmtBytes(d.size)}). <span class="reclaim-dry">dry run — no file written</span>
+      <br>${segs}`;
+  } catch (err) { toast(err.message, true); }
+  btn.disabled = false;
+});
+$("#btn-reclaim-run")?.addEventListener("click", () => loadReclamation());
+$("#btn-reclaim-export")?.addEventListener("click", () => {
+  window.open("/api/reclamation/export?" + reclaimFloorQS(), "_blank");
+});
+wireCollapse("#toggle-reclaim", "#reclaim-body",
+  { label: "Reclaim disk", storeKey: "stats_show_reclaim" });
+
 let swipeHit = null;
 async function loadNextSwipe() {
   const card = $("#swipe-card");

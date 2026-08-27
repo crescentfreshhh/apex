@@ -1665,6 +1665,7 @@ class Service:
         self._board_score_cache.clear()
         self._board_universe_cache.clear()
         self._peak_index_cache = None   # peaks depend on the taste scorer
+        self._scene_seg_cache = None    # so do the per-scene segment spans
 
     def _taste_scores(self, model: str, profile: str | None = None):
         """One taste score per indexed moment, for the whole library. Uses your
@@ -2219,13 +2220,14 @@ class Service:
             return (lambda vecs: np.asarray(vecs, dtype=np.float32) @ cu), "taste centroid"
         return None, "no taste yet"
 
-    def _peak_index(self, model: str | None = None, rebuild: bool = False) -> dict:
-        """`{peaks: {scene_id: [{t, score}, ...]}, total, scenes, source}` — the
-        apex segments (peaks) the scorer extracts from every embedded scene, via
-        the same `score_scene` pipeline `peaks score` uses. Cached, keyed on the
-        index size so new embeds recompute it. When `normalize=none` the hysteresis
-        thresholds are drawn from the library score distribution (p90/p75) so the
-        stat is meaningful whichever scorer is active."""
+    def _scene_segments(self, model: str | None = None, rebuild: bool = False):
+        """`({scene_id: [Segment, ...]}, source)` — the apex segments (peaks) the
+        scorer extracts from every embedded scene, via the same `score_scene`
+        pipeline `peaks score` uses. Cached, keyed on the index size so new embeds
+        recompute it. When `normalize=none` the hysteresis thresholds are drawn
+        from the library score distribution (p90/p75) so the result is meaningful
+        whichever scorer is active. Shared by the peak-count stats (`_peak_index`)
+        and the reclamation report."""
         from dataclasses import replace
 
         from ..pipeline import score_scene
@@ -2233,19 +2235,18 @@ class Service:
 
         model = model or self._model_name()
         idx = self.index(model)
-        cached = getattr(self, "_peak_index_cache", None)
+        cached = getattr(self, "_scene_seg_cache", None)
         if not rebuild and cached is not None and cached[0] == idx.size:
             return cached[1]
 
         fn, source = self._peak_score_fn(model)
         if fn is None or idx.size == 0:
-            out = {"peaks": {}, "total": 0, "scenes": 0, "source": source}
-            self._peak_index_cache = (idx.size, out)
+            out = ({}, source)
+            self._scene_seg_cache = (idx.size, out)
             return out
 
         sc = self.cfg.scoring
-        peaks: dict[str, list] = {}
-        total = 0
+        segments: dict[str, list] = {}
         if sc.normalize in ("", "none"):
             flat = np.asarray(fn(idx.matrix), dtype=np.float32).reshape(-1)
             high = float(np.percentile(flat, 90.0)) if flat.size else sc.high
@@ -2261,11 +2262,7 @@ class Service:
                     max_duration=sc.max_duration or None, pad=sc.pad,
                 )
                 if segs:
-                    peaks[sid] = [
-                        {"t": round(float(s.midpoint), 2), "score": round(float(s.peak_score), 4)}
-                        for s in segs
-                    ]
-                    total += len(segs)
+                    segments[sid] = segs
         else:  # scene-z: thresholds are std-devs; honour the configured scoring
             scoring = replace(sc)
             for key, (start, end) in idx._key_rows.items():
@@ -2274,14 +2271,235 @@ class Service:
                     continue
                 segs = score_scene(idx.times[start:end], idx.matrix[start:end], fn, scoring)
                 if segs:
-                    peaks[sid] = [
-                        {"t": round(float(s.midpoint), 2), "score": round(float(s.peak_score), 4)}
-                        for s in segs
-                    ]
-                    total += len(segs)
+                    segments[sid] = segs
 
+        out = (segments, source)
+        self._scene_seg_cache = (idx.size, out)
+        return out
+
+    def _peak_index(self, model: str | None = None, rebuild: bool = False) -> dict:
+        """`{peaks: {scene_id: [{t, score}, ...]}, total, scenes, source}` — the
+        per-scene peaks as midpoint+score points (for the Statistics tab), derived
+        from the shared `_scene_segments` pass. Cached on index size."""
+        model = model or self._model_name()
+        idx = self.index(model)
+        cached = getattr(self, "_peak_index_cache", None)
+        if not rebuild and cached is not None and cached[0] == idx.size:
+            return cached[1]
+        segments, source = self._scene_segments(model, rebuild=rebuild)
+        peaks = {
+            sid: [
+                {"t": round(float(s.midpoint), 2), "score": round(float(s.peak_score), 4)}
+                for s in segs
+            ]
+            for sid, segs in segments.items()
+        }
+        total = sum(len(v) for v in peaks.values())
         out = {"peaks": peaks, "total": total, "scenes": len(peaks), "source": source}
         self._peak_index_cache = (idx.size, out)
+        return out
+
+    def reclamation_report(
+        self,
+        floor: float | None = None,
+        waste_ratio: float = 0.4,
+        min_scene_secs: float = 0.0,
+        limit: int = 0,
+        model: str | None = None,
+    ) -> dict:
+        """Where the disk is going: for every embedded scene, compare its total
+        *peak* footage (segments whose peak_score ≥ `floor`) against the whole
+        file, and bucket the dead weight.
+
+          • no_peak — zero qualifying peaks → the whole file is reclaimable.
+          • sparse  — has peaks but they cover less than `waste_ratio` of the
+                      file → a per-scene peak reel would keep only ~kept_frac of
+                      the bytes; the rest is reclaimable.
+
+        READ-ONLY: nothing is written, marked, or deleted. Sizes are read from
+        disk (`os.path.getsize`); durations from Stash. Scenes already queued
+        (`hidden_scene_ids`) and files that can't be resolved are excluded from
+        the actionable lists (the latter counted as `unresolved`). Rows are
+        sorted by reclaimable bytes, biggest first; `limit`>0 caps each list
+        (totals always span the whole library)."""
+        import os
+
+        model = model or self._model_name()
+        segments, source = self._scene_segments(model)
+        idx = self.index(model)
+        empty = {
+            "floor": floor, "waste_ratio": waste_ratio, "source": source, "model": model,
+            "no_peak": [], "sparse": [],
+            "totals": {"no_peak_scenes": 0, "no_peak_bytes": 0, "sparse_scenes": 0,
+                       "sparse_bytes": 0, "total_bytes": 0, "considered": 0, "unresolved": 0},
+        }
+        if idx.size == 0:
+            return empty
+
+        sids = sorted({str((m or {}).get("scene_id")) for m in idx.key_meta.values()}
+                      - {"None", ""})
+        hidden = self.hidden_scene_ids()
+        sids = [s for s in sids if s not in hidden]
+        if not sids:
+            return empty
+        try:
+            details = self.client().scene_details(sids)
+        except Exception:  # noqa: BLE001 — Stash down: no sizes/durations to report
+            return empty
+
+        no_peak: list[dict] = []
+        sparse: list[dict] = []
+        unresolved = considered = 0
+        for sid in sids:
+            d = details.get(sid) or {}
+            path = d.get("path")
+            if not path or not os.path.exists(path):
+                unresolved += 1
+                continue
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                unresolved += 1
+                continue
+            duration = float(d.get("duration") or 0.0)
+            segs = segments.get(sid, [])
+            if floor is not None:
+                segs = [s for s in segs if s.peak_score >= floor]
+            if duration < min_scene_secs:
+                continue
+            considered += 1
+            kept_secs = float(sum(s.duration for s in segs))
+            peak_score = max((float(s.peak_score) for s in segs), default=0.0)
+            title = d.get("title") or ""
+            base = {
+                "scene_id": sid, "title": title, "path": path,
+                "size": size, "duration": round(duration, 1),
+                "kept_secs": round(kept_secs, 1), "peak_score": round(peak_score, 4),
+            }
+            if not segs:
+                no_peak.append({**base, "kept_frac": 0.0, "reclaim_bytes": size})
+                continue
+            kept_frac = (kept_secs / duration) if duration > 0 else 1.0
+            if kept_frac < waste_ratio:
+                est_bytes = int(size * kept_frac)
+                sparse.append({
+                    **base, "kept_frac": round(kept_frac, 3),
+                    "est_bytes": est_bytes, "reclaim_bytes": size - est_bytes,
+                })
+            # else: peaky enough — keep the whole file, not reclaimable
+
+        no_peak.sort(key=lambda r: r["reclaim_bytes"], reverse=True)
+        sparse.sort(key=lambda r: r["reclaim_bytes"], reverse=True)
+        totals = {
+            "no_peak_scenes": len(no_peak),
+            "no_peak_bytes": sum(r["reclaim_bytes"] for r in no_peak),
+            "sparse_scenes": len(sparse),
+            "sparse_bytes": sum(r["reclaim_bytes"] for r in sparse),
+            "considered": considered, "unresolved": unresolved,
+        }
+        totals["total_bytes"] = totals["no_peak_bytes"] + totals["sparse_bytes"]
+        return {
+            "floor": floor, "waste_ratio": waste_ratio, "source": source, "model": model,
+            "no_peak": no_peak[:limit] if limit else no_peak,
+            "sparse": sparse[:limit] if limit else sparse,
+            "totals": totals,
+        }
+
+    def reel_scene(
+        self,
+        scene_id: str,
+        floor: float | None = None,
+        dry_run: bool = True,
+        job=None,
+        model: str | None = None,
+    ) -> dict:
+        """Plan (or, when `dry_run=False`, produce) a per-scene *peak reel*: a new
+        file holding only this scene's qualifying peak segments, in chronological
+        order, losslessly stream-copied (`-c copy`, no re-encode). Peaks NEVER
+        touches the original — the reel is a separate file in the exports dir.
+
+        The POC default is `dry_run=True`: it returns the plan (the segments it
+        would keep, the estimated output bytes, the path it would write) and runs
+        no ffmpeg / writes nothing. `dry_run=False` (a deliberately-enabled later
+        step) actually cuts the reel via `_reel_segments`."""
+        import os
+        from pathlib import Path
+
+        log = (job.log if job else (lambda *_: None))
+        model = model or self._model_name()
+        sid = str(scene_id)
+        segments, _ = self._scene_segments(model)
+        segs = segments.get(sid, [])
+        if floor is not None:
+            segs = [s for s in segs if s.peak_score >= floor]
+        segs = sorted(segs, key=lambda s: s.start)  # chronological
+        d = (self.client().scene_details([sid]) or {}).get(sid) or {}
+        path = d.get("path")
+        duration = float(d.get("duration") or 0.0)
+        size = os.path.getsize(path) if (path and os.path.exists(path)) else 0
+        kept_secs = float(sum(s.duration for s in segs))
+        kept_frac = (kept_secs / duration) if duration > 0 else 0.0
+        est_bytes = int(size * kept_frac)
+        exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports")) / "reels"
+        out_path = str(exports / (_safe_reel_name(f"peaks-scene-{sid}") + ".mp4"))
+        plan = {
+            "scene_id": sid, "path": path, "out_path": out_path,
+            "segments": [{"start": round(s.start, 2), "end": round(s.end, 2),
+                          "duration": round(s.duration, 2), "peak_score": round(float(s.peak_score), 4)}
+                         for s in segs],
+            "kept_secs": round(kept_secs, 1), "kept_frac": round(kept_frac, 3),
+            "size": size, "est_bytes": est_bytes, "dry_run": dry_run,
+        }
+        if dry_run:
+            log(f"[dry-run] scene {sid}: would reel {len(segs)} segment(s) "
+                f"(~{kept_secs:.0f}s, ~{est_bytes // 1_000_000} MB) → {out_path}")
+            return plan
+        if not segs:
+            raise ValueError(f"scene {sid}: no qualifying peaks to reel")
+        if not path or not os.path.exists(path):
+            raise ValueError(f"scene {sid}: source file missing")
+        exports.mkdir(parents=True, exist_ok=True)
+        written = self._reel_segments(path, segs, out_path, log=log)
+        plan["bytes"] = os.path.getsize(written) if os.path.exists(written) else 0
+        plan["out_path"] = written
+        return plan
+
+    def _reel_segments(self, path: str, segments, out: str, log=None) -> str:
+        """Lossless stream-copy of each [start,end] segment from `path`, concatenated
+        into `out` (`-ss/-to -c copy` then a concat pass). Shared by the peak-reel
+        and the collection/reel exports. Returns the output path."""
+        import os
+        import subprocess
+        import tempfile
+
+        log = log or (lambda *_: None)
+        ff = getattr(self.cfg.sampling, "ffmpeg", "ffmpeg") if hasattr(self.cfg, "sampling") else "ffmpeg"
+        with tempfile.TemporaryDirectory() as td:
+            segfiles: list[str] = []
+            for i, s in enumerate(segments):
+                start, end = float(s.start), float(s.end)
+                seg = os.path.join(td, f"seg{i:04d}.ts")
+                r = subprocess.run(
+                    [ff, "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
+                     "-c", "copy", "-f", "mpegts", seg],
+                    capture_output=True,
+                )
+                if r.returncode == 0 and os.path.exists(seg) and os.path.getsize(seg) > 0:
+                    segfiles.append(seg)
+                else:
+                    log(f"  ! segment {start:.0f}-{end:.0f}s failed (codec mismatch?) — skipped")
+            if not segfiles:
+                raise RuntimeError("no segments could be cut (codec mismatch?)")
+            listf = os.path.join(td, "list.txt")
+            with open(listf, "w") as f:
+                for sf in segfiles:
+                    f.write(f"file '{sf}'\n")
+            cc = subprocess.run(
+                [ff, "-y", "-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", out],
+                capture_output=True,
+            )
+            if cc.returncode != 0:
+                raise RuntimeError("concat failed: " + cc.stderr.decode("replace")[-300:])
         return out
 
     def _scene_mtimes(self, model: str) -> dict[str, float]:

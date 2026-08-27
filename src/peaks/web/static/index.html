@@ -385,6 +385,32 @@
       </div>
     </div>
     <div id="stats-body" class="dim">Crunching your library…</div>
+
+    <div class="panel" id="reclaim-panel">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <h2 style="margin:0">♻️ Reclaim disk</h2>
+        <button id="toggle-reclaim" class="ghost">▸ Reclaim disk</button>
+      </div>
+      <div id="reclaim-body" hidden>
+        <div class="reclaim-dryrun">
+          <strong>DRY RUN</strong> — estimate only. Nothing is deleted, marked, or written
+          while we validate the methodology. The one artifact is a CSV you can export.
+        </div>
+        <p class="dim">Most of a big library is footage <em>between</em> the peaks. This measures
+          that dead weight at your current taste floor (the same one set on this tab / the
+          megaboard). <strong>No-peak</strong> scenes have zero peaks at the floor — the whole file
+          is reclaimable. <strong>Sparse</strong> scenes have only a little peak footage — a
+          lossless per-scene <em>peak reel</em> (ffmpeg stream-copy, no re-encode) would keep just
+          the peaks. Judged against your default profile's taste.</p>
+        <div class="row">
+          <button id="btn-reclaim-run" class="primary">Scan library</button>
+          <button id="btn-reclaim-export" class="ghost" hidden>⬇ Export list (CSV)</button>
+          <span id="reclaim-status" class="dim"></span>
+        </div>
+        <div id="reclaim-summary" class="reclaim-summary" hidden></div>
+        <div id="reclaim-lists" class="reclaim-lists"></div>
+      </div>
+    </div>
   </section>
 
   <!-- MEGABOARD -->
