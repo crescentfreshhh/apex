@@ -778,7 +778,10 @@ class Service:
                 return self.performer_moment_matches(str(s.get("scene_id")), float(s.get("t") or 0.0))["hits"]
             if kind == "similar":
                 key = self._key_for_scene(str(s.get("scene_id")), self._model_name())
-                return self.search_by_frame(key, float(s.get("t") or 0.0), top_k=300, per_scene=3) if key else []
+                return self.search_by_frame(
+                    key, float(s.get("t") or 0.0), top_k=300, per_scene=3,
+                    clip=s.get("clip") or None, clip_weight=float(s.get("clip_weight") or 0.5),
+                ) if key else []
         except Exception:  # noqa: BLE001 — a bad spec shouldn't 500 the board
             return []
         return []
@@ -1200,14 +1203,34 @@ class Service:
         self, key: str, time: float, top_k: int | None = 60, taste: bool = False,
         per_scene: int | None = 3, min_score: float | None = None,
         whole_peak: bool | None = None,
+        clip: str | None = None, clip_weight: float = 0.5,
     ) -> list[Hit]:
+        """Moments visually like the one at (key, time). With `clip` keywords (and
+        a CLIP index), it's a HYBRID: retrieve the visual pool, then re-rank/filter
+        by CLIP keyword match via `_clip_rerank` (`clip_weight` is the dial). Here
+        `min_score` becomes a floor on the *blended* hybrid score, so tightening it
+        drops the weak keyword matches; without keywords it stays a visual-cosine
+        floor (unchanged)."""
         idx = self.index()
         v = self._moment_query(idx, key, time, whole_peak)
         if v is None:
             return []
-        hits = idx.search(
-            v, top_k=top_k, per_scene=per_scene, exclude_key=key, min_score=min_score
-        )
+        use_clip = bool(clip and clip.strip()) and self.has_clip_index()
+        if use_clip:
+            # pull a generous visual pool (no visual floor) so the keyword rerank
+            # has room, then blend, apply the floor to the blend, and trim.
+            pool = idx.search(
+                v, top_k=max((top_k or 300) * 4, 800), per_scene=per_scene, exclude_key=key
+            )
+            hits = self._clip_rerank(pool, clip, weight=clip_weight)
+            if min_score is not None:
+                hits = [h for h in hits if h.score >= min_score]
+            if top_k:
+                hits = hits[:top_k]
+        else:
+            hits = idx.search(
+                v, top_k=top_k, per_scene=per_scene, exclude_key=key, min_score=min_score
+            )
         if taste:
             hits = self._rerank_by_taste(hits, self._model_name())
         return hits
@@ -1540,6 +1563,42 @@ class Service:
         snorm = (ss - float(ss.min())) / span
         final = (1.0 - relevance_weight) * taste + relevance_weight * snorm
         return [hits[i] for i in np.argsort(-final)]
+
+    def _clip_rerank(self, hits: list[Hit], text: str, weight: float = 0.5) -> list[Hit]:
+        """Hybrid: re-order visually-similar `hits` by how well each ALSO matches
+        the CLIP keyword prompt `text` (supports '-negative' terms). `weight` is
+        the dial — 0 = pure visual order, 1 = pure keyword — blending min-max
+        normalized visual and keyword scores. Candidates with no CLIP vector are
+        dropped (can't judge keywords, the graceful per-scene degrade). Each
+        surviving hit's `score` becomes the blend, so tiles and the taste-floor
+        slider read the hybrid match strength."""
+        if not hits or not (text or "").strip():
+            return hits
+        clip_idx = self.index(self._clip_name())
+        qv = self._unit(self._clip_query_vector(text))
+        kept, cs, vs = [], [], []
+        for h in hits:
+            cv = clip_idx.vector_at(h.key, h.time)
+            if cv is None:
+                continue  # not CLIP-embedded → can't score keywords
+            kept.append(h)
+            cs.append(float(self._unit(np.asarray(cv, dtype=np.float32)) @ qv))
+            vs.append(float(h.score))
+        if not kept:
+            return []
+
+        def _norm(a: np.ndarray) -> np.ndarray:
+            span = float(a.max() - a.min()) or 1.0
+            return (a - float(a.min())) / span
+
+        w = float(min(max(weight, 0.0), 1.0))
+        blended = (1.0 - w) * _norm(np.asarray(vs, np.float32)) + w * _norm(np.asarray(cs, np.float32))
+        out = []
+        for i in np.argsort(-blended):
+            h = kept[int(i)]
+            h.score = round(float(blended[int(i)]), 4)
+            out.append(h)
+        return out
 
     # --- "For You": taste centroid, recommendations, active learning ---------
 

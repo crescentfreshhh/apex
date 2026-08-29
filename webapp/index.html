@@ -26,6 +26,12 @@
       <input type="range" id="floor" min="0" max="0.95" step="0.01" value="0" />
       <span id="floor-val" class="dim">off</span>
     </label>
+    <span id="clip-wrap" hidden title="Narrow 'more like this moment' by CLIP keywords. Use -word to push a term away.">
+      <input type="text" id="clip-kw" placeholder="+ CLIP keywords…" size="16" />
+      <label title="Blend: left = pure visual similarity, right = pure keyword match">kw
+        <input type="range" id="clip-weight" min="0" max="1" step="0.05" value="0.5" />
+      </label>
+    </span>
     <button id="refresh-lib" title="Rebuild from Stash — pick up newly-added scenes / saved moments">↻ Refresh</button>
     <button id="save-board" title="Save whatever is currently driving the board as a playlist">💾 Save board</button>
     <button id="mute" title="Hover a tile to hear it — M to silence everything">🔊 Sound</button>

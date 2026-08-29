@@ -193,6 +193,14 @@ html, body {
 #floor-wrap input[type=range] { width: 120px; accent-color: var(--accent); cursor: pointer; }
 #floor-val { min-width: 26px; }
 
+/* CLIP-keyword hybrid controls for the "more like this moment" pivot */
+#clip-wrap { display: inline-flex; align-items: center; gap: 8px; }
+#clip-wrap[hidden] { display: none; }
+#clip-kw { background: var(--panel2, #1b1b20); color: var(--fg, #e8e8ea);
+  border: 1px solid var(--line, #2a2a30); border-radius: 8px; padding: 5px 9px; font-size: 13px; }
+#clip-wrap label { color: var(--dim); display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+#clip-weight { width: 90px; accent-color: var(--accent); cursor: pointer; }
+
 /* right-click tile menu: drive the board in the moment */
 .mb-menu {
   position: fixed; z-index: 20; min-width: 200px; padding: 5px;

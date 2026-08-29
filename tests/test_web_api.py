@@ -201,6 +201,25 @@ def test_profiles_are_isolated(cfg, tmp_path, monkeypatch):
                           params={"name": default}).status_code == 400
 
 
+def test_search_similar_hybrid_clip_params(cfg, monkeypatch):
+    import numpy as np
+
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}")
+    # reuse the DINO index as the CLIP index so the hybrid path exercises end-to-end
+    monkeypatch.setattr(svc_mod.Service, "_clip_name", lambda self: "dinov2")
+    monkeypatch.setattr(svc_mod.Service, "has_clip_index", lambda self: True)
+    monkeypatch.setattr(svc_mod.Service, "_clip_text_vector",
+                        lambda self, text: np.array([0, 1, 0], np.float32))
+    client = TestClient(create_app(cfg))
+    # scene 1 is the source (excluded); scene 2 is the only other embedded scene
+    d = client.get("/api/search/similar?scene_id=1&t=0&clip=stuff&clip_weight=0.7").json()
+    assert d["items"] and {it["scene_id"] for it in d["items"]} == {"2"}
+    assert 0.0 <= d["items"][0]["score"] <= 1.0   # blended hybrid score
+
+
 def test_peak_pool_setting_and_whole_peak_query(cfg, tmp_path, monkeypatch):
     import peaks.web.service as svc_mod
 

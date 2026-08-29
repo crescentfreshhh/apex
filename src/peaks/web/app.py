@@ -642,6 +642,7 @@ def create_app(cfg=None):
         key: str | None = None, t: float = 0.0, scene_id: str | None = None,
         top_k: int = 60, taste: bool = False, per_scene: int = 3,
         min_score: float = 0.0, enrich: int = 300, whole_peak: bool | None = None,
+        clip: str | None = None, clip_weight: float = 0.5,
     ):
         # the megaboard knows scene_id, not the cache key — resolve it (same path
         # /api/classify uses) so "more like this moment" works from a board tile.
@@ -654,7 +655,7 @@ def create_app(cfg=None):
             key, t, top_k=tk, taste=taste,
             per_scene=(per_scene if per_scene > 0 else None),
             min_score=(min_score if min_score > 0 else None),
-            whole_peak=whole_peak,
+            whole_peak=whole_peak, clip=clip, clip_weight=clip_weight,
         )
         return _search_payload(service, hits, enrich=enrich)
 

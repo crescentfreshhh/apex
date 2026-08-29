@@ -865,22 +865,37 @@ async function moreLikeThis(scene_id, t) {
   // remember the seed so the taste-floor slider and Refresh re-filter THIS moment,
   // not the original board. With a floor set, return every match above it (the
   // count grows/shrinks with the slider); with it off, a generous default.
+  const kw = (document.getElementById("clip-kw")?.value || "").trim();
+  const wEl = document.getElementById("clip-weight");
+  const w = wEl ? parseFloat(wEl.value) : 0.5;
   State.pivotSeed = { scene_id, t };
-  State.sourceSpec = { kind: "similar", scene_id, t };
+  State.sourceSpec = { kind: "similar", scene_id, t, ...(kw ? { clip: kw, clip_weight: w } : {}) };
   State.pivotApplyFloor = null;   // pivotSeed drives the re-run for this pivot
   syncFloorVisibility();
-  flashStatus("finding similar…");
+  flashStatus(kw ? `finding similar · matching “${kw}”…` : "finding similar…");
   try {
     const qs = new URLSearchParams({ scene_id, t });
     if (fyMinScore > 0) qs.set("min_score", fyMinScore);
     else qs.set("top_k", 300);
+    if (kw) { qs.set("clip", kw); qs.set("clip_weight", w); }
     const d = await api("/api/search/similar?" + qs.toString());
     const items = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
-    pivotBoard(items, `🔎 more like that moment${flr}`);
-    flashStatus(`🔎 ${items.length} moments like that${flr}`);
+    const kwl = kw ? ` · “${kw}”` : "";
+    pivotBoard(items, `🔎 more like that moment${kwl}${flr}`);
+    flashStatus(`🔎 ${items.length} moments like that${kwl}${flr}`);
   } catch (e) { flashStatus(e.message); }
 }
+// re-run the current "more like this moment" pivot when keywords / weight change
+function rerunSimilarPivot() {
+  if (State.pivotSeed && State.sourceSpec && State.sourceSpec.kind === "similar") {
+    moreLikeThis(State.pivotSeed.scene_id, State.pivotSeed.t);
+  }
+}
+document.getElementById("clip-kw")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); rerunSimilarPivot(); }
+});
+document.getElementById("clip-weight")?.addEventListener("change", () => rerunSimilarPivot());
 async function saveHerBest(scene_id) {
   flashStatus("finding her best…");
   let d;
@@ -1032,6 +1047,9 @@ function syncFloorVisibility() {
     : State.pivot ? (State.pivotApplyFloor != null)
     : (State.source === "foryou" || State.source === "performer");
   if (fw) fw.hidden = !show;
+  // CLIP-keyword box only for the "more like this moment" pivot (a visual seed)
+  const cw = document.getElementById("clip-wrap");
+  if (cw) cw.hidden = !(State.sourceSpec && State.sourceSpec.kind === "similar");
 }
 // the re-derivable descriptor for a live playlist (null = this board can't go live)
 function specForSource(src) {
