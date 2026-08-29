@@ -205,6 +205,8 @@ async function loadModels() {
     const m = await api("/api/models");
     $("#sel-dino").value = m.dino_model;
     $("#sel-clip").value = m.clip_model;
+    savedPeakPool = !!m.peak_pool;
+    const pp = $("#chk-peak-pool"); if (pp) pp.checked = savedPeakPool;
     const bits = [];
     if (m.dino_saved) bits.push("DINO override");
     if (m.clip_saved) bits.push("CLIP override");
@@ -230,6 +232,16 @@ async function saveModels(patch) {
 }
 $("#sel-dino")?.addEventListener("change", (e) => saveModels({ dino_model: e.target.value }));
 $("#sel-clip")?.addEventListener("change", (e) => saveModels({ clip_model: e.target.value }));
+$("#chk-peak-pool")?.addEventListener("change", async (e) => {
+  try {
+    await api("/api/models", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peak_pool: e.target.checked }),
+    });
+    wholePeakOverride = null;   // clear any inline compare override → follow the saved default
+    toast(e.target.checked ? "Matching on the whole peak" : "Matching on a single frame");
+  } catch (err) { toast(err.message, true); loadModels(); }
+});
 loadModels();
 
 function wireToggle(btnSel, panelSel, hintSel) {
@@ -466,6 +478,10 @@ let currentContext = {}; // what produced the current hits → drives the heatma
 const PREVIEW_MAX = 300; // tiles rendered; the full set still lives in lastHits
 const tasteOn = () => ($("#taste-toggle").checked ? "&taste=true" : "");
 let searchResults = [];  // the full ranked pool from the last search
+// peak-level matching: savedPeakPool = the Dashboard default; wholePeakOverride =
+// the inline Explore compare toggle (null → follow the saved default).
+let savedPeakPool = false, wholePeakOverride = null;
+const effectivePeak = () => (wholePeakOverride === null ? savedPeakPool : wholePeakOverride);
 // the Explore "search options" — per-scene cap, negation (match % is a display filter)
 function searchParams() {
   const per = $("#s-per-scene") ? (parseInt($("#s-per-scene").value, 10) || 0) : 3;
@@ -474,7 +490,9 @@ function searchParams() {
 }
 function searchQuery() {
   const { per, neg } = searchParams();
-  return `&per_scene=${per}&neg_weight=${neg}&enrich=${PREVIEW_MAX}&top_k=1000` + tasteOn();
+  let q = `&per_scene=${per}&neg_weight=${neg}&enrich=${PREVIEW_MAX}&top_k=1000` + tasteOn();
+  if (currentContext.kind === "frame") q += "&whole_peak=" + (effectivePeak() ? "true" : "false");
+  return q;
 }
 // the match-% slider is the SAME number printed on the tiles; it live-hides weaker ones
 const matchMin = () => parseFloat($("#match-min")?.value) || 0;
@@ -488,8 +506,18 @@ function onSearchResults(items) {
   const hi = Math.ceil(Math.max(...scores) * 100) / 100;
   sl.min = lo; sl.max = hi; sl.step = 0.01; sl.value = lo;   // start showing everything
   if (bar) bar.hidden = false;
+  // the "whole peak" compare toggle only applies to similar-moment (frame) results
+  const pw = $("#rb-peak-wrap"), pc = $("#rb-peak");
+  if (pw) pw.hidden = currentContext.kind !== "frame";
+  if (pc) pc.checked = effectivePeak();
   applyMatchFilter();
 }
+$("#rb-peak")?.addEventListener("change", (e) => {
+  wholePeakOverride = e.target.checked;
+  if (currentContext.kind === "frame" && currentContext.key != null) {
+    similar(currentContext.key, currentContext.t);   // re-run the same query both ways
+  }
+});
 function applyMatchFilter() {
   const v = matchMin();
   $("#match-min-val").textContent = `${Math.round(v * 100)}%`;

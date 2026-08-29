@@ -186,6 +186,29 @@ class SearchIndex:
         i = start + int(np.argmin(np.abs(seg_times - time)))
         return self.matrix[i]
 
+    def vector_around(self, key: str, time: float, window: float) -> np.ndarray | None:
+        """A 'peak-level' vector for the moment at (key, time): the *mean* of the
+        frames within ±`window` seconds, re-normalized to unit length — so a peak
+        is matched by its whole gist, not one (possibly fluky) midpoint frame.
+        Always includes the nearest frame, so a sparse/edge moment still returns a
+        vector; `window`<=0 or a single frame degrades to `vector_at`."""
+        rows = self._key_rows.get(key)
+        if rows is None:
+            return None
+        start, end = rows
+        seg_times = self.times[start:end]
+        if seg_times.size == 0:
+            return None
+        if window <= 0:
+            return self.vector_at(key, time)
+        mask = np.abs(seg_times - time) <= window
+        if not mask.any():  # window fell between samples → nearest frame
+            mask[int(np.argmin(np.abs(seg_times - time)))] = True
+        block = self.matrix[start:end][mask]
+        v = block.mean(axis=0).astype(np.float32)
+        n = float(np.linalg.norm(v))
+        return v / n if n > 0 else v
+
     def search_by_frame(
         self, key: str, time: float, top_k: int | None = 60, *,
         per_scene: int | None = 3, min_score: float | None = None,

@@ -27,6 +27,23 @@ def test_build_stacks_all_scenes(tmp_path):
     assert set(idx.scene_ids) == {"1", "2"}
 
 
+def test_vector_around_pools_within_window(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    _seed(cache, "k1", "1", [_unit([1, 0, 0]), _unit([0, 1, 0])], [0.0, 8.0])
+    idx = SearchIndex(cache, "dino").build(["k1"])
+
+    # window excludes the far frame → just the near one (== vector_at)
+    v0 = idx.vector_around("k1", 0.0, window=6.0)
+    assert np.allclose(v0, _unit([1, 0, 0]))
+    # window covers both frames → unit mean of the two
+    vmid = idx.vector_around("k1", 4.0, window=6.0)
+    assert np.allclose(vmid, _unit([1, 1, 0]))
+    # window<=0 degrades to the single nearest frame
+    assert np.allclose(idx.vector_around("k1", 8.0, window=0.0), _unit([0, 1, 0]))
+    # a window that lands between samples still returns the nearest (never None)
+    assert idx.vector_around("k1", 3.0, window=0.5) is not None
+
+
 def test_build_preallocates_matches_manual_stack(tmp_path):
     # the preallocated build must produce the exact same matrix/times/rows as a
     # naive per-scene stack (parity guard for the memory-lean rewrite).

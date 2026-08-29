@@ -107,6 +107,7 @@ def _models_model():
     class ModelsIn(BaseModel):
         dino_model: str | None = None
         clip_model: str | None = None
+        peak_pool: bool | None = None
 
     return ModelsIn
 
@@ -640,7 +641,7 @@ def create_app(cfg=None):
     def search_similar(
         key: str | None = None, t: float = 0.0, scene_id: str | None = None,
         top_k: int = 60, taste: bool = False, per_scene: int = 3,
-        min_score: float = 0.0, enrich: int = 300,
+        min_score: float = 0.0, enrich: int = 300, whole_peak: bool | None = None,
     ):
         # the megaboard knows scene_id, not the cache key — resolve it (same path
         # /api/classify uses) so "more like this moment" works from a board tile.
@@ -653,6 +654,7 @@ def create_app(cfg=None):
             key, t, top_k=tk, taste=taste,
             per_scene=(per_scene if per_scene > 0 else None),
             min_score=(min_score if min_score > 0 else None),
+            whole_peak=whole_peak,
         )
         return _search_payload(service, hits, enrich=enrich)
 
@@ -849,10 +851,11 @@ def create_app(cfg=None):
         return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
 
     @app.get("/api/board/performer_moment")
-    def board_performer_moment(scene_id: str, t: float = 0.0, count: int = 300):
+    def board_performer_moment(scene_id: str, t: float = 0.0, count: int = 300,
+                               whole_peak: bool | None = None):
         """Moments across this scene's lead performer, ranked by similarity to THIS
         moment — the megaboard's 'more of this moment, same actress' pivot."""
-        r = service.performer_moment_matches(scene_id, t, count=count)
+        r = service.performer_moment_matches(scene_id, t, count=count, whole_peak=whole_peak)
         return {"performer": r["performer"], "items": _hit_payload(service, r["hits"])}
 
     @app.get("/api/scene/{scene_id}/moments")
@@ -979,7 +982,8 @@ def create_app(cfg=None):
     def save_models(body: ModelsIn):
         try:
             return service.save_models(
-                dino_model=body.dino_model, clip_model=body.clip_model
+                dino_model=body.dino_model, clip_model=body.clip_model,
+                peak_pool=body.peak_pool,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))

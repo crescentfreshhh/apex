@@ -107,6 +107,22 @@ class Service:
                 self._settings_cache = {}
         return self._settings_cache
 
+    # peak-level matching: represent a moment by the mean of its frames within a
+    # window, not one midpoint frame. Off by default (single-frame, unchanged).
+    PEAK_POOL_WINDOW = 6.0  # seconds each side of the moment to average
+
+    def _peak_pool_default(self) -> bool:
+        return bool(self._settings().get("peak_pool", False))
+
+    def _moment_query(self, idx, key: str, time: float, whole_peak: bool | None):
+        """The query vector for a moment — pooled (whole-peak mean) or the single
+        nearest frame. `whole_peak=None` uses the saved setting; True/False
+        overrides it (the inline compare toggle)."""
+        pool = self._peak_pool_default() if whole_peak is None else bool(whole_peak)
+        if pool:
+            return idx.vector_around(key, float(time), self.PEAK_POOL_WINDOW)
+        return idx.vector_at(key, float(time))
+
     def _active_dino_model(self) -> str:
         return self._settings().get("dino_model") or self.cfg.embedding.dino_model
 
@@ -138,9 +154,11 @@ class Service:
             "clip_saved": bool(s.get("clip_model")),
             "dino_default": self.cfg.embedding.dino_model,
             "clip_default": self.cfg.embedding.clip_model,
+            "peak_pool": bool(s.get("peak_pool", False)),
         }
 
-    def save_models(self, dino_model: str | None = None, clip_model: str | None = None) -> dict:
+    def save_models(self, dino_model: str | None = None, clip_model: str | None = None,
+                    peak_pool: bool | None = None) -> dict:
         """Persist the active DINOv2 backbone and/or CLIP variant to
         /config/settings.json so the *whole* pipeline (embed, score, search,
         megaboard, 'CLIP sees') uses them — no container restart, no env vars.
@@ -152,9 +170,11 @@ class Service:
 
         clip_opts = {"ViT-B-32", "ViT-L-14", "ViT-H-14"}
         s = dict(self._settings())
+        backbone_changed = False
         if dino_model is not None:
             if dino_model and dino_model not in DINO_BACKBONES:
                 raise ValueError(f"unknown DINOv2 backbone: {dino_model}")
+            backbone_changed = (dino_model or None) != s.get("dino_model")
             if dino_model:
                 s["dino_model"] = dino_model
             else:
@@ -166,13 +186,17 @@ class Service:
                 s["clip_model"] = clip_model
             else:
                 s.pop("clip_model", None)
+        if peak_pool is not None:
+            s["peak_pool"] = bool(peak_pool)  # query-time matching mode (no re-embed)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(s, indent=2) + "\n")
         self._settings_cache = s
         # a changed backbone means a different cache namespace / vector space,
-        # so drop any built search indexes to force a clean rebuild.
-        self._index = {}
+        # so drop any built search indexes to force a clean rebuild. (A peak-pool
+        # toggle is query-time only — no rebuild needed.)
+        if backbone_changed:
+            self._index = {}
         return self.get_models()
 
     def schedule_settings(self) -> dict:
@@ -1174,9 +1198,14 @@ class Service:
     def search_by_frame(
         self, key: str, time: float, top_k: int | None = 60, taste: bool = False,
         per_scene: int | None = 3, min_score: float | None = None,
+        whole_peak: bool | None = None,
     ) -> list[Hit]:
-        hits = self.index().search_by_frame(
-            key, time, top_k=top_k, per_scene=per_scene, min_score=min_score
+        idx = self.index()
+        v = self._moment_query(idx, key, time, whole_peak)
+        if v is None:
+            return []
+        hits = idx.search(
+            v, top_k=top_k, per_scene=per_scene, exclude_key=key, min_score=min_score
         )
         if taste:
             hits = self._rerank_by_taste(hits, self._model_name())
@@ -2324,7 +2353,8 @@ class Service:
         return {"performer": best_name, "hits": hits[:count]}
 
     def performer_moment_matches(
-        self, scene_id: str, t: float, count: int = 300, per_scene: int = 6
+        self, scene_id: str, t: float, count: int = 300, per_scene: int = 6,
+        whole_peak: bool | None = None,
     ) -> dict:
         """'More of THIS moment, same actress': moments across this scene's lead
         performer's embedded scenes, ranked by visual similarity to the moment at
@@ -2335,7 +2365,7 @@ class Service:
         if not scenes:
             return {"performer": pname, "hits": []}
         key = self._key_for_scene(scene_id, model)
-        v = self.index(model).vector_at(key, float(t)) if key else None
+        v = self._moment_query(self.index(model), key, float(t), whole_peak) if key else None
         if v is None:  # can't locate the moment → her spread instead
             hits = self._moments_for_scenes(scenes, per_scene=per_scene, model=model)
         else:

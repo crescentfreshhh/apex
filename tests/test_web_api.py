@@ -201,6 +201,27 @@ def test_profiles_are_isolated(cfg, tmp_path, monkeypatch):
                           params={"name": default}).status_code == 400
 
 
+def test_peak_pool_setting_and_whole_peak_query(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.Service, "scene_meta", lambda self, ids: {})
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}")
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    client = TestClient(create_app(cfg))
+
+    # the Dashboard toggle persists (off by default → single-frame matching)
+    assert client.get("/api/models").json()["peak_pool"] is False
+    assert client.post("/api/models", json={"peak_pool": True}).json()["peak_pool"] is True
+    assert client.get("/api/models").json()["peak_pool"] is True
+
+    # the inline compare override changes the query vector: whole-peak averages
+    # scene 1's two frames (→ a different top score than the single midpoint frame)
+    a = client.get("/api/search/similar?scene_id=1&t=4&whole_peak=false").json()["items"]
+    b = client.get("/api/search/similar?scene_id=1&t=4&whole_peak=true").json()["items"]
+    assert a and b and a[0]["scene_id"] == b[0]["scene_id"] == "2"
+    assert a[0]["score"] != b[0]["score"]
+
+
 def test_search_similar_accepts_scene_id(cfg, monkeypatch):
     import peaks.web.service as svc_mod
 

@@ -49,6 +49,11 @@
         </label>
         <span id="models-status" class="dim"></span>
       </div>
+      <div class="row">
+        <label class="check" title="Match a moment by the mean of its frames (its whole gist) instead of one midpoint frame. Query-time only — no re-embed.">
+          <input type="checkbox" id="chk-peak-pool" /> Match on the whole peak</label>
+        <span class="dim">averages a moment's frames for steadier "find similar" — takes effect immediately, no re-embed.</span>
+      </div>
     </div>
 
     <div class="panel">
@@ -338,6 +343,9 @@
         <input type="range" id="match-min" min="0" max="1" step="0.01" value="0" />
         <b id="match-min-val">0%</b>
       </label>
+      <label class="check" id="rb-peak-wrap" hidden
+        title="Compare: match this moment by its whole peak (averaged frames) vs the single midpoint frame. Re-runs instantly.">
+        <input type="checkbox" id="rb-peak" /> whole peak</label>
     </div>
     <div id="results" class="grid"></div>
   </section>
