@@ -211,13 +211,14 @@ def test_search_similar_hybrid_clip_params(cfg, monkeypatch):
     # reuse the DINO index as the CLIP index so the hybrid path exercises end-to-end
     monkeypatch.setattr(svc_mod.Service, "_clip_name", lambda self: "dinov2")
     monkeypatch.setattr(svc_mod.Service, "has_clip_index", lambda self: True)
-    monkeypatch.setattr(svc_mod.Service, "_clip_text_vector",
-                        lambda self, text: np.array([0, 1, 0], np.float32))
+    monkeypatch.setattr(svc_mod.Service, "_clip_query_vector",
+                        lambda self, text, neg_weight=0.5, template=False: np.array([0, 1, 0], np.float32))
     client = TestClient(create_app(cfg))
     # scene 1 is the source (excluded); scene 2 is the only other embedded scene
     d = client.get("/api/search/similar?scene_id=1&t=0&clip=stuff&clip_weight=0.7").json()
     assert d["items"] and {it["scene_id"] for it in d["items"]} == {"2"}
-    assert 0.0 <= d["items"][0]["score"] <= 1.0   # blended hybrid score
+    assert 0.0 <= d["items"][0]["score"] <= 1.0        # fused-rank hybrid score
+    assert d["items"][0]["clip_score"] is not None     # raw keyword cosine surfaced
 
 
 def test_peak_pool_setting_and_whole_peak_query(cfg, tmp_path, monkeypatch):

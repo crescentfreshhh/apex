@@ -2,7 +2,7 @@
 
 Service-level, offline: a small DINO cache doubles as the CLIP index (via a
 monkeypatched `_clip_name`), and `_clip_query_vector` is stubbed so a keyword maps
-to a known direction — so we can assert the blend re-ranks deterministically.
+to a known direction — so we can assert the rank-fusion re-order deterministically.
 """
 
 import numpy as np
@@ -40,7 +40,9 @@ def _service(tmp_path, monkeypatch):
     svc = svc_mod.Service(cfg)
     monkeypatch.setattr(svc, "_clip_name", lambda: "dinov2")      # reuse the index as CLIP
     monkeypatch.setattr(svc, "has_clip_index", lambda: True)
-    monkeypatch.setattr(svc, "_clip_text_vector", lambda text: np.array([0, 0, 1], np.float32))
+    # the keyword query points at the 3rd axis — no real CLIP load
+    monkeypatch.setattr(svc, "_clip_query_vector",
+                        lambda text, neg_weight=0.5, template=False: np.array([0, 0, 1], np.float32))
     return svc
 
 
@@ -50,7 +52,8 @@ def test_clip_weight_dials_between_visual_and_keyword(tmp_path, monkeypatch):
     # pure keyword → the keyword-matching moment (scene 12) wins despite lower visual sim
     kw = svc.search_by_frame("k0", 0.0, top_k=5, clip="anything", clip_weight=1.0)
     assert kw and kw[0].scene_id == "12"
-    # pure visual → the visually-closest moment (scene 11) wins, keywords ignored
+    assert kw[0].clip_score is not None            # raw keyword cosine surfaced for the UI badge
+    # pure visual → the visually-closest moment (scene 11) wins, keyword ignored for order
     vis = svc.search_by_frame("k0", 0.0, top_k=5, clip="anything", clip_weight=0.0)
     assert vis and vis[0].scene_id == "11"
 
@@ -69,7 +72,47 @@ def test_clip_rerank_drops_candidates_without_a_clip_vector(tmp_path, monkeypatc
         def vector_at(self, key, t):
             return np.array([0, 0, 1], np.float32) if key == "ka" else None
 
+    # _moment_query pools via vector_around, which isn't on the fake — force the
+    # single-frame path so the fake's vector_at is what's consulted.
     monkeypatch.setattr(svc, "index", lambda model=None: _FakeClipIdx())
-    monkeypatch.setattr(svc, "_clip_query_vector", lambda text, neg_weight=0.5: np.array([0, 0, 1], np.float32))
+    monkeypatch.setattr(svc, "_moment_query",
+                        lambda idx, key, time, whole: idx.vector_at(key, time))
     out = svc._clip_rerank([Hit("A", "ka", 0.0, 0.9), Hit("B", "kb", 0.0, 0.8)], "x", weight=0.5)
     assert [h.scene_id for h in out] == ["A"]   # B dropped — no CLIP vector to judge
+
+
+def test_clip_query_template_differs_from_raw(tmp_path, monkeypatch):
+    svc = _service(tmp_path, monkeypatch)
+    # un-stub _clip_query_vector so we exercise the real templating branch; stub the
+    # two embed seams instead so no CLIP model loads.
+    monkeypatch.undo()
+    monkeypatch.setattr(svc, "_clip_text_vector", lambda text: np.array([1, 0, 0], np.float32))
+    # the template ensemble returns a different direction than the bare phrase
+    monkeypatch.setattr(svc, "_clip_text_batch",
+                        lambda labels: np.tile(np.array([0, 1, 0], np.float32), (len(labels), 1)))
+    raw = svc._clip_query_vector("heels", template=False)
+    tpl = svc._clip_query_vector("heels", template=True)
+    assert np.allclose(raw, _unit([1, 0, 0]))
+    assert np.allclose(tpl, _unit([0, 1, 0]))
+    assert not np.allclose(raw, tpl)
+
+
+def test_ensure_clip_uses_active_model(tmp_path, monkeypatch):
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    svc = svc_mod.Service(cfg)
+    monkeypatch.setattr(svc, "_active_clip_model", lambda: "ViT-H-14")
+    monkeypatch.setattr(svc, "_active_clip_pretrained", lambda: "some-weights")
+
+    captured = {}
+
+    class _FakeClip:
+        def __init__(self, model_name=None, pretrained=None, device=None):
+            captured["model_name"] = model_name
+            captured["pretrained"] = pretrained
+
+    import peaks.embedding as emb
+    monkeypatch.setattr(emb, "ClipEmbedder", _FakeClip)
+    svc._ensure_clip()
+    assert captured == {"model_name": "ViT-H-14", "pretrained": "some-weights"}

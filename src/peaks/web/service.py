@@ -180,9 +180,11 @@ class Service:
                 s["dino_model"] = dino_model
             else:
                 s.pop("dino_model", None)
+        clip_changed = False
         if clip_model is not None:
             if clip_model and clip_model not in clip_opts:
                 raise ValueError(f"unknown CLIP variant: {clip_model}")
+            clip_changed = (clip_model or None) != s.get("clip_model")
             if clip_model:
                 s["clip_model"] = clip_model
             else:
@@ -198,6 +200,9 @@ class Service:
         # toggle is query-time only — no rebuild needed.)
         if backbone_changed:
             self._index = {}
+        if clip_changed:  # the cached text embedder must match the new CLIP space
+            with self._clip_lock:
+                self._clip = None
         return self.get_models()
 
     def schedule_settings(self) -> dict:
@@ -1566,37 +1571,45 @@ class Service:
 
     def _clip_rerank(self, hits: list[Hit], text: str, weight: float = 0.5) -> list[Hit]:
         """Hybrid: re-order visually-similar `hits` by how well each ALSO matches
-        the CLIP keyword prompt `text` (supports '-negative' terms). `weight` is
-        the dial — 0 = pure visual order, 1 = pure keyword — blending min-max
-        normalized visual and keyword scores. Candidates with no CLIP vector are
-        dropped (can't judge keywords, the graceful per-scene degrade). Each
-        surviving hit's `score` becomes the blend, so tiles and the taste-floor
-        slider read the hybrid match strength."""
+        the CLIP keyword prompt `text` (supports '-negative' terms). `weight` is the
+        dial: 0 = pure visual order, 1 = pure keyword.
+
+        Robustness fixes over a naive value-blend: the keyword score comes from the
+        candidate's *pooled* CLIP frames (whole-peak, not one noisy frame) against a
+        *templated* query, and the two signals are fused by **weighted reciprocal
+        rank** (scale-free) rather than min-max blending two tightly-clustered bands.
+        Each surviving hit keeps its raw keyword cosine in `clip_score` (for the UI
+        badge) and gets a 0..1 `score` from the fused rank (so the floor slider still
+        works). Candidates with no CLIP vector are dropped (graceful degrade)."""
         if not hits or not (text or "").strip():
             return hits
         clip_idx = self.index(self._clip_name())
-        qv = self._unit(self._clip_query_vector(text))
-        kept, cs, vs = [], [], []
+        qv = self._unit(self._clip_query_vector(text, template=True))
+        kept, cs = [], []
         for h in hits:
-            cv = clip_idx.vector_at(h.key, h.time)
+            cv = self._moment_query(clip_idx, h.key, h.time, None)  # pooled, honors whole-peak
             if cv is None:
                 continue  # not CLIP-embedded → can't score keywords
             kept.append(h)
             cs.append(float(self._unit(np.asarray(cv, dtype=np.float32)) @ qv))
-            vs.append(float(h.score))
         if not kept:
             return []
-
-        def _norm(a: np.ndarray) -> np.ndarray:
-            span = float(a.max() - a.min()) or 1.0
-            return (a - float(a.min())) / span
-
-        w = float(min(max(weight, 0.0), 1.0))
-        blended = (1.0 - w) * _norm(np.asarray(vs, np.float32)) + w * _norm(np.asarray(cs, np.float32))
+        cs = np.asarray(cs, dtype=np.float32)
+        # `hits` arrive sorted by visual score (idx.search), so their order IS the
+        # visual rank; the keyword rank comes from the CLIP cosine.
+        n = len(kept)
+        visual_rank = np.arange(n, dtype=np.float32)
+        clip_rank = np.empty(n, dtype=np.float32)
+        clip_rank[np.argsort(-cs)] = np.arange(n, dtype=np.float32)
+        K, w = 60.0, float(min(max(weight, 0.0), 1.0))
+        rrf = (1.0 - w) / (K + visual_rank) + w / (K + clip_rank)
+        span = float(rrf.max() - rrf.min()) or 1.0
+        norm = (rrf - float(rrf.min())) / span
         out = []
-        for i in np.argsort(-blended):
+        for i in np.argsort(-rrf):
             h = kept[int(i)]
-            h.score = round(float(blended[int(i)]), 4)
+            h.score = round(float(norm[int(i)]), 4)          # fused rank → floor slider
+            h.clip_score = round(float(cs[int(i)]), 4)        # raw keyword cosine → UI badge
             out.append(h)
         return out
 
@@ -3651,10 +3664,24 @@ class Service:
         n = float(np.linalg.norm(v))
         return v / n if n > 0 else v
 
-    def _clip_query_vector(self, text: str, neg_weight: float = 0.5) -> np.ndarray:
+    # CLIP zero-shot works better from a small ensemble of prompt templates than a
+    # bare phrase; averaging their embeddings gives a sharper, less noisy direction.
+    _CLIP_TEMPLATES = ("{}", "a photo of {}", "a video of {}", "a scene showing {}")
+
+    def _clip_phrase_vector(self, phrase: str, template: bool) -> np.ndarray:
+        """Unit CLIP text vector for a phrase — a single embed, or (template=True)
+        the mean over a small prompt-template ensemble, renormalized."""
+        if not template:
+            return self._unit(self._clip_text_vector(phrase))
+        mats = self._clip_text_batch([t.format(phrase) for t in self._CLIP_TEMPLATES])
+        return self._unit(mats.mean(axis=0))
+
+    def _clip_query_vector(self, text: str, neg_weight: float = 0.5,
+                           template: bool = False) -> np.ndarray:
         """Build a query vector from a prompt with optional '-negative' terms.
         Positive phrase minus the negatives' direction, renormalized — standard
-        CLIP embedding arithmetic."""
+        CLIP embedding arithmetic. `template` wraps each phrase in a prompt-template
+        ensemble (sharper text↔image alignment; used by the hybrid pivot)."""
         pos, neg = [], []
         for tok in text.split():
             if len(tok) > 1 and tok.startswith("-"):
@@ -3662,9 +3689,9 @@ class Service:
             else:
                 pos.append(tok[1:] if (len(tok) > 1 and tok.startswith("+")) else tok)
         pos_phrase = " ".join(pos) or text  # all-negative: fall back to literal
-        q = self._unit(self._clip_text_vector(pos_phrase))
+        q = self._clip_phrase_vector(pos_phrase, template)
         if neg:
-            q = self._unit(q - neg_weight * self._unit(self._clip_text_vector(" ".join(neg))))
+            q = self._unit(q - neg_weight * self._clip_phrase_vector(" ".join(neg), template))
         return q
 
     # --- "what CLIP sees" — zero-shot moment classification ------------------
@@ -3822,8 +3849,8 @@ class Service:
                 from ..embedding import ClipEmbedder
 
                 self._clip = ClipEmbedder(
-                    model_name=self.cfg.embedding.clip_model,
-                    pretrained=self.cfg.embedding.clip_pretrained,
+                    model_name=self._active_clip_model(),          # match the INDEX space, not
+                    pretrained=self._active_clip_pretrained(),      # the (possibly stale) config
                     device=self.cfg.embedding.device or None,
                 )
         return self._clip

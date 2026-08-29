@@ -142,6 +142,7 @@ def _hit_payload(service: Service, hits) -> list[dict]:
                 "key": h.key,
                 "time": round(h.time, 2),
                 "score": round(h.score, 4),
+                "clip_score": getattr(h, "clip_score", None),
                 "thumb": f"/api/frame?key={h.key}&t={h.time:g}",
                 "stream": (
                     service.stream_url(h.scene_id, start=h.time) if h.scene_id else None
@@ -167,6 +168,7 @@ def _hit_light(service: Service, h) -> dict:
         "key": h.key,
         "time": round(h.time, 2),
         "score": round(h.score, 4),
+        "clip_score": getattr(h, "clip_score", None),
         "thumb": f"/api/frame?key={h.key}&t={h.time:g}",
         "stream": service.stream_url(h.scene_id, start=h.time) if h.scene_id else None,
         "title": "",

@@ -118,7 +118,8 @@ function loadApex(tile) {
   tile.el.classList.remove("extended");
   tile.apex = apex;
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
-  tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`;
+  const kw = apex.clip_score != null ? ` · 🔤 ${Math.round(apex.clip_score * 100)}%` : "";
+  tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)${kw}`;
   v.loop = false;
   v.src = apex.url;
   v.muted = true;
@@ -851,6 +852,7 @@ function apexFromHit(h) {
   return {
     scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + FY_CLIP),
     duration: FY_CLIP, url: h.stream, score: h.score ?? 1, title: h.title || "",
+    clip_score: h.clip_score ?? null,
   };
 }
 // swap the whole board to a new pool live — no reload (mirrors fyRefetch)
@@ -879,11 +881,22 @@ async function moreLikeThis(scene_id, t) {
     else qs.set("top_k", 300);
     if (kw) { qs.set("clip", kw); qs.set("clip_weight", w); }
     const d = await api("/api/search/similar?" + qs.toString());
-    const items = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+    const raw = (d.items || []).filter((h) => h.scene_id && h.stream);
+    const items = raw.map(apexFromHit);
     const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
     const kwl = kw ? ` · “${kw}”` : "";
     pivotBoard(items, `🔎 more like that moment${kwl}${flr}`);
-    flashStatus(`🔎 ${items.length} moments like that${kwl}${flr}`);
+    // when keywords are on, show whether CLIP actually separates the pool: the
+    // keyword-match spread (min · median · max %). A flat spread = CLIP can't tell
+    // these apart on your content (turn the dial down / try different words).
+    let spread = "";
+    const cs = raw.map((h) => h.clip_score).filter((x) => x != null).sort((a, b) => a - b);
+    if (kw && cs.length) {
+      const pct = (x) => Math.round(x * 100);
+      const med = cs[Math.floor(cs.length / 2)];
+      spread = ` · 🔤 ${pct(cs[0])}–${pct(cs[cs.length - 1])}% (med ${pct(med)}%)`;
+    }
+    flashStatus(`🔎 ${items.length} moments like that${kwl}${flr}${spread}`);
   } catch (e) { flashStatus(e.message); }
 }
 // re-run the current "more like this moment" pivot when keywords / weight change
