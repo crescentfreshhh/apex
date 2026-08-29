@@ -197,3 +197,109 @@ def test_run_fix_keeps_all_when_stash_unreachable(tmp_path, monkeypatch):
     result = svc.run_fix()
     assert result["pruned"] == 0 and result["failed"] == 1
     assert flog.keys() == {"fp_bad"}  # nothing pruned
+
+
+# --- Phase 6: uncached-only embed + auto-prune deleted-from-Stash failures ----
+
+class _FakeScene:
+    def __init__(self, sid):
+        self.id = sid
+        self.fingerprint = sid          # scene_key() prefers this
+        self.path = f"/v/{sid}.mp4"
+        self.markers = []
+
+
+def test_run_embed_only_embeds_uncached(tmp_path, monkeypatch):
+    import peaks.pipeline as pl
+    import peaks.sampling as smp
+    import peaks.web.service as svc_mod
+
+    svc, _ = _service(tmp_path)
+    scenes = [_FakeScene("1"), _FakeScene("2"), _FakeScene("3")]
+    monkeypatch.setattr(svc_mod.Service, "scenes", lambda self, limit=0: scenes)
+
+    class FakeCache:
+        def __init__(self, *a, **k):
+            pass
+        def has(self, key, model, interval=None):
+            return key in {"1", "2"}       # 1 & 2 already embedded
+        def keys(self, model):
+            return ["1", "2"]
+
+    monkeypatch.setattr(svc_mod, "EmbeddingCache", FakeCache)
+
+    class FakeSampler:
+        def __init__(self, **kw):
+            self.mode = kw.get("mode")
+            self.interval = kw.get("interval_seconds")
+            self.hwaccel = kw.get("hwaccel")
+
+    monkeypatch.setattr(smp, "FrameSampler", FakeSampler)
+
+    cap = {}
+
+    def fake_lib(passed, *a, **k):
+        cap["ids"] = [s.id for s in passed]
+        cap["total"] = k.get("total")
+        return {"embedded": 0}
+
+    monkeypatch.setattr(pl, "embed_library", fake_lib)
+
+    svc.run_embed()
+    assert cap["ids"] == ["3"]     # only the uncached scene is worked
+    assert cap["total"] == 1       # progress denominator = real pending, not the scan
+
+
+def test_prune_dead_failures(tmp_path):
+    svc, cfg = _service(tmp_path, gone={"2"})
+    flog = failure_log_for(cfg)
+    flog.record("k1", "1", "/v/1.mp4", error="worker exit 1")
+    flog.record("k2", "2", "/v/2.mp4", error="worker exit 1")   # deleted from Stash
+    assert svc.prune_dead_failures() == 1
+    assert flog.keys() == {"k1"}   # the deleted one is gone, the live one stays
+
+
+def test_prune_dead_failures_skips_on_outage(tmp_path):
+    svc, cfg = _service(tmp_path)
+
+    def _boom():
+        raise RuntimeError("stash down")
+
+    svc.client = _boom
+    flog = failure_log_for(cfg)
+    flog.record("k9", "9", "/v/9.mp4", error="worker exit 1")
+    assert svc.prune_dead_failures() == 0   # never prune when Stash can't be reached
+    assert flog.keys() == {"k9"}
+
+
+def test_run_embed_prunes_dead_failures_at_end(tmp_path, monkeypatch):
+    import peaks.pipeline as pl
+    import peaks.sampling as smp
+    import peaks.web.service as svc_mod
+
+    svc, cfg = _service(tmp_path, gone={"5"})
+    flog = failure_log_for(cfg)
+    flog.record("k5", "5", "/v/5.mp4", error="worker exit 1")   # deleted scene
+    monkeypatch.setattr(svc_mod.Service, "scenes", lambda self, limit=0: [])
+
+    class FakeCache:
+        def __init__(self, *a, **k):
+            pass
+        def has(self, key, model, interval=None):
+            return False
+        def keys(self, model):
+            return []
+
+    monkeypatch.setattr(svc_mod, "EmbeddingCache", FakeCache)
+
+    class FakeSampler:
+        def __init__(self, **kw):
+            self.mode = kw.get("mode")
+            self.interval = kw.get("interval_seconds")
+            self.hwaccel = kw.get("hwaccel")
+
+    monkeypatch.setattr(smp, "FrameSampler", FakeSampler)
+    monkeypatch.setattr(pl, "embed_library", lambda *a, **k: {"embedded": 0})
+
+    svc.run_embed()
+    assert flog.keys() == set()    # deleted-scene failure auto-pruned at end of embed

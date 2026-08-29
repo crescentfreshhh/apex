@@ -207,17 +207,31 @@ class Service:
         return self.schedule_settings()
 
     def embed_status(self) -> dict:
-        """How much of the Stash library is embedded — {embedded, total, pending}
-        — the 'N new scenes not yet embedded' number. `total`/`pending` are None
-        if Stash is unreachable."""
+        """How much of the library is embedded — {embedded, total, pending} —
+        the 'N new scenes not yet embedded' number. Counts `total` against the
+        SAME scope `run_embed` works (scenes under `cfg.library.path`), so pending
+        actually reaches 0 (the unscoped `scene_count()` could sit above the
+        embeddable set forever). The scoped count is a paginated call, cached
+        briefly. `total`/`pending` are None if Stash is unreachable."""
+        import time as _t
+
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         embedded = len(cache.keys(self._model_name()))
+        total = None
         try:
-            total = self.client().scene_count()
+            cached = getattr(self, "_scope_count_cache", None)
+            now = _t.monotonic()
+            if cached and now - cached[0] < 120:
+                total = cached[1]
+            else:
+                total = len(self.scenes())
+                self._scope_count_cache = (now, total)
         except Exception:  # noqa: BLE001 — Stash down
             total = None
-        pending = max(0, total - embedded) if total is not None else None
-        return {"embedded": embedded, "total": total, "pending": pending}
+        if total is None:
+            return {"embedded": embedded, "total": None, "pending": None}
+        embedded = min(embedded, total)  # clamp: orphan/out-of-scope keys never make pending<0
+        return {"embedded": embedded, "total": total, "pending": max(0, total - embedded)}
 
     # --- taste profiles (each = its own labels + Stash tag + model + feed) -----
 
@@ -319,7 +333,7 @@ class Service:
         configured default". An empty-string `hwaccel` explicitly forces CPU
         decode (distinct from `None`)."""
         from ..failures import failure_log_for
-        from ..pipeline import embed_library
+        from ..pipeline import embed_library, scene_key
         from ..sampling import FrameSampler
 
         s, e = self.cfg.sampling, self.cfg.embedding
@@ -334,12 +348,21 @@ class Service:
         embedder = self._embedder(model)
         n_workers = e.workers if workers is None else workers
         cache = EmbeddingCache(e.cache_dir)
-        scenes = self.scenes(limit=limit)
-        total = len(scenes)
+        # Only work the scenes that AREN'T already embedded (at this sampling
+        # signature), so progress reflects real work — "N of the new ones", not a
+        # re-scan from the top of the whole library. `limit` caps new scenes.
+        signature = getattr(sampler, "interval_signature", sampler.interval)
+        scanned = self.scenes()
+        pending = [sc for sc in scanned
+                   if not cache.has(scene_key(sc), embedder.name, interval=signature)]
+        if limit:
+            pending = pending[:limit]
+        total = len(pending)
         if job:
             job.progress = {"total": total, "done": 0}
             log(
-                f"embed: {total} scene(s) · model={embedder.name} · mode={sampler.mode} "
+                f"embed: {total} new · {len(scanned) - len(pending)} already embedded "
+                f"· {len(scanned)} in scope · model={embedder.name} · mode={sampler.mode} "
                 f"· interval={sampler.interval:g}s · hwaccel={sampler.hwaccel or 'off'} "
                 f"· workers={n_workers}"
             )
@@ -352,7 +375,7 @@ class Service:
                 )
 
         stats = embed_library(
-            scenes, sampler, embedder, cache,
+            pending, sampler, embedder, cache,
             batch_size=e.batch_size,
             workers=n_workers,
             total=total, log=_log,
@@ -360,6 +383,16 @@ class Service:
             should_stop=(lambda: job.cancelled) if job else None,
         )
         self.invalidate_index(embedder.name)
+        # deleted-from-Stash scenes can't ever embed — drop them from the failure
+        # log so the count reaches 0 on its own (they're gone from `scanned` too,
+        # so they're never re-attempted).
+        try:
+            pruned = self.prune_dead_failures()
+            if pruned:
+                log(f"cleaned up {pruned} deleted scene(s) from the failure log")
+                stats["failures_pruned"] = pruned
+        except Exception:  # noqa: BLE001 — cleanup is best-effort, never fail the embed
+            pass
         return stats
 
     def run_score(
@@ -900,6 +933,30 @@ class Service:
         self.invalidate_meta()
         total["models"] = len(models)
         return total
+
+    def prune_dead_failures(self) -> int:
+        """Drop failure-log entries whose scene has been DELETED from Stash — those
+        can never embed, so they'd otherwise wedge the count forever. Asks Stash
+        which of the failed `scene_id`s still exist and resolves the rest. Returns
+        the number pruned. If the Stash check can't be made (outage), prunes
+        nothing — a scene that's only transiently unreachable is never dropped."""
+        from ..failures import failure_log_for
+
+        flog = failure_log_for(self.cfg)
+        entries = flog.entries()
+        want = [e.get("scene_id") for e in entries if e.get("scene_id")]
+        if not want:
+            return 0
+        try:
+            alive = self.client().existing_scene_ids(want)
+        except Exception:  # noqa: BLE001 — Stash down: don't prune anything
+            return 0
+        pruned = 0
+        for e in entries:
+            sid = e.get("scene_id")
+            if sid is not None and str(sid) not in alive and flog.resolve(e["key"]):
+                pruned += 1
+        return pruned
 
     def run_fix(self, job=None, limit: int = 0, dry_run: bool = False) -> dict:
         """Retry scenes recorded in the failure log through a fallback ladder.
