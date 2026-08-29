@@ -1023,7 +1023,9 @@ def test_performer_moment_matches_ranks_across_her_scenes(tmp_path, monkeypatch)
     _seed_performer_scenes(cfg)
     monkeypatch.setattr(svc, "client", lambda: _PerfClient())
 
-    r = svc.performer_moment_matches("1", 0.0, per_scene=2)   # scene 1 @ 0 ~ [1,0,0,0]
+    # single-frame match: the invariant here is "its own frame is closest"; the
+    # whole-peak default would instead pool scene 1's frames (covered elsewhere).
+    r = svc.performer_moment_matches("1", 0.0, per_scene=2, whole_peak=False)  # scene 1 @ 0 ~ [1,0,0,0]
     assert r["performer"] == "Jane Doe"
     sids = [h.scene_id for h in r["hits"]]
     assert sids and set(sids) <= {"1", "2", "3"} and "99" not in sids  # embedded only

@@ -108,11 +108,12 @@ class Service:
         return self._settings_cache
 
     # peak-level matching: represent a moment by the mean of its frames within a
-    # window, not one midpoint frame. Off by default (single-frame, unchanged).
+    # window, not one midpoint frame. ON by default (steadier "find similar");
+    # an explicit `peak_pool: false` in settings still wins.
     PEAK_POOL_WINDOW = 6.0  # seconds each side of the moment to average
 
     def _peak_pool_default(self) -> bool:
-        return bool(self._settings().get("peak_pool", False))
+        return bool(self._settings().get("peak_pool", True))
 
     def _moment_query(self, idx, key: str, time: float, whole_peak: bool | None):
         """The query vector for a moment — pooled (whole-peak mean) or the single
@@ -154,7 +155,7 @@ class Service:
             "clip_saved": bool(s.get("clip_model")),
             "dino_default": self.cfg.embedding.dino_model,
             "clip_default": self.cfg.embedding.clip_model,
-            "peak_pool": bool(s.get("peak_pool", False)),
+            "peak_pool": self._peak_pool_default(),
         }
 
     def save_models(self, dino_model: str | None = None, clip_model: str | None = None,

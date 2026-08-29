@@ -209,10 +209,11 @@ def test_peak_pool_setting_and_whole_peak_query(cfg, tmp_path, monkeypatch):
     monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
     client = TestClient(create_app(cfg))
 
-    # the Dashboard toggle persists (off by default → single-frame matching)
+    # whole-peak matching is the default; an explicit off still wins and persists
+    assert client.get("/api/models").json()["peak_pool"] is True
+    assert client.post("/api/models", json={"peak_pool": False}).json()["peak_pool"] is False
     assert client.get("/api/models").json()["peak_pool"] is False
     assert client.post("/api/models", json={"peak_pool": True}).json()["peak_pool"] is True
-    assert client.get("/api/models").json()["peak_pool"] is True
 
     # the inline compare override changes the query vector: whole-peak averages
     # scene 1's two frames (→ a different top score than the single midpoint frame)
