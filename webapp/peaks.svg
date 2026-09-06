@@ -1,7 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="peaks">
-  <rect x="0" y="0" width="64" height="64" rx="14" fill="#1a1420"/>
-  <!-- back ridge (lighter pink) -->
-  <path d="M2 53 L14 35 L24 45 L34 31 L48 49 L62 53 Z" fill="#ff8ac2"/>
-  <!-- front ridge (hot pink), overlapping -->
-  <path d="M6 54 L20 29 L28 40 L40 23 L52 54 Z" fill="#ff4fa0"/>
+  <rect x="0" y="0" width="64" height="64" rx="14" fill="#0d0d0d"/>
+  <g>
+    <!-- full magenta range silhouette: tall sharp left peak, sweeping right peak -->
+    <path d="M4 49 L21 11 L31 28 L39 16 L47 31 L54 14 L60 49 Z" fill="#e0189a"/>
+    <!-- peak A: thin secondary tip notch -->
+    <path d="M21 11 L23.4 16.5 L22.2 15.4 Z" fill="#0d0d0d"/>
+    <!-- peak A: elegant thin lightning-bolt crack down the right face to the base -->
+    <path d="M21 14 L24 22 L22.4 22.6 L25.2 30 L23.6 30.6 L26.6 40 L24.4 49 L23.5 49 L25.4 40 L22.6 31 L24.2 30.4 L21.4 23 L23 22.4 L20.2 14.6 Z" fill="#0d0d0d"/>
+    <!-- saddle A-B: down-chevron arrow -->
+    <path d="M29 25 L34 25 L31.9 30 L33.6 30 L31.7 35.5 L29.6 30.4 L31.2 30.4 L30.7 26.7 Z" fill="#0d0d0d"/>
+    <!-- peak B: thin shadow crack on its right face -->
+    <path d="M39 16 L43.4 26 L41.9 26.6 L37.7 17.4 Z" fill="#0d0d0d"/>
+    <!-- peak C: radiating fan of thin cracks from the apex -->
+    <path d="M54 14 L59 47 L58.1 47 Z" fill="#0d0d0d"/>
+    <path d="M54 14 L55.6 48 L54.7 48 Z" fill="#0d0d0d"/>
+    <path d="M54 15 L51 48 L51.9 48 Z" fill="#0d0d0d"/>
+    <!-- peak C: attached left shadow facet -->
+    <path d="M54 14 L47.4 31 L49.6 34 L54 20 Z" fill="#0d0d0d"/>
+  </g>
 </svg>
