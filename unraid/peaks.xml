@@ -12,7 +12,7 @@
   <Category>MediaApp:Video Tools:</Category>
   <WebUI>http://[IP]:[PORT:8800]</WebUI>
   <TemplateURL/>
-  <Icon/>
+  <Icon>https://raw.githubusercontent.com/crescentfreshhh/apex/main/webapp/peaks.svg</Icon>
   <ExtraParams>--runtime=nvidia</ExtraParams>
   <PostArgs/>
   <DonateText/>

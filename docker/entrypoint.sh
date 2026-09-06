@@ -14,6 +14,7 @@ python3 /opt/peaks/refresh_config.py || echo "config: refresh skipped"
 cp -f /opt/peaks/webapp/index.html \
       /opt/peaks/webapp/megaboard.css \
       /opt/peaks/webapp/megaboard.js \
+      /opt/peaks/webapp/peaks.svg \
       /config/webapp/
 
 exec "$@"

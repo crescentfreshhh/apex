@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="peaks">
+  <rect x="0" y="0" width="64" height="64" rx="14" fill="#1a1420"/>
+  <!-- back ridge (lighter pink) -->
+  <path d="M2 53 L14 35 L24 45 L34 31 L48 49 L62 53 Z" fill="#ff8ac2"/>
+  <!-- front ridge (hot pink), overlapping -->
+  <path d="M6 54 L20 29 L28 40 L40 23 L52 54 Z" fill="#ff4fa0"/>
+</svg>

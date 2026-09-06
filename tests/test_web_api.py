@@ -55,6 +55,16 @@ def test_stats(client):
     assert body["cached_scenes"] == 2 and body["model"] == "dinov2"
 
 
+def test_favicon_served_on_both_frontends(client):
+    # the pink mountain icon ships inside the image and is served from both
+    # static mounts; the control-panel head links it (no more blank data: URI).
+    for url in ("/static/peaks.svg", "/megaboard/peaks.svg"):
+        r = client.get(url)
+        assert r.status_code == 200, url
+        assert "svg" in r.headers.get("content-type", ""), url
+    assert '/static/peaks.svg' in client.get("/").text
+
+
 def test_radio_endpoint(cfg, tmp_path, monkeypatch):
     import peaks.web.service as svc_mod
 
