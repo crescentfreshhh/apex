@@ -16,7 +16,6 @@
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="performers">Performers</button>
       <button class="tab" data-view="statistics">Statistics</button>
-      <button class="tab" data-view="trim">Trim</button>
       <button class="tab" data-view="board">Megaboard</button>
     </nav>
     <span id="conn" class="dim"></span>
@@ -334,58 +333,7 @@
       </div>
     </div>
     <div id="stats-body" class="dim">Crunching your library…</div>
-
-    <div class="panel" id="reclaim-panel">
-      <div class="row" style="justify-content:space-between;align-items:center">
-        <h2 style="margin:0">♻️ Reclaim disk</h2>
-        <button id="toggle-reclaim" class="ghost">▸ Reclaim disk</button>
-      </div>
-      <div id="reclaim-body" hidden>
-        <div class="reclaim-dryrun">
-          <strong>DRY RUN</strong> — estimate only. Nothing is deleted, marked, or written
-          while we validate the methodology. The one artifact is a CSV you can export.
-        </div>
-        <p class="dim">Most of a big library is footage <em>between</em> the peaks. This measures
-          that dead weight at your current taste floor (the same one set on this tab / the
-          megaboard). <strong>No-peak</strong> scenes have zero peaks at the floor — the whole file
-          is reclaimable. <strong>Sparse</strong> scenes have only a little peak footage — a
-          lossless per-scene <em>peak reel</em> (ffmpeg stream-copy, no re-encode) would keep just
-          the peaks. Judged against your default profile's taste.</p>
-        <div class="row">
-          <button id="btn-reclaim-run" class="primary">Scan library</button>
-          <button id="btn-reclaim-export" class="ghost" hidden>⬇ Export list (CSV)</button>
-          <span id="reclaim-status" class="dim"></span>
-        </div>
-        <div id="reclaim-summary" class="reclaim-summary" hidden></div>
-        <div id="reclaim-lists" class="reclaim-lists"></div>
-      </div>
-    </div>
   </section>
-
-  <!-- TRIM (subtractive reclamation) -->
-  <section id="trim" class="view">
-    <div class="panel">
-      <h2>✂️ Trim — chip away the dead weight</h2>
-      <p class="dim">Peaks routes you to your <strong>lowest-taste</strong> moments first — the most
-        likely dead weight. Condemn what's junk and the marks pile up into the ledger below. This is
-        <strong>subtractive</strong>: you only ever remove what you explicitly mark, and you can't lose
-        anything you didn't look at.</p>
-      <div class="reclaim-dryrun"><strong>DRY RUN</strong> — marks only. Nothing is trimmed or deleted;
-        cut bands snap inward to keyframes so a future lossless pass drops only fully-condemned spans.</div>
-      <div id="trim-ledger" class="reclaim-summary"></div>
-      <div id="trim-stage" class="trim-stage">
-        <div id="trim-card" class="trim-card dim">Loading the worst of your library…</div>
-      </div>
-      <div class="row trim-controls">
-        <button id="btn-trim-cut" class="ghost" title="Condemn ~30s around this moment (keyframe-snapped)">✂️ Cut ~30s here</button>
-        <button id="btn-trim-trash" class="ghost" title="Condemn the whole scene">🗑 Trash scene</button>
-        <button id="btn-trim-skip" class="ghost" title="Keep — next worst">➡️ Keep / next</button>
-        <button id="btn-trim-open" class="ghost" title="Open in the player to cut precisely on the heat bar">🔍 Open in player</button>
-      </div>
-      <span id="trim-status" class="dim"></span>
-    </div>
-  </section>
-
   <!-- MEGABOARD -->
   <section id="board" class="view">
     <div class="panel">
