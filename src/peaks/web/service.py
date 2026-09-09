@@ -162,7 +162,7 @@ class Service:
                     peak_pool: bool | None = None) -> dict:
         """Persist the active DINOv2 backbone and/or CLIP variant to
         /config/settings.json so the *whole* pipeline (embed, score, search,
-        megaboard, 'CLIP sees') uses them — no container restart, no env vars.
+        megaboard) uses them — no container restart, no env vars.
         Validates against the known model lists; a blank value clears the
         override back to the container default."""
         import json
@@ -2884,11 +2884,12 @@ class Service:
             q = self._unit(q - neg_weight * self._clip_phrase_vector(" ".join(neg), template))
         return q
 
-    # --- "what CLIP sees" — zero-shot moment classification ------------------
+    # --- taste/performer vocabulary (CLIP text terms) ------------------------
 
     def _vocab(self) -> list[str]:
-        """Classification prompts: a user-supplied /config/vocab.txt (one per
-        line) if present, else the built-in default list."""
+        """CLIP text terms for the taste-words and performer 'known for'
+        readouts: a user-supplied /config/vocab.txt (one per line) if present,
+        else the built-in default list."""
         import os
         from pathlib import Path
 

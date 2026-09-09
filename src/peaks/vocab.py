@@ -1,11 +1,10 @@
-"""Default vocabulary for CLIP zero-shot moment classification.
+"""Default vocabulary of CLIP text terms.
 
-These descriptive prompts are scored against a frame's CLIP embedding to surface
-"what CLIP sees" in a moment, to describe your taste ("what you're into"), and to
-drive auto-tagging. It's deliberately broad and caption-flavoured (CLIP was
-trained on web captions, so natural noun-phrases score better than bare
-keywords). Users override the whole list by dropping a `vocab.txt` (one prompt
-per line) into /config — editable live from the GUI.
+These descriptive prompts are scored against CLIP embeddings to describe your
+taste ("what you're into") and a performer's "known for" terms. Deliberately
+broad and caption-flavoured (CLIP was trained on web captions, so natural
+noun-phrases score better than bare keywords). Override the whole list by
+dropping a `vocab.txt` (one prompt per line) into /config.
 
 Kept descriptive and functional on purpose: this catalogues an adult-media
 library, so the terms explicitly describe performers (build, hair, skin),

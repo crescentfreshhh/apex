@@ -1557,7 +1557,7 @@ async function startRadio() {
 }
 function radioShow(i) {
   radioPos = i;
-  openViewerAt(i);              // reuse the viewer (stream, volume, "CLIP sees")
+  openViewerAt(i);              // reuse the viewer (stream, volume, heat)
   radioCurrentHit = currentHit;
   radioClipStart = -1;         // captured on the first playing tick
   bindRadioControls();
