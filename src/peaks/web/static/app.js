@@ -65,8 +65,8 @@ async function refreshDashboard() {
     $("#stat-cards").innerHTML = [
       ["Cached scenes", stats.cached_scenes],
       ["Indexed moments", caps.indexed_frames.toLocaleString()],
-      ["DINOv2 backbone", dino],
-      ["CLIP model", clip],
+      ["Visual model", dino],
+      ["Text-search model", clip],
       ["Device", stats.device],
       ["Failed scenes", stats.failures || 0],
       ["Library", stats.library_path],
@@ -1626,7 +1626,7 @@ document.querySelectorAll("#taste-manage [data-del]").forEach((b) =>
     const msg = purge
       ? "FULL RESET — permanently delete your ENTIRE taste profile (every 👍/👎 rating and the trained model) AND every ⭐ apex marker saved in Stash?\n\nThis deletes your curated favourites from Stash itself and CANNOT be undone."
       : isAll
-      ? "Permanently delete your ENTIRE taste profile — every 👍/👎 rating and the trained model?\n\nThis cannot be undone. (Your saved apex moments in Stash are kept.)"
+      ? "Permanently delete your ENTIRE taste profile — every 👍/👎 rating and the trained model?\n\nThis cannot be undone. (Your saved moments in Stash are kept.)"
       : `Delete all ratings from the ${b.textContent.replace("Undo last ", "last ")} and retrain on what's left?`;
     if (!confirm(msg)) return;
     b.disabled = true;

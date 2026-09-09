@@ -151,10 +151,6 @@ input, select { background: var(--panel2); color: var(--fg); border: 1px solid v
 .tile .orgbtn { color: var(--dim); }
 .tile .orgbtn.on { color: #1a1400; background: var(--ok); border-color: var(--ok); }
 
-/* --- For You (experimental tab) --- */
-.tag-exp { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px;
-  color: var(--accent2); border: 1px solid var(--line); border-radius: 20px;
-  padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
 .fy-words { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 12px; }
 .fy-chip { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: var(--panel2);
   border: 1px solid var(--line); color: var(--accent); }

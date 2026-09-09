@@ -82,9 +82,9 @@ def launch_labeler(
     }
     """
 
-    with gr.Blocks(title=f"Opus labeler — {profile}", js=hotkeys_js) as demo:
+    with gr.Blocks(title=f"Peaks labeler — {profile}", js=hotkeys_js) as demo:
         gr.Markdown(
-            f"### Opus labeler — profile `{profile}`\n"
+            f"### Peaks labeler — profile `{profile}`\n"
             "Rate each frame — **→ / y** = want it, **← / n** = skip."
         )
         image = gr.Image(label="candidate", height=480)

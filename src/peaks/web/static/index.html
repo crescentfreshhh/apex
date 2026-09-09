@@ -12,37 +12,36 @@
     <span class="brand">Peaks</span>
     <nav>
       <button class="tab active" data-view="foryou">For You</button>
-      <button class="tab" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="board">Megaboard</button>
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="performers">Performers</button>
       <button class="tab" data-view="statistics">Statistics</button>
-      <button class="tab" data-view="board">Megaboard</button>
+      <button class="tab" data-view="dashboard">Settings</button>
     </nav>
     <span id="conn" class="dim"></span>
     <button id="btn-logout" class="tab" title="Lock (sign out)" hidden>🔒 Lock</button>
   </header>
 
-  <!-- DASHBOARD -->
+  <!-- SETTINGS -->
   <section id="dashboard" class="view">
     <div class="cards" id="stat-cards"></div>
 
     <div class="panel">
-      <h2>Models</h2>
-      <p class="dim">The active DINOv2 backbone (visual structure / "find similar")
-        and CLIP variant (text search). Saved here and used
-        everywhere — no restart, no container variables. Bigger = more accurate at
-        more cost. Each backbone caches into its own namespace, so after switching
-        you re-run an embed pass to populate it.</p>
+      <h2>AI models</h2>
+      <p class="dim">The models behind "find similar" (visual) and text search. Saved
+        here and used everywhere — no restart. Bigger models are more accurate but
+        slower and use more disk; after switching, re-run an embed pass to fill the
+        new cache.</p>
       <div class="row">
-        <label>DINOv2 backbone
+        <label title="DINOv2 — reads visual structure; powers 'find similar' and the taste model">Visual model
           <select id="sel-dino">
-            <option value="dinov2_vitl14">large — vitl14 (default)</option>
-            <option value="dinov2_vitg14">giant — vitg14 (heaviest)</option>
+            <option value="dinov2_vitl14">large (default)</option>
+            <option value="dinov2_vitg14">giant (heaviest)</option>
           </select>
         </label>
-        <label>CLIP variant
+        <label title="OpenCLIP — matches images to text; powers text search">Text-search model
           <select id="sel-clip">
-            <option value="ViT-H-14">ViT-H-14 (largest)</option>
+            <option value="ViT-H-14">largest</option>
           </select>
         </label>
         <span id="models-status" class="dim"></span>
@@ -167,7 +166,7 @@
   <!-- FOR YOU -->
   <section id="foryou" class="view active">
     <div class="panel">
-      <h2>For You <span class="tag-exp">experimental</span></h2>
+      <h2>For You</h2>
       <p class="dim">A recommender built from your own taste — the average of every
         moment you've saved or thumbed up, matched against your whole
         library. No query needed. The more you save and rate, the sharper it gets.</p>
@@ -190,11 +189,11 @@
     </div>
 
     <div class="panel" id="swipe-panel">
-      <h2>Swipe trainer <span class="tag-exp">active learning</span></h2>
-      <p class="dim">The trainer shows you the frames it's <em>least sure</em> about —
-        rating those teaches your taste model fastest. It <strong>retrains itself in the
-        background</strong> every ~25 ratings, so just keep swiping and "For You" sharpens
-        on its own. "Train now" is optional — it forces an immediate retrain.</p>
+      <h2>Teach your taste</h2>
+      <p class="dim">Shows you the frames it's <em>least sure</em> about — rating those
+        teaches your taste fastest. It <strong>learns in the background</strong> every
+        ~25 ratings, so just keep swiping and "For You" sharpens on its own. "Train now"
+        is optional — it applies your ratings immediately.</p>
       <div id="swipe-stage" class="swipe-stage">
         <div id="swipe-card" class="swipe-card dim">Loading a frame…</div>
       </div>
@@ -208,7 +207,7 @@
     </div>
 
     <div class="panel" id="pick-panel">
-      <h2>🎲 Taste Picker <span class="tag-exp">batch</span></h2>
+      <h2>🎲 Taste Picker</h2>
       <p class="dim">A collage of random frames from your whole library. <strong>Tap the
         ones that are <em>you</em></strong> — they go straight into your taste (the rest are
         left untouched). Hit ▶ on a frame to preview it, then shuffle for ten more.</p>

@@ -20,7 +20,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 # served for any unauthenticated non-API request when a password is configured.
 _LOGIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Opus — sign in</title><link rel="icon" href="data:,">
+<title>Peaks — sign in</title><link rel="icon" href="data:,">
 <style>
   :root{--bg:#0b0b0d;--panel:#141417;--panel2:#1b1b20;--fg:#e8e8ea;--dim:#8a8a92;
     --line:#2a2a30;--accent:#c8a24a;--bad:#e0604d}
@@ -39,7 +39,7 @@ _LOGIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
   #err{color:var(--bad);font-size:13px;min-height:18px;margin-top:10px}
 </style></head><body>
 <form id="f" autocomplete="on">
-  <div class="brand">Opus</div><div class="sub">peaks — sign in</div>
+  <div class="brand">Peaks</div><div class="sub">sign in</div>
   <input id="pw" type="password" placeholder="Password" autofocus autocomplete="current-password">
   <button type="submit">Unlock</button>
   <div id="err"></div>

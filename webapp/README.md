@@ -1,4 +1,4 @@
-# Opus megaboard
+# Peaks megaboard
 
 A static web page: a grid of looping `<video>` tiles, each playing an **apex**
 segment live-streamed from Stash, swapping in a new one as it ends — cycling
