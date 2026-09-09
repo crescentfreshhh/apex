@@ -97,9 +97,6 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .viewer-taste .thumb { flex: 1; background: var(--panel2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px; padding: 7px; cursor: pointer; }
 .viewer-taste .thumb:hover { border-color: var(--accent); }
-.viewer-clip { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.clip-chip { font-size: 12px; padding: 3px 8px; border-radius: 12px;
-  background: var(--panel2); border: 1px solid var(--line); color: var(--fg); }
 .viewer-video video { cursor: pointer; }
 
 .adv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

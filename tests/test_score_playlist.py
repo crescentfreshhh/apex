@@ -152,38 +152,6 @@ def test_create_apex_adds_positive_taste_label(tmp_path, monkeypatch):
     assert svc.label_counts()["positive"] == 1  # unchanged — no cache key for scene 999
 
 
-def test_auto_tag_scores_and_writes(tmp_path, monkeypatch):
-    from peaks.cache import EmbeddingCache
-
-    svc, cfg = _service(tmp_path)
-    cache = EmbeddingCache(cfg.embedding.cache_dir)
-    # scene A looks like "beach", scene B like "office"
-    cache.save("A", "clip", np.array([0.0], dtype="float32"),
-               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
-    cache.save("B", "clip", np.array([0.0], dtype="float32"),
-               np.array([[0, 1, 0]], dtype="float32"), meta={"scene_id": "2"})
-    monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
-    vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
-    monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
-    monkeypatch.setattr(svc, "_clip_text_batch", lambda labels: np.stack([vmap[t] for t in labels]))
-
-    writes = []
-
-    class C:
-        def find_or_create_tag(self, name):
-            return type("T", (), {"id": {"beach": "10", "office": "20"}[name], "name": name})()
-
-        def add_scene_tags(self, scene_ids, tag_ids):
-            writes.append((sorted(scene_ids), tag_ids)); return len(scene_ids)
-
-    monkeypatch.setattr(svc, "client", lambda: C())
-
-    res = svc.auto_tag(top=1)
-    assert res["scenes"] == 2 and res["tags"] == 2
-    w = {tid[0]: sids for sids, tid in writes}
-    assert w["10"] == ["1"] and w["20"] == ["2"]  # beach→sceneA, office→sceneB
-
-
 def test_add_scene_tags_uses_add_mode(monkeypatch):
     from peaks.stash_client import StashClient
 
@@ -194,21 +162,6 @@ def test_add_scene_tags_uses_add_mode(monkeypatch):
     assert n == 2
     assert seen["input"]["tag_ids"] == {"ids": ["10"], "mode": "ADD"}
     assert seen["input"]["ids"] == ["1", "2"]
-
-
-def test_vocab_get_save_roundtrip(tmp_path, monkeypatch):
-    svc, _ = _service(tmp_path)
-    monkeypatch.setenv("PEAKS_VOCAB", str(tmp_path / "vocab.txt"))
-    # defaults before any file
-    d = svc.get_vocab()
-    assert d["from_file"] is False and d["count"] > 20
-
-    r = svc.save_vocab("beach\noffice\n# a comment\n")
-    assert r["count"] == 2  # comment + blank not counted
-    d2 = svc.get_vocab()
-    assert d2["from_file"] is True and "beach" in d2["vocab"]
-    # saving drops the cached matrix so classification rebuilds on the new terms
-    assert svc._vocab_cache is None
 
 
 def test_models_save_overrides_active_backbone(tmp_path, monkeypatch):
@@ -245,29 +198,6 @@ def test_models_save_rejects_unknown(tmp_path, monkeypatch):
         svc.save_models(dino_model="dinov2_enormous")
     with pytest.raises(ValueError):
         svc.save_models(clip_model="ViT-Z-99")
-
-
-def test_classify_frame_top_labels(tmp_path, monkeypatch):
-    from peaks.cache import EmbeddingCache
-
-    svc, cfg = _service(tmp_path)
-    cache = EmbeddingCache(cfg.embedding.cache_dir)
-    cache.save("k", "clip", np.array([0.0], dtype="float32"),
-               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
-    monkeypatch.setattr(svc, "_vocab", lambda: ["beach", "office"])
-    vmap = {"beach": np.array([1, 0, 0], dtype="float32"), "office": np.array([0, 1, 0], dtype="float32")}
-    monkeypatch.setattr(svc, "_clip_text_vector", lambda t: vmap[t])
-    monkeypatch.setattr(svc, "_clip_text_batch", lambda labels: np.stack([vmap[t] for t in labels]))
-
-    out = svc.classify_frame("k", 0.0, top_k=2)
-    assert out["labels"][0][0] == "beach"  # frame vector matches "beach"
-    labs = dict(out["labels"])
-    assert labs["beach"] > labs["office"]
-
-
-def test_classify_frame_missing_is_empty(tmp_path):
-    svc, _ = _service(tmp_path)
-    assert svc.classify_frame("nope", 0.0)["labels"] == []
 
 
 def test_taste_label_train_and_rerank(tmp_path, monkeypatch):
@@ -743,7 +673,6 @@ def test_delete_taste_recent_window_keeps_and_retrains(tmp_path):
     assert r["retrained"] is True and svc.has_taste()
 
 
-
 def test_diversify_breaks_up_near_duplicates(tmp_path):
     from peaks.cache import EmbeddingCache
     from peaks.search import Hit
@@ -1131,24 +1060,6 @@ def test_hall_of_fame_and_roulette(tmp_path, monkeypatch):
     assert any("best of" in n for n in names)
     r = svc.performer_roulette(min_moments=1)
     assert r["id"] in {"p1", "p2"}
-
-
-def test_find_duplicates_threshold(tmp_path):
-    from peaks.cache import EmbeddingCache
-
-    svc, cfg = _service(tmp_path)
-    cache = EmbeddingCache(cfg.embedding.cache_dir)
-    # query scene A; B is near-identical (same vec), C is different
-    cache.save("A", "dinov2", np.array([0.0], dtype="float32"),
-               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "1"})
-    cache.save("B", "dinov2", np.array([0.0], dtype="float32"),
-               np.array([[1, 0, 0]], dtype="float32"), meta={"scene_id": "2"})
-    cache.save("C", "dinov2", np.array([0.0], dtype="float32"),
-               np.array([[0, 1, 0]], dtype="float32"), meta={"scene_id": "3"})
-
-    dupes = svc.find_duplicates("A", 0.0, threshold=0.9)
-    keys = {h.key for h in dupes}
-    assert "B" in keys and "C" not in keys and "A" not in keys  # only the near-identical other scene
 
 
 def test_scene_pool_lists_scenes_with_urls(tmp_path, monkeypatch):

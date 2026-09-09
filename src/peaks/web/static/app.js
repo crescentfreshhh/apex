@@ -148,7 +148,6 @@ const JOB_PANELS = {
   sync: { btn: "#btn-sync", status: "#sync-status", log: "#sync-log" },
   fix: { btn: "#btn-fix", status: "#fix-status", log: "#fix-log", stop: "#btn-fix-stop" },
   reel: { btn: "#btn-reel", status: "#reel-status", log: "#reel-log", stop: "#btn-reel-stop" },
-  autotag: { btn: "#btn-autotag", status: "#autotag-status", log: "#autotag-log", stop: "#btn-autotag-stop" },
   playlist: { btn: "#btn-playlist", status: "#playlist-status", log: "#playlist-log" },
 };
 const tracked = new Set(); // job ids we're already polling in this tab
@@ -270,10 +269,6 @@ wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => {
   const q = embedQuery();
   return api("/api/embed" + (q ? "?" + q : ""), { method: "POST" });
 }, $("#btn-embed-stop"));
-wireJob($("#btn-autotag"), $("#autotag-status"), $("#autotag-log"), () => {
-  const top = $("#autotag-top").value || 5;
-  return api("/api/autotag?top=" + top, { method: "POST" });
-}, $("#btn-autotag-stop"));
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
   const prune = $("#sync-prune").checked;
   return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });
@@ -313,30 +308,6 @@ wireJob($("#btn-reel"), $("#reel-status"), $("#reel-log"), () => {
   const tag = $("#board-tag").value.trim();
   return api("/api/reel" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
 }, $("#btn-reel-stop"));
-// --- CLIP vocabulary editor -------------------------------------------------
-$("#btn-vocab-edit").addEventListener("click", async () => {
-  const ed = $("#vocab-editor");
-  if (!ed.hidden) { ed.hidden = true; return; }
-  try {
-    const d = await api("/api/vocab");
-    $("#vocab-text").value = d.vocab;
-    $("#vocab-status").textContent = `${d.count} terms${d.from_file ? "" : " (defaults)"}`;
-    ed.hidden = false;
-  } catch (e) { toast(e.message, true); }
-});
-$("#btn-vocab-reset").addEventListener("click", async () => {
-  try { $("#vocab-text").value = (await api("/api/vocab")).vocab; } catch {}
-});
-$("#btn-vocab-save").addEventListener("click", async () => {
-  try {
-    const r = await api("/api/vocab", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ vocab: $("#vocab-text").value }),
-    });
-    toast(`Saved ${r.count} terms`); $("#vocab-status").textContent = `${r.count} terms`;
-  } catch (e) { toast(e.message, true); }
-});
-
 async function refreshReels() {
   try {
     const { reels } = await api("/api/reels");
@@ -639,8 +610,6 @@ async function saveMoment(sid, t) {
 }
 let viewerIndex = -1;
 let currentHit = null;
-let classifyTimer = null;
-let classifyInterval = null;
 function openViewerAt(i) {
   if (i < 0 || i >= lastHits.length) return;
   viewerIndex = i;
@@ -658,26 +627,6 @@ async function similarFromViewer() {
     setActiveView("explore"); onSearchResults(d.items); openViewerAt(0); toast("More like this moment");
   } catch (e) { toast(e.message, true); }
 }
-async function dupesFromViewer() {
-  if (!currentHit) return;
-  const v = $("#viewer-v"); const t = v.currentTime || +currentHit.time;
-  try {
-    const hits = await api(`/api/duplicates?key=${encodeURIComponent(currentHit.key)}&t=${t.toFixed(2)}`);
-    if (!hits.length) return toast("no near-duplicates found");
-    currentContext = { kind: "frame", key: currentHit.key, t };
-    closeViewer(); renderHits(hits); setActiveView("explore");
-    toast(`${hits.length} near-duplicate${hits.length > 1 ? "s" : ""}`);
-  } catch (e) { toast(e.message, true); }
-}
-async function classifyCurrent(hit) {
-  const el = $("#viewer-clip"); const v = $("#viewer-v");
-  let d; try { d = await api(`/api/classify?key=${encodeURIComponent(hit.key)}&t=${(v.currentTime || +hit.time).toFixed(2)}`); }
-  catch { el.innerHTML = ""; return; }
-  const labs = d.labels || [];
-  el.innerHTML = labs.length
-    ? `<span class="dim">CLIP sees</span> ` + labs.map(([l, s]) => `<span class="clip-chip" title="${(s * 100).toFixed(0)}% match">${esc(l)}</span>`).join("")
-    : "";
-}
 function openViewer(hit) {
   if (!hit || !hit.stream) return;
   currentHit = hit;
@@ -687,21 +636,14 @@ function openViewer(hit) {
   v.src = sceneStreamUrl(hit.stream);
   v.onloadedmetadata = () => {
     try { v.currentTime = Math.min(startAt, (v.duration || startAt) - 0.1); } catch {}
-    renderHeat(hit); classifyCurrent(hit);
+    renderHeat(hit);
   };
-  v.onseeked = () => { clearTimeout(classifyTimer); classifyTimer = setTimeout(() => classifyCurrent(hit), 350); };
   v.onclick = () => { if (v.paused) v.play().catch(() => {}); else v.pause(); }; // click video = play/pause
-  // live "CLIP sees": reclassify the moment as it plays
-  clearInterval(classifyInterval);
-  classifyInterval = setInterval(() => {
-    if (!$("#viewer").hidden && !v.paused) classifyCurrent(currentHit);
-  }, 1600);
   v.play().catch(() => {});
   wireViewerTransport(v);
   $("#viewer-prev").onclick = prevViewer;
   $("#viewer-next").onclick = nextViewer;
   $("#viewer-similar").onclick = similarFromViewer;
-  $("#viewer-dupes").onclick = dupesFromViewer;
   $("#viewer-save").onclick = () => saveMoment(hit.scene_id, v.currentTime);
   $("#viewer-up").onclick = (e) => thumb(hit.key, v.currentTime, 1, hit.scene_id, e.currentTarget);
   $("#viewer-down").onclick = (e) => { thumb(hit.key, v.currentTime, 0, hit.scene_id, e.currentTarget); proposeCut(hit.scene_id, v.currentTime); };
@@ -711,7 +653,6 @@ function openViewer(hit) {
 }
 function closeViewer() {
   const V = $("#viewer"), v = $("#viewer-v");
-  clearInterval(classifyInterval);
   if (typeof stopRadio === "function") stopRadio();
   try { v.pause(); } catch {}
   v.removeAttribute("src"); v.load(); V.hidden = true;

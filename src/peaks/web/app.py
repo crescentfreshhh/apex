@@ -89,18 +89,6 @@ def _collection_model():
 CollectionIn = _collection_model()
 
 
-def _vocab_model():
-    from pydantic import BaseModel
-
-    class VocabIn(BaseModel):
-        vocab: str = ""
-
-    return VocabIn
-
-
-VocabIn = _vocab_model()
-
-
 def _models_model():
     from pydantic import BaseModel
 
@@ -646,8 +634,8 @@ def create_app(cfg=None):
         min_score: float = 0.0, enrich: int = 300, whole_peak: bool | None = None,
         clip: str | None = None, clip_weight: float = 0.5,
     ):
-        # the megaboard knows scene_id, not the cache key — resolve it (same path
-        # /api/classify uses) so "more like this moment" works from a board tile.
+        # the megaboard knows scene_id, not the cache key — resolve it so
+        # "more like this moment" works from a board tile.
         if key is None and scene_id is not None:
             key = service._key_for_scene(scene_id, service._model_name())
         if key is None:
@@ -935,33 +923,6 @@ def create_app(cfg=None):
         # sequence; strong taste matches still stay likely near the front.
         r = service.recommend(top_k=count, exclude=seen, shuffle=True, profile=profile)
         return {"items": _hit_payload(service, r["hits"])}
-
-    @app.post("/api/autotag")
-    def autotag(top: int = Query(5), min_score: float = Query(0.0), limit: int = Query(0)):
-        try:
-            job = jobs.start("autotag", lambda j: service.auto_tag(j, top=top, min_score=min_score, limit=limit))
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
-        return job.as_dict()
-
-    @app.get("/api/duplicates")
-    def duplicates(key: str, t: float, threshold: float = 0.9, model: str | None = None):
-        return _hit_payload(service, service.find_duplicates(key, t, threshold=threshold, model=model))
-
-    @app.get("/api/classify")
-    def classify(t: float, key: str | None = None, scene_id: str | None = None, top_k: int = 6):
-        try:
-            return service.classify_frame(key=key, time=t, scene_id=scene_id, top_k=top_k)
-        except Exception:  # noqa: BLE001 — classification is cosmetic
-            return {"labels": []}
-
-    @app.get("/api/vocab")
-    def get_vocab():
-        return service.get_vocab()
-
-    @app.post("/api/vocab")
-    def save_vocab(body: VocabIn):
-        return service.save_vocab(body.vocab)
 
     @app.get("/api/models")
     def get_models():

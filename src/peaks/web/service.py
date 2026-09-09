@@ -1240,22 +1240,6 @@ class Service:
             hits = self._rerank_by_taste(hits, self._model_name())
         return hits
 
-    def find_duplicates(
-        self, key: str, time: float, threshold: float = 0.9, top_k: int = 40,
-        model: str | None = None,
-    ) -> list[Hit]:
-        """Near-identical moments in OTHER scenes (re-encodes, re-uploads).
-        Uses DINOv2 by default — structural identity, the right space for visual
-        duplicates — and keeps only the strongest match per other scene above
-        `threshold`."""
-        model = model or self._model_name()
-        idx = self.index(model)
-        v = idx.vector_at(key, time)
-        if v is None:
-            return []
-        hits = idx.search(v, top_k=top_k, per_scene=1, exclude_key=key)
-        return [h for h in hits if h.score >= threshold]
-
     def scene_timeline(
         self,
         key: str,
@@ -3567,33 +3551,6 @@ class Service:
                 return terms
         return DEFAULT_VOCAB
 
-    def _vocab_path(self):
-        import os
-        from pathlib import Path
-
-        return Path(os.environ.get("PEAKS_VOCAB", "/config/vocab.txt"))
-
-    def get_vocab(self) -> dict:
-        """Current classification vocabulary as editable text (one term/line)."""
-        path = self._vocab_path()
-        return {
-            "vocab": "\n".join(self._vocab()),
-            "count": len(self._vocab()),
-            "from_file": path.is_file(),
-            "path": str(path),
-        }
-
-    def save_vocab(self, text: str) -> dict:
-        """Write the vocabulary file and drop the cached matrix so the next
-        classification rebuilds against the new terms."""
-        path = self._vocab_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [ln.rstrip() for ln in text.splitlines()]
-        path.write_text("\n".join(lines) + "\n")
-        with self._clip_lock:
-            self._vocab_cache = None
-        return {"count": len([ln for ln in lines if ln.strip() and not ln.startswith("#")])}
-
     def _vocab_matrix(self):
         """(labels, matrix) for the vocabulary, CLIP-text-embedded once and
         cached (unit rows, so scoring a frame is one matmul)."""
@@ -3610,65 +3567,6 @@ class Service:
             self._vocab_cache = (labels, mat)
         return labels, mat
 
-    def auto_tag(
-        self, job=None, top: int = 5, min_score: float = 0.0, limit: int = 0
-    ) -> dict:
-        """Zero-shot tag the library: for each CLIP-embedded scene, take the
-        vocabulary labels that best match any of its moments (max over frames)
-        and write them to Stash. Writes are batched one bulk update per tag
-        (ADD mode, so existing tags are preserved). Cancellable."""
-        from collections import defaultdict
-
-        log = (job.log if job else print)
-        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        clip = self._clip_name()
-        keys = cache.keys(clip)
-        if not keys:
-            log("no CLIP cache — run a CLIP embed pass first")
-            return {"scenes": 0, "tags": 0}
-        if limit:
-            keys = keys[:limit]
-        labels, mat = self._vocab_matrix()
-        client = self.client()
-        tag_id: dict[str, str] = {}
-        assign: dict[str, list[str]] = defaultdict(list)
-        scored = 0
-        if job:
-            job.progress = {"total": len(keys), "done": 0}
-        for k in keys:
-            if job and job.cancelled:
-                log(f"  ⏹ stop requested — halting after {scored} scenes")
-                break
-            try:
-                _, vecs, meta = cache.load(k, clip)
-            except Exception:
-                continue
-            sid = meta.get("scene_id")
-            if not sid or vecs.shape[0] == 0:
-                continue
-            per_label = (vecs.astype(np.float32) @ mat.T).max(axis=0)  # (V,)
-            for i in np.argsort(-per_label)[:top]:
-                if float(per_label[i]) < min_score:
-                    continue
-                lab = labels[i]
-                if lab not in tag_id:
-                    tag_id[lab] = client.find_or_create_tag(lab).id
-                assign[tag_id[lab]].append(str(sid))
-            scored += 1
-            if job:
-                job.progress["done"] = scored
-            if scored % 100 == 0:
-                log(f"  scored {scored}/{len(keys)} scenes")
-
-        written = 0
-        for tid, sids in assign.items():
-            if job and job.cancelled:
-                break
-            client.add_scene_tags(sids, [tid])
-            written += 1
-        log(f"auto-tag: {scored} scenes → {written} tags applied")
-        return {"scenes": scored, "tags": written}
-
     def _key_for_scene(self, scene_id: str, model: str) -> str | None:
         """Reverse-lookup a scene's cache key (the megaboard knows scene_id, not
         the fingerprint key)."""
@@ -3677,25 +3575,6 @@ class Service:
             if str(m.get("scene_id")) == str(scene_id):
                 return k
         return None
-
-    def classify_frame(
-        self, key: str | None = None, time: float = 0.0,
-        scene_id: str | None = None, top_k: int = 6,
-    ) -> dict:
-        """Top vocabulary matches for one frame — what CLIP thinks it is.
-        Accepts a cache key (Explore) or a scene_id (megaboard tiles)."""
-        clip = self._clip_name()
-        if key is None and scene_id is not None:
-            key = self._key_for_scene(scene_id, clip)
-        if key is None:
-            return {"labels": []}
-        v = self.index(clip).vector_at(key, time)
-        if v is None:
-            return {"labels": []}
-        labels, mat = self._vocab_matrix()
-        scores = mat @ self._unit(v)
-        order = np.argsort(-scores)[:top_k]
-        return {"labels": [[labels[i], round(float(scores[i]), 3)] for i in order]}
 
     def _ensure_clip(self):
         """Lazily build (once) the CLIP embedder used for text vectors."""
