@@ -26,7 +26,6 @@ class Hit:
     key: str
     time: float
     score: float
-    clip_score: float | None = None  # raw CLIP keyword-match cosine (hybrid pivot)
 
 
 class SearchIndex:

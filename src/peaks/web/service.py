@@ -785,7 +785,6 @@ class Service:
                 key = self._key_for_scene(str(s.get("scene_id")), self._model_name())
                 return self.search_by_frame(
                     key, float(s.get("t") or 0.0), top_k=300, per_scene=3,
-                    clip=s.get("clip") or None, clip_weight=float(s.get("clip_weight") or 0.5),
                 ) if key else []
         except Exception:  # noqa: BLE001 — a bad spec shouldn't 500 the board
             return []
@@ -1208,34 +1207,16 @@ class Service:
         self, key: str, time: float, top_k: int | None = 60, taste: bool = False,
         per_scene: int | None = 3, min_score: float | None = None,
         whole_peak: bool | None = None,
-        clip: str | None = None, clip_weight: float = 0.5,
     ) -> list[Hit]:
-        """Moments visually like the one at (key, time). With `clip` keywords (and
-        a CLIP index), it's a HYBRID: retrieve the visual pool, then re-rank/filter
-        by CLIP keyword match via `_clip_rerank` (`clip_weight` is the dial). Here
-        `min_score` becomes a floor on the *blended* hybrid score, so tightening it
-        drops the weak keyword matches; without keywords it stays a visual-cosine
-        floor (unchanged)."""
+        """Moments visually like the one at (key, time). `min_score` is a
+        visual-cosine floor; `whole_peak` matches the moment's pooled gist."""
         idx = self.index()
         v = self._moment_query(idx, key, time, whole_peak)
         if v is None:
             return []
-        use_clip = bool(clip and clip.strip()) and self.has_clip_index()
-        if use_clip:
-            # pull a generous visual pool (no visual floor) so the keyword rerank
-            # has room, then blend, apply the floor to the blend, and trim.
-            pool = idx.search(
-                v, top_k=max((top_k or 300) * 4, 800), per_scene=per_scene, exclude_key=key
-            )
-            hits = self._clip_rerank(pool, clip, weight=clip_weight)
-            if min_score is not None:
-                hits = [h for h in hits if h.score >= min_score]
-            if top_k:
-                hits = hits[:top_k]
-        else:
-            hits = idx.search(
-                v, top_k=top_k, per_scene=per_scene, exclude_key=key, min_score=min_score
-            )
+        hits = idx.search(
+            v, top_k=top_k, per_scene=per_scene, exclude_key=key, min_score=min_score
+        )
         if taste:
             hits = self._rerank_by_taste(hits, self._model_name())
         return hits
@@ -1552,50 +1533,6 @@ class Service:
         snorm = (ss - float(ss.min())) / span
         final = (1.0 - relevance_weight) * taste + relevance_weight * snorm
         return [hits[i] for i in np.argsort(-final)]
-
-    def _clip_rerank(self, hits: list[Hit], text: str, weight: float = 0.5) -> list[Hit]:
-        """Hybrid: re-order visually-similar `hits` by how well each ALSO matches
-        the CLIP keyword prompt `text` (supports '-negative' terms). `weight` is the
-        dial: 0 = pure visual order, 1 = pure keyword.
-
-        Robustness fixes over a naive value-blend: the keyword score comes from the
-        candidate's *pooled* CLIP frames (whole-peak, not one noisy frame) against a
-        *templated* query, and the two signals are fused by **weighted reciprocal
-        rank** (scale-free) rather than min-max blending two tightly-clustered bands.
-        Each surviving hit keeps its raw keyword cosine in `clip_score` (for the UI
-        badge) and gets a 0..1 `score` from the fused rank (so the floor slider still
-        works). Candidates with no CLIP vector are dropped (graceful degrade)."""
-        if not hits or not (text or "").strip():
-            return hits
-        clip_idx = self.index(self._clip_name())
-        qv = self._unit(self._clip_query_vector(text, template=True))
-        kept, cs = [], []
-        for h in hits:
-            cv = self._moment_query(clip_idx, h.key, h.time, None)  # pooled, honors whole-peak
-            if cv is None:
-                continue  # not CLIP-embedded → can't score keywords
-            kept.append(h)
-            cs.append(float(self._unit(np.asarray(cv, dtype=np.float32)) @ qv))
-        if not kept:
-            return []
-        cs = np.asarray(cs, dtype=np.float32)
-        # `hits` arrive sorted by visual score (idx.search), so their order IS the
-        # visual rank; the keyword rank comes from the CLIP cosine.
-        n = len(kept)
-        visual_rank = np.arange(n, dtype=np.float32)
-        clip_rank = np.empty(n, dtype=np.float32)
-        clip_rank[np.argsort(-cs)] = np.arange(n, dtype=np.float32)
-        K, w = 60.0, float(min(max(weight, 0.0), 1.0))
-        rrf = (1.0 - w) / (K + visual_rank) + w / (K + clip_rank)
-        span = float(rrf.max() - rrf.min()) or 1.0
-        norm = (rrf - float(rrf.min())) / span
-        out = []
-        for i in np.argsort(-rrf):
-            h = kept[int(i)]
-            h.score = round(float(norm[int(i)]), 4)          # fused rank → floor slider
-            h.clip_score = round(float(cs[int(i)]), 4)        # raw keyword cosine → UI badge
-            out.append(h)
-        return out
 
     # --- "For You": taste centroid, recommendations, active learning ---------
 
