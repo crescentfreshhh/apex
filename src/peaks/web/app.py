@@ -936,20 +936,6 @@ def create_app(cfg=None):
         r = service.recommend(top_k=count, exclude=seen, shuffle=True, profile=profile)
         return {"items": _hit_payload(service, r["hits"])}
 
-    # --- galaxy map ---------------------------------------------------------
-
-    @app.get("/api/galaxy")
-    def galaxy(space: str = "dino"):
-        return service.get_galaxy(space)
-
-    @app.post("/api/galaxy/build")
-    def galaxy_build(space: str = "dino"):
-        try:
-            job = jobs.start("galaxy", lambda j: service.build_galaxy(j, space))
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
-        return job.as_dict()
-
     @app.post("/api/autotag")
     def autotag(top: int = Query(5), min_score: float = Query(0.0), limit: int = Query(0)):
         try:

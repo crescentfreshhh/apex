@@ -693,7 +693,7 @@ function applyFloor() {
     fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
     return;
   }
-  // static sources (shuffle / collection / search / galaxy / tag:apex): floor is a no-op (and hidden)
+  // static sources (shuffle / collection / search / tag:apex): floor is a no-op (and hidden)
 }
 
 function fyHitToApex(h) {
@@ -1070,7 +1070,7 @@ function specForSource(src) {
   if (src === "search" && boardSearch) return { kind: "search", q: boardSearch.q, min: boardSearch.min, per: boardSearch.per, neg: boardSearch.neg, taste: boardSearch.taste };
   if (src === "foryou") return { kind: "foryou" };
   if (src === "stat") return { kind: "stat", metric: boardStat?.metric || "fresh", id: boardStat?.id || null };
-  return null;  // shuffle / tag / collection / galaxy — not live-derivable
+  return null;  // shuffle / tag / collection — not live-derivable
 }
 async function loadSource(src, opts = {}) {
   State.source = src;
@@ -1167,11 +1167,6 @@ async function loadSource(src, opts = {}) {
       await fyRefetch(true);
       if (!State.apexes.length) return showError("No For You taste yet. Thumb up moments or save apexes (⚑), then try again.");
       pickApex = fyPick;
-    } else if (src === "galaxy") {
-      let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_galaxy") || "null"); } catch {}
-      State.apexes = (pl && pl.apexes) || []; State.searchMode = true;
-      if (!State.apexes.length) return showError("No galaxy selection to play. Select a region in the Galaxy tab.");
-      pickApex = makePicker(State.apexes);
     } else {
       const tag = src.startsWith("tag:") ? src.slice(4) : src;
       const pl = await api("/api/board/apexes?tag=" + encodeURIComponent(tag));
@@ -1200,7 +1195,6 @@ async function initSources(initial) {
   if (initial === "stat") opts.push(`<option value="stat">Stat: ${esc(boardStat?.label || "statistic")}</option>`);
   // For You is always available — you can pivot to your taste from any source.
   opts.push(`<option value="foryou">For You — your taste</option>`);
-  if (initial === "galaxy") opts.push(`<option value="galaxy">Galaxy selection</option>`);
   sel.innerHTML = opts.join("");
   sel.addEventListener("change", () => loadSource(sel.value));
   return sel;
@@ -1247,7 +1241,6 @@ async function main() {
     boardStat = { metric, id: params.get("id"), label: LABELS[metric] || metric };
   }
   else if (params.get("src") === "foryou") initial = "foryou";
-  else if (params.get("src") === "galaxy") initial = "galaxy";
   else if (params.get("collection")) initial = "collection:" + params.get("collection");
   const sel = await initSources(initial);
   if (initial) sel.value = initial;

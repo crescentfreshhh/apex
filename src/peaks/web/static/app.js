@@ -48,7 +48,6 @@ document.querySelectorAll(".tab[data-view]").forEach((b) =>
     $("#" + b.dataset.view).classList.add("active");
     if (b.dataset.view === "dashboard") refreshDashboard();
     if (b.dataset.view === "foryou") openForYou();
-    if (b.dataset.view === "galaxy" && window.openGalaxy) window.openGalaxy();
     if (b.dataset.view === "performers") openPerformers();
     if (b.dataset.view === "statistics") openStatistics();
     if (b.dataset.view === "trim") openTrim();
