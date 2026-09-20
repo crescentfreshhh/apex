@@ -1696,6 +1696,7 @@ function renderExpHealth() {
     ["Not yet embedded", h.pending ?? "—"],
     ["Failed scenes", h.failed ?? 0],
     ["Taste examples", h.taste_examples ?? 0],
+    ["Ratings 👍 / 👎", `${h.taste_positive ?? "—"} / ${h.taste_negative ?? "—"}`],
     ["Scorer", h.scorer || "—"],
     ["Text search (CLIP)", h.has_clip ? "yes" : "no"],
   ];

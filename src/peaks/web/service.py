@@ -1579,6 +1579,10 @@ class Service:
             self._label_store(), cache, model, profile,
             kind=self.cfg.modeling.taste_classifier,
             recency_halflife_days=self.cfg.modeling.recency_halflife_days,
+            # your likes + ⭐-saves are all positives, so without a negative
+            # contrast the model saturates ("everything is your taste"). Augment
+            # with a random library background as implicit negatives.
+            background_ratio=1.0,
         )
         out = self._taste_path(profile, model)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1972,6 +1976,10 @@ class Service:
             es = {"embedded": (idx and len({s for s in idx.scene_ids if s})) or 0,
                   "total": None, "pending": None}
         c, n_examples, _ = self._taste_centroid(model, profile=profile)
+        try:
+            t_pos, t_neg = self._label_store().counts(profile or self.cfg.markers.tag_name)
+        except Exception:  # noqa: BLE001
+            t_pos, t_neg = None, None
         health = {
             "embedded_scenes": es.get("embedded"),
             "library_total": es.get("total"),
@@ -1980,6 +1988,8 @@ class Service:
             "has_clip": self.has_clip_index(),
             "model": model,
             "taste_examples": int(n_examples or 0),
+            "taste_positive": t_pos,
+            "taste_negative": t_neg,
             "scorer": None,
         }
         if idx.size == 0:

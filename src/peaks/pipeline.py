@@ -557,6 +557,49 @@ def build_training_set(
     return X, y
 
 
+def sample_background_negatives(
+    cache: EmbeddingCache, model_name: str, n: int,
+    exclude_keys: set | None = None, seed: int = 0,
+) -> np.ndarray:
+    """Random library-moment vectors to use as *implicit negatives*.
+
+    A taste set built from your likes + saves is almost all positives, so a
+    binary classifier has nothing to contrast against and calls everything
+    in-taste. In a large library the overwhelming majority of moments are NOT
+    your specific peaks, so a random background sample is a good stand-in for
+    "not your taste" (positive-unlabeled learning). Scenes you labeled positive
+    are excluded so your own peaks aren't sampled as negatives. Returns an
+    (m, dim) unit-float32 matrix, m ≤ n (fewer only if the cache is small)."""
+    if n <= 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    exclude_keys = exclude_keys or set()
+    keys = [k for k in cache.keys(model_name) if k not in exclude_keys]
+    if not keys:
+        return np.zeros((0, 0), dtype=np.float32)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(keys)
+    n_keys = min(len(keys), n)
+    per = max(1, -(-n // n_keys))  # ceil(n / n_keys): a few frames per scene if needed
+    picked: list[np.ndarray] = []
+    got = 0
+    for k in keys[:n_keys]:
+        try:
+            _times, vecs, _meta = cache.load(k, model_name)
+        except Exception:  # noqa: BLE001 — skip an unreadable scene
+            continue
+        if len(vecs) == 0:
+            continue
+        take = int(min(per, len(vecs)))
+        sel = rng.choice(len(vecs), size=take, replace=False)
+        picked.append(np.asarray(vecs[sel], dtype=np.float32))
+        got += take
+        if got >= n:
+            break
+    if not picked:
+        return np.zeros((0, 0), dtype=np.float32)
+    return np.vstack(picked)[:n].astype(np.float32)
+
+
 def recency_weights(ts: np.ndarray, halflife_days: float) -> np.ndarray | None:
     """Per-sample weights that decay with age: a rating `halflife_days` old
     counts half as much as a fresh one, so the model tracks your *current*
@@ -652,6 +695,7 @@ AUTO_MLP_MIN_SAMPLES = 200
 def train_profile(
     label_store, cache: EmbeddingCache, model_name: str, profile: str,
     kind: str = "logreg", recency_halflife_days: float = 0.0,
+    background_ratio: float = 0.0, background_weight: float = 0.5,
 ):
     """Build the training set and fit a TasteClassifier for `profile`.
 
@@ -660,21 +704,44 @@ def train_profile(
     weights recent ratings more, so the model evolves with you. When there are
     enough labels, stats include `cv_auc`: mean ROC-AUC over stratified CV folds
     — a quick "is this model any good" signal (1.0 = perfect, 0.5 = coin flip).
-    """
+
+    `background_ratio`>0 augments the negatives with a random library-background
+    sample (≈ that many × the positives), giving a positives-heavy taste set the
+    contrast it otherwise lacks — without it a classifier trained on likes+saves
+    saturates and calls everything in-taste. Background rows carry `background_weight`
+    (they're noisy negatives). The augmented model is trained as calibrated logreg."""
     from .classifier import TasteClassifier
 
     X, y, ts = build_training_set(
         label_store, cache, model_name, profile, with_recency=True
     )
-    resolved = kind
-    if kind == "auto":
-        resolved = "mlp" if int(X.shape[0]) >= AUTO_MLP_MIN_SAMPLES else "logreg"
     sample_weight = recency_weights(ts, recency_halflife_days)
+
+    background = 0
+    if background_ratio > 0 and X.shape[0] and int((y == 1).sum()) > 0:
+        pos_keys = {lab.key for lab in label_store.for_profile(profile) if int(lab.label) == 1}
+        n_pos, n_neg = int((y == 1).sum()), int((y == 0).sum())
+        n_bg = max(0, int(round(background_ratio * n_pos)) - n_neg)
+        xbg = sample_background_negatives(cache, model_name, n_bg, exclude_keys=pos_keys)
+        if xbg.shape[0] and xbg.shape[1] == X.shape[1]:
+            background = int(xbg.shape[0])
+            base_w = sample_weight if sample_weight is not None else np.ones(y.shape[0], dtype=np.float64)
+            X = np.vstack([X, xbg])
+            y = np.concatenate([y, np.zeros(background, dtype=int)])
+            sample_weight = np.concatenate([base_w, np.full(background, background_weight, dtype=np.float64)])
+
+    if background:
+        resolved = "logreg"   # background-augmented taste → linear + well-calibrated
+    elif kind == "auto":
+        resolved = "mlp" if int(X.shape[0]) >= AUTO_MLP_MIN_SAMPLES else "logreg"
+    else:
+        resolved = kind
 
     clf = TasteClassifier(kind=resolved, model_name=model_name, profile=profile)
     clf.train(X, y, sample_weight=sample_weight)
     stats = {
         "samples": int(X.shape[0]), "positives": int((y == 1).sum()),
+        "negatives": int((y == 0).sum()), "background": background,
         "kind": resolved, "recency": sample_weight is not None,
     }
 
