@@ -358,12 +358,14 @@
   <section id="board" class="view">
     <div class="panel">
       <h2>Megaboard</h2>
-      <p class="dim">Builds the grid's playlist from your saved moments (the
-        <code>apex</code> tag markers), then opens the board in its own optimized page.
-        Scoring with <em>write</em> rebuilds this automatically — use this button to
-        refresh on demand or for another tag.</p>
+      <p class="dim">Builds the grid's playlist from every moment saved under this
+        <strong>Stash tag</strong> (default <code>apex</code> = all your ⭐-saved moments),
+        then opens the board in its own optimized page. Scoring with <em>write</em>
+        rebuilds this automatically — use this button to refresh on demand or for
+        another tag.</p>
       <div class="row">
-        <input id="board-tag" placeholder="tag (default: apex)" />
+        <label title="The Stash tag whose saved moments feed the board and the export below. Default 'apex' = everything you've ⭐-saved; a profile tag like 'apex-heels' targets that profile.">Stash tag
+          <input id="board-tag" placeholder="default: apex — all saved moments" /></label>
         <button id="btn-playlist" class="primary">Build megaboard</button>
         <a id="board-link" class="ghost" href="/megaboard/" target="_blank">Open megaboard →</a>
         <span id="playlist-status" class="dim"></span>
@@ -371,10 +373,13 @@
       <pre id="playlist-log" class="log" hidden></pre>
       <div id="collections" class="reels"></div>
 
-      <p class="dim" style="margin-top:16px">Or stitch the tag's saved moments into a
-        single highlight video (fast stream-copy from the source files).</p>
+      <p class="dim" style="margin-top:16px">Stitches <strong>every</strong> moment saved
+        under the tag above, across your whole library (default <code>apex</code>), into
+        one highlight video — independent of the board on screen or any playlist. To
+        export a single playlist instead, use the ⬇ on its card above. (Fast stream-copy
+        from the source files.)</p>
       <div class="row">
-        <button id="btn-reel" class="primary">Export video</button>
+        <button id="btn-reel" class="primary" title="Stitches every ⭐-saved moment under the tag above into one video — not the board on screen or a playlist.">Export all saved moments</button>
         <button id="btn-reel-stop" class="ghost" hidden>Stop</button>
         <span id="reel-status" class="dim"></span>
       </div>
