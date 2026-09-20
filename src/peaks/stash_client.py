@@ -311,9 +311,17 @@ class StashClient:
         ids = [str(i) for i in ids if i]
         if not ids:
             return {}
-        data = self.execute(_SCENE_DETAILS_QUERY, {"ids": ids})
+        # Fetch in batches: one findScenes over the whole (possibly multi-thousand)
+        # embedded library can exceed the request timeout and fail intermittently —
+        # which surfaced as the flaky "No performers found". Chunking keeps each
+        # request small and fast. Merged transparently by scene id.
+        BATCH = 400
+        scenes: list[dict] = []
+        for i in range(0, len(ids), BATCH):
+            data = self.execute(_SCENE_DETAILS_QUERY, {"ids": ids[i : i + BATCH]})
+            scenes.extend(data["findScenes"]["scenes"])
         out: dict[str, dict] = {}
-        for s in data["findScenes"]["scenes"]:
+        for s in scenes:
             files = s.get("files") or []
             f0 = files[0] if files else {}
             paths = s.get("paths") or {}

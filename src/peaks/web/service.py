@@ -2195,7 +2195,10 @@ class Service:
         try:
             details = self.client().scene_details(embedded)
         except Exception:  # noqa: BLE001 — Stash down
-            return getattr(self, "_perf_stats_cache", None) or []
+            cached = getattr(self, "_perf_stats_cache", None)
+            if cached is not None:
+                return cached  # a transient blip shouldn't blank a working tab
+            raise  # cold cache: surface the real error, not a misleading "no performers"
 
         c, _, _ = self._taste_centroid(model)
         cu = self._unit(c) if c is not None else None

@@ -744,7 +744,10 @@ def create_app(cfg=None):
 
     @app.get("/api/performers")
     def performers(sort: str = "moments", refresh: bool = False):
-        rows = service.performer_stats(rebuild=refresh)
+        try:
+            rows = service.performer_stats(rebuild=refresh)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable / timed out
+            raise HTTPException(503, f"Couldn't reach Stash to build the performer list: {exc}")
         keyf = {
             "moments": lambda r: r.get("moments", 0),
             "scenes": lambda r: r.get("scenes", 0),
