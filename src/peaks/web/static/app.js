@@ -306,7 +306,15 @@ wireJob($("#btn-playlist"), $("#playlist-status"), $("#playlist-log"), () => {
 });
 wireJob($("#btn-reel"), $("#reel-status"), $("#reel-log"), () => {
   const tag = $("#board-tag").value.trim();
-  return api("/api/reel" + (tag ? "?tag=" + encodeURIComponent(tag) : ""), { method: "POST" });
+  const all = $("#reel-all")?.checked;
+  if (all && !confirm("Export EVERY saved moment under this tag into one video? With a large library this can be many GB and take a while.\n\nCancel to export just the 300 most recent instead.")) {
+    return Promise.reject(new Error("Export cancelled"));
+  }
+  const qs = new URLSearchParams();
+  if (tag) qs.set("tag", tag);
+  if (all) qs.set("limit", "0");   // 0 = all; omitted = server default cap (300)
+  const q = qs.toString();
+  return api("/api/reel" + (q ? "?" + q : ""), { method: "POST" });
 }, $("#btn-reel-stop"));
 async function refreshReels() {
   try {

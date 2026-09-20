@@ -37,6 +37,11 @@ class Service:
         self._board_score_cache = {}  # model -> (per-moment taste score array, scored_by)
         self._board_universe_cache = {}  # (model, per_scene) -> ordered per-scene-capped Hits
         self._labels_since_train = 0  # new ratings since the last (auto)train
+        self._av_probe_cache = {}  # source path -> (vcodec,w,h,fps,pixfmt,acodec,arate,ach)
+
+    # default cap on the whole-library "export all saved moments" reel — an
+    # unbounded export once produced a 1111-clip / 42GB file. limit=0 = all.
+    REEL_DEFAULT_CAP = 300
 
     # --- library / scenes ----------------------------------------------------
 
@@ -554,17 +559,13 @@ class Service:
             log(f"    (to tighten/loosen, try high≈{sug_high} low≈{sug_low})")
 
     def export_reel(
-        self, job=None, tag: str | None = None, limit: int = 0, name: str | None = None
+        self, job=None, tag: str | None = None, limit: int | None = None, name: str | None = None
     ) -> dict:
-        """Concatenate a tag's apex clips into one video (fast stream-copy).
-
-        Reads the scene files directly off the mounted (read-only) library and
-        copies each [start,end] segment without re-encoding, then concats them.
-        Stream-copy is fast but needs codec-compatible sources; clips that can't
-        be copied are skipped and reported. Output lands in the exports dir."""
+        """Concatenate a tag's saved moments into one video via `_build_reel`
+        (lossless stream-copy when the sources are uniform, re-encode to a common
+        1080p30 format when they're mixed). `limit` caps the clip count — None ⇒
+        the default cap, 0 ⇒ every saved moment (can be very large)."""
         import os
-        import subprocess
-        import tempfile
         import time as _t
         from pathlib import Path
 
@@ -572,46 +573,141 @@ class Service:
         tag = tag or self.cfg.markers.tag_name
         client = self.client()
         apexes = [m for m in client.iter_markers_by_tag(tag) if m["scene_id"]]
-        if limit:
-            apexes = apexes[:limit]
+        n_all = len(apexes)
+        cap = self.REEL_DEFAULT_CAP if limit is None else int(limit)
+        if cap and cap > 0 and n_all > cap:
+            apexes = apexes[:cap]
+            log(f"exporting the {cap} most recent of {n_all} '{tag}' moments (raise the cap to export all)")
         if not apexes:
             log(f"no '{tag}' markers to export")
             return {"clips": 0}
 
         details = client.scene_details(sorted({a["scene_id"] for a in apexes}))
+        specs = []
+        for a in apexes:
+            path = (details.get(str(a["scene_id"])) or {}).get("path")
+            if not path:
+                continue
+            start = float(a["seconds"])
+            end = float(a["end_seconds"]) if a.get("end_seconds") else start + 15.0
+            specs.append({"path": path, "start": start, "end": end, "scene_id": a["scene_id"]})
+
         exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
         exports.mkdir(parents=True, exist_ok=True)
         name = _safe_reel_name(name or f"reel-{tag}-{_t.strftime('%Y%m%d-%H%M%S')}") + ".mp4"
         out = exports / name
-        if job:
-            job.progress = {"total": len(apexes), "done": 0}
+        res = self._build_reel(specs, out, job=job, log=log)
+        res["name"] = name
+        return res
 
+    # --- reel builder: probe → stream-copy if uniform, else normalize --------
+
+    def _probe_av(self, path: str) -> tuple:
+        """(vcodec, w, h, fps, pixfmt, acodec, arate, ach) for a source file via
+        ffprobe; cached per path. vcodec/acodec are None when absent — the whole
+        tuple drives the 'are all clips compatible for stream-copy?' decision."""
+        import json
+        import subprocess
+
+        if path in self._av_probe_cache:
+            return self._av_probe_cache[path]
+        prof: tuple = (None, None, None, 0.0, None, None, 0, 0)
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_streams", "-of", "json", path],
+                capture_output=True,
+            )
+            data = json.loads(r.stdout or b"{}")
+            streams = data.get("streams", [])
+            vs = next((s for s in streams if s.get("codec_type") == "video"), {})
+            aud = next((s for s in streams if s.get("codec_type") == "audio"), {})
+
+            def _fps(s):
+                fr = s.get("avg_frame_rate") or s.get("r_frame_rate") or "0/0"
+                try:
+                    n, d = fr.split("/")
+                    return round(float(n) / float(d), 2) if float(d) else 0.0
+                except Exception:  # noqa: BLE001
+                    return 0.0
+
+            prof = (
+                vs.get("codec_name"), vs.get("width"), vs.get("height"), _fps(vs), vs.get("pix_fmt"),
+                aud.get("codec_name"), int(aud.get("sample_rate") or 0), int(aud.get("channels") or 0),
+            )
+        except Exception:  # noqa: BLE001 — probe failure → treat as unknown (forces re-encode)
+            pass
+        self._av_probe_cache[path] = prof
+        return prof
+
+    # re-encode canvas for mixed-source reels: everything padded to this so the
+    # concatenated file has one constant resolution/fps/pixfmt (concat -c copy
+    # is only valid across identical stream params).
+    _REEL_VF = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p")
+
+    def _build_reel(self, specs: list[dict], out, job=None, log=print) -> dict:
+        """Cut each {path,start,end} and join into one valid video. If every
+        source shares the same codec/res/fps/pixfmt/audio, stream-copy (fast,
+        lossless); otherwise re-encode each clip to a common 1080p30 H.264/AAC
+        canvas so the concatenation is well-formed (the mixed-source case that
+        previously produced a corrupt, speed-varying file). Validates the output
+        and raises on a malformed result instead of reporting success."""
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        out = Path(out)
+        distinct = {sp["path"] for sp in specs if sp.get("path")}
+        profs = {p: self._probe_av(p) for p in distinct}
+        uniform = (
+            len({profs[p] for p in distinct}) == 1
+            and next(iter(profs.values()), (None,))[0] is not None
+        ) if distinct else False
+        mode = "copy" if uniform else "reencode"
+        log(f"reel: {len(specs)} clip(s) from {len(distinct)} file(s) — "
+            + ("uniform sources → lossless stream-copy" if uniform
+               else "mixed sources → re-encoding to 1080p30 H.264/AAC"))
+        if job:
+            job.progress = {"total": len(specs), "done": 0}
+
+        expected = 0.0
         with tempfile.TemporaryDirectory() as td:
             segs: list[str] = []
-            for i, a in enumerate(apexes):
+            for i, sp in enumerate(specs):
                 if job and job.cancelled:
                     log(f"  ⏹ stop requested — halting after {len(segs)} clips")
                     break
-                d = details.get(str(a["scene_id"])) or {}
-                path = d.get("path")
+                path, start, end = sp.get("path"), float(sp["start"]), float(sp["end"])
                 if not path or not os.path.exists(path):
-                    log(f"  ! scene {a['scene_id']}: file missing — skipped")
+                    log(f"  ! scene {sp.get('scene_id')}: file missing — skipped")
                     continue
-                start = float(a["seconds"])
-                end = float(a["end_seconds"]) if a.get("end_seconds") else start + 15.0
-                seg = os.path.join(td, f"seg{i:04d}.ts")
-                r = subprocess.run(
-                    ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
-                     "-c", "copy", "-f", "mpegts", seg],
-                    capture_output=True,
-                )
+                seg = os.path.join(td, f"seg{i:05d}.ts")
+                if mode == "copy":
+                    cmd = ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
+                           "-c", "copy", "-avoid_negative_ts", "make_zero", "-f", "mpegts", seg]
+                elif profs.get(path, (None,) * 8)[5] is not None:  # source has audio
+                    cmd = ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
+                           "-vf", self._REEL_VF,
+                           "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-f", "mpegts", seg]
+                else:  # no audio → synth a silent track so the join stays continuous
+                    cmd = ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
+                           "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                           "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                           "-vf", self._REEL_VF,
+                           "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-f", "mpegts", seg]
+                r = subprocess.run(cmd, capture_output=True)
                 if r.returncode == 0 and os.path.exists(seg) and os.path.getsize(seg) > 0:
                     segs.append(seg)
+                    expected += max(0.0, end - start)
                     if job:
                         job.progress["done"] = len(segs)
-                    log(f"  + clip {len(segs)}: scene {a['scene_id']} {start:.0f}-{end:.0f}s")
+                    log(f"  + clip {len(segs)}: scene {sp.get('scene_id')} {start:.0f}-{end:.0f}s")
                 else:
-                    log(f"  ! scene {a['scene_id']} clip failed (codec mismatch?) — skipped")
+                    log(f"  ! scene {sp.get('scene_id')} clip failed — skipped"
+                        + (": " + r.stderr.decode("replace")[-160:] if r.stderr else ""))
             if not segs:
                 log("no clips extracted")
                 return {"clips": 0}
@@ -620,25 +716,53 @@ class Service:
                 for s in segs:
                     f.write(f"file '{s}'\n")
             cc = subprocess.run(
-                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", str(out)],
+                ["ffmpeg", "-y", "-fflags", "+genpts", "-f", "concat", "-safe", "0",
+                 "-i", listf, "-c", "copy", "-movflags", "+faststart", str(out)],
                 capture_output=True,
             )
             if cc.returncode != 0:
                 raise RuntimeError("concat failed: " + cc.stderr.decode("replace")[-300:])
+        self._validate_reel(out, expected, log=log)
         size = out.stat().st_size if out.exists() else 0
-        log(f"reel: {len(segs)} clips → {out} ({size // 1_000_000} MB)")
-        return {"clips": len(segs), "name": name, "path": str(out), "bytes": size}
+        log(f"reel: {len(segs)} clips → {out} ({size // 1_000_000} MB, {mode})")
+        return {"clips": len(segs), "path": str(out), "bytes": size, "mode": mode}
+
+    def _validate_reel(self, out, expected_secs: float, log=print) -> None:
+        """ffprobe the finished reel and fail loudly on a malformed result —
+        ffmpeg's concat exits 0 even when the joined stream is broken, so this is
+        the real gate. Checks there's a video stream and the duration is in the
+        right ballpark (loose, to tolerate keyframe pre-roll)."""
+        import json
+        import subprocess
+
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type",
+             "-of", "json", str(out)],
+            capture_output=True,
+        )
+        try:
+            data = json.loads(r.stdout or b"{}")
+        except Exception:  # noqa: BLE001
+            data = {}
+        vids = [s for s in data.get("streams", []) if s.get("codec_type") == "video"]
+        dur = float((data.get("format") or {}).get("duration") or 0.0)
+        if not vids:
+            raise RuntimeError("export validation failed: no video stream in the output")
+        if expected_secs and dur and not (0.5 * expected_secs <= dur <= 1.5 * expected_secs):
+            raise RuntimeError(
+                f"export validation failed: duration {dur:.0f}s is far off the expected "
+                f"~{expected_secs:.0f}s — the file is likely malformed"
+            )
+        log(f"  ✓ validated: {dur:.0f}s, {len(vids)} video stream(s)")
 
     def export_collection(
         self, job=None, name: str = "", limit: int = 200
     ) -> dict:
-        """Concatenate a saved collection's clips into one downloadable video —
-        the collection-flavoured sibling of export_reel. Highest-scoring moments
-        first, capped at `limit` so a giant collection can't kick off a
-        multi-hour render unasked. Stream-copy (fast), skips codec mismatches."""
+        """Concatenate a saved collection's clips into one downloadable video via
+        `_build_reel` (lossless stream-copy when the sources are uniform, else
+        re-encode to a common 1080p30 format). Highest-scoring moments first,
+        capped at `limit` so a giant collection can't kick off a huge render."""
         import os
-        import subprocess
-        import tempfile
         from pathlib import Path
 
         log = (job.log if job else print)
@@ -652,55 +776,22 @@ class Service:
         apexes = [a for a in apexes if a.get("scene_id")]
 
         details = self.client().scene_details(sorted({str(a["scene_id"]) for a in apexes}))
+        specs = []
+        for a in apexes:
+            path = (details.get(str(a["scene_id"])) or {}).get("path")
+            if not path:
+                continue
+            start = float(a.get("start") or 0)
+            end = float(a["end"]) if a.get("end") else start + float(a.get("duration") or 20)
+            specs.append({"path": path, "start": start, "end": end, "scene_id": a["scene_id"]})
+
         exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
         exports.mkdir(parents=True, exist_ok=True)
         safe = _safe_reel_name(Path(name).stem) + ".mp4"
         out = exports / safe
-        if job:
-            job.progress = {"total": len(apexes), "done": 0}
-
-        ff = getattr(self.cfg.sampling, "ffmpeg", "ffmpeg") if hasattr(self.cfg, "sampling") else "ffmpeg"
-        with tempfile.TemporaryDirectory() as td:
-            segs: list[str] = []
-            for i, a in enumerate(apexes):
-                if job and job.cancelled:
-                    log(f"  ⏹ stop requested — halting after {len(segs)} clips")
-                    break
-                path = (details.get(str(a["scene_id"])) or {}).get("path")
-                if not path or not os.path.exists(path):
-                    log(f"  ! scene {a['scene_id']}: file missing — skipped")
-                    continue
-                start = float(a.get("start") or 0)
-                end = float(a["end"]) if a.get("end") else start + float(a.get("duration") or 20)
-                seg = os.path.join(td, f"seg{i:04d}.ts")
-                r = subprocess.run(
-                    [ff, "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
-                     "-c", "copy", "-f", "mpegts", seg],
-                    capture_output=True,
-                )
-                if r.returncode == 0 and os.path.exists(seg) and os.path.getsize(seg) > 0:
-                    segs.append(seg)
-                    if job:
-                        job.progress["done"] = len(segs)
-                    log(f"  + clip {len(segs)}: scene {a['scene_id']} {start:.0f}-{end:.0f}s")
-                else:
-                    log(f"  ! scene {a['scene_id']} clip failed (codec mismatch?) — skipped")
-            if not segs:
-                log("no clips extracted")
-                return {"clips": 0}
-            listf = os.path.join(td, "list.txt")
-            with open(listf, "w") as f:
-                for s in segs:
-                    f.write(f"file '{s}'\n")
-            cc = subprocess.run(
-                [ff, "-y", "-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", str(out)],
-                capture_output=True,
-            )
-            if cc.returncode != 0:
-                raise RuntimeError("concat failed: " + cc.stderr.decode("replace")[-300:])
-        size = out.stat().st_size if out.exists() else 0
-        log(f"export: {len(segs)} clips → {out} ({size // 1_000_000} MB)")
-        return {"clips": len(segs), "name": safe, "path": str(out), "bytes": size}
+        res = self._build_reel(specs, out, job=job, log=log)
+        res["name"] = safe
+        return res
 
     def reels(self) -> list[dict]:
         """List exported reels (newest first)."""

@@ -373,13 +373,15 @@
       <pre id="playlist-log" class="log" hidden></pre>
       <div id="collections" class="reels"></div>
 
-      <p class="dim" style="margin-top:16px">Stitches <strong>every</strong> moment saved
-        under the tag above, across your whole library (default <code>apex</code>), into
-        one highlight video — independent of the board on screen or any playlist. To
-        export a single playlist instead, use the ⬇ on its card above. (Fast stream-copy
-        from the source files.)</p>
+      <p class="dim" style="margin-top:16px">Stitches the moments saved under the tag above,
+        across your whole library (default <code>apex</code>), into one highlight video —
+        independent of the board on screen or any playlist. To export a single playlist
+        instead, use the ⬇ on its card above. Clips from same-format sources are stitched
+        losslessly; a mix of resolutions/framerates is normalized to 1080p·30fps so the
+        file plays cleanly start to finish.</p>
       <div class="row">
-        <button id="btn-reel" class="primary" title="Stitches every ⭐-saved moment under the tag above into one video — not the board on screen or a playlist.">Export all saved moments</button>
+        <button id="btn-reel" class="primary" title="Stitches saved moments under the tag above into one video — not the board on screen or a playlist.">Export saved moments</button>
+        <label class="check" title="Off: export the most recent 300 (avoids a surprise multi-GB file). On: export every saved moment under this tag."><input type="checkbox" id="reel-all" /> all (else 300 most recent)</label>
         <button id="btn-reel-stop" class="ghost" hidden>Stop</button>
         <span id="reel-status" class="dim"></span>
       </div>

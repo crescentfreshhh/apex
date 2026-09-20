@@ -1027,9 +1027,14 @@ def test_export_collection_writes_mp4(tmp_path, monkeypatch):
         (tmp_path / f"{i}.mp4").write_bytes(b"x")   # files must "exist"
     monkeypatch.setattr(svc, "client", lambda: _C())
 
+    _PROBE = (b'{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,'
+              b'"height":1080,"avg_frame_rate":"30/1","pix_fmt":"yuv420p"},'
+              b'{"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2}]}')
     calls = []
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        if cmd[0] == "ffprobe":                       # uniform sources + valid output
+            return subprocess.CompletedProcess(cmd, 0, _PROBE, b"")
         # emulate ffmpeg writing each segment / final output
         out = cmd[-1]
         if out.endswith(".ts") or out.endswith(".mp4"):
@@ -1114,17 +1119,22 @@ def test_export_reel_extracts_and_concats(tmp_path, monkeypatch):
     monkeypatch.setattr("os.path.exists", lambda p: True)  # pretend sources + segs exist
     monkeypatch.setattr("os.path.getsize", lambda p: 1000)
 
+    _PROBE = (b'{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,'
+              b'"height":1080,"avg_frame_rate":"30/1","pix_fmt":"yuv420p"},'
+              b'{"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2}]}')
     calls = []
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        if cmd[0] == "ffprobe":                       # uniform sources + valid output
+            return subprocess.CompletedProcess(cmd, 0, _PROBE, b"")
         # the concat step must write the output file
         if "concat" in cmd:
             (tmp_path / "exports").mkdir(parents=True, exist_ok=True)
             out = cmd[-1]
             with open(out, "wb") as f:
                 f.write(b"x" * 2_000_000)
-        return type("R", (), {"returncode": 0, "stderr": b""})()
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 

@@ -376,7 +376,8 @@ def create_app(cfg=None):
         return job.as_dict()
 
     @app.post("/api/reel")
-    def start_reel(tag: str | None = None, limit: int = Query(0)):
+    def start_reel(tag: str | None = None, limit: int | None = Query(None)):
+        # limit None → default cap (REEL_DEFAULT_CAP); 0 → every saved moment.
         try:
             job = jobs.start("reel", lambda j: service.export_reel(j, tag=tag, limit=limit))
         except RuntimeError as exc:
