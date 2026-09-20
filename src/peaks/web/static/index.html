@@ -16,11 +16,32 @@
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="performers">Performers</button>
       <button class="tab" data-view="statistics">Statistics</button>
+      <button class="tab" data-view="experimental">🧪 Experimental</button>
       <button class="tab" data-view="dashboard">Settings</button>
     </nav>
     <span id="conn" class="dim"></span>
     <button id="btn-logout" class="tab" title="Lock (sign out)" hidden>🔒 Lock</button>
   </header>
+
+  <!-- EXPERIMENTAL (taste validation / diagnostics) -->
+  <section id="experimental" class="view">
+    <div class="panel">
+      <h2>🧪 Experimental — taste coverage</h2>
+      <p class="dim">A read-only check on how much of your embedded library your taste
+        actually reaches, and <em>why</em> the rest doesn't — using the exact scoring
+        that drives For You and the megaboard. A scene with no on-taste moment is usually
+        one of three things, not a bug: it isn't embedded yet, your taste is built from
+        few examples (so it's narrow by design), or your floor is high.</p>
+      <div class="row">
+        <label id="exp-floor-wrap" title="A scene counts as 'covered' if its best moment scores at or above this. Shared with the board + Statistics.">taste floor
+          <input type="range" id="exp-floor" min="0" max="0.95" step="0.01" value="0" />
+          <b id="exp-floor-val" class="dim">off</b></label>
+        <button id="btn-exp-refresh" class="ghost">↻ Refresh</button>
+        <span id="exp-status" class="dim"></span>
+      </div>
+    </div>
+    <div id="exp-body" class="dim">Analyzing your taste coverage…</div>
+  </section>
 
   <!-- SETTINGS -->
   <section id="dashboard" class="view">

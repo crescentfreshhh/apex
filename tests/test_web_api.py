@@ -137,6 +137,37 @@ def test_taste_metrics_endpoint(cfg, tmp_path, monkeypatch):
     assert mt["value"] == 0.5 and 0 <= mt["percentile"] <= 100
 
 
+def test_experimental_taste_validation(cfg, tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    cfg.modeling.labels_path = str(tmp_path / "labels.json")
+    monkeypatch.setattr(svc_mod.Service, "stream_url", lambda self, sid, start=None: f"http://s/{sid}?t={start}")
+    # embed_status reaches Stash for the scope count; the endpoint tolerates a
+    # failure, but stub it so the test is offline + deterministic.
+    monkeypatch.setattr(svc_mod.Service, "embed_status",
+                        lambda self: {"embedded": 2, "total": 2, "pending": 0})
+
+    class _C:
+        def iter_markers_by_tag(self, tag, page_size=200):
+            return iter(())
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    client = TestClient(create_app(cfg))
+
+    # no taste yet → not ready, but still reports pipeline health
+    r0 = client.get("/api/experimental/taste").json()
+    assert r0["ready"] is False and "health" in r0
+
+    client.post("/api/label", params={"key": "k1", "t": 0.0, "label": 1, "scene_id": "1"})
+    d = client.get("/api/experimental/taste").json()
+    assert d["ready"] is True
+    assert d["scenes"] == 2                          # two embedded scenes
+    assert len(d["distribution"]) == 20              # 20 histogram bins
+    assert len(d["coverage_curve"]) == 19            # floors 0.05..0.95
+    assert d["health"]["taste_examples"] == 1 and d["health"]["scorer"] in ("classifier", "modes")
+    assert d["wall"] and all("thumb" in w and "score" in w for w in d["wall"])
+
+
 def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
     import peaks.web.service as svc_mod
 

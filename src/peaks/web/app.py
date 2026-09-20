@@ -269,6 +269,11 @@ def create_app(cfg=None):
         r = service.stats_board(metric, id=id, count=count)
         return {"performer": r.get("performer"), "items": _hit_payload(service, r.get("hits", []))}
 
+    @app.get("/api/experimental/taste")
+    def experimental_taste(profile: str | None = None):
+        """Read-only taste-coverage diagnostics for the Experimental tab."""
+        return service.taste_validation(profile=profile)
+
     @app.get("/api/capabilities")
     def capabilities():
         idx = service.index()

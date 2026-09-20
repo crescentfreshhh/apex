@@ -50,6 +50,7 @@ document.querySelectorAll(".tab[data-view]").forEach((b) =>
     if (b.dataset.view === "foryou") openForYou();
     if (b.dataset.view === "performers") openPerformers();
     if (b.dataset.view === "statistics") openStatistics();
+    if (b.dataset.view === "experimental") openExperimental();
   })
 );
 
@@ -1654,6 +1655,107 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(0); }  // ← = 👎 pass
   else if (e.key === "ArrowDown") { e.preventDefault(); loadNextSwipe(); }
 });
+
+// --- Experimental: taste coverage / validation -----------------------------
+let expData = null;
+function updateExpFloorLabel() {
+  const v = +$("#exp-floor").value;
+  $("#exp-floor-val").textContent = v > 0 ? Math.round(v * 100) + "%" : "off";
+}
+async function openExperimental() {
+  const body = $("#exp-body");
+  const f = readFloor();
+  if (f != null && isFinite(f)) $("#exp-floor").value = Math.min(Math.max(f, 0), 0.95);
+  updateExpFloorLabel();
+  body.innerHTML = '<p class="dim">Analyzing your taste coverage…</p>';
+  $("#exp-status").textContent = "";
+  try {
+    expData = await api("/api/experimental/taste" + (PROFILE.isDefault() ? "" : `?profile=${encodeURIComponent(PROFILE.name)}`));
+  } catch (e) { body.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  renderExperimental();
+}
+function expCoverageAt(floor) {
+  if (floor <= 0) return expData.scenes;
+  let covered = expData.scenes;
+  for (const p of (expData.coverage_curve || [])) if (p.floor <= floor) covered = p.covered;
+  return covered;
+}
+function renderExpHealth() {
+  const h = expData.health || {};
+  const cards = [
+    ["Embedded scenes", h.embedded_scenes ?? "—"],
+    ["Library total", h.library_total ?? "—"],
+    ["Not yet embedded", h.pending ?? "—"],
+    ["Failed scenes", h.failed ?? 0],
+    ["Taste examples", h.taste_examples ?? 0],
+    ["Scorer", h.scorer || "—"],
+    ["Text search (CLIP)", h.has_clip ? "yes" : "no"],
+  ];
+  const warn = [
+    (h.taste_examples != null && h.taste_examples < 25) ? `⚠ Your taste is built from only ${h.taste_examples} example(s) — it will naturally miss most of the library until you rate more.` : "",
+    h.pending ? `⚠ ${h.pending} scene(s) aren't embedded yet, so they can't be scored.` : "",
+    h.failed ? `⚠ ${h.failed} scene(s) failed to embed (see Settings → Failed scenes).` : "",
+  ].filter(Boolean).join(" ");
+  return `<div class="panel"><h3 class="exp-h">Pipeline health</h3>
+    <div class="cards">${cards.map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${esc(String(v))}</div></div>`).join("")}</div>
+    ${warn ? `<p class="dim" style="margin-top:8px">${warn}</p>` : ""}</div>`;
+}
+function renderExperimental() {
+  const body = $("#exp-body");
+  if (!expData || !expData.ready) {
+    body.innerHTML = `<div class="panel"><p class="dim">${esc(expData?.reason || "Not ready.")}</p></div>` + renderExpHealth();
+    return;
+  }
+  const floor = +$("#exp-floor").value;
+  const total = expData.scenes || 0;
+  const covered = expCoverageAt(floor);
+  const uncovered = total - covered;
+  const pct = total ? Math.round((uncovered / total) * 100) : 0;
+  const floorTxt = floor > 0 ? Math.round(floor * 100) + "%" : "0%";
+  const coverage = `<div class="panel">
+    <div class="exp-big">${uncovered.toLocaleString()} of ${total.toLocaleString()} scenes <span class="dim">have no moment above ${floorTxt} (${pct}%)</span></div>
+    <div class="dim">${covered.toLocaleString()} scene(s) are covered by your taste at this floor · scores span ${Math.round(expData.score_range[0] * 100)}%–${Math.round(expData.score_range[1] * 100)}%.</div></div>`;
+
+  const dist = expData.distribution || [];
+  const dmax = Math.max(1, ...dist.map((b) => b.n));
+  const histBars = dist.map((b) => {
+    const hh = Math.round((b.n / dmax) * 100);
+    return `<div class="exp-bar ${b.lo >= floor ? "" : "below"}" style="height:${hh}%" title="${Math.round(b.lo * 100)}%+ · ${b.n} scene(s)"></div>`;
+  }).join("");
+  const histogram = `<div class="panel"><h3 class="exp-h">Per-scene best-score distribution</h3>
+    <div class="exp-hist">${histBars}</div><div class="exp-axis"><span>0%</span><span>100%</span></div>
+    <p class="dim">Each scene's single best moment. Grey bars (left of the floor) are the uncovered scenes.</p></div>`;
+
+  const curve = expData.coverage_curve || [];
+  const curveBars = curve.map((p) => {
+    const hh = total ? Math.round((p.covered / total) * 100) : 0;
+    return `<div class="exp-bar" style="height:${hh}%" title="floor ${Math.round(p.floor * 100)}% · ${p.covered.toLocaleString()} covered (${hh}%)"></div>`;
+  }).join("");
+  const curvePanel = `<div class="panel"><h3 class="exp-h">Coverage vs. floor</h3>
+    <div class="exp-hist">${curveBars}</div><div class="exp-axis"><span>floor 5%</span><span>95%</span></div>
+    <p class="dim">How much of the library stays covered as the floor rises — the knee is a sensible floor.</p></div>`;
+
+  const de = expData.density || {};
+  const density = `<div class="panel"><h3 class="exp-h">Sampling density</h3>
+    <p class="dim">Moments sampled per scene — min ${de.min}, median ${de.median}, max ${de.max}. ${de.sparse_scenes ? `⚠ ${de.sparse_scenes} scene(s) have fewer than 4 sampled moments (few chances to score — a denser embed interval would help).` : "Every scene has a healthy number of sampled moments."}</p></div>`;
+
+  const w = expData.wall || [];
+  const tiles = w.map((it) => `<div class="exp-tile" data-stream="${esc(it.stream || "")}" data-key="${esc(it.key)}" data-t="${it.t}" data-sid="${esc(String(it.scene_id))}">
+      <img loading="lazy" src="${it.thumb}" onerror="this.style.display='none'" />
+      <span class="exp-score">${Math.round(it.score * 100)}%</span></div>`).join("");
+  const wall = w.length ? `<div class="panel"><h3 class="exp-h">Least on-taste scenes <span class="dim">(their own best moment)</span></h3>
+    <p class="dim">The ${w.length} scenes your taste scores lowest. Do they genuinely look "not you"? If good scenes are here, your taste needs more examples — not a bug. Click a still to play it.</p>
+    <div class="exp-wall">${tiles}</div></div>` : "";
+
+  body.innerHTML = coverage + renderExpHealth() + histogram + curvePanel + density + wall;
+  body.querySelectorAll(".exp-tile").forEach((el) => el.addEventListener("click", () => {
+    const hit = { stream: el.dataset.stream, time: +el.dataset.t, scene_id: el.dataset.sid, key: el.dataset.key, score: 0 };
+    if (hit.stream) openViewer(hit);
+  }));
+}
+$("#exp-floor")?.addEventListener("input", () => { updateExpFloorLabel(); if (expData && expData.ready) renderExperimental(); });
+$("#exp-floor")?.addEventListener("change", () => writeFloor(+$("#exp-floor").value));
+$("#btn-exp-refresh")?.addEventListener("click", () => openExperimental());
 
 function setActiveView(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === name));

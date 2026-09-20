@@ -1356,6 +1356,12 @@ class Service:
         store.add(key, float(time), int(label), profile, scene_id=scene_id)
         store.save()
         self._labels_since_train += 1
+        # Reflect the new rating immediately: without this the cached taste
+        # sources/modes/board scores stay stale until the next autotrain (~25
+        # ratings) or a manual Train — so ratings appeared not to "take" and the
+        # board kept scoring against an older taste. Caches rebuild lazily on the
+        # next query (a cheap re-score for the modes/centroid scorer).
+        self._invalidate_taste_caches()
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
 
@@ -1853,6 +1859,101 @@ class Service:
         return {
             "hits": hits, "scenes": scenes_total, "moments": moments_total,
             "model": model, "scored_by": scored_by,
+        }
+
+    def taste_validation(self, profile: str | None = None, wall: int = 48) -> dict:
+        """Read-only diagnostics for the Experimental tab. Reuses the SAME
+        `_taste_scores` the board scores with, so what you see here is exactly
+        what drives For You / the megaboard. Reports, per the embedded library:
+        coverage (scenes with no moment above a floor), the per-scene best-score
+        distribution, a coverage-vs-floor curve, sampling density, a stills wall
+        of the *least* on-taste scenes, and pipeline-health context that explains
+        WHY a scene may be uncovered (unembedded, thin taste, high floor) so an
+        empty patch reads as a cause, not a bug. Computes nothing new — one pass
+        over the existing index."""
+        from ..failures import failure_log_for
+
+        model = self._model_name()
+        idx = self.index(model)
+        try:
+            es = self.embed_status()
+        except Exception:  # noqa: BLE001 — Stash offline; embedded count still known
+            es = {"embedded": (idx and len({s for s in idx.scene_ids if s})) or 0,
+                  "total": None, "pending": None}
+        c, n_examples, _ = self._taste_centroid(model, profile=profile)
+        health = {
+            "embedded_scenes": es.get("embedded"),
+            "library_total": es.get("total"),
+            "pending": es.get("pending"),
+            "failed": len(failure_log_for(self.cfg)),
+            "has_clip": self.has_clip_index(),
+            "model": model,
+            "taste_examples": int(n_examples or 0),
+            "scorer": None,
+        }
+        if idx.size == 0:
+            return {"ready": False,
+                    "reason": "Nothing embedded yet — run an embed pass first.",
+                    "health": health}
+        scores, scored_by = self._taste_scores(model, profile=profile)
+        health["scorer"] = scored_by
+        if scores is None:
+            return {"ready": False,
+                    "reason": "No taste yet — save (⭐) or 👍 a few moments, then Train.",
+                    "health": health}
+
+        sid_arr = np.asarray([str(s) if s is not None else "" for s in idx.scene_ids])
+        # per-scene BEST moment row, vectorised: order by (scene, best-first), take
+        # the first row of each scene group — mirrors _board_universe's grouping.
+        order = np.lexsort((-scores, sid_arr))
+        sarr = sid_arr[order]
+        first = np.empty(sarr.size, dtype=bool)
+        first[0] = True
+        first[1:] = sarr[1:] != sarr[:-1]
+        best_rows = order[first]
+        best_rows = best_rows[sid_arr[best_rows] != ""]      # drop the no-scene bucket
+        best_scores = scores[best_rows].astype(np.float32)
+        n_scenes = int(best_rows.size)
+
+        # per-scene sampled-moment counts (density)
+        uniq, cnt = np.unique(sid_arr, return_counts=True)
+        real_cnt = cnt[uniq != ""]
+        density = {
+            "min": int(real_cnt.min()), "median": int(np.median(real_cnt)),
+            "max": int(real_cnt.max()),
+            "sparse_scenes": int((real_cnt < 4).sum()),  # <4 frames = few chances to score
+        }
+
+        # coverage-vs-floor curve (0.05 … 0.95)
+        floors = [round(f / 20, 2) for f in range(1, 20)]
+        curve = [{"floor": f, "covered": int((best_scores >= f).sum())} for f in floors]
+
+        # per-scene best-score distribution (20 bins, 0..1)
+        hist, edges = np.histogram(np.clip(best_scores, 0.0, 1.0), bins=20, range=(0.0, 1.0))
+        dist = [{"lo": round(float(edges[i]), 3), "n": int(hist[i])} for i in range(20)]
+
+        # stills wall: the LEAST on-taste scenes (their own best moment)
+        low = best_rows[np.argsort(best_scores)][:wall]
+        wall_items = []
+        for i in low.tolist():
+            sid = idx.scene_ids[i]
+            t = round(float(idx.times[i]), 2)
+            wall_items.append({
+                "scene_id": sid, "key": idx.keys[i], "t": t,
+                "score": round(float(scores[i]), 4),
+                "thumb": f"/api/frame?key={idx.keys[i]}&t={idx.times[i]:g}",
+                "stream": self.stream_url(sid, start=t) if sid else None,
+            })
+
+        return {
+            "ready": True,
+            "scenes": n_scenes,
+            "score_range": [round(float(best_scores.min()), 4), round(float(best_scores.max()), 4)],
+            "distribution": dist,
+            "coverage_curve": curve,
+            "density": density,
+            "wall": wall_items,
+            "health": health,
         }
 
     def _sample_uniform(
