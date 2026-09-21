@@ -678,7 +678,10 @@ class Service:
         """One video of a performer's top `count` taste-ranked moments. Reuses
         `performer_best` for the ranking and `_build_reel` for the cut+join, so it
         honors the export-quality settings (a performer spans many scenes → mixed
-        → re-encode). Each moment becomes a `window`-second clip centered on it."""
+        → re-encode). Each moment becomes a `window`-second clip centered on it.
+        Playback is grouped by scene — the reel stays inside one scene (clips in
+        timestamp order) before moving to the next, with the strongest scene
+        (her single most on-taste moment) first."""
         import os
         import time as _t
         from pathlib import Path
@@ -691,9 +694,16 @@ class Service:
             log(f"no moments found for {pname}")
             return {"clips": 0, "performer": pname}
         details = self.client().scene_details(sorted({str(h.scene_id) for h in hits if h.scene_id}))
-        specs = []
+        # Group clips by scene so the reel plays through one scene at a time. Hits
+        # arrive globally taste-score-descending, so the order each scene first
+        # appears IS "best scene first" (a scene's first hit is its top moment, and
+        # those firsts are in descending order — no separate max-score pass needed).
+        # Within a scene the clips are then sorted by timestamp ascending.
+        scene_order: list[str] = []
+        by_scene: dict[str, list[dict]] = {}
         for h in hits:
-            d = details.get(str(h.scene_id)) or {}
+            sid = str(h.scene_id)
+            d = details.get(sid) or {}
             path = d.get("path")
             if not path:
                 continue
@@ -704,7 +714,13 @@ class Service:
             if dur:                       # keep the clip inside the scene
                 end = min(end, dur)
                 start = min(start, max(0.0, dur - 1.0))
-            specs.append({"path": path, "start": start, "end": end, "scene_id": h.scene_id})
+            if sid not in by_scene:
+                by_scene[sid] = []
+                scene_order.append(sid)
+            by_scene[sid].append({"path": path, "start": start, "end": end, "scene_id": h.scene_id})
+        specs = []
+        for sid in scene_order:           # best scene first, chronological within
+            specs.extend(sorted(by_scene[sid], key=lambda s: s["start"]))
 
         exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
         exports.mkdir(parents=True, exist_ok=True)

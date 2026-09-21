@@ -296,6 +296,49 @@ def test_export_performer_builds_centered_specs(tmp_path, monkeypatch):
     assert res["performer"] == "Jane Doe" and res["name"].endswith(".mp4")
 
 
+def test_export_performer_groups_by_scene_best_first(tmp_path, monkeypatch):
+    """Reel plays through one scene at a time (timestamp order within), scenes
+    ordered best-first. Hits arrive globally taste-score-descending."""
+    svc = _svc(tmp_path)
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+
+    class _Hit:
+        def __init__(self, sid, t, score):
+            self.scene_id, self.time, self.score = sid, t, score
+
+    # interleaved across 3 scenes, out of time order, score-desc (as performer_best returns):
+    hits = [
+        _Hit("20", 200.0, 0.95),   # scene A top → best scene
+        _Hit("22", 50.0, 0.90),    # scene C top
+        _Hit("20", 10.0, 0.80),    # scene A, earlier timestamp
+        _Hit("21", 300.0, 0.70),   # scene B top
+        _Hit("21", 100.0, 0.60),   # scene B, earlier timestamp
+    ]
+    monkeypatch.setattr(svc_mod.Service, "performer_best",
+                        lambda self, **kw: {"performer": "Jane Doe", "hits": hits})
+
+    class _C:
+        def scene_details(self, ids):
+            return {sid: {"path": f"/data/{sid}.mp4", "duration": 1000.0}
+                    for sid in ("20", "21", "22")}
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    captured = {}
+    monkeypatch.setattr(svc_mod.Service, "_build_reel",
+                        lambda self, specs, out, job=None, log=print:
+                        captured.update(specs=specs) or {"clips": len(specs)})
+
+    svc.export_performer(name="Jane Doe", window=20.0)
+    specs = captured["specs"]
+    # scenes grouped, best-first: A(0.95), C(0.90), B(0.70)
+    assert [s["scene_id"] for s in specs] == ["20", "20", "22", "21", "21"]
+    # within each scene, clips play in timestamp (start) order
+    a_starts = [s["start"] for s in specs if s["scene_id"] == "20"]
+    b_starts = [s["start"] for s in specs if s["scene_id"] == "21"]
+    assert a_starts == sorted(a_starts) and a_starts == [0.0, 190.0]   # t=10 then t=200
+    assert b_starts == sorted(b_starts) and b_starts == [90.0, 290.0]  # t=100 then t=300
+
+
 def test_export_performer_no_hits(tmp_path, monkeypatch):
     svc = _svc(tmp_path)
     monkeypatch.setattr(svc_mod.Service, "performer_best",
