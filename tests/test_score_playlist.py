@@ -694,6 +694,14 @@ def test_diversify_breaks_up_near_duplicates(tmp_path):
     diverse = svc._diversify(ranked, "dinov2", k=2, diversity=0.6)
     assert [h.key for h in diverse] == ["A", "C"]  # variety pulls C above the near-dupe B
 
+    # order_all: pool (3) already fits in k (3) but is still MMR-reordered so the
+    # near-duplicate B is pushed to the end (the performer reel's interleaving).
+    all_pure = svc._diversify(ranked, "dinov2", k=3, diversity=0.6)
+    assert [h.key for h in all_pure] == ["A", "B", "C"]  # without order_all: score order
+    all_div = svc._diversify(ranked, "dinov2", k=3, diversity=0.6, order_all=True)
+    assert [h.key for h in all_div] == ["A", "C", "B"]  # C interleaved before its look-alike B
+    assert svc._diversify([], "dinov2", k=3, diversity=0.6, order_all=True) == []  # empty is safe
+
 
 def test_recommend_exclude_drops_scenes(tmp_path, monkeypatch):
     svc, cfg = _service(tmp_path)

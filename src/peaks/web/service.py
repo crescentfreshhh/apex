@@ -675,35 +675,41 @@ class Service:
 
     def export_performer(self, job=None, name=None, performer_id=None,
                          count: int = 300, window: float = 20.0) -> dict:
-        """One video of a performer's top `count` taste-ranked moments. Reuses
-        `performer_best` for the ranking and `_build_reel` for the cut+join, so it
-        honors the export-quality settings (a performer spans many scenes → mixed
-        → re-encode). Each moment becomes a `window`-second clip centered on it.
-        Playback is grouped by scene — the reel stays inside one scene (clips in
-        timestamp order) before moving to the next, with the strongest scene
-        (her single most on-taste moment) first."""
+        """One video of a performer's top `count` taste moments. Gathers a
+        generous candidate pool (many moments per scene), then MMR-selects the
+        final `count` via `_diversify` so the reel is quality-proportional and
+        varied rather than flat: scenes with more distinct on-taste content
+        contribute more, near-duplicate frames are suppressed, and no single scene
+        dominates. Reuses `_build_reel` for the cut+join, so it honors the
+        export-quality settings (mixed scenes → re-encode). Each moment becomes a
+        `window`-second clip centered on it, and clips play in the MMR order —
+        dissimilar moments interleaved across the whole reel."""
         import os
         import time as _t
         from pathlib import Path
 
         log = (job.log if job else print)
-        r = self.performer_best(name=name, performer_id=performer_id, count=count)
+        model = self._model_name()
+        # Generous pool: up to 40 moments/scene so rich scenes aren't pre-truncated
+        # (like the endless channel), best-first by taste, capped so MMR stays fast.
+        pool_count = max(count * 5, 1500)
+        r = self.performer_best(name=name, performer_id=performer_id,
+                                count=pool_count, per_scene=40)
         pname = r.get("performer") or name or "performer"
-        hits = r.get("hits") or []
-        if not hits:
+        pool = r.get("hits") or []
+        if not pool:
             log(f"no moments found for {pname}")
             return {"clips": 0, "performer": pname}
+        # MMR select+order: quality-proportional, de-duplicated, interleaved for
+        # variety (order_all so short pools still get reordered, not left in score
+        # order). Honors the configured feed diversity, floored so an explicitly
+        # "diverse" reel stays diverse even if the feed knob is globally off.
+        diversity = self.cfg.modeling.feed_diversity or 0.3
+        hits = self._diversify(pool, model, count, diversity, order_all=True)
         details = self.client().scene_details(sorted({str(h.scene_id) for h in hits if h.scene_id}))
-        # Group clips by scene so the reel plays through one scene at a time. Hits
-        # arrive globally taste-score-descending, so the order each scene first
-        # appears IS "best scene first" (a scene's first hit is its top moment, and
-        # those firsts are in descending order — no separate max-score pass needed).
-        # Within a scene the clips are then sorted by timestamp ascending.
-        scene_order: list[str] = []
-        by_scene: dict[str, list[dict]] = {}
-        for h in hits:
-            sid = str(h.scene_id)
-            d = details.get(sid) or {}
+        specs = []
+        for h in hits:                    # keep the MMR order → interleaved reel
+            d = details.get(str(h.scene_id)) or {}
             path = d.get("path")
             if not path:
                 continue
@@ -714,18 +720,13 @@ class Service:
             if dur:                       # keep the clip inside the scene
                 end = min(end, dur)
                 start = min(start, max(0.0, dur - 1.0))
-            if sid not in by_scene:
-                by_scene[sid] = []
-                scene_order.append(sid)
-            by_scene[sid].append({"path": path, "start": start, "end": end, "scene_id": h.scene_id})
-        specs = []
-        for sid in scene_order:           # best scene first, chronological within
-            specs.extend(sorted(by_scene[sid], key=lambda s: s["start"]))
+            specs.append({"path": path, "start": start, "end": end, "scene_id": h.scene_id})
 
         exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
         exports.mkdir(parents=True, exist_ok=True)
         fname = _safe_reel_name(f"reel-{pname}-best-{_t.strftime('%Y%m%d-%H%M%S')}") + ".mp4"
-        log(f"performer reel: {pname} — {len(specs)} of top {count} moments")
+        log(f"performer reel: {pname} — {len(specs)} diverse moments (target {count}, "
+            f"from a pool of {len(pool)})")
         res = self._build_reel(specs, exports / fname, job=job, log=log)
         res["name"] = fname
         res["performer"] = pname
@@ -2222,12 +2223,19 @@ class Service:
         order = rng.choice(n, size=count, replace=False, p=p)
         return [ranked[int(i)] for i in order]
 
-    def _diversify(self, hits: list[Hit], model: str, k: int, diversity: float) -> list[Hit]:
+    def _diversify(self, hits: list[Hit], model: str, k: int, diversity: float,
+                   order_all: bool = False) -> list[Hit]:
         """Maximal Marginal Relevance: pick a top-`k` that balances taste-rank
         against variety, so the feed spans your taste instead of collapsing into
         near-duplicates of your single favourite. `diversity` in [0,1]: 0 keeps
-        the pure ranking, higher trades relevance for spread."""
-        if diversity <= 0 or len(hits) <= k:
+        the pure ranking, higher trades relevance for spread. `order_all` runs the
+        MMR greedy even when the pool already fits in `k`, so the result is
+        re-ordered for variety (dissimilar picks spread apart) rather than left in
+        score order — the performer reel wants an interleaved, non-repetitive
+        sequence even when it keeps every candidate."""
+        if diversity <= 0 or not hits:
+            return hits[:k]
+        if len(hits) <= k and not order_all:
             return hits[:k]
         idx = self.index(model)
         dim = idx.dim or 1

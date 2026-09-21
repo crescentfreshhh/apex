@@ -268,6 +268,10 @@ def test_export_performer_builds_centered_specs(tmp_path, monkeypatch):
     hits = [_Hit("10", 100.0), _Hit("11", 5.0), _Hit("12", 500.0)]
     monkeypatch.setattr(svc_mod.Service, "performer_best",
                         lambda self, **kw: {"performer": "Jane Doe", "hits": hits})
+    monkeypatch.setattr(svc_mod.Service, "_model_name", lambda self: "dinov2")
+    # identity diversify → keep input order so the centering asserts are stable
+    monkeypatch.setattr(svc_mod.Service, "_diversify",
+                        lambda self, h, model, k, diversity, order_all=False: h[:k])
 
     class _C:
         def scene_details(self, ids):
@@ -296,9 +300,9 @@ def test_export_performer_builds_centered_specs(tmp_path, monkeypatch):
     assert res["performer"] == "Jane Doe" and res["name"].endswith(".mp4")
 
 
-def test_export_performer_groups_by_scene_best_first(tmp_path, monkeypatch):
-    """Reel plays through one scene at a time (timestamp order within), scenes
-    ordered best-first. Hits arrive globally taste-score-descending."""
+def test_export_performer_diverse_interleaved(tmp_path, monkeypatch):
+    """Reel gathers a generous pool, MMR-selects (order_all), and emits specs in
+    that diversified order — interleaved, NOT scene-grouped."""
     svc = _svc(tmp_path)
     monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
 
@@ -306,16 +310,28 @@ def test_export_performer_groups_by_scene_best_first(tmp_path, monkeypatch):
         def __init__(self, sid, t, score):
             self.scene_id, self.time, self.score = sid, t, score
 
-    # interleaved across 3 scenes, out of time order, score-desc (as performer_best returns):
-    hits = [
-        _Hit("20", 200.0, 0.95),   # scene A top → best scene
-        _Hit("22", 50.0, 0.90),    # scene C top
-        _Hit("20", 10.0, 0.80),    # scene A, earlier timestamp
-        _Hit("21", 300.0, 0.70),   # scene B top
-        _Hit("21", 100.0, 0.60),   # scene B, earlier timestamp
+    pool = [
+        _Hit("20", 200.0, 0.95),
+        _Hit("20", 10.0, 0.90),
+        _Hit("22", 50.0, 0.80),
+        _Hit("21", 300.0, 0.70),
+        _Hit("21", 100.0, 0.60),
     ]
-    monkeypatch.setattr(svc_mod.Service, "performer_best",
-                        lambda self, **kw: {"performer": "Jane Doe", "hits": hits})
+    seen = {}
+
+    def fake_best(self, **kw):
+        seen.update(kw)
+        return {"performer": "Jane Doe", "hits": pool}
+
+    monkeypatch.setattr(svc_mod.Service, "performer_best", fake_best)
+    monkeypatch.setattr(svc_mod.Service, "_model_name", lambda self: "dinov2")
+
+    def fake_div(self, hits, model, k, diversity, order_all=False):
+        assert order_all is True and diversity > 0      # reel asks for diverse ordering
+        # pretend MMR interleaved different scenes: 20, 22, 21, 20, 21
+        return [hits[0], hits[2], hits[3], hits[1], hits[4]]
+
+    monkeypatch.setattr(svc_mod.Service, "_diversify", fake_div)
 
     class _C:
         def scene_details(self, ids):
@@ -328,15 +344,12 @@ def test_export_performer_groups_by_scene_best_first(tmp_path, monkeypatch):
                         lambda self, specs, out, job=None, log=print:
                         captured.update(specs=specs) or {"clips": len(specs)})
 
-    svc.export_performer(name="Jane Doe", window=20.0)
+    svc.export_performer(name="Jane Doe", count=300, window=20.0)
     specs = captured["specs"]
-    # scenes grouped, best-first: A(0.95), C(0.90), B(0.70)
-    assert [s["scene_id"] for s in specs] == ["20", "20", "22", "21", "21"]
-    # within each scene, clips play in timestamp (start) order
-    a_starts = [s["start"] for s in specs if s["scene_id"] == "20"]
-    b_starts = [s["start"] for s in specs if s["scene_id"] == "21"]
-    assert a_starts == sorted(a_starts) and a_starts == [0.0, 190.0]   # t=10 then t=200
-    assert b_starts == sorted(b_starts) and b_starts == [90.0, 290.0]  # t=100 then t=300
+    # playback order follows the MMR output (interleaved), not scene-grouped
+    assert [s["scene_id"] for s in specs] == ["20", "22", "21", "20", "21"]
+    # a generous candidate pool was gathered so rich scenes can contribute more
+    assert seen.get("per_scene", 0) >= 40 and seen.get("count", 0) >= 300
 
 
 def test_export_performer_no_hits(tmp_path, monkeypatch):
