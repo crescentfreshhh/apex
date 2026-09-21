@@ -75,6 +75,39 @@
     </div>
 
     <div class="panel">
+      <h2>Export quality</h2>
+      <p class="dim">Applies when a reel combines clips of <em>different</em> formats — it
+        re-encodes them to one canvas so the file plays cleanly. Same-format exports stay
+        lossless at their native resolution/framerate regardless. Higher settings = larger
+        files and slower encodes; H.265 is ~half the size at 4K but needs a modern player.</p>
+      <div class="row">
+        <label title="Re-encode canvas. 'Match source' uses the largest resolution among the clips (capped at 4K); nothing is upscaled beyond what exists.">Resolution
+          <select id="exp-res">
+            <option value="1080">1080p (default)</option>
+            <option value="1440">1440p</option>
+            <option value="2160">4K (2160p)</option>
+            <option value="source">Match largest source</option>
+          </select>
+        </label>
+        <label title="'Highest' uses the fastest framerate among the clips (capped at 120).">Frame rate
+          <select id="exp-fps">
+            <option value="30">30 (default)</option>
+            <option value="60">60</option>
+            <option value="source">Highest source</option>
+          </select>
+        </label>
+        <label title="H.264 plays everywhere; H.265/HEVC is smaller at 4K but needs a modern player.">Codec
+          <select id="exp-codec">
+            <option value="h264">H.264 (default)</option>
+            <option value="hevc">H.265 / HEVC</option>
+          </select>
+        </label>
+        <button id="btn-export-save" class="primary">Save</button>
+        <span id="export-status" class="dim"></span>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>Embed</h2>
       <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
       <div class="row">

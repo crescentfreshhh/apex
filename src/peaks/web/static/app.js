@@ -242,6 +242,30 @@ $("#chk-peak-pool")?.addEventListener("change", async (e) => {
 });
 loadModels();
 
+// --- export quality (reel re-encode target) ---------------------------------
+async function loadExportSettings() {
+  try {
+    const e = await api("/api/export-settings");
+    if ($("#exp-res")) $("#exp-res").value = e.res;
+    if ($("#exp-fps")) $("#exp-fps").value = e.fps;
+    if ($("#exp-codec")) $("#exp-codec").value = e.codec;
+  } catch {}
+}
+async function saveExportSettings() {
+  try {
+    await api("/api/export-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        res: $("#exp-res").value, fps: $("#exp-fps").value, codec: $("#exp-codec").value,
+      }),
+    });
+    $("#export-status").textContent = "saved";
+    setTimeout(() => { if ($("#export-status")) $("#export-status").textContent = ""; }, 1500);
+  } catch (err) { toast(err.message, true); }
+}
+$("#btn-export-save")?.addEventListener("click", saveExportSettings);
+loadExportSettings();
+
 function wireToggle(btnSel, panelSel, hintSel) {
   $(btnSel).addEventListener("click", () => {
     const a = $(panelSel), open = a.hidden;
@@ -807,6 +831,7 @@ function renderPerformers(rows) {
           <button class="perf-detail-btn">Open</button>
           <button class="perf-best">⭐ Best of</button>
           <button class="perf-play ghost">▶ Board</button>
+          <button class="perf-reel ghost" title="Export a single video of this performer's top 300 taste-ranked moments">⬇ Reel</button>
         </div>
       </div>
     </div>`;
@@ -851,11 +876,41 @@ function playPerformerBoard(id, name) {
   const query = $("#perf-query").value.trim(); if (query) qs.set("pq", query);
   window.open("/megaboard/?" + qs.toString(), "_blank");
 }
+// one-click: stitch a performer's top-N taste-ranked moments into a single video.
+// Reuses the reel builder, so it honors the Export-quality setting (mixed sources
+// → re-encode). The finished file lands under Megaboard → Exported videos.
+async function exportPerformerReel(id, name, count = 300) {
+  if (!confirm(`Export ${name}'s top ${count} moments as one video?\n\n` +
+    `This stitches clips from many scenes and re-encodes to your current ` +
+    `Export-quality setting (Settings → Export quality), so it can take a while. ` +
+    `The file appears under Megaboard → Exported videos when done.`)) return;
+  const qs = new URLSearchParams({ count });
+  if (id) qs.set("id", id);
+  if (name) qs.set("name", name);
+  try {
+    const j = await api("/api/performer/reel?" + qs.toString(), { method: "POST" });
+    toast(`Building ${name}'s top ${count}… (Megaboard → Exported videos when ready)`);
+    if (j && j.id) pollPerformerReel(j.id, name);
+  } catch (e) { toast(e.message, true); }
+}
+async function pollPerformerReel(id, name) {
+  try {
+    const j = await api("/api/jobs/" + id);
+    if (j.status === "running") return setTimeout(() => pollPerformerReel(id, name), 3000);
+    if (j.status === "error") toast(`${name}'s reel failed: ${j.error}`, true);
+    else if (j.status === "cancelled") toast(`${name}'s reel stopped.`);
+    else {
+      const r = j.result || {};
+      toast(`✅ ${name}'s reel ready: ${r.clips || "?"} clips → Megaboard → Exported videos`);
+    }
+  } catch { /* transient; the job still finishes server-side and shows in the reel list */ }
+}
 $("#perf-grid")?.addEventListener("click", (e) => {
   const card = e.target.closest(".perf-card"); if (!card) return;
   const { id, name } = card.dataset;
   if (e.target.closest(".perf-best")) performerBestOf(id, name);
   else if (e.target.closest(".perf-play")) playPerformerBoard(id, name);
+  else if (e.target.closest(".perf-reel")) exportPerformerReel(id, name);
   else openPerformerDetail(id);   // "Open" button or card body → detail page
 });
 $("#btn-perf-search")?.addEventListener("click", async () => {
@@ -923,6 +978,7 @@ function renderPerfDetail(d) {
         <div class="perf-actions" style="margin-top:10px">
           <button id="pd-best" class="primary">⭐ Save best-of</button>
           <button id="pd-board" class="ghost">▶ Endless channel</button>
+          <button id="pd-reel" class="ghost" title="Export a single video of her top 300 taste-ranked moments">⬇ Reel</button>
           <button id="pd-compare" class="ghost">⚔ Compare</button>
         </div>
       </div>
@@ -934,6 +990,7 @@ function renderPerfDetail(d) {
   wirePerfHover(box);
   $("#pd-back").onclick = () => showPerfDetail(false);
   $("#pd-board").onclick = () => playPerformerBoard(d.id, d.performer);
+  $("#pd-reel").onclick = () => exportPerformerReel(d.id, d.performer);
   $("#pd-best").onclick = () => saveCollectionPrompt(items, `${d.performer} — best of`);
   $("#pd-compare").onclick = () => addToCompare(d.id, d.performer);
   box.querySelectorAll(".pd-sim").forEach((b) => b.onclick = () => openPerformerDetail(b.dataset.id));

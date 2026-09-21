@@ -163,3 +163,142 @@ def test_export_reel_caps_by_default(tmp_path, monkeypatch):
     assert captured["n"] == 2
     svc.export_reel(tag="apex", limit=0)        # 0 → all 10
     assert captured["n"] == 10
+
+
+# --- configurable export quality --------------------------------------------
+
+def test_export_settings_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    svc = _svc(tmp_path)
+    # defaults when unset
+    e = svc.get_export_settings()
+    assert (e["res"], e["fps"], e["codec"]) == ("1080", "30", "h264")
+    # persist + read back (fresh instance re-reads the file)
+    svc.save_export_settings(res="2160", fps="60", codec="hevc")
+    e2 = _svc(tmp_path).get_export_settings()
+    assert (e2["res"], e2["fps"], e2["codec"]) == ("2160", "60", "hevc")
+    # validation rejects junk
+    with pytest.raises(ValueError):
+        svc.save_export_settings(res="720")
+    with pytest.raises(ValueError):
+        svc.save_export_settings(fps="144")
+    with pytest.raises(ValueError):
+        svc.save_export_settings(codec="av1")
+
+
+def test_reel_honors_4k_hevc_settings(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    svc._settings_cache = {"export_res": "2160", "export_fps": "60", "export_codec": "hevc"}
+    a, b = str(tmp_path / "a.mp4"), str(tmp_path / "b.mp4")
+    _touch(a)
+    _touch(b)
+    calls = _Calls()
+    calls.profiles = {
+        a: ("h264", 1920, 1080, 30.0, "yuv420p", "aac", 48000, 2),
+        b: ("hevc", 1280, 720, 24.0, "yuv420p", "aac", 44100, 2),
+    }
+    monkeypatch.setattr(subprocess, "run", _make_fake_run(calls))
+    svc._build_reel(
+        [{"path": a, "start": 0, "end": 10, "scene_id": "1"},
+         {"path": b, "start": 5, "end": 20, "scene_id": "2"}],
+        tmp_path / "o.mp4",
+    )
+    segs = _seg_cmds(calls)
+    assert segs and all("scale=3840:2160" in "".join(c) for c in segs)
+    assert all("fps=60" in "".join(c) for c in segs)
+    assert all("libx265" in c for c in segs)
+    assert not any("libx264" in c for c in segs)
+
+
+def test_reel_defaults_stay_1080_h264(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    svc._settings_cache = {}   # unset → 1080/30/h264 defaults
+    a, b = str(tmp_path / "a.mp4"), str(tmp_path / "b.mp4")
+    _touch(a)
+    _touch(b)
+    calls = _Calls()
+    calls.profiles = {
+        a: ("h264", 1920, 1080, 30.0, "yuv420p", "aac", 48000, 2),
+        b: ("hevc", 1280, 720, 24.0, "yuv420p", "aac", 44100, 2),
+    }
+    monkeypatch.setattr(subprocess, "run", _make_fake_run(calls))
+    svc._build_reel(
+        [{"path": a, "start": 0, "end": 10, "scene_id": "1"},
+         {"path": b, "start": 5, "end": 20, "scene_id": "2"}],
+        tmp_path / "o.mp4",
+    )
+    segs = _seg_cmds(calls)
+    assert segs and all("scale=1920:1080" in "".join(c) for c in segs)
+    assert all("fps=30" in "".join(c) for c in segs)
+    assert all("libx264" in c for c in segs)
+
+
+def test_reel_source_res_takes_max(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    svc._settings_cache = {"export_res": "source", "export_fps": "source"}
+    a, b = str(tmp_path / "a.mp4"), str(tmp_path / "b.mp4")
+    _touch(a)
+    _touch(b)
+    calls = _Calls()
+    calls.profiles = {
+        a: ("h264", 3840, 2160, 60.0, "yuv420p", "aac", 48000, 2),
+        b: ("hevc", 1280, 720, 24.0, "yuv420p", "aac", 44100, 2),
+    }
+    monkeypatch.setattr(subprocess, "run", _make_fake_run(calls))
+    svc._build_reel(
+        [{"path": a, "start": 0, "end": 10, "scene_id": "1"},
+         {"path": b, "start": 5, "end": 20, "scene_id": "2"}],
+        tmp_path / "o.mp4",
+    )
+    segs = _seg_cmds(calls)
+    assert segs and all("scale=3840:2160" in "".join(c) for c in segs)   # max of the two
+    assert all("fps=60" in "".join(c) for c in segs)
+
+
+# --- one-click performer reel -----------------------------------------------
+
+def test_export_performer_builds_centered_specs(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+
+    class _Hit:
+        def __init__(self, sid, t):
+            self.scene_id, self.time, self.score = sid, t, 0.9
+
+    hits = [_Hit("10", 100.0), _Hit("11", 5.0), _Hit("12", 500.0)]
+    monkeypatch.setattr(svc_mod.Service, "performer_best",
+                        lambda self, **kw: {"performer": "Jane Doe", "hits": hits})
+
+    class _C:
+        def scene_details(self, ids):
+            return {"10": {"path": "/data/10.mp4", "duration": 600.0},
+                    "11": {"path": "/data/11.mp4", "duration": 30.0},
+                    "12": {"path": "/data/12.mp4", "duration": 505.0}}
+
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: _C())
+    captured = {}
+    monkeypatch.setattr(svc_mod.Service, "_build_reel",
+                        lambda self, specs, out, job=None, log=print:
+                        captured.update(specs=specs, out=str(out)) or
+                        {"clips": len(specs), "mode": "reencode", "path": str(out),
+                         "bytes": 1})
+
+    res = svc.export_performer(name="Jane Doe", count=300, window=20.0)
+    specs = captured["specs"]
+    assert len(specs) == 3
+    # centered 20s window, clamped into the scene
+    assert specs[0]["start"] == 90.0 and specs[0]["end"] == 110.0          # t=100 mid-scene
+    assert specs[1]["start"] == 0.0                                        # t=5 clamps to 0
+    assert specs[1]["end"] == 20.0
+    assert specs[2]["end"] == 505.0                                        # t=500 clamps to dur
+    # performer name in the output filename
+    assert "jane-doe" in captured["out"].lower()
+    assert res["performer"] == "Jane Doe" and res["name"].endswith(".mp4")
+
+
+def test_export_performer_no_hits(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc_mod.Service, "performer_best",
+                        lambda self, **kw: {"performer": "Nobody", "hits": []})
+    res = svc.export_performer(name="Nobody")
+    assert res["clips"] == 0 and res["performer"] == "Nobody"

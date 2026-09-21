@@ -103,6 +103,20 @@ def _models_model():
 ModelsIn = _models_model()
 
 
+def _export_settings_model():
+    from pydantic import BaseModel
+
+    class ExportSettingsIn(BaseModel):
+        res: str | None = None
+        fps: str | None = None
+        codec: str | None = None
+
+    return ExportSettingsIn
+
+
+ExportSettingsIn = _export_settings_model()
+
+
 def _login_model():
     from pydantic import BaseModel
 
@@ -816,6 +830,28 @@ def create_app(cfg=None):
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
+
+    @app.get("/api/export-settings")
+    def get_export_settings():
+        return service.get_export_settings()
+
+    @app.post("/api/export-settings")
+    def save_export_settings(body: ExportSettingsIn):
+        try:
+            return service.save_export_settings(res=body.res, fps=body.fps, codec=body.codec)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/performer/reel")
+    def performer_reel(id: str | None = None, name: str | None = None, count: int = Query(300)):
+        try:
+            job = jobs.start(
+                "reel",
+                lambda j: service.export_performer(j, performer_id=id, name=name, count=count),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
 
     @app.get("/api/timeline")
     def timeline(

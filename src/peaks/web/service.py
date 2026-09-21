@@ -210,6 +210,79 @@ class Service:
                 self._clip = None
         return self.get_models()
 
+    # export/reel quality — governs the mixed-source RE-ENCODE canvas only
+    # (uniform-source reels always stream-copy losslessly at native res/fps).
+    _EXPORT_RES = {"1080": (1920, 1080), "1440": (2560, 1440), "2160": (3840, 2160)}
+
+    def get_export_settings(self) -> dict:
+        s = self._settings()
+        return {
+            "res": s.get("export_res", "1080"),
+            "fps": s.get("export_fps", "30"),
+            "codec": s.get("export_codec", "h264"),
+            "res_options": ["1080", "1440", "2160", "source"],
+            "fps_options": ["30", "60", "source"],
+            "codec_options": ["h264", "hevc"],
+        }
+
+    def save_export_settings(self, res=None, fps=None, codec=None) -> dict:
+        """Persist reel export quality to settings.json (no re-embed / no index
+        rebuild — it only affects export time)."""
+        import json
+
+        s = dict(self._settings())
+        if res is not None:
+            if res not in ("1080", "1440", "2160", "source"):
+                raise ValueError(f"bad export resolution: {res}")
+            s["export_res"] = res
+        if fps is not None:
+            if fps not in ("30", "60", "source"):
+                raise ValueError(f"bad export fps: {fps}")
+            s["export_fps"] = fps
+        if codec is not None:
+            if codec not in ("h264", "hevc"):
+                raise ValueError(f"bad export codec: {codec}")
+            s["export_codec"] = codec
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.get_export_settings()
+
+    def _reel_target(self, profs: dict) -> tuple[int, int, int, str]:
+        """(width, height, fps, codec) for the mixed-source re-encode canvas,
+        from the saved export settings. 'source' picks the max across the clips
+        (capped at 4K / 120fps); everything is scale-to-fit + padded to this so
+        the concatenation stays valid."""
+        es = self.get_export_settings()
+        if es["res"] == "source":
+            ws = [p[1] for p in profs.values() if p[1]]
+            hs = [p[2] for p in profs.values() if p[2]]
+            w = min(3840, max(ws)) if ws else 1920
+            h = min(2160, max(hs)) if hs else 1080
+        else:
+            w, h = self._EXPORT_RES[es["res"]]
+        w -= w % 2
+        h -= h % 2
+        if es["fps"] == "source":
+            fps_vals = [p[3] for p in profs.values() if p[3]]
+            fps = int(min(120, round(max(fps_vals)))) if fps_vals else 30
+        else:
+            fps = int(es["fps"])
+        return max(2, w), max(2, h), max(1, fps), es["codec"]
+
+    @staticmethod
+    def _reel_vf(w: int, h: int, fps: int) -> str:
+        return (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p")
+
+    @staticmethod
+    def _encode_args(codec: str) -> list[str]:
+        if codec == "hevc":
+            return ["-c:v", "libx265", "-crf", "24", "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]
+        return ["-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+
     def schedule_settings(self) -> dict:
         """Current recurring-embed settings (settings.json overriding config).
         The web scheduler reads this live, so a UI change applies without a
@@ -600,6 +673,48 @@ class Service:
         res["name"] = name
         return res
 
+    def export_performer(self, job=None, name=None, performer_id=None,
+                         count: int = 300, window: float = 20.0) -> dict:
+        """One video of a performer's top `count` taste-ranked moments. Reuses
+        `performer_best` for the ranking and `_build_reel` for the cut+join, so it
+        honors the export-quality settings (a performer spans many scenes → mixed
+        → re-encode). Each moment becomes a `window`-second clip centered on it."""
+        import os
+        import time as _t
+        from pathlib import Path
+
+        log = (job.log if job else print)
+        r = self.performer_best(name=name, performer_id=performer_id, count=count)
+        pname = r.get("performer") or name or "performer"
+        hits = r.get("hits") or []
+        if not hits:
+            log(f"no moments found for {pname}")
+            return {"clips": 0, "performer": pname}
+        details = self.client().scene_details(sorted({str(h.scene_id) for h in hits if h.scene_id}))
+        specs = []
+        for h in hits:
+            d = details.get(str(h.scene_id)) or {}
+            path = d.get("path")
+            if not path:
+                continue
+            dur = float(d.get("duration") or 0) or None
+            t = float(h.time)
+            start = max(0.0, t - window / 2)
+            end = start + window
+            if dur:                       # keep the clip inside the scene
+                end = min(end, dur)
+                start = min(start, max(0.0, dur - 1.0))
+            specs.append({"path": path, "start": start, "end": end, "scene_id": h.scene_id})
+
+        exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
+        exports.mkdir(parents=True, exist_ok=True)
+        fname = _safe_reel_name(f"reel-{pname}-best-{_t.strftime('%Y%m%d-%H%M%S')}") + ".mp4"
+        log(f"performer reel: {pname} — {len(specs)} of top {count} moments")
+        res = self._build_reel(specs, exports / fname, job=job, log=log)
+        res["name"] = fname
+        res["performer"] = pname
+        return res
+
     # --- reel builder: probe → stream-copy if uniform, else normalize --------
 
     def _probe_av(self, path: str) -> tuple:
@@ -641,17 +756,17 @@ class Service:
 
     # re-encode canvas for mixed-source reels: everything padded to this so the
     # concatenated file has one constant resolution/fps/pixfmt (concat -c copy
-    # is only valid across identical stream params).
-    _REEL_VF = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p")
+    # is only valid across identical stream params); the exact target comes from
+    # the export-quality settings via _reel_target().
 
     def _build_reel(self, specs: list[dict], out, job=None, log=print) -> dict:
         """Cut each {path,start,end} and join into one valid video. If every
         source shares the same codec/res/fps/pixfmt/audio, stream-copy (fast,
-        lossless); otherwise re-encode each clip to a common 1080p30 H.264/AAC
-        canvas so the concatenation is well-formed (the mixed-source case that
-        previously produced a corrupt, speed-varying file). Validates the output
-        and raises on a malformed result instead of reporting success."""
+        lossless); otherwise re-encode each clip to a common canvas (from the
+        export-quality settings) so the concatenation is well-formed (the
+        mixed-source case that previously produced a corrupt, speed-varying
+        file). Validates the output and raises on a malformed result instead of
+        reporting success."""
         import os
         import subprocess
         import tempfile
@@ -665,9 +780,12 @@ class Service:
             and next(iter(profs.values()), (None,))[0] is not None
         ) if distinct else False
         mode = "copy" if uniform else "reencode"
+        tw, th, tfps, tcodec = self._reel_target(profs)
+        vf, venc = self._reel_vf(tw, th, tfps), self._encode_args(tcodec)
         log(f"reel: {len(specs)} clip(s) from {len(distinct)} file(s) — "
             + ("uniform sources → lossless stream-copy" if uniform
-               else "mixed sources → re-encoding to 1080p30 H.264/AAC"))
+               else f"mixed sources → re-encoding to {tw}x{th} {tfps}fps "
+                    f"{'H.265' if tcodec == 'hevc' else 'H.264'}/AAC"))
         if job:
             job.progress = {"total": len(specs), "done": 0}
 
@@ -688,15 +806,13 @@ class Service:
                            "-c", "copy", "-avoid_negative_ts", "make_zero", "-f", "mpegts", seg]
                 elif profs.get(path, (None,) * 8)[5] is not None:  # source has audio
                     cmd = ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
-                           "-vf", self._REEL_VF,
-                           "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                           "-vf", vf, *venc,
                            "-c:a", "aac", "-ar", "48000", "-ac", "2", "-f", "mpegts", seg]
                 else:  # no audio → synth a silent track so the join stays continuous
                     cmd = ["ffmpeg", "-y", "-ss", f"{start:g}", "-to", f"{end:g}", "-i", path,
                            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
                            "-map", "0:v:0", "-map", "1:a:0", "-shortest",
-                           "-vf", self._REEL_VF,
-                           "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                           "-vf", vf, *venc,
                            "-c:a", "aac", "-ar", "48000", "-ac", "2", "-f", "mpegts", seg]
                 r = subprocess.run(cmd, capture_output=True)
                 if r.returncode == 0 and os.path.exists(seg) and os.path.getsize(seg) > 0:
