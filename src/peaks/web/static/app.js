@@ -266,6 +266,32 @@ async function saveExportSettings() {
 $("#btn-export-save")?.addEventListener("click", saveExportSettings);
 loadExportSettings();
 
+// --- moment length (smart clip drift threshold) -----------------------------
+async function loadClipSettings() {
+  try {
+    const c = await api("/api/clip-settings");
+    if ($("#clip-sim")) { $("#clip-sim").value = c.similarity; }
+    if ($("#clip-sim-val")) $("#clip-sim-val").textContent = (+c.similarity).toFixed(2);
+    if (c.min != null) document.querySelectorAll("#clip-min").forEach((e) => e.textContent = c.min);
+    if (c.max != null) document.querySelectorAll("#clip-max, #clip-max2").forEach((e) => e.textContent = c.max);
+  } catch {}
+}
+async function saveClipSettings() {
+  try {
+    await api("/api/clip-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ similarity: parseFloat($("#clip-sim").value) }),
+    });
+    $("#clip-status").textContent = "saved — reload the board to see it";
+    setTimeout(() => { if ($("#clip-status")) $("#clip-status").textContent = ""; }, 2500);
+  } catch (err) { toast(err.message, true); }
+}
+$("#clip-sim")?.addEventListener("input", (e) => {
+  if ($("#clip-sim-val")) $("#clip-sim-val").textContent = (+e.target.value).toFixed(2);
+});
+$("#btn-clip-save")?.addEventListener("click", saveClipSettings);
+loadClipSettings();
+
 function wireToggle(btnSel, panelSel, hintSel) {
   $(btnSel).addEventListener("click", () => {
     const a = $(panelSel), open = a.hidden;

@@ -117,6 +117,18 @@ def _export_settings_model():
 ExportSettingsIn = _export_settings_model()
 
 
+def _clip_settings_model():
+    from pydantic import BaseModel
+
+    class ClipSettingsIn(BaseModel):
+        similarity: float | None = None
+
+    return ClipSettingsIn
+
+
+ClipSettingsIn = _clip_settings_model()
+
+
 def _login_model():
     from pydantic import BaseModel
 
@@ -847,6 +859,17 @@ def create_app(cfg=None):
     def save_export_settings(body: ExportSettingsIn):
         try:
             return service.save_export_settings(res=body.res, fps=body.fps, codec=body.codec)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/clip-settings")
+    def get_clip_settings():
+        return service.get_clip_settings()
+
+    @app.post("/api/clip-settings")
+    def save_clip_settings(body: ClipSettingsIn):
+        try:
+            return service.save_clip_settings(similarity=body.similarity)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 

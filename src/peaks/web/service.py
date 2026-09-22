@@ -249,6 +249,41 @@ class Service:
         self._settings_cache = s
         return self.get_export_settings()
 
+    # smart clip length — the drift threshold is GUI-tunable (settings.json
+    # overlay overriding config) so it can be eyeballed against the board live.
+    def _clip_similarity(self) -> float:
+        v = self._settings().get("clip_similarity")
+        if v is None:
+            return self.cfg.scoring.clip_similarity
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return self.cfg.scoring.clip_similarity
+
+    def get_clip_settings(self) -> dict:
+        return {
+            "similarity": round(self._clip_similarity(), 3),
+            "min": self.cfg.scoring.min_duration,
+            "max": self.cfg.scoring.max_duration,
+        }
+
+    def save_clip_settings(self, similarity=None) -> dict:
+        """Persist the moment-length drift threshold to settings.json. Applies to
+        the next feed / board / reel build — no re-embed, no restart."""
+        import json
+
+        s = dict(self._settings())
+        if similarity is not None:
+            sim = float(similarity)
+            if not (0.0 <= sim <= 1.0):
+                raise ValueError(f"clip similarity must be between 0 and 1: {similarity}")
+            s["clip_similarity"] = round(sim, 3)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.get_clip_settings()
+
     def _reel_target(self, profs: dict) -> tuple[int, int, int, str]:
         """(width, height, fps, codec) for the mixed-source re-encode canvas,
         from the saved export settings. 'source' picks the max across the clips
@@ -415,7 +450,7 @@ class Service:
             return (round(float(time), 3), round(float(time) + fixed, 3))
         return idx.clip_span(
             key, float(time),
-            similarity=sc.clip_similarity,
+            similarity=self._clip_similarity(),   # GUI-tunable (settings.json overlay)
             min_dur=sc.min_duration,
             max_dur=(sc.max_duration or 0.0),
             interval=(self.cfg.sampling.interval_seconds or 2.0),

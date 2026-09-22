@@ -108,6 +108,23 @@
     </div>
 
     <div class="panel">
+      <h2>Moment length</h2>
+      <p class="dim">How long each moment plays in For You, the megaboard and reels. A clip
+        holds from the moment and keeps playing until the picture changes enough — this dial
+        sets how <em>much</em> change ends it. <b>Higher = shorter, tighter clips</b> that cut at
+        the slightest change; <b>lower = longer holds</b> (too low and everything runs to the
+        <span id="clip-max">30</span>s cap). Clamped to <span id="clip-min">3</span>–<span id="clip-max2">30</span>s.
+        Takes effect on the next board/feed load — no re-embed.</p>
+      <div class="row">
+        <label for="clip-sim">Sensitivity</label>
+        <input id="clip-sim" type="range" min="0.3" max="0.95" step="0.01" value="0.5" />
+        <span id="clip-sim-val" class="dim">0.50</span>
+        <button id="btn-clip-save" class="primary">Save</button>
+        <span id="clip-status" class="dim"></span>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>Embed</h2>
       <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
       <div class="row">

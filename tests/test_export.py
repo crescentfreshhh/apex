@@ -186,6 +186,23 @@ def test_export_settings_round_trip(tmp_path, monkeypatch):
         svc.save_export_settings(codec="av1")
 
 
+def test_clip_settings_round_trip_and_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    svc = _svc(tmp_path)
+    # default falls through to config
+    assert svc.get_clip_settings()["similarity"] == svc.cfg.scoring.clip_similarity
+    # persist + read back on a fresh instance; the overlay overrides config
+    svc.save_clip_settings(similarity=0.8)
+    fresh = _svc(tmp_path)
+    assert fresh.get_clip_settings()["similarity"] == 0.8
+    assert fresh._clip_similarity() == 0.8
+    # out-of-range rejected
+    with pytest.raises(ValueError):
+        svc.save_clip_settings(similarity=1.5)
+    with pytest.raises(ValueError):
+        svc.save_clip_settings(similarity=-0.1)
+
+
 def test_reel_honors_4k_hevc_settings(tmp_path, monkeypatch):
     svc = _svc(tmp_path)
     svc._settings_cache = {"export_res": "2160", "export_fps": "60", "export_codec": "hevc"}
