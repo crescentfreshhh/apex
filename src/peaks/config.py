@@ -58,7 +58,7 @@ class EmbeddingConfig:
     model: str = "dino"  # "dino" | "clip" | "fake"
     cache_dir: str = "cache/embeddings"
     device: str = ""  # "" = auto (cuda if available)
-    batch_size: int = 64
+    batch_size: int = 16  # frames per GPU pass; VRAM-sensitive — raise on large GPUs
     # which OpenCLIP variant powers the "clip" channel. ViT-L-14 is a strong
     # default (768-dim, sharper search + tags) at ~2-3x the cost of ViT-B-32.
     # Changing it invalidates the CLIP cache (different space/dim) — the cache

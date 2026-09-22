@@ -104,7 +104,7 @@ model = "dino"
 cache_dir = "cache/embeddings"
 # "" = auto (CUDA if available, else CPU). Or force "cuda" / "cpu".
 device = ""
-batch_size = 64
+batch_size = 16          # frames per GPU pass; VRAM-sensitive — raise on large GPUs, lower if it OOMs
 # Scenes decoded concurrently during embed (raw path). Sparse sampling waits
 # on disk seeks, so 3-4 workers is a near-linear speedup; drop to 1 if the
 # array thrashes. (Env override: PEAKS_WORKERS)
