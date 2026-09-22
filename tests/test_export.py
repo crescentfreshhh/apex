@@ -263,15 +263,18 @@ def test_export_performer_builds_centered_specs(tmp_path, monkeypatch):
 
     class _Hit:
         def __init__(self, sid, t):
-            self.scene_id, self.time, self.score = sid, t, 0.9
+            self.scene_id, self.time, self.score, self.key = sid, t, 0.9, f"k{sid}"
 
     hits = [_Hit("10", 100.0), _Hit("11", 5.0), _Hit("12", 500.0)]
     monkeypatch.setattr(svc_mod.Service, "performer_best",
                         lambda self, **kw: {"performer": "Jane Doe", "hits": hits})
     monkeypatch.setattr(svc_mod.Service, "_model_name", lambda self: "dinov2")
-    # identity diversify → keep input order so the centering asserts are stable
+    # identity diversify → keep input order so the clip asserts are stable
     monkeypatch.setattr(svc_mod.Service, "_diversify",
                         lambda self, h, model, k, diversity, order_all=False: h[:k])
+    # deterministic smart span: clip starts AT the moment, holds 15s forward
+    monkeypatch.setattr(svc_mod.Service, "clip_span",
+                        lambda self, key, t, model=None: (float(t), float(t) + 15.0))
 
     class _C:
         def scene_details(self, ids):
@@ -287,14 +290,13 @@ def test_export_performer_builds_centered_specs(tmp_path, monkeypatch):
                         {"clips": len(specs), "mode": "reencode", "path": str(out),
                          "bytes": 1})
 
-    res = svc.export_performer(name="Jane Doe", count=300, window=20.0)
+    res = svc.export_performer(name="Jane Doe", count=300)
     specs = captured["specs"]
     assert len(specs) == 3
-    # centered 20s window, clamped into the scene
-    assert specs[0]["start"] == 90.0 and specs[0]["end"] == 110.0          # t=100 mid-scene
-    assert specs[1]["start"] == 0.0                                        # t=5 clamps to 0
-    assert specs[1]["end"] == 20.0
-    assert specs[2]["end"] == 505.0                                        # t=500 clamps to dur
+    # clip starts at the moment and runs for the span length, clamped to the scene
+    assert specs[0]["start"] == 100.0 and specs[0]["end"] == 115.0         # t=100 mid-scene
+    assert specs[1]["start"] == 5.0 and specs[1]["end"] == 20.0            # t=5 + 15
+    assert specs[2]["end"] == 505.0                                        # t=500 + 15 clamps to dur
     # performer name in the output filename
     assert "jane-doe" in captured["out"].lower()
     assert res["performer"] == "Jane Doe" and res["name"].endswith(".mp4")
@@ -308,7 +310,7 @@ def test_export_performer_diverse_interleaved(tmp_path, monkeypatch):
 
     class _Hit:
         def __init__(self, sid, t, score):
-            self.scene_id, self.time, self.score = sid, t, score
+            self.scene_id, self.time, self.score, self.key = sid, t, score, f"k{sid}"
 
     pool = [
         _Hit("20", 200.0, 0.95),
@@ -325,6 +327,8 @@ def test_export_performer_diverse_interleaved(tmp_path, monkeypatch):
 
     monkeypatch.setattr(svc_mod.Service, "performer_best", fake_best)
     monkeypatch.setattr(svc_mod.Service, "_model_name", lambda self: "dinov2")
+    monkeypatch.setattr(svc_mod.Service, "clip_span",
+                        lambda self, key, t, model=None: (float(t), float(t) + 12.0))
 
     def fake_div(self, hits, model, k, diversity, order_all=False):
         assert order_all is True and diversity > 0      # reel asks for diverse ordering
@@ -344,7 +348,7 @@ def test_export_performer_diverse_interleaved(tmp_path, monkeypatch):
                         lambda self, specs, out, job=None, log=print:
                         captured.update(specs=specs) or {"clips": len(specs)})
 
-    svc.export_performer(name="Jane Doe", count=300, window=20.0)
+    svc.export_performer(name="Jane Doe", count=300)
     specs = captured["specs"]
     # playback order follows the MMR output (interleaved), not scene-grouped
     assert [s["scene_id"] for s in specs] == ["20", "22", "21", "20", "21"]

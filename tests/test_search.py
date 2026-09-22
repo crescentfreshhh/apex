@@ -165,6 +165,36 @@ def test_vector_at_picks_nearest_time(tmp_path):
     assert idx.vector_at("missing", 0.0) is None
 
 
+def test_clip_span_holds_until_shot_change(tmp_path):
+    cache = EmbeddingCache(tmp_path)
+    same = _unit([1, 0, 0])
+    cut = _unit([0, 1, 0])                       # a drastically different frame (a cut)
+    # frames every 2s: three similar (the moment's shot), then a cut, then more
+    _seed(cache, "k1", "1",
+          [same, same, same, cut, cut],
+          [0.0, 2.0, 4.0, 6.0, 8.0])
+    idx = SearchIndex(cache, "dino").build(["k1"])
+
+    # from t=0 the clip holds through the three similar frames and stops at the cut
+    start, end = idx.clip_span("k1", 0.0, similarity=0.5, min_dur=1.0, max_dur=30.0, interval=2.0)
+    assert start == 0.0
+    assert end == 6.0          # last similar frame at 4.0 + one 2.0s interval
+
+    # min_duration floors a very short hold (anchor at the last frame → no room to grow)
+    s2, e2 = idx.clip_span("k1", 8.0, similarity=0.5, min_dur=5.0, max_dur=30.0, interval=2.0)
+    assert e2 - s2 == 5.0      # natural hold (2s) floored up to min_dur
+
+    # max_duration caps a long hold
+    s3, e3 = idx.clip_span("k1", 0.0, similarity=0.5, min_dur=1.0, max_dur=3.0, interval=2.0)
+    assert e3 - s3 == 3.0
+
+    # missing scene / disabled → fixed fallback window, start at the moment
+    s4, e4 = idx.clip_span("missing", 12.0, similarity=0.5, min_dur=3.0, max_dur=30.0, interval=2.0)
+    assert (s4, e4) == (12.0, 32.0)     # min(max_dur, 20) = 20s fallback
+    s5, e5 = idx.clip_span("k1", 0.0, similarity=0.0, min_dur=3.0, max_dur=30.0, interval=2.0)
+    assert (s5, e5) == (0.0, 20.0)      # similarity<=0 disables detection
+
+
 def test_build_only_requested_keys(tmp_path):
     cache = EmbeddingCache(tmp_path)
     _seed(cache, "k1", "1", [_unit([1, 0, 0])], [0.0])

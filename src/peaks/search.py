@@ -209,6 +209,40 @@ class SearchIndex:
         n = float(np.linalg.norm(v))
         return v / n if n > 0 else v
 
+    def clip_span(
+        self, key: str, time: float, *,
+        similarity: float = 0.5, min_dur: float = 3.0, max_dur: float = 30.0,
+        interval: float = 2.0,
+    ) -> tuple[float, float]:
+        """Smart clip bounds for the moment at (key, time): start AT the moment and
+        grow the end forward while each following sampled frame still resembles the
+        moment (cosine to the anchor frame ≥ `similarity`), stopping at the first
+        drastically-different frame (a shot change / drift). The length is clamped
+        to [`min_dur`, `max_dur`]. `interval` is the sampling step (so the last
+        similar frame's content is fully covered). Falls back to a fixed
+        min(max_dur, 20)s clip when the scene isn't embedded or `similarity`<=0.
+        Returns (start, end) seconds; start is the moment itself so the stream
+        offset is unchanged."""
+        fixed = min(max_dur, 20.0) if max_dur else 20.0
+        rows = self._key_rows.get(key)
+        if similarity <= 0 or rows is None:
+            return (round(float(time), 3), round(float(time) + fixed, 3))
+        start_i, end_i = rows
+        seg_times = self.times[start_i:end_i]
+        n = int(seg_times.size)
+        if n == 0:
+            return (round(float(time), 3), round(float(time) + fixed, 3))
+        block = self.matrix[start_i:end_i]        # rows are unit vectors → dot = cosine
+        ai = int(np.argmin(np.abs(seg_times - time)))
+        sims = block @ block[ai]                  # cosine of every frame to the anchor
+        j = ai
+        while j + 1 < n and float(sims[j + 1]) >= similarity:
+            j += 1
+        end = float(seg_times[j]) + interval       # cover the last similar frame
+        dur = end - float(time)
+        dur = max(min_dur, min(dur, max_dur)) if max_dur else max(min_dur, dur)
+        return (round(float(time), 3), round(float(time) + dur, 3))
+
     def search_by_frame(
         self, key: str, time: float, top_k: int | None = 60, *,
         per_scene: int | None = 3, min_score: float | None = None,

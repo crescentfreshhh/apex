@@ -186,6 +186,13 @@ def test_foryou_board_endpoint(cfg, tmp_path, monkeypatch):
     board = client.get("/api/foryou/board?count=6").json()
     items = board["items"]
     assert items and all(it["scene_id"] and it["stream"] for it in items)
+    # every moment carries a smart, content-aware clip span (clip_span), not a
+    # fixed length: start at the moment, a positive bounded duration
+    for it in items:
+        assert "start" in it and "end" in it and "duration" in it
+        assert it["start"] == it["time"]
+        assert 0 < it["duration"] <= cfg.scoring.max_duration
+        assert abs((it["end"] - it["start"]) - it["duration"]) < 0.05
     # coverage numbers come back so the board can show "how many match my taste"
     assert board["scenes"] >= 1 and board["moments"] >= board["scenes"]
     assert board["scored_by"] in ("classifier", "modes", "centroid")

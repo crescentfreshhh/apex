@@ -87,6 +87,12 @@ class ScoringConfig:
     merge_gap: float = 2.0
     max_duration: float = 30.0
     pad: float = 0.5
+    # Smart clip length: when a point-moment is played (feed / megaboard / reel),
+    # the clip holds from the moment and grows forward while each sampled frame
+    # still resembles the moment (cosine ≥ this), stopping at the first
+    # drastically-different frame (a shot change / drift). Clamped to
+    # [min_duration, max_duration]. 0 disables → fixed max(min,20)s clips.
+    clip_similarity: float = 0.5
     references_dir: str = "references"
 
 
@@ -260,6 +266,12 @@ class Config:
                 scoring_raw.get("max_duration", ScoringConfig.max_duration)
             ),
             pad=float(scoring_raw.get("pad", ScoringConfig.pad)),
+            clip_similarity=float(
+                os.environ.get(
+                    "PEAKS_CLIP_SIMILARITY",
+                    scoring_raw.get("clip_similarity", ScoringConfig.clip_similarity),
+                )
+            ),
             references_dir=scoring_raw.get(
                 "references_dir", ScoringConfig.references_dir
             ),

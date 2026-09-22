@@ -138,12 +138,16 @@ def _hit_payload(service: Service, hits) -> list[dict]:
     out = []
     for h in hits:
         m = meta.get(h.scene_id, {}) if h.scene_id else {}
+        start, end = service.clip_span(h.key, h.time)
         out.append(
             {
                 "scene_id": h.scene_id,
                 "key": h.key,
                 "time": round(h.time, 2),
                 "score": round(h.score, 4),
+                "start": start,
+                "end": end,
+                "duration": round(end - start, 2),
                 "thumb": f"/api/frame?key={h.key}&t={h.time:g}",
                 "stream": (
                     service.stream_url(h.scene_id, start=h.time) if h.scene_id else None
@@ -164,11 +168,15 @@ def _hit_payload(service: Service, hits) -> list[dict]:
 def _hit_light(service: Service, h) -> dict:
     """A hit with just what the grid/board need — no Stash metadata lookup, so
     an unbounded result set costs no per-scene network calls."""
+    start, end = service.clip_span(h.key, h.time)
     return {
         "scene_id": h.scene_id,
         "key": h.key,
         "time": round(h.time, 2),
         "score": round(h.score, 4),
+        "start": start,
+        "end": end,
+        "duration": round(end - start, 2),
         "thumb": f"/api/frame?key={h.key}&t={h.time:g}",
         "stream": service.stream_url(h.scene_id, start=h.time) if h.scene_id else None,
         "title": "",

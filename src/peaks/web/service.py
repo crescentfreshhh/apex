@@ -401,6 +401,26 @@ class Service:
             return clip_cache_name(self._active_clip_model())
         return canonical_name(alias or self.cfg.embedding.model)
 
+    def clip_span(self, key: str, time: float, model: str | None = None) -> tuple[float, float]:
+        """(start, end) for playing the moment at (key, time): a smart, content-aware
+        clip length — holds from the moment and grows until the frame drifts away
+        (a shot change), clamped to [scoring.min_duration, scoring.max_duration].
+        Shared by the feed, megaboard, and reels so 'moment length' is one notion.
+        Falls back to a fixed clip when the scene isn't embedded."""
+        sc = self.cfg.scoring
+        try:
+            idx = self.index(model or self._model_name())
+        except Exception:  # noqa: BLE001 — no index yet → fixed fallback length
+            fixed = min(sc.max_duration or 20.0, 20.0)
+            return (round(float(time), 3), round(float(time) + fixed, 3))
+        return idx.clip_span(
+            key, float(time),
+            similarity=sc.clip_similarity,
+            min_dur=sc.min_duration,
+            max_dur=(sc.max_duration or 0.0),
+            interval=(self.cfg.sampling.interval_seconds or 2.0),
+        )
+
     def _embedder(self, model: str | None = None):
         """Build the embedder for `model`, using the *active* backbone/variant
         (a GUI-saved choice in /config/settings.json overriding config). The
@@ -674,7 +694,7 @@ class Service:
         return res
 
     def export_performer(self, job=None, name=None, performer_id=None,
-                         count: int = 300, window: float = 20.0) -> dict:
+                         count: int = 300) -> dict:
         """One video of a performer's top `count` taste moments. Gathers a
         generous candidate pool (many moments per scene), then MMR-selects the
         final `count` via `_diversify` so the reel is quality-proportional and
@@ -682,8 +702,9 @@ class Service:
         contribute more, near-duplicate frames are suppressed, and no single scene
         dominates. Reuses `_build_reel` for the cut+join, so it honors the
         export-quality settings (mixed scenes → re-encode). Each moment becomes a
-        `window`-second clip centered on it, and clips play in the MMR order —
-        dissimilar moments interleaved across the whole reel."""
+        smart, content-aware clip (`clip_span`: hold from the moment until the frame
+        drifts), and clips play in the MMR order — dissimilar moments interleaved
+        across the whole reel."""
         import os
         import time as _t
         from pathlib import Path
@@ -714,9 +735,11 @@ class Service:
             if not path:
                 continue
             dur = float(d.get("duration") or 0) or None
-            t = float(h.time)
-            start = max(0.0, t - window / 2)
-            end = start + window
+            # smart, content-aware length: hold from the moment until the frame
+            # drifts (a shot change), clamped to scoring min/max — same notion of
+            # "moment" the feed and megaboard now use.
+            start, end = self.clip_span(h.key, float(h.time), model)
+            start = max(0.0, start)
             if dur:                       # keep the clip inside the scene
                 end = min(end, dur)
                 start = min(start, max(0.0, dur - 1.0))
@@ -3004,11 +3027,16 @@ class Service:
         created = []
         for r in rows[:top_n]:
             best = self.performer_best(performer_id=r["id"], name=r["name"], count=count, per_scene=per_scene)
-            apexes = [{
-                "scene_id": h.scene_id, "start": round(h.time, 2), "end": round(h.time + 20, 2),
-                "duration": 20, "url": self.stream_url(h.scene_id, start=h.time),
-                "score": round(h.score, 4), "title": r["name"],
-            } for h in best["hits"] if h.scene_id]
+            apexes = []
+            for h in best["hits"]:
+                if not h.scene_id:
+                    continue
+                cs, ce = self.clip_span(h.key, float(h.time))   # smart, content-aware length
+                apexes.append({
+                    "scene_id": h.scene_id, "start": round(cs, 2), "end": round(ce, 2),
+                    "duration": round(ce - cs, 2), "url": self.stream_url(h.scene_id, start=h.time),
+                    "score": round(h.score, 4), "title": r["name"],
+                })
             if apexes:
                 saved = self.save_collection(f"{r['name']} — best of", apexes)
                 created.append(saved)

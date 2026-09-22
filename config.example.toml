@@ -143,6 +143,13 @@ min_duration = 3.0      # discard segments shorter than this (seconds)
 merge_gap = 2.0         # merge neighbouring segments closer than this (seconds)
 max_duration = 30.0     # split anything longer than this (0 = no cap)
 pad = 0.5               # pad each segment edge by this many seconds
+# Smart clip length for played moments (feed / megaboard / reels): the clip holds
+# from the moment and grows forward while each sampled frame still resembles it
+# (cosine >= this), stopping at the first drastically-different frame (a shot
+# change). Clamped to [min_duration, max_duration]. Higher = tighter/shorter clips
+# that cut at the slightest change; lower = longer holds. 0 disables (fixed 20s).
+# Granularity is limited by interval_seconds. (Env: PEAKS_CLIP_SIMILARITY)
+clip_similarity = 0.5
 # Directory of example stills you love (the Tier-1 references). Gitignored.
 references_dir = "references"
 

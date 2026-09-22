@@ -629,7 +629,18 @@ function randomMoment() {
 // the tail and looped in ~1-2 min), pull a big varied pool from the API, play
 // each moment once (weighted shuffle) before repeating, and refetch a fresh
 // batch — excluding scenes already shown — when the queue runs low. Endless.
-const FY_CLIP = 20;                      // clip seconds per For You tile
+const FY_CLIP = 20;                      // fallback clip seconds when the server sends no span
+// A moment's clip length. Prefer the server's smart, content-aware span
+// (start/end/duration from clip_span — holds the moment until the frame drifts),
+// falling back to a fixed FY_CLIP window for older payloads / un-embedded scenes.
+function hitClip(h) {
+  const start = +h.time || 0;
+  const d = +h.duration;
+  if (Number.isFinite(d) && d > 0) return { start, dur: d };
+  const s = +h.start, e = +h.end;
+  if (Number.isFinite(s) && Number.isFinite(e) && e > s) return { start, dur: e - s };
+  return { start, dur: FY_CLIP };
+}
 const PIVOT_PER_SCENE = 100;             // performer board: moments sampled per scene, well-spaced
 const PIVOT_COUNT = 6000;                // performer board: max moments pulled (tab "Board" + pivot)
 const fyState = { exclude: new Set(), queue: [], recent: [], refetching: false };
@@ -676,10 +687,10 @@ function applyFloor() {
 }
 
 function fyHitToApex(h) {
-  const start = +h.time || 0;
+  const { start, dur } = hitClip(h);
   return {
-    scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + FY_CLIP),
-    duration: FY_CLIP, url: h.stream, score: h.score ?? 1, title: h.title || "",
+    scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + dur),
+    duration: Math.round(dur), url: h.stream, score: h.score ?? 1, title: h.title || "",
   };
 }
 // order key = random^(1/score): higher-taste moments tend to come earlier, but
@@ -827,10 +838,10 @@ function openTileMenu(tile, x, y) {
 }
 
 function apexFromHit(h) {
-  const start = +h.time || 0;
+  const { start, dur } = hitClip(h);
   return {
-    scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + FY_CLIP),
-    duration: FY_CLIP, url: h.stream, score: h.score ?? 1, title: h.title || "",
+    scene_id: h.scene_id, start: Math.round(start), end: Math.round(start + dur),
+    duration: Math.round(dur), url: h.stream, score: h.score ?? 1, title: h.title || "",
   };
 }
 // swap the whole board to a new pool live — no reload (mirrors fyRefetch)

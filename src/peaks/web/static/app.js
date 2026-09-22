@@ -714,10 +714,15 @@ wireToggle("#toggle-search-adv", "#search-adv", null);
 // (same origin) so we don't clobber the saved apex playlist.json.
 const BOARD_CLIP_SECONDS = 20;
 function hitsToApexes(hits) {
-  return (hits || []).filter((h) => h.scene_id && h.stream).map((h) => ({
-    scene_id: h.scene_id, start: +h.time, end: +h.time + BOARD_CLIP_SECONDS,
-    duration: BOARD_CLIP_SECONDS, url: h.stream, score: h.score ?? 1, title: h.title || "",
-  }));
+  return (hits || []).filter((h) => h.scene_id && h.stream).map((h) => {
+    // prefer the server's smart, content-aware clip length (clip_span);
+    // fall back to the fixed BOARD_CLIP_SECONDS for older payloads.
+    const dur = (Number.isFinite(+h.duration) && +h.duration > 0) ? +h.duration : BOARD_CLIP_SECONDS;
+    return {
+      scene_id: h.scene_id, start: +h.time, end: +h.time + dur,
+      duration: dur, url: h.stream, score: h.score ?? 1, title: h.title || "",
+    };
+  });
 }
 function sendToMegaboard(hits, storeKey, src) {
   const apexes = hitsToApexes(hits);
