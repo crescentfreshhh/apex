@@ -487,6 +487,7 @@ class Service:
         pipeline: str | None = None,
         workers: int | None = None,
         scene_timeout: float | None = None,
+        batch_size: int | None = None,
     ) -> dict:
         """One incremental embed pass (skips already-cached scenes).
 
@@ -510,6 +511,7 @@ class Service:
         )
         embedder = self._embedder(model)
         n_workers = e.workers if workers is None else workers
+        n_batch = e.batch_size if batch_size is None else batch_size
         cache = EmbeddingCache(e.cache_dir)
         # Only work the scenes that AREN'T already embedded (at this sampling
         # signature), so progress reflects real work — "N of the new ones", not a
@@ -527,7 +529,7 @@ class Service:
                 f"embed: {total} new · {len(scanned) - len(pending)} already embedded "
                 f"· {len(scanned)} in scope · model={embedder.name} · mode={sampler.mode} "
                 f"· interval={sampler.interval:g}s · hwaccel={sampler.hwaccel or 'off'} "
-                f"· workers={n_workers}"
+                f"· workers={n_workers} · batch={n_batch}"
             )
 
         def _log(msg):
@@ -539,7 +541,7 @@ class Service:
 
         stats = embed_library(
             pending, sampler, embedder, cache,
-            batch_size=e.batch_size,
+            batch_size=n_batch,
             workers=n_workers,
             total=total, log=_log,
             failure_log=failure_log_for(self.cfg),

@@ -188,6 +188,7 @@ let defaultsLoaded = false;
     $("#adv-interval").value = d.interval;
     $("#adv-workers").value = d.workers;
     $("#adv-timeout").value = d.timeout;
+    if ($("#adv-batch")) $("#adv-batch").value = d.batch_size;
     // scoring thresholds
     $("#adv-high").value = d.high;
     $("#adv-low").value = d.low;
@@ -310,7 +311,7 @@ function embedQuery() {
   qs.set("model", $("#adv-model").value);
   qs.set("mode", $("#adv-mode").value);
   qs.set("hwaccel", $("#adv-hwaccel").value);
-  for (const [k, sel] of [["interval", "#adv-interval"], ["workers", "#adv-workers"], ["timeout", "#adv-timeout"]]) {
+  for (const [k, sel] of [["interval", "#adv-interval"], ["workers", "#adv-workers"], ["timeout", "#adv-timeout"], ["batch_size", "#adv-batch"]]) {
     const v = $(sel).value; if (v !== "") qs.set(k, v);
   }
   return qs.toString();

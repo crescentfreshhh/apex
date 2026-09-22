@@ -167,6 +167,7 @@
         </label>
         <label>Workers<input id="adv-workers" type="number" min="1" step="1" /></label>
         <label>Timeout (s)<input id="adv-timeout" type="number" min="0" step="30" /></label>
+        <label title="Frames embedded per GPU pass. Lower it if the GPU runs out of memory — the giant backbone on a 12GB card may need 16–32.">Batch size<input id="adv-batch" type="number" min="1" step="1" /></label>
       </div>
       <p id="adv-hint" class="dim adv-hint" hidden>Overrides apply to this run only —
         no restart, nothing saved to the container.</p>

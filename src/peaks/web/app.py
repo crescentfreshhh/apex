@@ -334,6 +334,7 @@ def create_app(cfg=None):
             "pipeline": s.pipeline,
             "workers": e.workers,
             "timeout": s.scene_timeout,
+            "batch_size": e.batch_size,
             "tag": service.cfg.markers.tag_name,
             "high": sc.high,
             "low": sc.low,
@@ -352,6 +353,7 @@ def create_app(cfg=None):
         pipeline: str | None = None,
         workers: int | None = None,
         timeout: float | None = None,
+        batch_size: int | None = None,
     ):
         # sampling knobs actually supplied; absent ones fall back to config.
         # The active backbone/variant come from the saved model settings.
@@ -360,6 +362,7 @@ def create_app(cfg=None):
             for k, v in dict(
                 mode=mode, interval=interval, hwaccel=hwaccel,
                 pipeline=pipeline, workers=workers, scene_timeout=timeout,
+                batch_size=batch_size,
             ).items()
             if v is not None
         }

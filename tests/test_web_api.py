@@ -606,6 +606,7 @@ def test_defaults_endpoint(client):
     assert "interval" in d and "workers" in d and "mode" in d
     assert "high" in d and "low" in d and d["tag"] == "apex"
     assert "max_duration" in d and "normalize" in d
+    assert "batch_size" in d
 
 
 def test_score_forwards_thresholds(client, monkeypatch):
@@ -663,7 +664,7 @@ def test_embed_forwards_advanced_overrides(client, monkeypatch):
     jid = client.post(
         "/api/embed",
         params={"model": "clip", "mode": "interval", "interval": 4,
-                "hwaccel": "", "workers": 2, "timeout": 600},
+                "hwaccel": "", "workers": 2, "timeout": 600, "batch_size": 16},
     ).json()["id"]
     for _ in range(50):
         if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
@@ -672,6 +673,7 @@ def test_embed_forwards_advanced_overrides(client, monkeypatch):
     assert seen["model"] == "clip" and seen["mode"] == "interval"
     assert seen["interval"] == 4 and seen["workers"] == 2
     assert seen["scene_timeout"] == 600
+    assert seen["batch_size"] == 16  # VRAM knob forwarded for the giant-backbone re-embed
     assert seen["hwaccel"] == ""  # empty string forwarded (force CPU), not dropped
 
 
