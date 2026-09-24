@@ -458,3 +458,14 @@ a.ghost { font-size: 13px; }
 .cat-bulk[hidden] { display: none; }
 .cat-bulk-grades { display: flex; flex-wrap: wrap; gap: 6px; }
 .cat-bulk .cat-g { padding: 6px 10px; font-size: 13px; }
+
+/* --- dialogs (delete rejects) --- */
+.dlg { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 12px;
+  padding: 18px 20px; width: min(640px, calc(100vw - 32px)); box-shadow: 0 20px 60px rgba(0, 0, 0, .6); }
+.dlg::backdrop { background: rgba(0, 0, 0, .6); }
+.dlg h2 { margin-top: 0; }
+.dlg-list { max-height: 260px; overflow: auto; border-top: 1px solid var(--line); margin: 8px 0; }
+.dlg-list .hist-row { grid-template-columns: minmax(0, 1fr) auto; }
+.dlg-ack { display: flex; gap: 8px; align-items: center; margin: 10px 0 4px; color: var(--bad); }
+button.danger:disabled { opacity: .45; cursor: default; background: transparent; color: var(--bad); }
+button.danger[hidden] { display: none; }

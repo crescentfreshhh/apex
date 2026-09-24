@@ -3687,7 +3687,11 @@ class Service(LibraryMixin):
     def _cat_update_row(self, sid: str) -> dict:
         """Re-read one scene from Stash and patch it into the cached listing."""
         sid = str(sid)
-        fresh = self._meta_client().scene_details([sid]).get(sid, {})
+        return self._cat_put_row(sid, self._meta_client().scene_details([sid]).get(sid, {}))
+
+    def _cat_put_row(self, sid: str, fresh: dict) -> dict:
+        """Patch one scene's fresh Stash metadata into the cached listing."""
+        sid = str(sid)
         with self._meta_lock:
             self._meta[sid] = fresh
         row = self._cat_row(sid, fresh)
@@ -3734,6 +3738,11 @@ class Service(LibraryMixin):
 
         floor = quality_floor(rows)
         preds = self._tier_predictions(rows)
+        if preds:          # features are loaded anyway: remember any new 1★ scenes
+            try:
+                self._remember_rejects([r for r in rows if r["tier"] == "rejected"])
+            except Exception:  # noqa: BLE001 — memory is best-effort
+                pass
         views = {v: len(self._triage(v, pool, preds, floor)) for v in self.TRIAGE_VIEWS}
         in_view = view in self.TRIAGE_VIEWS
         if in_view:
@@ -4001,20 +4010,32 @@ class Service(LibraryMixin):
 
         self._tier_training = True
         try:
-            rows = [r for r in self._catalogue_all() if r["tier"] in TIER_CLASS]
+            everything = self._catalogue_all()
+            rows = [r for r in everything if r["tier"] in TIER_CLASS]
             feats = self._scene_features(rows)
+            self._remember_rejects(rows, feats)
             train = [r for r in rows if r["scene_id"] in feats]
+            vis = [feats[r["scene_id"]][0] for r in train]
+            qual = [feats[r["scene_id"]][1] for r in train]
             y = [TIER_CLASS[r["tier"]] for r in train]
+            # rejects deleted from the library live on as remembered features
+            live = {r["fingerprint"] for r in everything if r.get("fingerprint")}
+            _, mv, mq = self.reject_memory().rows(exclude=live)
+            remembered = 0 if mv is None else len(mv)
+            if remembered:
+                vis += list(mv)
+                qual += list(mq)
+                y += ["reject"] * remembered
             counts = {c: y.count(c) for c in CLASSES}
             ok, short = usable_classes(y)
-            base = {"counts": counts, "short": short,
+            base = {"counts": counts, "short": short, "remembered_rejects": remembered,
                     "unembedded": len(rows) - len(train)}
             if len(ok) < 2:
                 return {"trained": False, **base,
                         "reason": "needs at least 10 graded, embedded scenes in two or more tiers"}
             keep = [i for i, c in enumerate(y) if c in ok]
-            Xv = np.stack([feats[train[i]["scene_id"]][0] for i in keep])
-            Xq = np.stack([feats[train[i]["scene_id"]][1] for i in keep])
+            Xv = np.stack([vis[i] for i in keep])
+            Xq = np.stack([qual[i] for i in keep])
             model, rep = fit_best(Xv, Xq, [y[i] for i in keep])
             report = {"trained": True, **base, **rep, "classes": model.classes_,
                       "n": len(keep), "trained_at": _t.strftime("%Y-%m-%d %H:%M")}

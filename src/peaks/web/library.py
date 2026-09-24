@@ -270,3 +270,126 @@ class LibraryMixin:
             if job is not None:
                 job.progress = {"done": i + 1, "total": len(items)}
         return {"restored": done, "failed": failed}
+
+    # --- deleting rejects (and remembering what they looked like) --------------
+
+    def reject_memory(self):
+        from ..reject_memory import RejectMemory
+
+        return RejectMemory(self.cfg.modeling.dir, self._model_name())
+
+    def _remember_rejects(self, rows: list[dict], feats: dict | None = None) -> int:
+        """Store triage features of 1★ scenes that are embedded and not yet
+        remembered. Cheap when there's nothing new."""
+        mem = self.reject_memory()
+        have = mem.fingerprints()
+        todo = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint")
+                and r["fingerprint"] not in have]
+        if not todo:
+            return 0
+        feats = self._scene_features(todo) if feats is None else feats
+        return mem.add({r["fingerprint"]: feats[r["scene_id"]] for r in todo
+                        if r["scene_id"] in feats})
+
+    def delete_preview(self, scene_ids: list[str] | None = None) -> dict:
+        """The rejected (1★) scenes a delete would remove — all of them, or the
+        selected ones — with their total size. Nothing is changed."""
+        rows = [r for r in self._catalogue_all(refresh=True) if r["tier"] == "rejected"]
+        if scene_ids is not None:
+            want = {str(s) for s in scene_ids}
+            rows = [r for r in rows if r["scene_id"] in want]
+        return {"count": len(rows), "bytes": sum(int(r.get("size") or 0) for r in rows),
+                "ids": [r["scene_id"] for r in rows],       # exactly what a confirm deletes
+                "capable": bool(self.capabilities()["ops"].get("scenesDestroy")),
+                "items": [{k: r.get(k) for k in ("scene_id", "title", "path", "size")}
+                          for r in rows[:300]]}
+
+    def _drop_local(self, rows: list[dict]) -> None:
+        """Forget deleted scenes everywhere in Peaks: embedding cache (every
+        model), hidden set, display metadata and the catalogue listing."""
+        from ..cache import EmbeddingCache, path_key
+
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        models = cache.models()
+        for r in rows:
+            key = r.get("fingerprint") or path_key(r.get("path") or r["scene_id"])
+            for m in models:
+                cache.delete(key, m)
+            self.set_scene_hidden(r["scene_id"], False)
+            self.invalidate_meta(r["scene_id"])
+        for m in models:
+            self.invalidate_index(m)
+        gone = {r["scene_id"] for r in rows}
+        cached = getattr(self, "_cat_cache", None)
+        if cached:
+            cached[1][:] = [r for r in cached[1] if r["scene_id"] not in gone]
+
+    def delete_scenes(self, job, scene_ids: list[str], confirm: bool = False,
+                      reason: str = "reject", keep_ids: set[str] | None = None) -> dict:
+        """Delete scenes AND their files from Stash, a few at a time.
+
+        reason="reject": each scene is re-read right before deletion and refused
+        unless it is still rated 1★; its features go to the reject memory first.
+        reason="duplicate": the caller has already chosen a keeper (never in
+        `keep_ids`); the copies are not remembered as rejects.
+        Every deleted file is logged."""
+        if not confirm:
+            raise PermissionError("deleting removes the files from disk — confirm first")
+        if reason not in ("reject", "duplicate"):
+            raise ValueError(f"unknown delete reason: {reason}")
+        self.require_op("scenesDestroy")
+        from ..tiers import tier_of
+
+        ids = [str(s) for s in dict.fromkeys(scene_ids or []) if str(s) not in (keep_ids or set())]
+        client = self.client()
+        deleted, refused, failed, freed = [], [], [], 0
+        CHUNK = 10
+        for i in range(0, len(ids), CHUNK):
+            if job is not None and job.cancelled:
+                break
+            part = ids[i:i + CHUNK]
+            fresh = client.scene_details(part)          # the state right now, not the listing's
+            ok_rows = []
+            for sid in part:
+                m = fresh.get(sid)
+                if m is None:
+                    refused.append({"scene_id": sid, "why": "no longer in Stash"})
+                    continue
+                row = self._cat_row(sid, m)
+                if reason == "reject" and tier_of(m.get("rating100"), m.get("o_counter")) != "rejected":
+                    refused.append({"scene_id": sid, "title": row["title"],
+                                    "why": "not rated 1★ any more"})
+                    self._cat_put_row(sid, m)                 # the listing was stale
+                    self.set_scene_hidden(sid, False)
+                    continue
+                ok_rows.append(row)
+            if not ok_rows:
+                continue
+            if reason == "reject":
+                try:
+                    self._remember_rejects(ok_rows)
+                except Exception as exc:  # noqa: BLE001 — never block a delete on memory
+                    if job is not None:
+                        job.log(f"reject memory: {exc}")
+            try:
+                client.destroy_scenes([r["scene_id"] for r in ok_rows],
+                                      delete_file=True, delete_generated=True)
+            except Exception as exc:  # noqa: BLE001
+                failed += [{"scene_id": r["scene_id"], "error": str(exc)} for r in ok_rows]
+                if job is not None:
+                    job.log(f"delete failed: {exc}")
+                continue
+            for r in ok_rows:
+                freed += int(r.get("size") or 0)
+                deleted.append(r["scene_id"])
+                self._log_scene("delete", r, reason=reason, size=r.get("size"),
+                                before={"rating100": r["rating100"], "o_counter": r["o_counter"],
+                                        "tier": r["tier"]},
+                                detail=f"file deleted ({reason})")
+                if job is not None:
+                    job.log(f"deleted {r['path']}")
+            self._drop_local(ok_rows)
+            if job is not None:
+                job.progress = {"done": min(i + CHUNK, len(ids)), "total": len(ids)}
+        return {"deleted": len(deleted), "freed_bytes": freed, "refused": refused,
+                "failed": failed, "ids": deleted}

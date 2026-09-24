@@ -159,11 +159,16 @@ def _catalogue_models():
     class TierTagsIn(BaseModel):
         tags: dict[str, str] = {}
 
-    return GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn, TierTagsIn
+    class DeleteIn(BaseModel):
+        scene_ids: list[str] | None = None      # None = every rejected scene
+        confirm: bool = False
+
+    return (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
+            TierTagsIn, DeleteIn)
 
 
 (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
- TierTagsIn) = _catalogue_models()
+ TierTagsIn, DeleteIn) = _catalogue_models()
 
 
 def _login_model():
@@ -990,6 +995,33 @@ def create_app(cfg=None):
     def catalogue_restore_bulk(body: BulkRestoreIn):
         items = [i.model_dump() for i in body.items]
         return _library_job(lambda j: service.restore_bulk(j, items))
+
+    @app.get("/api/catalogue/delete-preview")
+    def catalogue_delete_preview(ids: str | None = None):
+        try:
+            return service.delete_preview([i for i in ids.split(",") if i] if ids else None)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/catalogue/delete")
+    def catalogue_delete(body: DeleteIn):
+        """Delete rejected (1★) scenes and their files. Each is re-checked right
+        before deletion; anything no longer 1★ is refused."""
+        if not body.confirm:
+            raise HTTPException(409, "deleting removes the files from disk — preview, then confirm")
+        caps = service.capabilities()
+        if not caps["ops"].get("scenesDestroy"):
+            raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
+        try:
+            ids = body.scene_ids
+            if ids is None:
+                ids = [r["scene_id"] for r in service._catalogue_all(refresh=True)
+                       if r["tier"] == "rejected"]
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
+        if not ids:
+            raise HTTPException(400, "no rejected scenes to delete")
+        return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject"))
 
     @app.get("/api/catalogue/tier-tags")
     def catalogue_tier_tags():

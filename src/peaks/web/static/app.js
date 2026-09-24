@@ -401,6 +401,11 @@ async function waitJob(id, onTick, every = 800) {
     await new Promise((r) => setTimeout(r, every));
   }
 }
+const fmtBytes = (b) => {
+  b = +b || 0;
+  for (const [u, n] of [["TB", 1e12], ["GB", 1e9], ["MB", 1e6]]) if (b >= n) return `${(b / n).toFixed(b >= 10 * n ? 0 : 1)} ${u}`;
+  return `${Math.round(b / 1e3)} KB`;
+};
 const plural = (n, one, many = one + "s") => `${(+n).toLocaleString()} ${n === 1 ? one : many}`;
 const tierLabel = (t) => (typeof TIER_NAMES !== "undefined" && TIER_NAMES[t]) || t || "—";
 const HIST_VERB = { grade: "Graded", restore: "Restored", delete: "Deleted",
@@ -2192,6 +2197,12 @@ function renderCatChips() {
   $("#cat-chips").innerHTML = chip("", "All", all) + CAT_CHIPS.map((t) => chip(t, TIER_NAMES[t], cat.counts[t])).join("");
   // ▶ Board / ⬇ Reel act on one keeper tier (the selected chip)
   const tierOk = !cat.view && ["legendaire", "exceptionnelle", "merveilleuse", "upscale"].includes(cat.tier);
+  const del = $("#btn-cat-delete");
+  if (del) {
+    const n = cat.counts.rejected || 0;
+    del.hidden = cat.view || cat.tier !== "rejected" || !n;
+    del.textContent = `🗑 Delete all ${plural(n, "rejected scene")}`;
+  }
   for (const [id, verb] of [["#btn-cat-board", "▶ Board"], ["#btn-cat-reel", "⬇ Reel"]]) {
     const b = $(id); if (!b) continue;
     b.disabled = !tierOk;
@@ -2214,7 +2225,8 @@ function renderCatTriage() {
     const gain = Math.round((rep.quality_gain || 0) * 100);
     txt = `Trained on ${rep.n} scenes (${rep.trained_at}) · ${pct(rep.cv.exact)} exact · ${pct(rep.cv.within_one)} within one tier` +
       ` · file quality ${gain >= 0 ? "+" : ""}${gain} pts` +
-      (m.grades_since_train ? ` · ${m.grades_since_train} grades since` : "");
+      (m.grades_since_train ? ` · ${m.grades_since_train} grades since` : "") +
+      (rep.remembered_rejects ? ` · incl. ${plural(rep.remembered_rejects, "deleted reject")} remembered` : "");
     const short = Object.entries(rep.short || {}).map(([c, n]) => `${className(c)} (${n})`);
     if (short.length) txt += ` · too few to learn: ${short.join(", ")}`;
   } else if (rep && !rep.trained) {
@@ -2418,6 +2430,8 @@ function renderCatBulk() {
   bar.hidden = n === 0 && !cat.bulkBusy;
   if (cat.bulkBusy) return;
   $("#cat-bulk-n").textContent = plural(n, "scene") + " selected";
+  const allRejected = n > 0 && cat.items.filter((r) => cat.sel.has(r.scene_id)).every((r) => r.tier === "rejected");
+  const ds = $("#btn-cat-delsel"); if (ds) ds.hidden = !allRejected;
   $("#cat-bulk-grades").innerHTML = GRADES.map((g) =>
     `<button class="cat-g g-${g}" data-g="${g}">${esc(gradeName(g))}</button>`).join("");
 }
@@ -2459,6 +2473,54 @@ $("#cat-bulk")?.addEventListener("click", (e) => {
     cat.sel.clear(); renderCatList(); renderCatBulk();
   }
 });
+// --- deleting rejects (files included) — preview, tick, then delete ---------------
+async function openDeleteDialog(ids) {
+  const dlg = $("#del-dlg");
+  let d;
+  try {
+    d = await api("/api/catalogue/delete-preview" + (ids ? "?ids=" + encodeURIComponent(ids.join(",")) : ""));
+  } catch (e) { toast(e.message, true); return; }
+  if (!d.count) { toast("Nothing rated 1★ to delete"); return; }
+  $("#del-title").textContent = ids ? "Delete selected rejects" : "Delete all rejected scenes";
+  $("#del-summary").innerHTML = `<b>${plural(d.count, "scene")}</b> · <b>${fmtBytes(d.bytes)}</b> will be deleted from Stash, with their files.`;
+  $("#del-list").innerHTML = d.items.map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path || "")}">${esc(r.title || r.path)}</span>
+    <span class="dim">${r.size ? fmtBytes(r.size) : ""}</span></div>`).join("") +
+    (d.count > d.items.length ? `<div class="dim">…and ${d.count - d.items.length} more</div>` : "");
+  const ack = $("#del-ack"), go = $("#btn-del-go");
+  ack.checked = false; go.disabled = true; $("#del-status").textContent = "";
+  go.textContent = `Delete ${plural(d.count, "file")}`;
+  if (!d.capable) {
+    ack.disabled = true;
+    $("#del-status").textContent = "Your Stash version can't delete scenes from the API — update Stash to use this.";
+  } else ack.disabled = false;
+  ack.onchange = () => { go.disabled = !ack.checked; };
+  $("#btn-del-cancel").onclick = () => dlg.close();
+  go.onclick = async () => {
+    go.disabled = true; ack.disabled = true; $("#btn-del-cancel").disabled = true;
+    try {
+      const job = await api("/api/catalogue/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scene_ids: d.ids, confirm: true }),   // exactly what was previewed
+      });
+      const j = await waitJob(job.id, (x) => {
+        const p = x.progress || {};
+        $("#del-status").textContent = `deleting ${p.done ?? 0}/${p.total ?? d.count}…`;
+      });
+      if (j.status === "error") throw new Error(j.error);
+      const r = j.result;
+      const extra = [r.refused.length ? `${r.refused.length} skipped (no longer 1★)` : "",
+        r.failed.length ? `${r.failed.length} failed` : ""].filter(Boolean).join(" · ");
+      toast(`Deleted ${plural(r.deleted, "scene")} · freed ${fmtBytes(r.freed_bytes)}${extra ? " · " + extra : ""}`, !!r.failed.length);
+      dlg.close();
+      cat.sel.clear(); openCatalogue(); loadHistory();
+    } catch (e) { $("#del-status").textContent = e.message; toast(e.message, true); }
+    $("#btn-del-cancel").disabled = false;
+  };
+  dlg.showModal();
+}
+$("#btn-cat-delete")?.addEventListener("click", () => openDeleteDialog(null));
+$("#btn-cat-delsel")?.addEventListener("click", () =>
+  openDeleteDialog(cat.items.filter((r) => cat.sel.has(r.scene_id)).map((r) => r.scene_id)));
 $("#btn-cat-select")?.addEventListener("click", () => {
   cat.items.forEach((r) => cat.sel.add(r.scene_id));
   renderCatList(); renderCatBulk();

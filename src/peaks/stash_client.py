@@ -187,6 +187,12 @@ mutation SceneMarkersDestroy($ids: [ID!]!) {
 }
 """
 
+_SCENES_DESTROY = """
+mutation ScenesDestroy($input: ScenesDestroyInput!) {
+  scenesDestroy(input: $input)
+}
+"""
+
 _BULK_SCENE_UPDATE = """
 mutation BulkSceneUpdate($input: BulkSceneUpdateInput!) {
   bulkSceneUpdate(input: $input) { id }
@@ -576,6 +582,18 @@ class StashClient:
             {"input": {"ids": scene_ids, "tag_ids": {"ids": tag_ids, "mode": "ADD"}}},
         )
         return len(scene_ids)
+
+    def destroy_scenes(self, scene_ids: list[str], delete_file: bool = True,
+                       delete_generated: bool = True) -> int:
+        """Delete scenes from Stash — with `delete_file`, the video files too
+        (irreversible). Returns how many ids were submitted."""
+        ids = [str(s) for s in scene_ids if s]
+        if not ids:
+            return 0
+        self.execute(_SCENES_DESTROY, {"input": {
+            "ids": ids, "delete_file": bool(delete_file),
+            "delete_generated": bool(delete_generated)}})
+        return len(ids)
 
     def destroy_scene_markers(self, marker_ids: list[str], chunk: int = 100) -> int:
         """Delete markers by id (chunked). Returns how many ids were submitted."""

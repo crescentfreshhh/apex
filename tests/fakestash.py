@@ -90,3 +90,9 @@ class FakeStash:
         self.calls.append(("reset_o", sid))
         self.s[sid]["o_counter"] = 0
         return 0
+
+    def destroy_scenes(self, scene_ids, delete_file=True, delete_generated=True):
+        self.calls.append(("destroy", tuple(scene_ids), delete_file, delete_generated))
+        for sid in scene_ids:
+            self.s.pop(str(sid), None)
+        return len(scene_ids)

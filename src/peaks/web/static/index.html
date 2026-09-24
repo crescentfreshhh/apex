@@ -479,6 +479,7 @@
         </select>
         <button id="btn-cat-refresh" class="ghost" title="Re-read grades from Stash (picks up changes made there)">↻ Refresh</button>
         <button id="btn-cat-select" class="ghost" title="Select every scene loaded in this view, to grade them together">☐ Select all</button>
+        <button id="btn-cat-delete" class="danger" hidden>🗑 Delete all rejected</button>
         <button id="btn-cat-board" class="ghost" disabled title="Play the selected tier's best moments on the megaboard (pick a tier chip first)">▶ Board</button>
         <button id="btn-cat-reel" class="ghost" disabled title="Export one video of the selected tier's best moments (pick a tier chip first)">⬇ Reel</button>
         <span id="cat-status" class="dim"></span>
@@ -490,6 +491,7 @@
       <b id="cat-bulk-n"></b>
       <span id="cat-bulk-grades" class="cat-bulk-grades"></span>
       <span class="grow"></span>
+      <button id="btn-cat-delsel" class="danger" hidden>🗑 Delete selected</button>
       <button id="btn-cat-selall" class="ghost">Select all loaded</button>
       <button id="btn-cat-selnone" class="ghost">Clear (Esc)</button>
     </div>
@@ -547,6 +549,22 @@
   </section>
 
   <!-- SCENE VIEWER (in-app player + heatmap + editable stats) -->
+  <!-- delete rejects: shown by the Catalogue, deletes files only after the tick + button -->
+  <dialog id="del-dlg" class="dlg">
+    <h2 id="del-title">Delete rejected scenes</h2>
+    <p id="del-summary"></p>
+    <div id="del-list" class="dlg-list"></div>
+    <p class="dim">Each scene is re-checked right before deletion — anything no longer rated 1★
+      is skipped. Every deleted file is recorded in Settings → History. Peaks remembers what the
+      rejects looked like, so keeper triage keeps learning from them.</p>
+    <label class="check dlg-ack"><input type="checkbox" id="del-ack" /> Delete the video files from disk too — this can't be undone</label>
+    <div class="row">
+      <button id="btn-del-go" class="danger" disabled>Delete</button>
+      <button id="btn-del-cancel" class="ghost">Cancel</button>
+      <span id="del-status" class="dim"></span>
+    </div>
+  </dialog>
+
   <div id="viewer" class="viewer" hidden>
     <div class="viewer-stage">
       <button id="viewer-close" class="viewer-close" title="Close (Esc)">✕</button>
