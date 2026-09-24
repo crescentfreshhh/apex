@@ -129,6 +129,27 @@ def _clip_settings_model():
 ClipSettingsIn = _clip_settings_model()
 
 
+def _catalogue_models():
+    from pydantic import BaseModel
+
+    class GradeIn(BaseModel):
+        scene_id: str
+        grade: str
+
+    class RestoreIn(BaseModel):
+        scene_id: str
+        rating100: int | None = None
+        o_counter: int = 0
+
+    class TierNamesIn(BaseModel):
+        names: dict[str, str] = {}
+
+    return GradeIn, RestoreIn, TierNamesIn
+
+
+GradeIn, RestoreIn, TierNamesIn = _catalogue_models()
+
+
 def _login_model():
     from pydantic import BaseModel
 
@@ -825,7 +846,7 @@ def create_app(cfg=None):
             "scenes": lambda r: r.get("scenes", 0),
             "taste": lambda r: (r.get("taste_best") or 0),
             "affinity": lambda r: (r.get("affinity") or 0),
-            "engagement": lambda r: r.get("o_counter", 0),
+            "engagement": lambda r: (r.get("tier_score", 0), r.get("o_counter", 0)),  # tiers, not summed O
         }.get(sort, lambda r: r.get("moments", 0))
         return {"performers": sorted(rows, key=keyf, reverse=True)}
 
@@ -893,6 +914,60 @@ def create_app(cfg=None):
             return service.save_export_settings(res=body.res, fps=body.fps, codec=body.codec)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
+
+    # --- catalogue: grade & filter with the user's tiers (5★ + O-count) -----
+
+    @app.get("/api/catalogue")
+    def catalogue(
+        tier: str | None = None, res: str | None = None, min_mbps: float | None = None,
+        q: str | None = None, sort: str = "date", offset: int = 0,
+        limit: int = Query(60, ge=1, le=500), refresh: bool = False,
+    ):
+        try:
+            return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort,
+                                     offset=max(0, offset), limit=limit, refresh=refresh)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, f"Stash unreachable: {exc}")
+
+    @app.post("/api/catalogue/grade")
+    def catalogue_grade(body: GradeIn):
+        try:
+            return service.grade_scene(body.scene_id, body.grade)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash update failed: {exc}")
+
+    @app.post("/api/catalogue/restore")
+    def catalogue_restore(body: RestoreIn):
+        try:
+            return service.restore_scene_grade(body.scene_id, body.rating100, body.o_counter)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Stash update failed: {exc}")
+
+    @app.get("/api/catalogue/names")
+    def catalogue_names():
+        return service.tier_display_names()
+
+    @app.post("/api/catalogue/names")
+    def catalogue_save_names(body: TierNamesIn):
+        return service.save_tier_names(body.names)
+
+    @app.get("/api/scene/{scene_id}/cover")
+    def scene_cover(scene_id: str):
+        try:
+            got = service.scene_cover(scene_id)
+        except Exception:  # noqa: BLE001
+            got = None
+        if not got:
+            raise HTTPException(404, "no cover")
+        data, ctype = got
+        return Response(content=data, media_type=ctype,
+                        headers={"Cache-Control": "private, max-age=86400"})
 
     @app.get("/api/clip-settings")
     def get_clip_settings():

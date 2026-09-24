@@ -49,6 +49,7 @@ document.querySelectorAll(".tab[data-view]").forEach((b) =>
     if (b.dataset.view === "dashboard") refreshDashboard();
     if (b.dataset.view === "foryou") openForYou();
     if (b.dataset.view === "performers") openPerformers();
+    if (b.dataset.view === "catalogue" && !cat.loaded) openCatalogue();
     if (b.dataset.view === "statistics") openStatistics();
     if (b.dataset.view === "experimental") openExperimental();
   })
@@ -417,6 +418,63 @@ function stars(rating100) {
     s += `<span class="star ${i <= filled ? "on" : ""}" data-r="${i * 20}">★</span>`;
   return s;
 }
+
+// --- tiers: the O-count is a GRADE above 5★, not an event count --------------
+// Mirrors peaks/tiers.py (tier_of) — keep the two in sync.
+const TIER_ORDER = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
+let TIER_NAMES = {
+  unreviewed: "Unreviewed", rejected: "Rejected", anomaly: "Anomaly", upscale: "Upscale",
+  merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire",
+};
+const GRADES = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "reject"];   // keys 1–5
+function tierOf(rating100, o) {
+  const r = +rating100 || 0;
+  if (r <= 0) return "unreviewed";
+  if (r <= 20) return "rejected";
+  if (r < 100) return "unreviewed";
+  return ({ 0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+}
+function gradeName(g) { return g === "reject" ? "Reject (1★)" : TIER_NAMES[g]; }
+function tierBadge(rating100, o, { showUnreviewed = false } = {}) {
+  const t = tierOf(rating100, o);
+  if (t === "unreviewed" && !showUnreviewed) return "";
+  return `<span class="tier tier-${t}" title="${esc(TIER_NAMES[t])} · ${rating100 == null ? "unrated" : Math.round(rating100 / 20) + "★"} · O ${o ?? 0}">${esc(TIER_NAMES[t])}</span>`;
+}
+(async () => { try { TIER_NAMES = { ...TIER_NAMES, ...(await api("/api/catalogue/names")) }; } catch {} })();
+
+// a performer's graded keepers, best tier first, e.g. "3 Légendaire · 5 Exceptionnelle"
+function tierTally(tiers, { compact = false } = {}) {
+  const parts = ["legendaire", "exceptionnelle", "merveilleuse"]
+    .filter((t) => (tiers || {})[t])
+    .map((t) => compact
+      ? `<span class="tier tier-${t}" title="${esc(TIER_NAMES[t])}">${tiers[t]}</span>`
+      : `${tiers[t]} ${esc(TIER_NAMES[t])}`);
+  return parts.join(compact ? " " : " · ");
+}
+
+// grade undo stack, shared by the Catalogue and the viewer's grade menu
+const gradeUndo = [];
+async function applyGrade(sid, grade) {
+  const r = await api("/api/catalogue/grade", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scene_id: String(sid), grade }),
+  });
+  gradeUndo.push({ sid: String(sid), prev: r.previous, grade });
+  toast(`${gradeName(grade)} — Z to undo`);
+  return r.scene;
+}
+async function undoGrade() {
+  const u = gradeUndo.pop();
+  if (!u) { toast("nothing to undo"); return null; }
+  try {
+    const r = await api("/api/catalogue/restore", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_id: u.sid, ...u.prev }),
+    });
+    toast(`Undone (${gradeName(u.grade)})`);
+    return r.scene;
+  } catch (e) { gradeUndo.push(u); toast(e.message, true); return null; }
+}
 let lastHits = [];
 function renderHits(hits, container, previewMax) {
   const g = container || $("#results");
@@ -444,7 +502,7 @@ function renderHits(hits, container, previewMax) {
         <div class="edit">
           <span class="rating" title="rating">${stars(h.rating100)}</span>
           <span class="ospacer"></span>
-          <button class=" obtn" title="O-count (click +, shift-click −)">⊙ ${h.o_counter ?? 0}</button>
+          ${tierBadge(h.rating100, h.o_counter)}
           <button class="orgbtn ${h.organized ? "on" : ""}" title="organized">✓</button>
         </div>
       </div>
@@ -522,13 +580,6 @@ function wireSceneEdits(sid, root) {
       const m = await patchScene(sid, { organized: !org.classList.contains("on") });
       org.classList.toggle("on", !!m.organized); toast("organized " + (m.organized ? "on" : "off"));
     } catch (e) { toast(e.message, true); }
-  });
-  const ob = root.querySelector(".obtn");
-  if (ob) ob.addEventListener("click", async (e) => {
-    try {
-      const r = await api(`/api/scene/${sid}/o`, { method: e.shiftKey ? "DELETE" : "POST" });
-      ob.textContent = `⊙ ${r.o_counter}`;
-    } catch (err) { toast(err.message, true); }
   });
 }
 function wireTileEdits(tile) { wireSceneEdits(tile.dataset.sid, tile); }
@@ -684,9 +735,19 @@ async function loadViewerMeta(sid) {
   $("#viewer-sub").textContent =
     [m.studio, perf, m.date, (m.tags || []).slice(0, 6).join(", ")].filter(Boolean).join("  ·  ") || "—";
   edit.innerHTML = `<span class="rating">${stars(m.rating100)}</span>
-    <button class="obtn" title="O-count (click +, shift-click −)">⊙ ${m.o_counter ?? 0}</button>
+    ${tierBadge(m.rating100, m.o_counter, { showUnreviewed: true })}
+    <select class="grade-sel" title="Grade this scene (5★ + O-count) — Z undoes">
+      <option value="">Grade…</option>
+      ${GRADES.map((g) => `<option value="${g}">${esc(gradeName(g))}</option>`).join("")}
+    </select>
     <button class="orgbtn ${m.organized ? "on" : ""}">✓ organized</button>`;
   wireSceneEdits(sid, edit);
+  const gs = edit.querySelector(".grade-sel");
+  if (gs) gs.addEventListener("change", async () => {
+    if (!gs.value) return;
+    try { await applyGrade(sid, gs.value); loadViewerMeta(sid); }
+    catch (e) { toast(e.message, true); gs.value = ""; }
+  });
 }
 async function saveMoment(sid, t) {
   if (!sid) return toast("no scene id for this result", true);
@@ -882,7 +943,7 @@ function renderPerformers(rows) {
   grid.innerHTML = rows.map((r) => {
     const pct = Math.round((r.moments / maxMoments) * 100);
     const taste = r.affinity != null ? `<span class="perf-taste" title="mean taste affinity">★ ${Math.round(r.affinity * 100)}%</span>` : "";
-    const eng = r.o_counter ? ` · ⊙ ${r.o_counter}` : "";
+    const eng = tierTally(r.tiers, { compact: true }) ? ` · ${tierTally(r.tiers, { compact: true })}` : "";
     return `<div class="perf-card" data-id="${esc(r.id)}" data-name="${esc(r.name)}">
       ${perfPhotoHTML(r)}
       <div class="perf-body">
@@ -1032,7 +1093,7 @@ function renderPerfDetail(d) {
           ${stat("moments", (s.moments || 0).toLocaleString())}
           ${stat("scenes", s.scenes)}
           ${stat("★ taste", s.affinity != null ? Math.round(s.affinity * 100) + "%" : null)}
-          ${stat("⊙", s.o_counter)}
+          ${stat("🏆", tierTally(s.tiers) || null)}
           ${stat("✩", s.rating)}
         </div>
         ${dist ? `<div class="dim" style="margin-top:6px">how on-taste her moments are</div>${dist}` : ""}
@@ -1096,7 +1157,7 @@ async function renderCompare() {
         <img src="${thumb}" onerror="this.style.opacity=.15"/>
         <h3>${esc(d.performer)}</h3>
         <div class="dim">${(s.moments || 0).toLocaleString()} moments · ${s.scenes || 0} scenes</div>
-        <div class="dim">★ ${s.affinity != null ? Math.round(s.affinity * 100) + "%" : "—"} · ⊙ ${s.o_counter || 0} · ✩ ${s.rating ?? "—"}</div>
+        <div class="dim">★ ${s.affinity != null ? Math.round(s.affinity * 100) + "%" : "—"} · ${tierTally(s.tiers, { compact: true }) || "no tiered scenes"} · ✩ ${s.rating ?? "—"}</div>
         <div class="fy-words" style="margin-top:8px">${fp}</div>
       </div>`;
     };
@@ -1884,6 +1945,163 @@ function renderExperimental() {
 $("#exp-floor")?.addEventListener("input", () => { updateExpFloorLabel(); if (expData && expData.ready) renderExperimental(); });
 $("#exp-floor")?.addEventListener("change", () => writeFloor(+$("#exp-floor").value));
 $("#btn-exp-refresh")?.addEventListener("click", () => openExperimental());
+
+// --- Catalogue: grade & filter the library with your tiers -------------------
+const CAT_PAGE = 60;
+const CAT_CHIPS = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
+const cat = { tier: "unreviewed", items: [], total: 0, counts: {}, focus: 0, loaded: false, busy: false };
+
+function catParams(offset, refresh) {
+  const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
+  if (cat.tier) qs.set("tier", cat.tier);
+  const q = $("#cat-q").value.trim(); if (q) qs.set("q", q);
+  const res = $("#cat-res").value; if (res) qs.set("res", res);
+  const mb = $("#cat-mbps").value; if (mb !== "") qs.set("min_mbps", mb);
+  if (refresh) qs.set("refresh", "true");
+  return qs.toString();
+}
+async function openCatalogue({ append = false, refresh = false } = {}) {
+  if (cat.busy) return;
+  cat.busy = true;
+  const offset = append ? cat.items.length : 0;
+  $("#cat-status").textContent = refresh ? "re-reading grades from Stash…" : "loading…";
+  if (!append) $("#cat-list").innerHTML = '<p class="dim">Reading your library…</p>';
+  try {
+    const d = await api("/api/catalogue?" + catParams(offset, refresh));
+    TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
+    cat.items = append ? cat.items.concat(d.items) : d.items;
+    cat.total = d.total; cat.counts = d.counts; cat.loaded = true;
+    if (!append) cat.focus = 0;
+    renderCatChips(); renderCatList();
+    $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
+  } catch (e) {
+    $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
+    $("#cat-status").textContent = "";
+  } finally { cat.busy = false; }
+}
+function renderCatChips() {
+  const all = Object.values(cat.counts).reduce((a, b) => a + b, 0);
+  const chip = (t, label, n) =>
+    `<button class="cat-chip ${cat.tier === t ? "on" : ""} ${t ? "tier-" + t : ""}" data-t="${t}">${esc(label)} <span class="n">${(n || 0).toLocaleString()}</span></button>`;
+  $("#cat-chips").innerHTML = chip("", "All", all) + CAT_CHIPS.map((t) => chip(t, TIER_NAMES[t], cat.counts[t])).join("");
+}
+function qualityLine(q) {
+  return [q.res, q.mbps != null ? `${q.mbps} Mbps` : null, (q.codec || "").toUpperCase() || null,
+          q.fps ? `${Math.round(q.fps)}fps` : null].filter(Boolean).join(" · ") || "quality unknown";
+}
+function catCardHTML(r, i) {
+  const who = [r.performers.slice(0, 4).join(", "), r.studio, r.date, r.duration ? fmt(r.duration) : ""].filter(Boolean).join(" · ");
+  const moments = (r.moments || []).map((m, j) =>
+    `<img class="cat-m" loading="lazy" src="${m.thumb}" data-j="${j}" title="${fmt(m.t)}${m.score != null ? " · taste " + Math.round(m.score * 100) + "%" : ""}" />`).join("");
+  const cur = r.tier === "rejected" ? "reject" : r.tier;   // highlight the grade it already has
+  const grades = GRADES.map((g, k) =>
+    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><kbd>${k + 1}</kbd> ${esc(gradeName(g))}</button>`).join("");
+  return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""}" data-i="${i}">
+    <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
+    <div class="cat-body">
+      <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
+      <div class="dim cat-who">${esc(who)}</div>
+      <div class="cat-q">${esc(qualityLine(r.quality))}</div>
+      <div class="cat-moments">${moments || '<span class="dim">not embedded yet — no moments</span>'}</div>
+    </div>
+    <div class="cat-grades">${grades}</div>
+  </div>`;
+}
+function renderCatList() {
+  const list = $("#cat-list");
+  list.innerHTML = cat.items.length
+    ? cat.items.map(catCardHTML).join("")
+    : '<p class="dim">Nothing here with these filters.</p>';
+  $("#btn-cat-more").hidden = cat.items.length >= cat.total;
+}
+function renderCatCard(i) {
+  const old = $(`#cat-list .cat-card[data-i="${i}"]`);
+  if (old) old.outerHTML = catCardHTML(cat.items[i], i);
+}
+function focusCat(i, scroll = true) {
+  if (!cat.items.length) return;
+  const prev = cat.focus;
+  cat.focus = Math.max(0, Math.min(cat.items.length - 1, i));
+  $(`#cat-list .cat-card[data-i="${prev}"]`)?.classList.remove("focus");
+  const el = $(`#cat-list .cat-card[data-i="${cat.focus}"]`);
+  el?.classList.add("focus");
+  if (scroll) el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  if (cat.focus >= cat.items.length - 3 && cat.items.length < cat.total) openCatalogue({ append: true });
+}
+function catBumpCounts(from, to) {
+  if (from === to) return;
+  cat.counts[from] = Math.max(0, (cat.counts[from] || 0) - 1);
+  cat.counts[to] = (cat.counts[to] || 0) + 1;
+  renderCatChips();
+}
+async function gradeCat(i, grade) {
+  const r = cat.items[i]; if (!r) return;
+  try {
+    const fresh = await applyGrade(r.scene_id, grade);
+    catBumpCounts(r.tier, fresh.tier);
+    // stays in place (dimmed) so the list doesn't jump and Z still has context
+    cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, _graded: true };
+    renderCatCard(i);
+    focusCat(i + 1);
+  } catch (e) { toast(e.message, true); }
+}
+async function undoCatGrade() {
+  const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
+  const fresh = await undoGrade();
+  if (!fresh) return;
+  const i = cat.items.findIndex((r) => r.scene_id === sid);
+  if (i < 0) return;
+  catBumpCounts(cat.items[i].tier, fresh.tier);
+  cat.items[i] = { ...cat.items[i], ...fresh, _graded: false };
+  renderCatCard(i); focusCat(i);
+}
+function watchCat(i, j = null) {
+  const r = cat.items[i]; if (!r) return;
+  const hits = cat.items.map((x) => {
+    const m = (x.moments || [])[0];
+    return m ? { scene_id: x.scene_id, key: m.key, time: m.t, stream: m.stream }
+             : { scene_id: x.scene_id, key: "", time: 0, stream: x.stream };
+  });
+  const m = j != null ? (r.moments || [])[j] : null;
+  if (m) hits[i] = { scene_id: r.scene_id, key: m.key, time: m.t, stream: m.stream };
+  lastHits = hits;          // viewer ← / → walk the catalogue page
+  openViewerAt(i);
+}
+$("#cat-chips")?.addEventListener("click", (e) => {
+  const b = e.target.closest(".cat-chip"); if (!b) return;
+  cat.tier = b.dataset.t; openCatalogue();
+});
+$("#cat-list")?.addEventListener("click", (e) => {
+  const card = e.target.closest(".cat-card"); if (!card) return;
+  const i = +card.dataset.i;
+  const g = e.target.closest(".cat-g");
+  if (g) { focusCat(i, false); gradeCat(i, g.dataset.g); return; }
+  const m = e.target.closest(".cat-m");
+  if (m) { focusCat(i, false); watchCat(i, +m.dataset.j); return; }
+  if (e.target.closest(".cat-cover")) { focusCat(i, false); watchCat(i); return; }
+  focusCat(i, false);
+});
+let catQT;
+$("#cat-q")?.addEventListener("input", () => { clearTimeout(catQT); catQT = setTimeout(() => openCatalogue(), 300); });
+for (const sel of ["#cat-res", "#cat-sort", "#cat-mbps"]) $(sel)?.addEventListener("change", () => openCatalogue());
+$("#btn-cat-refresh")?.addEventListener("click", () => openCatalogue({ refresh: true }));
+$("#btn-cat-more")?.addEventListener("click", () => openCatalogue({ append: true }));
+document.addEventListener("keydown", (e) => {
+  if (!$("#catalogue")?.classList.contains("active") || !$("#viewer").hidden) return;
+  if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k >= "1" && k <= "5") { e.preventDefault(); gradeCat(cat.focus, GRADES[+k - 1]); }
+  else if (k === "j" || k === "arrowdown") { e.preventDefault(); focusCat(cat.focus + 1); }
+  else if (k === "k" || k === "arrowup") { e.preventDefault(); focusCat(cat.focus - 1); }
+  else if (k === "enter") { e.preventDefault(); watchCat(cat.focus); }
+  else if (k === "z") { e.preventDefault(); undoCatGrade(); }
+});
+// Z also undoes a grade made from the viewer's grade menu
+document.addEventListener("keydown", (e) => {
+  if ($("#viewer").hidden || e.key.toLowerCase() !== "z" || e.target.closest("input, select, textarea")) return;
+  e.preventDefault();
+  undoGrade().then((s) => { if (s && currentHit) loadViewerMeta(currentHit.scene_id); });
+});
 
 function setActiveView(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === name));

@@ -104,7 +104,7 @@ query SceneDetails($ids: [ID!]) {
       studio { name }
       performers { id name gender }
       tags { name }
-      files { path duration width height }
+      files { path duration width height bit_rate frame_rate video_codec size }
       paths { screenshot preview }
     }
   }
@@ -284,13 +284,18 @@ class StashClient:
 
     _EDITABLE = ("rating100", "organized", "title", "date", "details")
 
-    def update_scene(self, scene_id: str, **fields) -> dict:
-        """Update editable scene fields in Stash (only the ones passed).
-        Returns the updated scene dict."""
+    def update_scene(self, scene_id: str, clear: tuple = (), **fields) -> dict:
+        """Update editable scene fields in Stash (only the ones passed; `None`
+        values are skipped). Fields named in `clear` are explicitly set to null —
+        e.g. undoing a grade on a scene that was unrated. Returns the updated
+        scene dict."""
         inp: dict = {"id": str(scene_id)}
         for k in self._EDITABLE:
             if k in fields and fields[k] is not None:
                 inp[k] = fields[k]
+        for k in clear:
+            if k in self._EDITABLE:
+                inp[k] = None
         data = self.execute(_SCENE_UPDATE, {"input": inp})
         return data["sceneUpdate"]
 
@@ -342,6 +347,10 @@ class StashClient:
                 "duration": f0.get("duration"),
                 "width": f0.get("width"),
                 "height": f0.get("height"),
+                "bit_rate": f0.get("bit_rate"),
+                "frame_rate": f0.get("frame_rate"),
+                "video_codec": f0.get("video_codec") or "",
+                "size": f0.get("size"),
                 "path": f0.get("path"),
                 "cover": paths.get("screenshot"),
             }
@@ -393,6 +402,18 @@ class StashClient:
             )
             r.raise_for_status()
         except Exception:  # noqa: BLE001 — missing image is not fatal
+            return None
+        return r.content, r.headers.get("content-type", "image/jpeg")
+
+    def scene_screenshot(self, scene_id: str) -> tuple[bytes, str] | None:
+        """A scene's Stash cover image through the authed session (proxied by the
+        web app, so the api key never reaches the browser)."""
+        try:
+            r = self.session.get(
+                f"{self.base_url}/scene/{scene_id}/screenshot", timeout=self.timeout
+            )
+            r.raise_for_status()
+        except Exception:  # noqa: BLE001 — missing cover is not fatal
             return None
         return r.content, r.headers.get("content-type", "image/jpeg")
 

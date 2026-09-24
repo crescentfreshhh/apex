@@ -16,6 +16,7 @@ from ..cache import EmbeddingCache
 from ..config import Config
 from ..embedding import canonical_name
 from ..search import Hit, SearchIndex
+from ..tiers import TIER_WEIGHT, tier_of
 
 
 class Service:
@@ -2715,10 +2716,14 @@ class Service:
                     continue
                 e = perf.setdefault(str(p["id"]), {
                     "name": p.get("name", ""), "scenes": set(),
-                    "o": 0, "rating_sum": 0.0, "rating_n": 0,
+                    "o": 0, "rating_sum": 0.0, "rating_n": 0, "tiers": {},
                 })
                 e["scenes"].add(str(sid))
                 e["o"] += int(meta.get("o_counter") or 0)
+                # the O-count is a GRADE above 5★ (peaks.tiers), not an event
+                # count — tally tiers instead of summing it
+                t = tier_of(meta.get("rating100"), meta.get("o_counter"))
+                e["tiers"][t] = e["tiers"].get(t, 0) + 1
                 if meta.get("rating100") is not None:
                     e["rating_sum"] += float(meta["rating100"])
                     e["rating_n"] += 1
@@ -2769,6 +2774,8 @@ class Service:
                 "taste_best": round(best, 4) if cu is not None else None,
                 "taste_mean": taste_mean, "affinity": taste_mean,
                 "o_counter": e["o"],
+                "tiers": e["tiers"],
+                "tier_score": sum(TIER_WEIGHT.get(t, 0) * n for t, n in e["tiers"].items()),
                 "rating": round(e["rating_sum"] / e["rating_n"], 1) if e["rating_n"] else None,
                 "top": top,
             })
@@ -3502,6 +3509,277 @@ class Service:
         count = self.client().scene_delete_o(scene_id)
         self.invalidate_meta(scene_id)
         return count
+
+    # --- catalogue: grade & filter the library with the user's tiers -----------
+    # Grade = 5★ + O-count (see peaks.tiers). The listing is cached briefly and
+    # refreshable, because grades are also made directly in Stash and the
+    # per-scene display cache (`_meta`) otherwise never expires.
+
+    _CAT_TTL = 300.0
+
+    def tier_display_names(self) -> dict[str, str]:
+        from ..tiers import tier_names
+
+        return tier_names(self._settings().get("tier_names"))
+
+    def save_tier_names(self, names: dict) -> dict[str, str]:
+        import json
+
+        from ..tiers import DEFAULT_NAMES
+
+        s = dict(self._settings())
+        cur = dict(s.get("tier_names") or {})
+        for k, v in (names or {}).items():
+            if k in DEFAULT_NAMES:
+                if isinstance(v, str) and v.strip():
+                    cur[k] = v.strip()[:40]
+                else:
+                    cur.pop(k, None)          # blank → back to the default
+        s["tier_names"] = cur
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.tier_display_names()
+
+    def _cat_row(self, sid: str, m: dict) -> dict:
+        import os
+
+        from ..tiers import quality_of, tier_of
+
+        path = m.get("path") or ""
+        return {
+            "scene_id": sid,
+            "title": m.get("title") or os.path.splitext(os.path.basename(path))[0],
+            "date": m.get("date") or "",
+            "duration": m.get("duration"),
+            "performers": m.get("performers") or [],
+            "studio": m.get("studio") or "",
+            "tags": m.get("tags") or [],
+            "rating100": m.get("rating100"),
+            "o_counter": int(m.get("o_counter") or 0),
+            "tier": tier_of(m.get("rating100"), m.get("o_counter")),
+            "quality": quality_of(m),
+            "path": path,
+        }
+
+    def _catalogue_all(self, refresh: bool = False) -> list[dict]:
+        """Every scene in scope as a catalogue row. Raises if Stash is
+        unreachable (an empty listing would read as 'everything unreviewed')."""
+        import time as _t
+
+        cached = getattr(self, "_cat_cache", None)
+        if cached and not refresh and _t.monotonic() - cached[0] < self._CAT_TTL:
+            return cached[1]
+        ids = [str(s.id) for s in self.scenes()]
+        want = ids if refresh else [s for s in ids if s not in self._meta]
+        if want:
+            fetched = self._meta_client().scene_details(want)   # raises if Stash is down
+            with self._meta_lock:
+                for sid in want:
+                    self._meta[sid] = fetched.get(sid, {})
+        rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
+        self._sync_hidden_from_ratings(rows)
+        self._cat_cache = (_t.monotonic(), rows)
+        return rows
+
+    def _sync_hidden_from_ratings(self, rows: list[dict]) -> None:
+        """Keep the feed-hiding set in line with Stash: every 1★ (rejected) scene
+        is hidden from feeds/boards, including ones rejected in Stash itself;
+        in-scope scenes that are no longer 1★ are unhidden."""
+        import json
+
+        cur = set(self.hidden_scene_ids())
+        scope = {r["scene_id"] for r in rows}
+        rejected = {r["scene_id"] for r in rows if r["tier"] == "rejected"}
+        new = (cur - scope) | rejected
+        if new == cur:
+            return
+        self._hidden_set = new
+        try:
+            p = self._hidden_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(sorted(new)))
+        except Exception:  # noqa: BLE001 — persistence best-effort
+            pass
+
+    def _cat_update_row(self, sid: str) -> dict:
+        """Re-read one scene from Stash and patch it into the cached listing."""
+        sid = str(sid)
+        fresh = self._meta_client().scene_details([sid]).get(sid, {})
+        with self._meta_lock:
+            self._meta[sid] = fresh
+        row = self._cat_row(sid, fresh)
+        cached = getattr(self, "_cat_cache", None)
+        if cached:
+            for i, r in enumerate(cached[1]):
+                if r["scene_id"] == sid:
+                    cached[1][i] = row
+                    break
+        return row
+
+    def catalogue(self, tier: str | None = None, res: str | None = None,
+                  min_mbps: float | None = None, q: str | None = None,
+                  sort: str = "date", offset: int = 0, limit: int = 60,
+                  refresh: bool = False) -> dict:
+        """A filtered, sorted page of the library for grading, plus per-tier
+        counts (counted before the tier filter, so the chips always show
+        what each tier holds within the other filters)."""
+        from ..tiers import RES_CLASSES, TIERS
+
+        rows = self._catalogue_all(refresh=refresh)
+        tiers = {t for t in (tier or "").split(",") if t}
+        resset = {r for r in (res or "").split(",") if r}
+        needle = (q or "").strip().lower()
+
+        def keep(r) -> bool:
+            if resset and (r["quality"]["res"] or "") not in resset:
+                return False
+            if min_mbps and (r["quality"]["mbps"] or 0) < float(min_mbps):
+                return False
+            if needle:
+                hay = " ".join([r["title"], r["studio"], r["path"], *r["performers"]]).lower()
+                if needle not in hay:
+                    return False
+            return True
+
+        pool = [r for r in rows if keep(r)]
+        counts = {t: 0 for t in TIERS}
+        for r in pool:
+            counts[r["tier"]] += 1
+        if tiers:
+            pool = [r for r in pool if r["tier"] in tiers]
+
+        res_rank = {c: i for i, c in enumerate(RES_CLASSES)}
+        keyfns = {
+            "date": (lambda r: r["date"] or "", True),
+            "duration": (lambda r: r["duration"] or 0, True),
+            "title": (lambda r: r["title"].lower(), False),
+            "bitrate": (lambda r: r["quality"]["mbps"] or 0, True),
+            "quality": (lambda r: (res_rank.get(r["quality"]["res"] or "", -1),
+                                   r["quality"]["mbps"] or 0), True),
+        }
+        fn, rev = keyfns.get(sort, keyfns["date"])
+        pool.sort(key=fn, reverse=rev)
+        page = pool[offset: offset + limit]
+        moments = self._scene_moment_strips([r["scene_id"] for r in page])
+        items = [{**r, "moments": moments.get(r["scene_id"], []),
+                  "stream": self.stream_url(r["scene_id"], start=0)} for r in page]
+        return {
+            "items": items, "total": len(pool), "counts": counts,
+            "names": self.tier_display_names(), "offset": offset, "limit": limit,
+        }
+
+    def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,
+                             min_gap: float = 20.0) -> dict[str, list[dict]]:
+        """Up to `n` well-spaced best moments per scene for the catalogue cards:
+        top taste frames when a taste model exists, otherwise evenly spread."""
+        try:
+            model = self._model_name()
+            idx = self.index(model)
+        except Exception:  # noqa: BLE001 — no index yet → cards show covers only
+            return {}
+        if idx.size == 0:
+            return {}
+        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        try:
+            scores, _ = self._taste_scores(model)
+        except Exception:  # noqa: BLE001
+            scores = None
+        out: dict[str, list[dict]] = {}
+        for sid in scene_ids:
+            key = sid_key.get(str(sid))
+            span = idx._key_rows.get(key) if key else None
+            if not span:
+                continue
+            a, b = span
+            times = idx.times[a:b]
+            if scores is not None:
+                order = np.argsort(-scores[a:b])
+            else:
+                order = np.linspace(0, b - a - 1, num=min(n, b - a)).astype(int)
+            picked: list[int] = []
+            for j in order:
+                t = float(times[int(j)])
+                if all(abs(t - float(times[p])) >= min_gap for p in picked):
+                    picked.append(int(j))
+                if len(picked) >= n:
+                    break
+            picked.sort(key=lambda j: float(times[j]))
+            out[str(sid)] = [{
+                "key": key,
+                "t": round(float(times[j]), 2),
+                "thumb": f"/api/frame?key={key}&t={float(times[j]):g}",
+                "stream": self.stream_url(str(sid), start=float(times[j])),
+                "score": round(float(scores[a + j]), 3) if scores is not None else None,
+            } for j in picked]
+        return out
+
+    def set_o_count(self, scene_id: str, n: int, current: int | None = None) -> int:
+        """Set a scene's O-count to exactly `n` by moving from the current count
+        (reset for 0) — works on every Stash version and keeps the existing
+        O history for the part that doesn't change."""
+        if not 0 <= int(n) <= 100:
+            raise ValueError(f"O-count out of range: {n}")
+        sid = str(scene_id)
+        client = self.client()
+        if current is None:
+            current = int((self._meta_client().scene_details([sid]).get(sid) or {})
+                          .get("o_counter") or 0)
+        n, count = int(n), int(current)
+        if n == count:
+            return count
+        if n == 0:
+            client.scene_reset_o(sid)
+            count = 0
+        elif n > count:
+            for _ in range(n - count):
+                count = client.scene_add_o(sid)
+        else:
+            for _ in range(count - n):
+                count = client.scene_delete_o(sid)
+        self.invalidate_meta(sid)
+        return count
+
+    def grade_scene(self, scene_id: str, grade: str) -> dict:
+        """Apply one of the user's grades (peaks.tiers.GRADES) in Stash. Returns
+        the updated catalogue row and the previous {rating100, o_counter} so the
+        UI can undo."""
+        from ..tiers import GRADES
+
+        if grade not in GRADES:
+            raise ValueError(f"unknown grade: {grade}")
+        sid = str(scene_id)
+        cur = self._meta_client().scene_details([sid]).get(sid)
+        if not cur:
+            raise LookupError(f"scene {sid} not found in Stash")
+        prev = {"rating100": cur.get("rating100"), "o_counter": int(cur.get("o_counter") or 0)}
+        rating, o = GRADES[grade]
+        self.update_scene(sid, rating100=rating)          # also syncs 1★ → hidden
+        if o is not None:
+            self.set_o_count(sid, o, current=prev["o_counter"])
+        self._note_grade()
+        return {"scene": self._cat_update_row(sid), "previous": prev}
+
+    def restore_scene_grade(self, scene_id: str, rating100: int | None, o_counter: int) -> dict:
+        """Undo: put a scene's rating and O-count back exactly (a previously
+        unrated scene gets its rating cleared, not set to a value)."""
+        sid = str(scene_id)
+        if rating100 is None or int(rating100) <= 0:
+            self.client().update_scene(sid, clear=("rating100",))
+            self.invalidate_meta(sid)
+            self.set_scene_hidden(sid, False)
+        else:
+            self.update_scene(sid, rating100=int(rating100))
+        self.set_o_count(sid, int(o_counter or 0))
+        return {"scene": self._cat_update_row(sid)}
+
+    def _note_grade(self) -> None:
+        """Counts grades since the last triage-model training (Phase B hook)."""
+        self._grades_since_train = getattr(self, "_grades_since_train", 0) + 1
+
+    def scene_cover(self, scene_id: str):
+        return self.client().scene_screenshot(scene_id)
 
     # --- thumbnails ----------------------------------------------------------
 

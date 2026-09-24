@@ -350,3 +350,69 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .exp-tile .exp-score { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,.72);
   color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 8px; }
 .exp-tile:hover { outline: 2px solid var(--accent); }
+
+/* --- tiers (5★ + O-count grades) ------------------------------------------ */
+.tier { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .3px;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; line-height: 1.5;
+  white-space: nowrap; vertical-align: middle; }
+.tier-legendaire { color: #e6c15a; background: rgba(230, 193, 90, .12); }
+.tier-exceptionnelle { color: #b889ff; background: rgba(184, 137, 255, .12); }
+.tier-merveilleuse { color: #6ea8fe; background: rgba(110, 168, 254, .12); }
+.tier-upscale { color: #7fb3aa; background: rgba(127, 179, 170, .10); }
+.tier-anomaly { color: #e8a14d; background: rgba(232, 161, 77, .12); }
+.tier-rejected { color: #e0604d; background: rgba(224, 96, 77, .10); }
+.tier-unreviewed { color: var(--dim); background: transparent; }
+.grade-sel { margin-left: 6px; }
+
+/* --- catalogue ------------------------------------------------------------ */
+.cat-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.cat-chip { background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+  border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+.cat-chip .n { color: var(--dim); margin-left: 4px; }
+.cat-chip.on { border-color: currentColor; box-shadow: 0 0 0 1px currentColor inset; }
+.cat-chip:not([class*="tier-"]).on { color: var(--accent); }
+.num-sm { width: 5em; }
+.cat-list { display: flex; flex-direction: column; gap: 10px; }
+.cat-card { display: grid; grid-template-columns: 200px 1fr auto; gap: 14px; align-items: start;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.cat-card.focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.cat-card.graded { opacity: .55; }
+.cat-card.graded.focus { opacity: .8; }
+.cat-cover { width: 200px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px;
+  background: #000; cursor: pointer; }
+.cat-body { min-width: 0; }
+.cat-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-who { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-q { font-size: 12px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.cat-moments { display: flex; gap: 6px; margin-top: 8px; }
+.cat-m { width: 104px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 4px;
+  cursor: pointer; background: #000; }
+.cat-m:hover { outline: 2px solid var(--accent2); }
+.cat-grades { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+.cat-g { text-align: left; background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+  border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
+.cat-g kbd { color: var(--dim); margin-right: 4px; font-size: 11px; }
+.cat-g.g-legendaire:hover { border-color: #e6c15a; }
+.cat-g.g-exceptionnelle:hover { border-color: #b889ff; }
+.cat-g.g-merveilleuse:hover { border-color: #6ea8fe; }
+.cat-g.g-upscale:hover { border-color: #7fb3aa; }
+.cat-g.g-reject:hover { border-color: #e0604d; }
+.cat-more { justify-content: center; margin-top: 10px; }
+@media (max-width: 760px) {
+  .cat-card { grid-template-columns: 1fr; }
+  .cat-cover { width: 100%; }
+  .cat-grades { flex-direction: row; flex-wrap: wrap; min-width: 0; }
+}
+/* chips carry their tier's colour; the card's current grade is highlighted */
+.cat-chip.tier-legendaire { color: #e6c15a; }
+.cat-chip.tier-exceptionnelle { color: #b889ff; }
+.cat-chip.tier-merveilleuse { color: #6ea8fe; }
+.cat-chip.tier-upscale { color: #7fb3aa; }
+.cat-chip.tier-anomaly { color: #e8a14d; }
+.cat-chip.tier-rejected { color: #e0604d; }
+.cat-chip.tier-unreviewed { color: var(--fg); }
+.cat-g.cur.g-legendaire { border-color: #e6c15a; color: #e6c15a; }
+.cat-g.cur.g-exceptionnelle { border-color: #b889ff; color: #b889ff; }
+.cat-g.cur.g-merveilleuse { border-color: #6ea8fe; color: #6ea8fe; }
+.cat-g.cur.g-upscale { border-color: #7fb3aa; color: #7fb3aa; }
+.cat-g.cur.g-reject { border-color: #e0604d; color: #e0604d; }

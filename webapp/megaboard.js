@@ -400,7 +400,7 @@ async function loadMeta(tile) {
   const edit = meta.querySelector(".mb-edit");
   edit.innerHTML = `
     <span class="mb-rating">${starsHTML(m.rating100)}</span>
-    <button class="mb-o" title="O-count (click +, shift-click −)">⊙ ${m.o_counter ?? 0}</button>
+    ${mbTierBadge(m.rating100, m.o_counter)}
     <button class="mb-org ${m.organized ? "on" : ""}" title="organized">✓ organized</button>`;
   wireStatEdits(tile, edit);
 }
@@ -425,14 +425,6 @@ function wireStatEdits(tile, edit) {
       } catch {}
     })
   );
-  const o = edit.querySelector(".mb-o");
-  o.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    try {
-      const r = await api("/api/scene/" + sid + "/o", { method: e.shiftKey ? "DELETE" : "POST" });
-      o.textContent = `⊙ ${r.o_counter}`;
-    } catch {}
-  });
   const org = edit.querySelector(".mb-org");
   org.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -603,6 +595,18 @@ function tileTime(t) {
 // --- sources: shuffle-all / apex tag / saved collection / search handoff ----
 
 const SHUFFLE_MIN = 7, SHUFFLE_MAX = 22; // random clip length (s) => random intervals
+// Tier badge — the O-count is the user's grade above 5★ (see peaks/tiers.py), so
+// it's shown read-only here; grading happens in the app's Catalogue / viewer.
+let MB_TIER_NAMES = { rejected: "Rejected", anomaly: "Anomaly", upscale: "Upscale",
+  merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire" };
+fetch("/api/catalogue/names").then((r) => (r.ok ? r.json() : null))
+  .then((n) => { if (n) MB_TIER_NAMES = { ...MB_TIER_NAMES, ...n }; }).catch(() => {});
+function mbTierBadge(rating100, o) {
+  const r = +rating100 || 0;
+  const t = r <= 0 || (r > 20 && r < 100) ? null : r <= 20 ? "rejected"
+    : ({ 0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  return t ? `<span class="mb-tier tier-${t}">${esc(MB_TIER_NAMES[t] || t)}</span>` : "";
+}
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }

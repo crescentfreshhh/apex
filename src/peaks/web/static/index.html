@@ -15,6 +15,7 @@
       <button class="tab" data-view="board">Megaboard</button>
       <button class="tab" data-view="explore">Explore</button>
       <button class="tab" data-view="performers">Performers</button>
+      <button class="tab" data-view="catalogue">Catalogue</button>
       <button class="tab" data-view="statistics">Statistics</button>
       <button class="tab" data-view="experimental">🧪 Experimental</button>
       <button class="tab" data-view="dashboard">Settings</button>
@@ -377,7 +378,7 @@
           <option value="scenes">Scenes</option>
           <option value="taste">Taste (best)</option>
           <option value="affinity">You'd love ★</option>
-          <option value="engagement">Engagement ⊙</option>
+          <option value="engagement">Tiers 🏆</option>
         </select>
         <button id="btn-perf-roulette" class="ghost" title="Surprise me — a random on-taste performer, endless on the board">🎲 Roulette</button>
         <button id="btn-perf-hof" class="ghost" title="Auto-build best-of playlists for your top performers">🏆 Hall of Fame</button>
@@ -388,6 +389,44 @@
     </div>
     <div id="perf-grid" class="perf-grid"></div>
     <div id="perf-detail" hidden></div>
+  </section>
+
+  <!-- CATALOGUE: grade & filter the library with your tiers -->
+  <section id="catalogue" class="view">
+    <div class="panel">
+      <h2>Catalogue</h2>
+      <p class="dim">Grade your library with your tiers — <b>5★ plus the O-count</b>
+        (16 / 17 / 18), <b>Upscale</b> (5★, O 0) or <b>Reject</b> (1★). Grades are written
+        to Stash, and every one can be undone.
+        Keys: <kbd>1</kbd>–<kbd>5</kbd> grade · <kbd>J</kbd>/<kbd>K</kbd> next/prev ·
+        <kbd>Enter</kbd> watch · <kbd>Z</kbd> undo.</p>
+      <div id="cat-chips" class="cat-chips"></div>
+      <div class="row">
+        <input id="cat-q" placeholder="Search title, performer, studio, path…" />
+        <select id="cat-res" title="Resolution">
+          <option value="">any resolution</option>
+          <option value="4K">4K</option>
+          <option value="1440p">1440p</option>
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+          <option value="SD">SD</option>
+        </select>
+        <label title="Only files at or above this bitrate">min Mbps
+          <input id="cat-mbps" type="number" min="0" step="1" class="num-sm" /></label>
+        <span class="dim">sort:</span>
+        <select id="cat-sort">
+          <option value="date">Newest</option>
+          <option value="quality">Quality (resolution, bitrate)</option>
+          <option value="bitrate">Bitrate</option>
+          <option value="duration">Longest</option>
+          <option value="title">Title</option>
+        </select>
+        <button id="btn-cat-refresh" class="ghost" title="Re-read grades from Stash (picks up changes made there)">↻ Refresh</button>
+        <span id="cat-status" class="dim"></span>
+      </div>
+    </div>
+    <div id="cat-list" class="cat-list"></div>
+    <div class="row cat-more"><button id="btn-cat-more" class="ghost" hidden>Load more</button></div>
   </section>
 
   <!-- STATISTICS -->
