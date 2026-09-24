@@ -6,328 +6,96 @@
   <title>Peaks</title>
   <link rel="icon" type="image/svg+xml" href="/static/peaks.svg" />
   <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/ui.css" />
 </head>
 <body>
-  <header id="topbar">
-    <span class="brand">Peaks</span>
-    <nav>
-      <button class="tab active" data-view="foryou">For You</button>
-      <button class="tab" data-view="board">Megaboard</button>
-      <button class="tab" data-view="explore">Explore</button>
-      <button class="tab" data-view="performers">Performers</button>
-      <button class="tab" data-view="catalogue">Catalogue</button>
-      <button class="tab" data-view="statistics">Statistics</button>
-      <button class="tab" data-view="experimental">🧪 Experimental</button>
-      <button class="tab" data-view="dashboard">Settings</button>
-    </nav>
-    <span id="conn" class="dim"></span>
-    <button id="btn-logout" class="tab" title="Lock (sign out)" hidden>🔒 Lock</button>
-  </header>
-
-  <!-- EXPERIMENTAL (taste validation / diagnostics) -->
-  <section id="experimental" class="view">
-    <div class="panel">
-      <h2>🧪 Experimental — taste coverage</h2>
-      <p class="dim">A read-only check on how much of your embedded library your taste
-        actually reaches, and <em>why</em> the rest doesn't — using the exact scoring
-        that drives For You and the megaboard. A scene with no on-taste moment is usually
-        one of three things, not a bug: it isn't embedded yet, your taste is built from
-        few examples (so it's narrow by design), or your floor is high.</p>
-      <div class="row">
-        <label id="exp-floor-wrap" title="A scene counts as 'covered' if its best moment scores at or above this. Shared with the board + Statistics.">taste floor
-          <input type="range" id="exp-floor" min="0" max="0.95" step="0.01" value="0" />
-          <b id="exp-floor-val" class="dim">off</b></label>
-        <button id="btn-exp-refresh" class="ghost">↻ Refresh</button>
-        <span id="exp-status" class="dim"></span>
-      </div>
+<div class="app">
+  <!-- SIDEBAR: four groups — watch, library, taste, system -->
+  <aside class="side" id="side">
+    <div class="brand"><i>▲</i>Peaks</div>
+    <div class="grp">Watch</div>
+    <button class="nav tab active" data-view="foryou"><span class="ic">◉</span>For You</button>
+    <button class="nav tab" data-view="board"><span class="ic">▦</span>Megaboard</button>
+    <button class="nav tab" data-view="explore"><span class="ic">⌕</span>Search</button>
+    <button class="nav tab" data-view="performers"><span class="ic">♛</span>Performers</button>
+    <div class="grp">Library</div>
+    <button class="nav tab" data-view="catalogue"><span class="ic">☰</span>Catalogue<span class="ct" id="nav-ct-cat"></span></button>
+    <div id="side-smart" class="side-smart" hidden>
+      <div class="grp sub-grp">Smart views</div>
+      <span id="cat-views" class="side-views"></span>
+      <button id="btn-cat-new" class="side-view" hidden title="Scenes added by the last ingest">✦ New</button>
     </div>
-    <div id="exp-body" class="dim">Analyzing your taste coverage…</div>
-  </section>
+    <button class="nav tab" data-view="review"><span class="ic">▶</span>Review queue<span class="ct" id="nav-ct-review"></span></button>
+    <button class="nav tab" data-view="dupes"><span class="ic">⧉</span>Duplicates<span class="ct hot" id="nav-ct-dupes" hidden></span></button>
+    <button class="nav tab" data-view="statistics"><span class="ic">◔</span>Insights</button>
+    <div class="grp">Taste</div>
+    <button class="nav tab" data-view="taste"><span class="ic">✦</span>Taste</button>
+    <div class="grp">System</div>
+    <button class="nav tab" data-view="activity"><span class="ic">↻</span>Activity<span class="ct hot" id="nav-ct-jobs" hidden></span></button>
+    <button class="nav tab" data-view="dashboard"><span class="ic">⚙</span>Settings</button>
+    <div class="spacer"></div>
+    <div id="job-tray" class="tray" hidden></div>
+    <div class="conn"><span class="dot" id="conn-dot"></span><span id="conn">connecting…</span></div>
+  </aside>
 
-  <!-- SETTINGS -->
-  <section id="dashboard" class="view">
-    <div class="cards" id="stat-cards"></div>
-
-    <div class="panel">
-      <h2>AI models</h2>
-      <p class="dim">The models behind "find similar" (visual) and text search. Saved
-        here and used everywhere — no restart. Bigger models are more accurate but
-        slower and use more disk; after switching, re-run an embed pass to fill the
-        new cache.</p>
-      <div class="row">
-        <label title="DINOv2 — reads visual structure; powers 'find similar' and the taste model">Visual model
-          <select id="sel-dino">
-            <option value="dinov2_vitl14">large (default)</option>
-            <option value="dinov2_vitg14">giant (heaviest)</option>
-          </select>
-        </label>
-        <label title="OpenCLIP — matches images to text; powers text search">Text-search model
-          <select id="sel-clip">
-            <option value="ViT-H-14">largest</option>
-          </select>
-        </label>
-        <span id="models-status" class="dim"></span>
-      </div>
-      <div class="row">
-        <label class="check" title="Match a moment by the mean of its frames (its whole gist) instead of one midpoint frame. Query-time only — no re-embed.">
-          <input type="checkbox" id="chk-peak-pool" /> Match on the whole peak</label>
-        <span class="dim">default — averages a moment's frames for steadier "find similar"; uncheck for single-frame matching. Takes effect immediately, no re-embed.</span>
-      </div>
+  <main class="main">
+    <div class="top">
+      <button class="nav-toggle" id="nav-toggle" title="Menu">☰</button>
+      <button class="cmd" id="cmd-open" title="Search or jump to anything (⌘K / Ctrl+K)">⌕ <span>Search or jump to…</span><kbd>⌘K</kbd></button>
+      <div class="grow"></div>
+      <button id="btn-top-ingest" class="btn ghost" title="Scan → identify → auto tag in Stash, then embed + duplicate-check the new scenes">⤓ Ingest</button>
+      <button id="btn-logout" class="btn ghost" title="Lock (sign out)" hidden>🔒</button>
     </div>
+    <div class="content" id="content">
 
-    <div class="panel">
-      <h2>Export quality</h2>
-      <p class="dim">Applies when a reel combines clips of <em>different</em> formats — it
-        re-encodes them to one canvas so the file plays cleanly. Same-format exports stay
-        lossless at their native resolution/framerate regardless. Higher settings = larger
-        files and slower encodes; H.265 is ~half the size at 4K but needs a modern player.</p>
-      <div class="row">
-        <label title="Re-encode canvas. 'Match source' uses the largest resolution among the clips (capped at 4K); nothing is upscaled beyond what exists.">Resolution
-          <select id="exp-res">
-            <option value="1080">1080p (default)</option>
-            <option value="1440">1440p</option>
-            <option value="2160">4K (2160p)</option>
-            <option value="source">Match largest source</option>
-          </select>
-        </label>
-        <label title="'Highest' uses the fastest framerate among the clips (capped at 120).">Frame rate
-          <select id="exp-fps">
-            <option value="30">30 (default)</option>
-            <option value="60">60</option>
-            <option value="source">Highest source</option>
-          </select>
-        </label>
-        <label title="H.264 plays everywhere; H.265/HEVC is smaller at 4K but needs a modern player.">Codec
-          <select id="exp-codec">
-            <option value="h264">H.264 (default)</option>
-            <option value="hevc">H.265 / HEVC</option>
-          </select>
-        </label>
-        <button id="btn-export-save" class="primary">Save</button>
-        <span id="export-status" class="dim"></span>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2>Tier names</h2>
-      <p class="dim">What your grades are called across Peaks (Catalogue, badges, boards,
-        reels). Grades themselves are 5★ + O-count in Stash — only the names change here.
-        Leave a box blank to restore the default.</p>
-      <div id="tier-names" class="row"></div>
-      <div class="row">
-        <button id="btn-tier-names-save" class="primary">Save</button>
-        <span id="tier-names-status" class="dim"></span>
-      </div>
-    </div>
-
-    <div class="panel" id="tier-tags-panel">
-      <h2>Tier tags (renamer)</h2>
-      <p class="dim">Grading a scene into one of these tiers gives it <b>exactly one</b> of these
-        Stash tags — every other tier tag is removed first — and marks it <em>organized</em>, in a
-        single update, so your renamer plugin moves the file once. Rejects (1★) only change the
-        rating. Grades made in Stash directly aren't tagged: <b>Check &amp; sync</b> lists them and
-        tags them after you confirm.</p>
-      <div id="tier-tags" class="row"></div>
-      <div class="row">
-        <button id="btn-tier-tags-save" class="ghost">Save names</button>
-        <button id="btn-tag-sync" class="primary">Check &amp; sync…</button>
-        <span id="tier-tags-status" class="dim"></span>
-      </div>
-      <div id="tag-sync-box" hidden></div>
-    </div>
-
-    <div class="panel" id="history-panel">
-      <h2>History &amp; backups</h2>
-      <p class="dim">Every change Peaks makes in Stash — grades, undos, restores, deletions,
-        tag syncs, ingests — is logged here with the file it touched. Grades are also backed
-        up daily (and every 25 grades) by <em>file fingerprint</em>, so they survive renames,
-        rescans and even a lost Stash database. Restoring previews the differences first.</p>
-      <div class="row">
-        <button id="btn-hist-refresh" class="ghost">↻ Refresh</button>
-        <a id="hist-download" class="ghost btn-link" href="/api/history/download" download>Download full log</a>
-        <span class="grow"></span>
-        <button id="btn-backup-now" class="ghost">Back up grades now</button>
-        <select id="backup-sel" title="Grade backups, newest first"></select>
-        <button id="btn-backup-preview" class="ghost">Preview restore…</button>
-        <span id="backup-status" class="dim"></span>
-      </div>
-      <div id="backup-diff" hidden></div>
-      <div id="hist-list" class="hist-list dim">Loading…</div>
-    </div>
-
-    <div class="panel">
-      <h2>Moment length</h2>
-      <p class="dim">How long each moment plays in For You, the megaboard and reels. A clip
-        holds from the moment and keeps playing until the picture changes enough — this dial
-        sets how <em>much</em> change ends it. <b>Higher = shorter, tighter clips</b> that cut at
-        the slightest change; <b>lower = longer holds</b> (too low and everything runs to the
-        <span id="clip-max">30</span>s cap). Clamped to <span id="clip-min">3</span>–<span id="clip-max2">30</span>s.
-        Takes effect on the next board/feed load — no re-embed.</p>
-      <div class="row">
-        <label for="clip-sim">Sensitivity</label>
-        <input id="clip-sim" type="range" min="0.3" max="0.95" step="0.01" value="0.5" />
-        <span id="clip-sim-val" class="dim">0.50</span>
-        <button id="btn-clip-save" class="primary">Save</button>
-        <span id="clip-status" class="dim"></span>
-      </div>
-    </div>
-
-    <div class="panel" id="ingest-panel">
-      <h2>Ingest new files</h2>
-      <p class="dim">Your Stash routine in one click: <b>scan</b> (phashes always on) → <b>identify</b>
-        → <b>auto tag</b>, each with the defaults saved on Stash's Tasks page, then Peaks
-        <b>embeds</b> just the new scenes and checks them for <b>duplicates</b>. Identify and
-        auto tag only touch the new scenes. New scenes land in Catalogue → <em>New</em>.</p>
-      <div class="row">
-        <button id="btn-ingest" class="primary">Ingest new files</button>
-        <button id="btn-ingest-stop" class="ghost" hidden>Stop</button>
-        <span id="ingest-status" class="dim"></span>
-      </div>
-      <pre id="ingest-log" class="log" hidden></pre>
-    </div>
-
-    <div class="panel">
-      <h2>Embed</h2>
-      <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
-      <div class="row">
-        <button id="btn-embed" class="primary">Embed new scenes</button>
-        <button id="btn-embed-stop" class="ghost" hidden>Stop</button>
-        <button id="toggle-adv" class="ghost" type="button">Advanced ▾</button>
-        <span id="embed-status" class="dim"></span>
-      </div>
-      <div class="row"><span id="embed-pending" class="dim"></span></div>
-      <div class="row" title="Automatically embed newly-added Stash scenes on a schedule — the web app does it in the background, no CLI, no restart.">
-        <label class="check"><input type="checkbox" id="sched-on" /> Auto-embed new scenes</label>
-        <label>every <input id="sched-hours" type="number" min="0.5" step="0.5" style="width:64px" /> h</label>
-        <label class="check" title="After each pass, refresh moved scenes' paths (and drop deleted ones if prune is on)"><input type="checkbox" id="sched-sync" /> sync</label>
-        <label class="check" title="Drop cache entries for scenes deleted from Stash (destructive)"><input type="checkbox" id="sched-prune" /> prune</label>
-        <button id="btn-sched-save" class="ghost">Save schedule</button>
-        <span id="sched-status" class="dim"></span>
-      </div>
-      <div id="embed-adv" class="adv" hidden>
-        <label>Model
-          <select id="adv-model">
-            <option value="dino">DINOv2 — structure</option>
-            <option value="clip">CLIP — text search</option>
-            <option value="dino,clip">DINOv2 + CLIP (queued)</option>
-          </select>
-        </label>
-        <label>Sampling
-          <select id="adv-mode">
-            <option value="sparse">sparse (fast)</option>
-            <option value="interval">interval (linear)</option>
-            <option value="keyframes">keyframes</option>
-          </select>
-        </label>
-        <label>Interval (s)<input id="adv-interval" type="number" min="1" step="1" /></label>
-        <label>GPU decode
-          <select id="adv-hwaccel">
-            <option value="cuda">cuda (NVDEC)</option>
-            <option value="auto">auto</option>
-            <option value="">off (CPU)</option>
-          </select>
-        </label>
-        <label>Workers<input id="adv-workers" type="number" min="1" step="1" /></label>
-        <label>Timeout (s)<input id="adv-timeout" type="number" min="0" step="30" /></label>
-        <label title="Frames embedded per GPU pass. Lower it if the GPU runs out of memory — the giant backbone on a 12GB card may need 16–32.">Batch size<input id="adv-batch" type="number" min="1" step="1" /></label>
-      </div>
-      <p id="adv-hint" class="dim adv-hint" hidden>Overrides apply to this run only —
-        no restart, nothing saved to the container.</p>
-      <pre id="embed-log" class="log" hidden></pre>
-    </div>
-
-    <div class="panel" id="fail-panel" hidden>
-      <h2>Failed scenes <span id="fail-count" class="dim"></span></h2>
-      <p class="dim">Scenes that failed to embed (usually a seek/decode quirk,
-        not a bad file). Retry runs a fallback ladder: sparse without NVDEC,
-        then a full linear decode like VLC uses.</p>
-      <div class="row">
-        <button id="btn-fix" class="primary">Retry failed</button>
-        <button id="btn-fix-stop" class="ghost" hidden>Stop</button>
-        <button id="btn-fail-list" class="ghost">Show list</button>
-        <span id="fix-status" class="dim"></span>
-      </div>
-      <pre id="fail-list" class="log" hidden></pre>
-      <pre id="fix-log" class="log" hidden></pre>
-    </div>
-
-    <div class="panel">
-      <h2>Sync library</h2>
-      <p class="dim">Reconcile the cache with Stash: refresh scenes that moved
-        between folders and drop cache entries for scenes deleted from Stash.</p>
-      <div class="row">
-        <label class="check"><input type="checkbox" id="sync-prune" checked /> prune deleted scenes</label>
-        <button id="btn-sync" class="primary">Sync now</button>
-        <span id="sync-status" class="dim"></span>
-      </div>
-      <pre id="sync-log" class="log" hidden></pre>
-    </div>
-
-    <div class="panel">
-      <h2>Score</h2>
-      <p class="dim">Find your peaks and write markers into Stash. Run once with
-        <em>write</em> off first — the log shows a calibration read-out (your
-        actual score distribution) so you can set thresholds that match.</p>
-      <div class="row">
-        <input id="score-tag" placeholder="tag (default: apex)" />
-        <label class="check"><input type="checkbox" id="score-write" /> write markers</label>
-        <button id="toggle-score-adv" class="ghost" type="button">Advanced ▾</button>
-        <button id="btn-score" class="primary">Run scoring</button>
-        <button id="btn-score-stop" class="ghost" hidden>Stop</button>
-        <span id="score-status" class="dim"></span>
-      </div>
-      <div id="score-adv" class="adv" hidden>
-        <label>Enter at (high)<input id="adv-high" type="number" min="0" step="0.01" /></label>
-        <label>Stay until (low)<input id="adv-low" type="number" min="0" step="0.01" /></label>
-        <label>Max length (s)<input id="adv-maxdur" type="number" min="0" step="5" /></label>
-        <label>Match
-          <select id="adv-reduce">
-            <option value="max">max — specific</option>
-            <option value="mean">mean — broader</option>
-          </select>
-        </label>
-        <label>Normalize
-          <select id="adv-normalize">
-            <option value="none">none — absolute</option>
-            <option value="scene-z">scene-z — per-scene peaks</option>
-          </select>
-        </label>
-      </div>
-      <pre id="score-log" class="log" hidden></pre>
-    </div>
-  </section>
-
-  <!-- FOR YOU -->
+  <!-- FOR YOU (home) -->
   <section id="foryou" class="view active">
-    <div class="panel">
-      <h2>For You</h2>
-      <p class="dim">A recommender built from your own taste — the average of every
-        moment you've saved or thumbed up, matched against your whole
-        library. No query needed. The more you save and rate, the sharper it gets.</p>
-      <div class="row" id="profile-row" title="Each profile keeps its own 👍/👎, saved moments, trained model, and feed">
-        <label class="dim" for="profile-select">Taste profile</label>
-        <select id="profile-select"></select>
-        <button id="btn-profile-new" class="ghost" title="Create a new taste profile">+ New</button>
-        <button id="btn-profile-del" class="ghost" title="Delete this profile (keeps its saved moments in Stash)" hidden>🗑</button>
-      </div>
-      <div class="row">
-        <button id="btn-foryou-rebuild" class="primary">Rebuild from my taste</button>
-        <button id="btn-foryou-board" class="ghost" title="Play the current For You feed on the megaboard">▶ Play on megaboard</button>
-        <button id="btn-foryou-radio" class="ghost" title="Lean back — an endless stream of your taste that adapts as you thumb">📻 Taste Radio</button>
-        <label class="check" title="Weight only your most recent loved moments — see what you're into lately">
-          <input type="checkbox" id="foryou-recent" /> lately only</label>
-        <span id="foryou-status" class="dim"></span>
-      </div>
-      <div class="row" style="margin-top:12px"><button id="toggle-taste-visual" class="ghost">▸ What you like</button></div>
-      <div id="foryou-words" class="fy-words" hidden></div>
+    <div class="head">
+      <h1>For You</h1>
+      <span id="profile-row" class="row inline" title="Each profile keeps its own 👍/👎, saved moments, trained model, and feed">
+        <select id="profile-select" class="pill-select"></select>
+        <button id="btn-profile-new" class="btn sm ghost" title="Create a new taste profile">＋</button>
+        <button id="btn-profile-del" class="btn sm ghost" title="Delete this profile (keeps its saved moments in Stash)" hidden>🗑</button>
+      </span>
+      <span class="grow"></span>
+      <label class="check" title="Weight only your most recent loved moments — see what you're into lately"><input type="checkbox" id="foryou-recent" /> lately</label>
+      <button id="btn-foryou-rebuild" class="btn ghost" title="Rebuild the feed from your taste">↻</button>
+      <button id="btn-foryou-radio" class="btn" title="Lean back — an endless stream of your taste that adapts as you thumb">📻 Radio</button>
+      <button id="btn-foryou-board" class="btn pri" title="Play the current For You feed on the megaboard">▶ Play all</button>
     </div>
+    <div id="foryou-status" class="cap fy-status"></div>
+    <div class="hero" id="fy-hero-wrap">
+      <div id="fy-hero" class="hero-big"></div>
+      <div class="hero-side">
+        <div class="card pad" id="fy-teach">
+          <div class="row between"><h3>Sharpen your taste</h3><span class="faint" id="fy-teach-n">learns as you go</span></div>
+          <div class="fy-teach-frame"><div id="fy-teach-img" class="pic"></div>
+            <div class="muted small">Peaks is least sure about moments like this. One tap teaches it.</div></div>
+          <div class="row"><button class="btn" id="fy-teach-no">👎 Pass <kbd>←</kbd></button><button class="btn" id="fy-teach-skip">Skip</button>
+            <button class="btn pri" id="fy-teach-yes">👍 Love <kbd>→</kbd></button></div>
+        </div>
+        <div class="card pad" id="fy-today">
+          <h3>Your library today</h3>
+          <div id="fy-today-body" class="today-grid"><span class="faint">…</span></div>
+          <div class="row"><button class="btn sm" data-go="review">Start reviewing →</button><button class="btn sm ghost" data-go="dupes">Duplicates →</button></div>
+        </div>
+      </div>
+    </div>
+    <h2 class="shelf-h">Top moments for you <span class="sub2">diverse across your library</span><span class="grow"></span>
+      <button id="toggle-taste-visual" class="btn sm ghost">▸ What you like</button></h2>
+    <div id="foryou-words" class="fy-words" hidden></div>
+    <div id="foryou-results" class="grid"></div>
+  </section>
 
-    <div class="panel" id="swipe-panel">
-      <h2>Teach your taste</h2>
-      <p class="dim">Shows you the frames it's <em>least sure</em> about — rating those
-        teaches your taste fastest. It <strong>learns in the background</strong> every
-        ~25 ratings, so just keep swiping and "For You" sharpens on its own. "Train now"
-        is optional — it applies your ratings immediately.</p>
+  <!-- TASTE: teach · picker · labels · manage -->
+  <section id="taste" class="view">
+    <div class="head"><h1>Taste</h1><span class="sub2">Everything that trains “For You”. It learns in the background every ~25 ratings.</span></div>
+    <div class="seg tabs" id="taste-tabs">
+      <span class="on" data-tab="teach">Teach</span><span data-tab="picker">Picker</span>
+      <span data-tab="labels">Labels</span><span data-tab="manage">Undo &amp; reset</span>
+    </div>
+    <div class="panel" id="swipe-panel" data-pane="teach">
+      <p class="cap">Frames Peaks is <em>least sure</em> about — rating these teaches it fastest. <kbd>←</kbd> pass · <kbd>↓</kbd> skip · <kbd>→</kbd> love.</p>
       <div id="swipe-stage" class="swipe-stage">
         <div id="swipe-card" class="swipe-card dim">Loading a frame…</div>
       </div>
@@ -339,12 +107,8 @@
         <span id="swipe-status" class="dim"></span>
       </div>
     </div>
-
-    <div class="panel" id="pick-panel">
-      <h2>🎲 Taste Picker</h2>
-      <p class="dim">A collage of random frames from your whole library. <strong>Tap the
-        ones that are <em>you</em></strong> — they go straight into your taste (the rest are
-        left untouched). Hit ▶ on a frame to preview it, then shuffle for ten more.</p>
+    <div class="panel" id="pick-panel" data-pane="picker" hidden>
+      <p class="cap">Ten random frames from your library — <b>tap the ones that are you</b>, then add them. ▶ previews a frame.</p>
       <div class="row">
         <button id="btn-pick-shuffle" class="primary" title="Draw ten fresh random frames">🎲 Shuffle 10</button>
         <button id="btn-pick-add" class="thumb up" title="Save the tapped frames as in-taste" disabled>＋ Add to my taste</button>
@@ -352,13 +116,8 @@
       </div>
       <div id="pick-grid" class="grid pick-grid"></div>
     </div>
-
-    <div class="panel" id="taste-labels-panel">
-      <h2>Your taste labels</h2>
-      <p class="dim">Every 👍/👎 you've given, as frames — the raw signal behind "For You".
-        Click a badge to flip it, ✕ to remove it, then <strong>Train now</strong>. Because the
-        model learns over visual <em>similarity</em>, a correction carries to similar-looking
-        frames after retraining — you're not fixing one frame, you're steering a neighborhood.</p>
+    <div class="panel" id="taste-labels-panel" data-pane="labels" hidden>
+      <p class="cap">Every 👍/👎 you've given. Flip or remove one, then <b>Train now</b> — a correction steers every similar-looking frame.</p>
       <div class="row">
         <span id="taste-labels-counts" class="dim"></span>
         <button id="toggle-taste-labels" class="ghost">▸ your labels</button>
@@ -368,12 +127,8 @@
       <div id="taste-labels" class="taste-labels" hidden></div>
       <div class="row"><button id="btn-taste-labels-more" class="ghost" hidden>Load more</button></div>
     </div>
-
-    <div class="panel" id="taste-manage">
-      <h2>Manage taste</h2>
-      <p class="dim">Undo a bad session, or wipe your learned taste to start fresh.
-        This deletes your 👍/👎 ratings (and retrains on what's left) — your saved
-        saved moments in Stash are <strong>not</strong> touched.</p>
+    <div class="panel" id="taste-manage" data-pane="manage" hidden>
+      <p class="cap">Undo a bad session or start over. Deletes 👍/👎 ratings and retrains — saved moments in Stash are <b>not</b> touched (except full reset).</p>
       <div class="row">
         <button class="ghost" data-del="20">Undo last 20 min</button>
         <button class="ghost" data-del="60">Undo last 1 hr</button>
@@ -383,23 +138,22 @@
         <span id="taste-manage-status" class="dim"></span>
       </div>
     </div>
-
-    <div id="foryou-results" class="grid"></div>
   </section>
 
-
-  <!-- EXPLORE -->
+  <!-- SEARCH (was Explore) -->
   <section id="explore" class="view">
+    <div class="head"><h1>Search</h1><span class="sub2">Describe a moment · <code>-word</code> excludes</span></div>
     <div class="search-bar">
-      <input id="q" placeholder="Describe a moment… use -word to exclude (e.g. beach -crowd)" />
+      <input id="q" placeholder="Describe a moment… (e.g. beach -crowd)" />
       <button id="btn-text" class="primary">Search</button>
-      <button id="btn-board-search" class="ghost" disabled title="Open the current results as a megaboard, each tile starting at its matched moment">Play on megaboard</button>
-      <button id="btn-save-collection" class="ghost" disabled title="Save the current results as a named playlist you can reopen">Save playlist</button>
       <label class="check" title="Re-rank results by your trained taste"><input type="checkbox" id="taste-toggle" /> ★ My taste</label>
-      <button id="btn-train" class="ghost" title="Train your preference model from the thumbs you've given">Train</button>
       <button id="toggle-search-adv" class="ghost">Options ▾</button>
-      <span id="explore-hint" class="dim"></span>
+      <span class="grow"></span>
+      <button id="btn-board-search" class="ghost" disabled title="Open the current results as a megaboard, each tile starting at its matched moment">▶ Board</button>
+      <button id="btn-save-collection" class="ghost" disabled title="Save the current results as a named playlist you can reopen">Save playlist</button>
+      <button id="btn-train" class="ghost" title="Train your preference model from the thumbs you've given">Train</button>
     </div>
+    <div class="row"><span id="explore-hint" class="dim"></span></div>
     <div id="search-adv" class="adv" hidden>
       <label title="Cap moments per scene so one long video can't dominate. 0 = unlimited.">per scene
         <input type="number" id="s-per-scene" min="0" max="50" value="3" style="width:64px" />
@@ -424,120 +178,83 @@
 
   <!-- PERFORMERS -->
   <section id="performers" class="view">
-    <div class="panel">
-      <h2>Performers</h2>
-      <p class="dim">How the performers in your library stack up by the moments they
-        generate — and, once you've built a taste, how on-taste those moments are. Build a
-        playlist of anyone's <strong>best moments</strong> in one click.</p>
-      <div class="row">
-        <input id="perf-search" placeholder="Find a performer by name…" />
-        <button id="btn-perf-search" class="primary">Best of →</button>
-        <input id="perf-query" placeholder="focus (optional, e.g. lingerie)" title="Rank her best moments by this instead of your taste" />
-        <span class="dim">sort:</span>
-        <select id="perf-sort">
+    <div class="head"><h1>Performers</h1><span class="sub2">ranked by the moments they give you</span><span class="grow"></span>
+      <button id="btn-perf-roulette" class="btn" title="Surprise me — a random on-taste performer, endless on the board">🎲 Roulette</button>
+      <button id="btn-perf-hof" class="btn" title="Auto-build best-of playlists for your top performers">🏆 Hall of Fame</button>
+      <button id="btn-perf-refresh" class="btn ghost" title="Re-scan the library from Stash">↻</button></div>
+    <div class="toolbar">
+      <input id="perf-search" class="search" placeholder="Find a performer…" />
+      <input id="perf-query" class="search" placeholder="focus (optional, e.g. lingerie)" title="Rank her best moments by this instead of your taste" />
+      <button id="btn-perf-search" class="btn pri">Best of →</button>
+      <span class="grow"></span>
+      <label class="muted">Sort <select id="perf-sort">
           <option value="moments">Moments</option>
           <option value="scenes">Scenes</option>
           <option value="taste">Taste (best)</option>
           <option value="affinity">You'd love ★</option>
           <option value="engagement">Tiers 🏆</option>
-        </select>
-        <button id="btn-perf-roulette" class="ghost" title="Surprise me — a random on-taste performer, endless on the board">🎲 Roulette</button>
-        <button id="btn-perf-hof" class="ghost" title="Auto-build best-of playlists for your top performers">🏆 Hall of Fame</button>
-        <button id="btn-perf-refresh" class="ghost" title="Re-scan the library from Stash">↻ Rebuild</button>
-        <span id="perf-status" class="dim"></span>
-      </div>
-      <div id="compare-tray" class="dim" hidden></div>
+        </select></label>
+      <span id="perf-status" class="dim"></span>
     </div>
+    <div id="compare-tray" class="dim" hidden></div>
     <div id="perf-grid" class="perf-grid"></div>
     <div id="perf-detail" hidden></div>
   </section>
 
-  <!-- CATALOGUE: grade & filter the library with your tiers -->
+  <!-- CATALOGUE -->
   <section id="catalogue" class="view">
-    <div class="panel">
-      <h2>Catalogue</h2>
-      <p class="dim">Grade your library with your tiers — <b>5★ plus the O-count</b>
-        (16 / 17 / 18), <b>Upscale</b> (5★, O 0) or <b>Reject</b> (1★). Grades are written
-        to Stash, and every one can be undone.
-        Keys: <kbd>1</kbd>–<kbd>5</kbd> grade · <kbd>J</kbd>/<kbd>K</kbd> next/prev ·
-        <kbd>Enter</kbd> watch · <kbd>X</kbd> select (shift = range) · <kbd>Z</kbd> undo.
-        Grading into Légendaire / Exceptionnelle / Merveilleuse / Upscale also sets that
-        tier's tag and <em>organized</em>, so your renamer files it.</p>
-      <div id="cat-chips" class="cat-chips"></div>
-      <div class="cat-triage">
-        <span class="dim">Triage:</span>
-        <span id="cat-views" class="cat-chips"></span>
-        <button id="btn-cat-train" class="ghost" title="Learn your tiers from the scenes you've graded (the picture + file quality)">Train on my grades</button>
-        <button id="btn-cat-new" class="cat-chip" hidden title="Scenes added by the last ingest">✦ New</button>
-        <button id="btn-cat-ingest" class="cat-chip" title="Scan → identify → auto tag in Stash, then embed + duplicate-check the new scenes">⤓ Ingest</button>
-        <button id="btn-cat-dupes" class="cat-chip" title="Stash's duplicate checker (phash), judged on file quality">⧉ Duplicates</button>
-        <span id="cat-model" class="dim"></span>
-      </div>
-      <div class="row">
-        <input id="cat-q" placeholder="Search title, performer, studio, path…" />
-        <select id="cat-res" title="Resolution">
-          <option value="">any resolution</option>
-          <option value="4K">4K</option>
-          <option value="1440p">1440p</option>
-          <option value="1080p">1080p</option>
-          <option value="720p">720p</option>
-          <option value="SD">SD</option>
-        </select>
-        <label title="Only files at or above this bitrate">min Mbps
-          <input id="cat-mbps" type="number" min="0" step="1" class="num-sm" /></label>
-        <span class="dim">sort:</span>
-        <select id="cat-sort">
+    <div class="head"><h1>Catalogue</h1><span id="cat-status" class="sub2"></span><span class="grow"></span>
+      <button id="btn-cat-board" class="btn ghost" disabled title="Play the selected tier's best moments on the megaboard (pick a tier first)">▶ Board</button>
+      <button id="btn-cat-reel" class="btn ghost" disabled title="Export one video of the selected tier's best moments (pick a tier first)">⬇ Reel</button>
+      <button id="btn-cat-delete" class="btn danger" hidden>🗑 Delete all rejected</button>
+      <div class="menu-wrap"><button class="btn ghost" id="btn-cat-more-menu" title="More">⋯</button>
+        <div class="menu" id="cat-menu" hidden>
+          <button id="btn-cat-refresh" title="Re-read grades from Stash (picks up changes made there)">↻ Re-read from Stash</button>
+          <button id="btn-cat-select" title="Select every scene loaded in this view">☐ Select all loaded</button>
+          <button id="btn-cat-train" title="Learn your tiers from the scenes you've graded (the picture + file quality)">✦ Train on my grades</button>
+          <button id="btn-cat-ingest" title="Scan → identify → auto tag in Stash, then embed + duplicate-check the new scenes">⤓ Ingest new files</button>
+          <button id="btn-cat-dupes" title="Stash's duplicate checker (phash), judged on file quality">⧉ Duplicates</button>
+        </div></div>
+      <button id="btn-cat-review" class="btn pri" title="Grade this list one scene at a time (Review queue)">▶ Review</button>
+    </div>
+    <div id="cat-chips" class="seg tiers"></div>
+    <div class="toolbar">
+      <input id="cat-q" class="search" placeholder="Filter by title, performer, studio, path…" />
+      <select id="cat-res" title="Resolution">
+        <option value="">any resolution</option>
+        <option value="4K">4K</option>
+        <option value="1440p">1440p</option>
+        <option value="1080p">1080p</option>
+        <option value="720p">720p</option>
+        <option value="SD">SD</option>
+      </select>
+      <label class="muted" title="Only files at or above this bitrate">≥ <input id="cat-mbps" type="number" min="0" step="1" class="num-sm" /> Mbps</label>
+      <button id="btn-cat-filters" class="btn sm ghost" title="Performer, studio, tag, date and length filters">＋ Filter</button>
+      <span class="grow"></span>
+      <div id="cat-saved" class="cat-saved"></div>
+      <label class="muted">Sort <select id="cat-sort">
           <option value="date">Newest</option>
-          <option value="predicted">Predicted tier (needs training)</option>
-          <option value="quality">Quality (resolution, bitrate)</option>
+          <option value="predicted">Predicted tier</option>
+          <option value="quality">Quality</option>
           <option value="bitrate">Bitrate</option>
           <option value="duration">Longest</option>
           <option value="size">Largest files</option>
-          <option value="added">Recently added to Stash</option>
+          <option value="added">Recently added</option>
           <option value="title">Title</option>
-        </select>
-        <button id="btn-cat-refresh" class="ghost" title="Re-read grades from Stash (picks up changes made there)">↻ Refresh</button>
-        <button id="btn-cat-select" class="ghost" title="Select every scene loaded in this view, to grade them together">☐ Select all</button>
-        <button id="btn-cat-delete" class="danger" hidden>🗑 Delete all rejected</button>
-        <button id="btn-cat-board" class="ghost" disabled title="Play the selected tier's best moments on the megaboard (pick a tier chip first)">▶ Board</button>
-        <button id="btn-cat-reel" class="ghost" disabled title="Export one video of the selected tier's best moments (pick a tier chip first)">⬇ Reel</button>
-        <button id="btn-cat-filters" class="ghost" title="Performer, studio, tag, date and length filters">Filters ▾</button>
-        <span id="cat-status" class="dim"></span>
-      </div>
-      <div id="cat-filters" class="row cat-filters" hidden>
-        <label>Performer <input id="cat-perf" list="dl-perf" placeholder="any" /></label>
-        <label>Studio <input id="cat-studio" list="dl-studio" placeholder="any" /></label>
-        <label>Tag <input id="cat-tag" list="dl-tag" placeholder="any" /></label>
-        <label>Released <input id="cat-from" type="date" /> – <input id="cat-to" type="date" /></label>
-        <label>Length <input id="cat-dmin" type="number" min="0" step="5" class="num-sm" placeholder="min" /> –
-          <input id="cat-dmax" type="number" min="0" step="5" class="num-sm" placeholder="max" /> min</label>
-        <button id="btn-cat-clear" class="ghost">Clear filters</button>
-        <datalist id="dl-perf"></datalist><datalist id="dl-studio"></datalist><datalist id="dl-tag"></datalist>
-      </div>
-      <div id="cat-saved" class="cat-chips cat-saved"></div>
-      <div id="cat-storage" class="cat-storage dim"></div>
+        </select></label>
     </div>
-    <div id="dupe-box" hidden>
-      <div class="panel">
-        <h2>Duplicates</h2>
-        <p class="dim">Groups found by Stash's duplicate checker (perceptual hash), laid out by what
-          you care about — resolution, bitrate, size. The <b>recommended</b> copy is the highest
-          resolution, then bitrate, then size. <b>Keep this</b> deletes the other copies with their
-          files; if one of them carries a better grade, that grade (and its tier tag) moves to the
-          copy you keep first.</p>
-        <div class="row">
-          <label>Accuracy <select id="dupe-acc">
-            <option value="exact">Exact</option><option value="high">High</option>
-            <option value="medium">Medium</option><option value="low">Low</option></select></label>
-          <label>Duration <select id="dupe-dur">
-            <option value="-1">any</option><option value="0">equal</option>
-            <option value="1">±1 s</option><option value="5">±5 s</option><option value="10">±10 s</option></select></label>
-          <button id="btn-dupe-scan" class="primary">Find duplicates</button>
-          <span id="dupe-status" class="dim"></span>
-        </div>
-      </div>
-      <div id="dupe-list" class="dupe-list"></div>
+    <div id="cat-filters" class="toolbar cat-filters" hidden>
+      <label>Performer <input id="cat-perf" list="dl-perf" placeholder="any" /></label>
+      <label>Studio <input id="cat-studio" list="dl-studio" placeholder="any" /></label>
+      <label>Tag <input id="cat-tag" list="dl-tag" placeholder="any" /></label>
+      <label>Released <input id="cat-from" type="date" /> – <input id="cat-to" type="date" /></label>
+      <label>Length <input id="cat-dmin" type="number" min="0" step="5" class="num-sm" placeholder="min" /> –
+        <input id="cat-dmax" type="number" min="0" step="5" class="num-sm" placeholder="max" /> min</label>
+      <button id="btn-cat-clear" class="btn sm ghost">Clear</button>
+      <datalist id="dl-perf"></datalist><datalist id="dl-studio"></datalist><datalist id="dl-tag"></datalist>
     </div>
+    <div id="cat-storage" class="cat-storage"></div>
+    <div id="cat-model" class="cat-model faint"></div>
     <div id="cat-list" class="cat-list"></div>
     <div class="row cat-more"><button id="btn-cat-more" class="ghost" hidden>Load more</button></div>
     <div id="cat-bulk" class="cat-bulk" hidden>
@@ -546,63 +263,316 @@
       <span class="grow"></span>
       <button id="btn-cat-delsel" class="danger" hidden>🗑 Delete selected</button>
       <button id="btn-cat-selall" class="ghost">Select all loaded</button>
-      <button id="btn-cat-selnone" class="ghost">Clear (Esc)</button>
+      <button id="btn-cat-selnone" class="ghost">Clear <kbd>Esc</kbd></button>
     </div>
   </section>
 
-  <!-- STATISTICS -->
+  <!-- REVIEW QUEUE: one scene at a time -->
+  <section id="review" class="view">
+    <div id="rv-empty" class="empty" hidden></div>
+    <div id="rv" class="rv">
+      <div class="rv-main">
+        <div class="head tight"><h1 id="rv-title">…</h1><span id="rv-sub" class="sub2"></span><span class="grow"></span>
+          <span id="rv-pos" class="muted"></span><button class="btn sm ghost" id="rv-exit">✕ Exit <kbd>Esc</kbd></button></div>
+        <div class="rv-player"><video id="rv-v" playsinline muted></video>
+          <div class="rv-scrub" id="rv-scrub"><div class="rv-track"><i id="rv-prog"></i></div></div></div>
+        <div class="rv-grades" id="rv-grades"></div>
+        <div class="kbdrow"><span><kbd>1</kbd>–<kbd>5</kbd> grade</span><span><kbd>J</kbd>/<kbd>K</kbd> next / previous scene</span>
+          <span><kbd>←</kbd>/<kbd>→</kbd> jump between peaks</span><span><kbd>Space</kbd> play</span><span><kbd>M</kbd> sound</span><span><kbd>Z</kbd> undo</span></div>
+      </div>
+      <div class="rv-side">
+        <div class="card pad"><h3>Peaks thinks</h3><div id="rv-probs" class="probs"></div><div id="rv-why" class="muted small"></div></div>
+        <div class="card pad"><h3>File</h3><div id="rv-facts" class="facts"></div></div>
+        <div class="card pad rv-next"><h3>Up next</h3><div id="rv-queue" class="queue"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DUPLICATES -->
+  <section id="dupes" class="view">
+    <div id="dupe-box">
+      <div class="head"><h1>Duplicates</h1><span id="dupe-status" class="sub2"></span></div>
+      <div class="toolbar">
+        <label class="muted">Accuracy <select id="dupe-acc">
+          <option value="exact">Exact</option><option value="high">High</option>
+          <option value="medium">Medium</option><option value="low">Low</option></select></label>
+        <label class="muted">Duration <select id="dupe-dur">
+          <option value="-1">any</option><option value="0">equal</option>
+          <option value="1">±1 s</option><option value="5">±5 s</option><option value="10">±10 s</option></select></label>
+        <button id="btn-dupe-scan" class="btn pri">Find duplicates</button>
+        <span class="faint small">Recommended = highest resolution → bitrate → size. Keeping a copy moves the best grade to it first.</span>
+      </div>
+      <div id="dupe-list" class="dupe-list"></div>
+    </div>
+  </section>
+
+  <!-- INSIGHTS: statistics + storage + taste coverage -->
   <section id="statistics" class="view">
-    <div class="panel">
-      <h2>📈 Statistics</h2>
-      <p class="dim">How your library is growing and what your taste is made of. A
-        <em>peak</em> is a scored standout — a high-scoring stretch the algorithm
-        extracts from a scene. Each card with a ▶ plays its moments on the megaboard as
-        its own playlist.</p>
-      <div class="row">
-        <button id="btn-stats-refresh" class="ghost" title="Recompute">↻ Refresh</button>
-        <span id="stats-status" class="dim"></span>
+    <div class="head"><h1>Insights</h1><span id="stats-status" class="sub2"></span><span class="grow"></span>
+      <button id="btn-stats-refresh" class="btn ghost" title="Recompute">↻ Refresh</button></div>
+    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="coverage">Taste coverage</span></div>
+    <div id="stats-body" class="dim" data-pane="overview">Crunching your library…</div>
+    <div id="experimental" data-pane="coverage" hidden>
+      <div class="toolbar">
+        <label id="exp-floor-wrap" class="muted" title="A scene counts as 'covered' if its best moment scores at or above this. Shared with the board + Statistics.">Taste floor
+          <input type="range" id="exp-floor" min="0" max="0.95" step="0.01" value="0" />
+          <b id="exp-floor-val" class="dim">off</b></label>
+        <button id="btn-exp-refresh" class="btn sm ghost">↻ Refresh</button>
+        <span id="exp-status" class="dim"></span>
+        <span class="faint small">How much of your library your taste reaches — and why the rest doesn't.</span>
       </div>
+      <div id="exp-body" class="dim">Analyzing your taste coverage…</div>
     </div>
-    <div id="stats-body" class="dim">Crunching your library…</div>
   </section>
-  <!-- MEGABOARD -->
-  <section id="board" class="view">
-    <div class="panel">
-      <h2>Megaboard</h2>
-      <p class="dim">Builds the grid's playlist from every moment saved under this
-        <strong>Stash tag</strong> (default <code>apex</code> = all your ⭐-saved moments),
-        then opens the board in its own optimized page. Scoring with <em>write</em>
-        rebuilds this automatically — use this button to refresh on demand or for
-        another tag.</p>
-      <div class="row">
-        <label title="The Stash tag whose saved moments feed the board and the export below. Default 'apex' = everything you've ⭐-saved; a profile tag like 'apex-heels' targets that profile.">Stash tag
-          <input id="board-tag" placeholder="default: apex — all saved moments" /></label>
-        <button id="btn-playlist" class="primary">Build megaboard</button>
-        <a id="board-link" class="ghost" href="/megaboard/" target="_blank">Open megaboard →</a>
-        <span id="playlist-status" class="dim"></span>
-      </div>
-      <pre id="playlist-log" class="log" hidden></pre>
-      <div id="collections" class="reels"></div>
 
-      <p class="dim" style="margin-top:16px">Stitches the moments saved under the tag above,
-        across your whole library (default <code>apex</code>), into one highlight video —
-        independent of the board on screen or any playlist. To export a single playlist
-        instead, use the ⬇ on its card above. Clips from same-format sources are stitched
-        losslessly; a mix of resolutions/framerates is normalized to 1080p·30fps so the
-        file plays cleanly start to finish.</p>
+  <!-- MEGABOARD (builder, playlists, reels) -->
+  <section id="board" class="view">
+    <div class="head"><h1>Megaboard</h1><span class="sub2">a wall of your moments, playing at once</span><span class="grow"></span>
+      <a id="board-link" class="btn pri" href="/megaboard/" target="_blank">Open megaboard ↗</a></div>
+    <div class="panel">
+      <h3>Saved moments</h3>
+      <p class="cap">Build the board — or export one video — from every moment saved under a Stash tag (default <code>apex</code> = all ⭐ saves).</p>
       <div class="row">
-        <button id="btn-reel" class="primary" title="Stitches saved moments under the tag above into one video — not the board on screen or a playlist.">Export saved moments</button>
-        <label class="check" title="Off: export the most recent 300 (avoids a surprise multi-GB file). On: export every saved moment under this tag."><input type="checkbox" id="reel-all" /> all (else 300 most recent)</label>
+        <input id="board-tag" placeholder="Stash tag — default: apex" title="A profile tag like 'apex-heels' targets that profile." />
+        <button id="btn-playlist" class="primary">Build megaboard</button>
+        <button id="btn-reel" class="ghost" title="Stitch saved moments under this tag into one video">⬇ Export as video</button>
+        <label class="check" title="Off: the most recent 300 (avoids a surprise multi-GB file). On: every saved moment under this tag."><input type="checkbox" id="reel-all" /> all (else 300 newest)</label>
         <button id="btn-reel-stop" class="ghost" hidden>Stop</button>
+        <span id="playlist-status" class="dim"></span>
         <span id="reel-status" class="dim"></span>
       </div>
+      <pre id="playlist-log" class="log" hidden></pre>
       <pre id="reel-log" class="log" hidden></pre>
-      <div id="reels" class="reels"></div>
+    </div>
+    <h2 class="shelf-h">Playlists</h2>
+    <div id="collections" class="reels"></div>
+    <h2 class="shelf-h">Exported videos</h2>
+    <div id="reels" class="reels"></div>
+  </section>
+
+  <!-- ACTIVITY: every job + history -->
+  <section id="activity" class="view">
+    <div class="head"><h1>Activity</h1><span class="sub2">everything Peaks runs or changes, in one place</span><span class="grow"></span>
+      <button id="btn-ingest" class="btn pri">⤓ Ingest new files</button>
+      <button id="btn-ingest-stop" class="btn danger" hidden>Stop</button></div>
+    <div class="cards" id="stat-cards"></div>
+    <div class="act-cols">
+      <div>
+        <div class="panel" id="ingest-panel">
+          <div class="row between"><h3>Ingest</h3><span id="ingest-status" class="dim"></span></div>
+          <div class="steps" id="ingest-steps">
+            <div class="st" data-st="scan"><b>Scan</b><span>phashes on</span></div>
+            <div class="st" data-st="identify"><b>Identify</b><span>new scenes</span></div>
+            <div class="st" data-st="auto tag"><b>Auto tag</b><span>new scenes</span></div>
+            <div class="st" data-st="embed"><b>Embed</b><span>new scenes</span></div>
+            <div class="st" data-st="duplicates"><b>Duplicates</b><span>new vs library</span></div>
+          </div>
+          <pre id="ingest-log" class="log" hidden></pre>
+        </div>
+
+        <div class="panel">
+          <div class="row between"><h3>Embedding</h3><span id="embed-status" class="dim"></span></div>
+          <div class="row"><span id="embed-pending" class="muted"></span></div>
+          <div class="row">
+            <button id="btn-embed" class="primary">Embed new scenes</button>
+            <button id="btn-embed-stop" class="ghost" hidden>Stop</button>
+            <button id="toggle-adv" class="ghost" type="button">Options ▾</button>
+          </div>
+          <div id="embed-adv" class="adv" hidden>
+            <label>Model
+              <select id="adv-model">
+                <option value="dino">DINOv2 — structure</option>
+                <option value="clip">CLIP — text search</option>
+                <option value="dino,clip">DINOv2 + CLIP (queued)</option>
+              </select>
+            </label>
+            <label>Sampling
+              <select id="adv-mode">
+                <option value="sparse">sparse (fast)</option>
+                <option value="interval">interval (linear)</option>
+                <option value="keyframes">keyframes</option>
+              </select>
+            </label>
+            <label>Interval (s)<input id="adv-interval" type="number" min="1" step="1" /></label>
+            <label>GPU decode
+              <select id="adv-hwaccel">
+                <option value="cuda">cuda (NVDEC)</option>
+                <option value="auto">auto</option>
+                <option value="">off (CPU)</option>
+              </select>
+            </label>
+            <label>Workers<input id="adv-workers" type="number" min="1" step="1" /></label>
+            <label>Timeout (s)<input id="adv-timeout" type="number" min="0" step="30" /></label>
+            <label title="Frames embedded per GPU pass. Lower it if the GPU runs out of memory — the giant backbone on a 12GB card may need 16–32.">Batch size<input id="adv-batch" type="number" min="1" step="1" /></label>
+          </div>
+          <p id="adv-hint" class="dim adv-hint" hidden>Overrides apply to this run only.</p>
+          <div class="row sched" title="Automatically embed newly-added Stash scenes on a schedule, in the background.">
+            <label class="check"><input type="checkbox" id="sched-on" /> Auto-embed new scenes</label>
+            <label class="muted">every <input id="sched-hours" type="number" min="0.5" step="0.5" style="width:64px" /> h</label>
+            <label class="check" title="After each pass, refresh moved scenes' paths (and drop deleted ones if prune is on)"><input type="checkbox" id="sched-sync" /> then sync</label>
+            <label class="check" title="Drop cache entries for scenes deleted from Stash (destructive)"><input type="checkbox" id="sched-prune" /> prune</label>
+            <button id="btn-sched-save" class="btn sm ghost">Save</button>
+            <span id="sched-status" class="dim"></span>
+          </div>
+          <pre id="embed-log" class="log" hidden></pre>
+        </div>
+
+        <div class="panel" id="fail-panel" hidden>
+          <div class="row between"><h3 class="warn">Failed scenes <span id="fail-count" class="dim"></span></h3><span id="fix-status" class="dim"></span></div>
+          <p class="cap">Usually a seek/decode quirk. Retry falls back to CPU decode, then a full linear decode.</p>
+          <div class="row">
+            <button id="btn-fix" class="primary">Retry failed</button>
+            <button id="btn-fix-stop" class="ghost" hidden>Stop</button>
+            <button id="btn-fail-list" class="ghost">Show list</button>
+          </div>
+          <pre id="fail-list" class="log" hidden></pre>
+          <pre id="fix-log" class="log" hidden></pre>
+        </div>
+
+        <div class="panel">
+          <h3>Maintenance</h3>
+          <div class="maint">
+            <div class="mrow"><div><b>Sync with Stash</b><span>refresh moved scenes, drop deleted ones</span></div>
+              <div class="row"><label class="check"><input type="checkbox" id="sync-prune" checked /> prune</label>
+                <button id="btn-sync" class="btn sm">↻ Sync</button><span id="sync-status" class="dim"></span></div></div>
+            <div class="mrow"><div><b>Write peak markers</b><span>score scenes and add markers in Stash — dry-run first</span></div>
+              <div class="row"><input id="score-tag" placeholder="tag (apex)" class="num-md" />
+                <label class="check"><input type="checkbox" id="score-write" /> write</label>
+                <button id="toggle-score-adv" class="btn sm ghost" type="button">▾</button>
+                <button id="btn-score" class="btn sm">✎ Run</button>
+                <button id="btn-score-stop" class="btn sm ghost" hidden>Stop</button><span id="score-status" class="dim"></span></div></div>
+            <div id="score-adv" class="adv" hidden>
+              <label>Enter at (high)<input id="adv-high" type="number" min="0" step="0.01" /></label>
+              <label>Stay until (low)<input id="adv-low" type="number" min="0" step="0.01" /></label>
+              <label>Max length (s)<input id="adv-maxdur" type="number" min="0" step="5" /></label>
+              <label>Match
+                <select id="adv-reduce">
+                  <option value="max">max — specific</option>
+                  <option value="mean">mean — broader</option>
+                </select>
+              </label>
+              <label>Normalize
+                <select id="adv-normalize">
+                  <option value="none">none — absolute</option>
+                  <option value="scene-z">scene-z — per-scene peaks</option>
+                </select>
+              </label>
+            </div>
+            <div class="mrow"><div><b>Tier tags</b><span>tag scenes graded directly in Stash</span></div>
+              <div class="row"><button class="btn sm" data-go="dashboard" data-sec="tiers">🏷 Check tier tags…</button></div></div>
+            <div class="mrow"><div><b>Duplicates</b><span>Stash's phash groups, judged on quality</span></div>
+              <div class="row"><button class="btn sm" data-go="dupes">⧉ Find duplicates…</button></div></div>
+          </div>
+          <pre id="sync-log" class="log" hidden></pre>
+          <pre id="score-log" class="log" hidden></pre>
+        </div>
+      </div>
+
+      <div class="panel" id="history-panel">
+        <div class="row between"><h3>History</h3>
+          <span class="row"><button id="btn-hist-refresh" class="btn sm ghost" title="Refresh">↻</button>
+            <a id="hist-download" class="btn sm ghost" href="/api/history/download" download>⬇ Log</a></span></div>
+        <div class="row backups">
+          <span class="muted small">Grade backups</span>
+          <select id="backup-sel" title="Grade backups, newest first"></select>
+          <button id="btn-backup-preview" class="btn sm ghost">Restore…</button>
+          <button id="btn-backup-now" class="btn sm ghost">Back up now</button>
+          <span id="backup-status" class="dim"></span>
+        </div>
+        <div id="backup-diff" hidden></div>
+        <div id="hist-list" class="hist-list dim">Loading…</div>
+      </div>
     </div>
   </section>
 
-  <!-- SCENE VIEWER (in-app player + heatmap + editable stats) -->
-  <!-- delete rejects: shown by the Catalogue, deletes files only after the tick + button -->
+  <!-- SETTINGS: sectioned forms only -->
+  <section id="dashboard" class="view">
+    <div class="head"><h1>Settings</h1></div>
+    <div class="set">
+      <nav class="snav" id="set-nav">
+        <button class="on" data-sec="tiers">Tiers &amp; renamer</button>
+        <button data-sec="playback">Playback &amp; moments</button>
+        <button data-sec="export">Export</button>
+        <button data-sec="models">AI models</button>
+      </nav>
+      <div class="sets">
+        <div class="sec" data-sec="tiers">
+          <h2>Tiers &amp; renamer</h2>
+          <p class="lead">What grades are called in Peaks, and the Stash tag each tier writes for your renamer.</p>
+          <div class="field"><div class="l"><b>Tier names</b><span>shown across Peaks · blank = default</span></div>
+            <div><div id="tier-names" class="row"></div>
+              <div class="row"><button id="btn-tier-names-save" class="btn sm pri">Save names</button><span id="tier-names-status" class="dim"></span></div></div></div>
+          <div class="field" id="tier-tags-panel"><div class="l"><b>Tier tags</b><span>one per scene · others removed · + organized</span></div>
+            <div><div id="tier-tags" class="row"></div>
+              <div class="row"><button id="btn-tier-tags-save" class="btn sm ghost">Save tags</button><span id="tier-tags-status" class="dim"></span></div></div></div>
+          <div class="field"><div class="l"><b>Rejects</b><span>1★</span></div><div class="muted">Rating only — tags and organized are left alone.</div></div>
+          <div class="field"><div class="l"><b>Out-of-sync scenes</b><span>graded in Stash directly</span></div>
+            <div><button id="btn-tag-sync" class="btn sm">Check &amp; sync…</button><div id="tag-sync-box" hidden></div></div></div>
+        </div>
+        <div class="sec" data-sec="playback" hidden>
+          <h2>Playback &amp; moments</h2>
+          <p class="lead">How moments are cut and matched. Takes effect on the next load — no re-embed.</p>
+          <div class="field"><div class="l"><b>Moment length</b><span>clamped to <span id="clip-min">3</span>–<span id="clip-max">30</span> s (<span id="clip-max2">30</span> s cap)</span></div>
+            <div class="row"><span class="faint small">Longer</span><input id="clip-sim" type="range" min="0.3" max="0.95" step="0.01" value="0.5" />
+              <span class="faint small">Tighter</span><span id="clip-sim-val" class="dim">0.50</span>
+              <button id="btn-clip-save" class="btn sm pri">Save</button><span id="clip-status" class="dim"></span></div></div>
+          <div class="field"><div class="l"><b>Match on the whole peak</b><span>“find similar”</span></div>
+            <label class="check" title="Match a moment by the mean of its frames instead of one midpoint frame. Query-time only.">
+              <input type="checkbox" id="chk-peak-pool" /> average a moment's frames (steadier) — off = single frame</label></div>
+        </div>
+        <div class="sec" data-sec="export" hidden>
+          <h2>Export</h2>
+          <p class="lead">Used when a reel mixes formats. Same-format exports stay lossless.</p>
+          <div class="field"><div class="l"><b>Resolution</b><span>“match” = largest source, max 4K</span></div>
+            <select id="exp-res">
+              <option value="1080">1080p (default)</option>
+              <option value="1440">1440p</option>
+              <option value="2160">4K (2160p)</option>
+              <option value="source">Match largest source</option>
+            </select></div>
+          <div class="field"><div class="l"><b>Frame rate</b><span>“highest” caps at 120</span></div>
+            <select id="exp-fps">
+              <option value="30">30 (default)</option>
+              <option value="60">60</option>
+              <option value="source">Highest source</option>
+            </select></div>
+          <div class="field"><div class="l"><b>Codec</b><span>H.265 ≈ half the size at 4K</span></div>
+            <div class="row"><select id="exp-codec">
+              <option value="h264">H.264 (default)</option>
+              <option value="hevc">H.265 / HEVC</option>
+            </select><button id="btn-export-save" class="btn sm pri">Save</button><span id="export-status" class="dim"></span></div></div>
+        </div>
+        <div class="sec" data-sec="models" hidden>
+          <h2>AI models</h2>
+          <p class="lead">Used everywhere, no restart. After switching, run an embed pass (Activity) to fill the new cache.</p>
+          <div class="field"><div class="l"><b>Visual model</b><span>DINOv2 · “find similar” + taste</span></div>
+            <select id="sel-dino">
+              <option value="dinov2_vitl14">large (default)</option>
+              <option value="dinov2_vitg14">giant (heaviest)</option>
+            </select></div>
+          <div class="field"><div class="l"><b>Text-search model</b><span>OpenCLIP</span></div>
+            <div class="row"><select id="sel-clip">
+              <option value="ViT-H-14">largest</option>
+            </select><span id="models-status" class="dim"></span></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+    </div><!-- /content -->
+  </main>
+</div>
+
+  <!-- ⌘K command palette -->
+  <div id="cmdk" class="cmdk" hidden>
+    <div class="cmdk-box">
+      <input id="cmdk-in" placeholder="Search moments, jump to a page, run a command…" autocomplete="off" />
+      <div id="cmdk-list" class="cmdk-list"></div>
+      <div class="cmdk-foot faint"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close</div>
+    </div>
+  </div>
+
+  <!-- delete files: shown for rejects and duplicates; deletes only after the tick + button -->
   <dialog id="del-dlg" class="dlg">
     <h2 id="del-title">Delete rejected scenes</h2>
     <p id="del-summary"></p>
@@ -616,6 +586,7 @@
     </div>
   </dialog>
 
+  <!-- SCENE VIEWER (in-app player + heatmap + editable stats) -->
   <div id="viewer" class="viewer" hidden>
     <div class="viewer-stage">
       <button id="viewer-close" class="viewer-close" title="Close (Esc)">✕</button>

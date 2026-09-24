@@ -39,21 +39,58 @@ function pparam(extra = {}) {
 // the Stash marker tag a saved moment is filed under (undefined = server default)
 function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
-// --- tabs -------------------------------------------------------------------
-document.querySelectorAll(".tab[data-view]").forEach((b) =>
-  b.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-    document.querySelectorAll(".view").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active");
-    $("#" + b.dataset.view).classList.add("active");
-    if (b.dataset.view === "dashboard") refreshDashboard();
-    if (b.dataset.view === "foryou") openForYou();
-    if (b.dataset.view === "performers") openPerformers();
-    if (b.dataset.view === "catalogue" && !cat.loaded) openCatalogue();
-    if (b.dataset.view === "statistics") openStatistics();
-    if (b.dataset.view === "experimental") openExperimental();
-  })
-);
+// --- navigation: sidebar pages, remembered in the URL hash ----------------------
+const VIEWS = ["foryou", "board", "explore", "performers", "catalogue", "review", "dupes",
+  "statistics", "taste", "activity", "dashboard"];
+// show a page without side effects (used when another action lands on it)
+function showView(name) {
+  if (!VIEWS.includes(name)) name = "foryou";
+  document.querySelectorAll(".nav[data-view]").forEach((x) => x.classList.toggle("active", x.dataset.view === name));
+  document.querySelectorAll(".view").forEach((x) => x.classList.toggle("active", x.id === name));
+  const smart = $("#side-smart"); if (smart) smart.hidden = !["catalogue", "review"].includes(name);
+  document.body.classList.remove("nav-open");
+  $("#content")?.scrollTo(0, 0);
+  if (location.hash !== "#/" + name) history.replaceState(null, "", "#/" + name);
+}
+// open a page and load what it shows
+function go(name) {
+  showView(name);
+  if (name === "activity") refreshDashboard();
+  if (name === "foryou") openForYou();
+  if (name === "performers") openPerformers();
+  if (name === "catalogue" && !cat.loaded) openCatalogue();
+  if (name === "review") openReview();
+  if (name === "dupes") openDupes();
+  if (name === "statistics") openStatistics();
+  if (name === "taste") openTaste();
+  if (name === "dashboard") { loadTierNames(); loadTierTags(); }
+}
+document.querySelectorAll(".nav[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
+// any [data-go] button jumps to a page (optionally a Settings section)
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-go]"); if (!b) return;
+  go(b.dataset.go);
+  if (b.dataset.sec) showSettingsSection(b.dataset.sec);
+});
+$("#nav-toggle")?.addEventListener("click", (e) => { e.stopPropagation(); document.body.classList.toggle("nav-open"); });
+$(".main")?.addEventListener("click", () => document.body.classList.remove("nav-open"));
+// tabs inside a page: .seg.tabs [data-tab] ↔ siblings with [data-pane]
+function wireTabs(tabsSel, onShow) {
+  const tabs = $(tabsSel); if (!tabs) return;
+  tabs.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-tab]"); if (!t) return;
+    tabs.querySelectorAll("[data-tab]").forEach((x) => x.classList.toggle("on", x === t));
+    tabs.parentElement.querySelectorAll(":scope > [data-pane]").forEach((p) => { p.hidden = p.dataset.pane !== t.dataset.tab; });
+    if (onShow) onShow(t.dataset.tab);
+  });
+}
+function showSettingsSection(sec) {
+  document.querySelectorAll("#set-nav [data-sec]").forEach((b) => b.classList.toggle("on", b.dataset.sec === sec));
+  document.querySelectorAll(".sets .sec").forEach((p) => { p.hidden = p.dataset.sec !== sec; });
+}
+$("#set-nav")?.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-sec]"); if (b) showSettingsSection(b.dataset.sec);
+});
 
 // --- dashboard --------------------------------------------------------------
 async function refreshDashboard() {
@@ -61,7 +98,7 @@ async function refreshDashboard() {
     const [stats, caps] = await Promise.all([
       api("/api/stats"), api("/api/capabilities"),
     ]);
-    $("#conn").textContent = "connected";
+    $("#conn").textContent = "Stash connected"; $("#conn-dot")?.classList.remove("off");
     const dino = (stats.dino_model || "").replace("dinov2_", "") || stats.model;
     const clip = `${stats.clip_model || "?"} · ${stats.clip_cached ? stats.clip_cached.toLocaleString() + " cached" : "not embedded"}`;
     $("#stat-cards").innerHTML = [
@@ -78,7 +115,8 @@ async function refreshDashboard() {
     $("#fail-panel").hidden = nf === 0;
     $("#fail-count").textContent = nf ? `· ${nf}` : "";
   } catch (e) {
-    $("#conn").textContent = "disconnected"; toast("Cannot reach backend: " + e.message, true);
+    $("#conn").textContent = "disconnected"; $("#conn-dot")?.classList.add("off");
+    toast("Cannot reach backend: " + e.message, true);
   }
   if (typeof refreshReels === "function") refreshReels();
   if (typeof refreshCollections === "function") refreshCollections();
@@ -1420,6 +1458,7 @@ async function loadForYou(rebuild) {
     foryouItems = d.items || [];
     if (!d.items.length) {
       grid.innerHTML = "";
+      renderHero(null);
       $("#foryou-status").textContent =
         "No taste yet — save some moments (★) or thumb up moments, then rebuild.";
       return;
@@ -1432,6 +1471,7 @@ async function loadForYou(rebuild) {
       ` · ${d.model}`;
     currentContext = { kind: "foryou" };
     renderHits(d.items, grid);
+    renderHero(d.items[0]);
   } catch (e) { grid.innerHTML = ""; toast(e.message, true); }
 }
 
@@ -1779,8 +1819,13 @@ async function loadNextSwipe() {
       <div class="swipe-meta"><div class="title">${esc(title)}</div>
       <div class="dim">${fmt(swipeHit.time)}</div></div>`;
     card.onclick = () => openViewer(swipeHit);
+    const mini = $("#fy-teach-img");
+    if (mini) { mini.innerHTML = `<img src="${swipeHit.thumb}" alt="" />`; mini.onclick = () => openViewer(swipeHit); }
   } catch (e) { card.textContent = e.message; }
 }
+$("#fy-teach-yes")?.addEventListener("click", () => swipeRate(1));
+$("#fy-teach-no")?.addEventListener("click", () => swipeRate(0));
+$("#fy-teach-skip")?.addEventListener("click", () => loadNextSwipe());
 async function swipeRate(label) {
   if (!swipeHit) return;
   try {
@@ -1852,10 +1897,54 @@ $("#btn-profile-del")?.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
+// the For You hero: the single best moment right now, big
+function renderHero(h) {
+  const el = $("#fy-hero"); if (!el) return;
+  if (!h) {
+    el.onclick = null;
+    el.innerHTML = `<div class="hero-empty"><h2>Your feed starts with a few likes</h2>
+      <p class="muted">Tap 👍 on the card to the right, ★-save moments while you watch, or pick frames in Taste → Picker. Then ↻ rebuild.</p>
+      <button class="btn pri" data-go="taste">Teach your taste →</button></div>`;
+    return;
+  }
+  const title = h.title || `scene ${h.scene_id ?? "?"}`;
+  const who = (h.performers || []).slice(0, 2).join(", ");
+  el.innerHTML = `<img src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
+    <div class="ov"><div class="row">${tierBadge(h.rating100, h.o_counter)}<span class="muted">${Math.round(h.score * 100)}% match · ${fmt(h.time)}</span></div>
+      <h2>${esc(who ? who + " — " + title : title)}</h2>
+      <div class="row"><button class="btn pri" data-hero="play">▶ Play</button><button class="btn" data-hero="similar">⟳ More like this</button>
+        <button class="btn" data-hero="save">★ Save</button></div></div>`;
+  el.onclick = (e) => {
+    const a = e.target.closest("[data-hero]")?.dataset.hero;
+    if (a === "similar") similar(h.key, h.time);
+    else if (a === "save") saveMoment(h.scene_id, h.time);
+    else openViewerAt(0);
+  };
+}
+// "your library today": counts that point at the next job to do
+async function loadLibraryToday() {
+  const box = $("#fy-today-body"); if (!box) return;
+  try {
+    const d = await api("/api/catalogue?limit=1&tier=unreviewed");
+    const likely = (d.views || {}).likely || 0, rej = (d.storage || {}).rejected;
+    let dupes = 0;
+    try { const x = await api("/api/duplicates"); dupes = x.groups ? x.groups.length : 0; } catch {}
+    const n = (v) => (+v || 0).toLocaleString();
+    box.innerHTML = `<div><b>${n(d.counts.unreviewed)}</b><span>to review</span></div>
+      <div><b>${n(likely)}</b><span>likely keepers</span></div>
+      <div><b class="bad">${rej ? fmtBytes(rej.bytes) : "0"}</b><span>rejects to delete</span></div>
+      <div><b class="gold">${n(dupes)}</b><span>duplicate groups</span></div>`;
+    setNavCounts(d);
+  } catch { box.innerHTML = '<span class="faint">Stash unreachable</span>'; }
+}
+function openTaste() { loadNextSwipe(); loadLabelCounts(); }
+wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); });
+wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); });
+
 async function openForYou() {
   if (!profilesLoaded) await loadProfiles();
   loadNextSwipe();
-  loadPicks();
+  loadLibraryToday();
   await loadForYou(false);   // cached taste = fast open; "Rebuild" forces a fresh rebuild
   loadTasteBands();          // colours the For You tiles by taste band (cheap)
   loadLabelCounts();         // header counts only; the taste panels load frames on expand
@@ -2057,8 +2146,9 @@ document.querySelectorAll("#taste-manage [data-del]").forEach((b) =>
 // keyboard shortcuts while the For You tab is the active view
 document.addEventListener("keydown", (e) => {
   if (!$("#viewer").hidden) return;                       // viewer owns keys when open
-  if (!$("#foryou")?.classList.contains("active")) return;
-  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  const teachOpen = $("#taste")?.classList.contains("active") && !$("#swipe-panel").hidden;
+  if (!$("#foryou")?.classList.contains("active") && !teachOpen) return;
+  if (!$("#cmdk").hidden || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(1); }   // → = 👍 love
   else if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(0); }  // ← = 👎 pass
   else if (e.key === "ArrowDown") { e.preventDefault(); loadNextSwipe(); }
@@ -2208,6 +2298,7 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     cat.items = append ? cat.items.concat(d.items) : d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
+    setNavCounts(d);
     const nb = $("#btn-cat-new"), ing = d.ingest || {};
     if (nb) {
       nb.hidden = !ing.new && !cat.isNew;
@@ -2225,6 +2316,17 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
     $("#cat-status").textContent = "";
   } finally { cat.busy = false; }
+}
+// sidebar counts: library size, the review queue, duplicate groups
+function setNavCounts(d) {
+  const all = Object.values(d.counts || {}).reduce((a, b) => a + b, 0);
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v ? (+v).toLocaleString() : ""; };
+  if (!cat.isNew && !cat.view) set("#nav-ct-cat", all);
+  set("#nav-ct-review", (d.counts || {}).unreviewed);
+}
+function setDupeCount(n) {
+  const el = $("#nav-ct-dupes"); if (!el) return;
+  el.hidden = !n; el.textContent = n || "";
 }
 function renderCatChips() {
   const all = Object.values(cat.counts).reduce((a, b) => a + b, 0);
@@ -2351,33 +2453,45 @@ function qualityLine(q) {
   return [q.res, q.mbps != null ? `${q.mbps} Mbps` : null, (q.codec || "").toUpperCase() || null,
           q.fps ? `${Math.round(q.fps)}fps` : null].filter(Boolean).join(" · ") || "quality unknown";
 }
+// quality as chips: the things you judge a file by, at a glance
+function qualityChips(r) {
+  const q = r.quality || {};
+  const chip = (txt, cls = "") => txt ? `<span class="q ${cls}">${esc(txt)}</span>` : "";
+  const hiRes = q.res === "4K", lowRes = q.res === "SD" || q.res === "720p";
+  return chip(q.res || "?", hiRes ? "hi" : lowRes ? "warn" : "") +
+    chip(q.mbps != null ? `${q.mbps} Mbps` : "", r.flag ? "warn" : (q.mbps >= 30 ? "hi" : "")) +
+    chip((q.codec || "").toUpperCase()) + chip(q.fps ? `${Math.round(q.fps)}fps` : "") +
+    chip(r.size ? fmtBytes(r.size) : "");
+}
 function catCardHTML(r, i) {
-  const who = [r.performers.slice(0, 4).join(", "), r.studio, r.date, r.duration ? fmt(r.duration) : ""].filter(Boolean).join(" · ");
-  const moments = (r.moments || []).map((m, j) =>
+  const who = [r.performers.slice(0, 3).join(", "), r.studio, (r.date || "").slice(0, 4)].filter(Boolean).join(" · ");
+  const moments = (r.moments || []).slice(0, 3).map((m, j) =>
     `<img class="cat-m" loading="lazy" src="${m.thumb}" data-j="${j}" title="${fmt(m.t)}${m.score != null ? " · taste " + Math.round(m.score * 100) + "%" : ""}" />`).join("");
   const cur = r.tier === "rejected" ? "reject" : r.tier;   // highlight the grade it already has
-  const sug = r.suggest ? r.suggest.grade : null;
-  const grades = GRADES.map((g, k) =>
-    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><kbd>${k + 1}</kbd> ${esc(gradeName(g))}</button>`).join("");
   const p = r.pred;
+  const sug = r.suggest ? r.suggest.grade : (p && r.tier === "unreviewed" ? p.tier : null);
+  const short = { legendaire: "Lég", exceptionnelle: "Exc", merveilleuse: "Mer", upscale: "Ups", reject: "Rej" };
+  const grades = GRADES.map((g, k) =>
+    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
   const predLine = p
-    ? `<div class="cat-pred">Looks like <span class="tier tier-${p.tier === "reject" ? "rejected" : p.tier}">${esc(className(p.tier))}</span> ${Math.round(p.conf * 100)}%` +
+    ? `<div class="cat-pred">Looks <span class="tc-${p.tier === "reject" ? "rejected" : p.tier}">${esc(className(p.tier))}</span> ${Math.round(p.conf * 100)}%` +
       (p.keeper != null ? ` · keeper ${Math.round(p.keeper * 100)}%` : "") + `</div>`
     : "";
   const flag = (r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "") +
-    (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate — see ⧉ Duplicates</div>` : "");
+    (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate</div>` : "");
   const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${esc(r.suggest.why)}</div>` : "";
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
-    <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
+    <div class="cat-coverwrap"><img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
+      ${r.duration ? `<span class="dur">${fmt(r.duration)}</span>` : ""}</div>
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
-      <div class="dim cat-who">${esc(who)}</div>
-      <div class="cat-q">${esc(qualityLine(r.quality))}${r.size ? ` · ${fmtBytes(r.size)}` : ""}</div>
+      <div class="cat-who">${esc(who)}</div>
+      <div class="qual">${qualityChips(r)}</div>
       ${predLine}${flag}${suggest}${tagLine(r)}
-      <div class="cat-moments">${moments || '<span class="dim">not embedded yet — no moments</span>'}</div>
     </div>
+    <div class="cat-moments">${moments || '<span class="faint small">moments appear once embedded</span>'}</div>
     <div class="cat-grades">${grades}</div>
   </div>`;
 }
@@ -2461,7 +2575,8 @@ $("#cat-chips")?.addEventListener("click", (e) => {
 });
 $("#cat-views")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-view"); if (!b || b.disabled) return;
-  setDupeMode(false);
+  showView("catalogue");
+  cat.isNew = false;
   cat.view = cat.view === b.dataset.v ? "" : b.dataset.v;
   openCatalogue();
 });
@@ -2649,13 +2764,10 @@ async function openDeleteDialog(ids) {
 }
 // --- duplicates: Stash's phash groups, judged on file quality -----------------
 const dupe = { on: false, data: null };
+// duplicates live on their own page now; kept for callers that toggle the old mode
 function setDupeMode(on) {
   dupe.on = on;
-  $("#dupe-box").hidden = !on;
-  $("#cat-list").hidden = on;
-  $("#btn-cat-more").hidden = on || cat.items.length >= cat.total;
-  $("#btn-cat-dupes")?.classList.toggle("on", on);
-  if (on) { cat.sel.clear(); renderCatBulk(); }
+  if (on) go("dupes");
 }
 function dupeCopyHTML(r, g) {
   const q = r.quality || {};
@@ -2675,6 +2787,7 @@ function dupeCopyHTML(r, g) {
 function renderDupes() {
   const d = dupe.data, box = $("#dupe-list");
   if (!d || !d.groups) { box.innerHTML = ""; return; }
+  setDupeCount(d.groups.length);
   $("#dupe-status").textContent = `${plural(d.groups.length, "group")} · ${fmtBytes(d.reclaim)} reclaimable` +
     (d.ignored ? ` · ${d.ignored} marked not duplicates` : "") + ` · checked ${d.checked_at}`;
   box.innerHTML = d.groups.length ? d.groups.map((g, gi) => `<div class="dupe-group" data-g="${gi}">
@@ -2685,11 +2798,11 @@ function renderDupes() {
     : '<p class="dim">No duplicates at this accuracy. 🎉</p>';
 }
 async function openDupes() {
-  setDupeMode(true);
   try { const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); } } catch {}
+  if (!dupe.data) $("#dupe-list").innerHTML = '<div class="empty">Pick an accuracy and <b>Find duplicates</b> — Stash compares phashes across the library.</div>';
 }
 $("#btn-cat-new")?.addEventListener("click", () => {
-  setDupeMode(false);
+  showView("catalogue");
   cat.isNew = !cat.isNew;
   if (cat.isNew) { cat.tier = ""; cat.view = ""; }
   openCatalogue();
@@ -2702,6 +2815,7 @@ async function startIngest() {
     if (btn) { btn.disabled = true; logEl.hidden = false; wireStop(stop, statusEl, job.id); }
     const cb = $("#btn-cat-ingest"); if (cb) cb.disabled = true;
     const j = await waitJob(job.id, (x) => {
+      renderIngestSteps(x);
       const p = x.progress || {}, line = (x.log || []).slice(-1)[0] || "starting…";
       $("#cat-status").textContent = "Ingest: " + line;
       if (statusEl) statusEl.textContent = `${x.status}${p.stage && p.stage !== "done" ? " · " + p.stage : ""} · ${x.elapsed}s`;
@@ -2709,6 +2823,7 @@ async function startIngest() {
     }, 1500);
     if (btn) { btn.disabled = false; if (stop) stop.hidden = true; }
     if (cb) cb.disabled = false;
+    renderIngestSteps(j);
     if (j.status === "error") { toast("Ingest failed: " + j.error, true); $("#cat-status").textContent = ""; return; }
     if (j.status === "cancelled") { toast("Ingest stopped."); return; }
     const r = j.result;
@@ -2718,11 +2833,32 @@ async function startIngest() {
     if (cat.loaded || r.new) openCatalogue({ refresh: true });
   } catch (e) { toast(e.message, true); }
 }
+// the five ingest steps light up from the job's log ("2/5 identify: …", "scan done: …")
+const INGEST_STEPS = ["scan", "identify", "auto tag", "embed", "duplicates"];
+function renderIngestSteps(job) {
+  const box = $("#ingest-steps"); if (!box) return;
+  const log = (job.log || []).join("\n");
+  let cur = -1;
+  INGEST_STEPS.forEach((st, i) => { if (log.includes(`${i + 1}/5 ${st}`)) cur = i; });
+  const finished = job.status !== "running";
+  box.querySelectorAll(".st").forEach((el, i) => {
+    const note = (job.result && job.result.stages || {})[INGEST_STEPS[i]];
+    el.classList.toggle("done", i < cur || (finished && job.status === "done" && (i <= cur || !!note)));
+    el.classList.toggle("run", !finished && i === cur);
+    el.classList.toggle("fail", finished && job.status === "error" && i === cur);
+    if (note) el.querySelector("span").textContent = note;
+  });
+}
 $("#btn-ingest")?.addEventListener("click", startIngest);
+$("#btn-top-ingest")?.addEventListener("click", () => {
+  if (confirm("Ingest new files?\n\nStash scans the library (phashes on), identifies and auto-tags the new scenes with your saved task defaults, then Peaks embeds them and checks for duplicates.")) {
+    go("activity"); startIngest();
+  }
+});
 $("#btn-cat-ingest")?.addEventListener("click", () => {
   if (confirm("Ingest new files?\n\nStash scans the library (phashes on), identifies and auto-tags the new scenes with your saved task defaults, then Peaks embeds them and checks for duplicates.")) startIngest();
 });
-$("#btn-cat-dupes")?.addEventListener("click", () => (dupe.on ? (setDupeMode(false), openCatalogue()) : openDupes()));
+$("#btn-cat-dupes")?.addEventListener("click", () => go("dupes"));
 $("#btn-dupe-scan")?.addEventListener("click", async () => {
   const btn = $("#btn-dupe-scan"); btn.disabled = true;
   try {
@@ -2780,6 +2916,9 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
 $("#btn-cat-delete")?.addEventListener("click", () => openDeleteDialog(null));
 $("#btn-cat-delsel")?.addEventListener("click", () =>
   openDeleteDialog(cat.items.filter((r) => cat.sel.has(r.scene_id)).map((r) => r.scene_id)));
+$("#btn-cat-more-menu")?.addEventListener("click", (e) => { e.stopPropagation(); $("#cat-menu").hidden = !$("#cat-menu").hidden; });
+document.addEventListener("click", (e) => { if (!e.target.closest(".menu-wrap")) { const m = $("#cat-menu"); if (m) m.hidden = true; } });
+$("#btn-cat-review")?.addEventListener("click", () => { rv.fromCatalogue = true; go("review"); });
 $("#btn-cat-select")?.addEventListener("click", () => {
   cat.items.forEach((r) => cat.sel.add(r.scene_id));
   renderCatList(); renderCatBulk();
@@ -2792,8 +2931,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 function setActiveView(name) {
-  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === name));
-  document.querySelectorAll(".view").forEach((x) => x.classList.toggle("active", x.id === name));
+  showView(name);
 }
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -2813,4 +2951,235 @@ $("#btn-logout").addEventListener("click", async () => {
 });
 
 refreshDashboard();  // conn status + job reattach (runs even though it's not the landing view)
-openForYou();        // For You is the home page — populate it on load
+// land on the page in the URL (#/catalogue …), else For You — the home page
+go((location.hash.match(/^#\/(\w+)/) || [])[1] || "foryou");
+window.addEventListener("hashchange", () => {
+  const v = (location.hash.match(/^#\/(\w+)/) || [])[1];
+  if (v && !$("#" + v)?.classList.contains("active")) go(v);
+});
+
+// --- live job tray (sidebar): whatever is running, from any page -------------------
+const JOB_LABEL = { embed: "Embedding", ingest: "Ingest", score: "Writing markers", sync: "Syncing",
+  fix: "Retrying failed", reel: "Exporting video", playlist: "Building board", library: "Updating Stash",
+  dupes: "Finding duplicates", train: "Training taste" };
+async function pollJobTray() {
+  const tray = $("#job-tray");
+  if (!tray || document.hidden) return;
+  let jobs;
+  try { jobs = await api("/api/jobs"); } catch { return; }
+  const running = jobs.filter((j) => j.status === "running");
+  const badge = $("#nav-ct-jobs");
+  if (badge) { badge.hidden = !running.length; badge.textContent = running.length || ""; }
+  tray.hidden = !running.length;
+  tray.innerHTML = running.slice(0, 3).map((j) => {
+    const p = j.progress || {};
+    const pct = p.total ? Math.round(100 * (p.done || 0) / p.total) : (typeof p.pct === "number" ? Math.round(100 * p.pct) : null);
+    const detail = p.total ? `${(p.done || 0).toLocaleString()} / ${p.total.toLocaleString()}` : (p.stage || `${Math.round(j.elapsed)}s`);
+    return `<div class="tray-job"><div class="row between"><b>${esc(JOB_LABEL[j.kind] || j.kind)}</b><span class="muted">${pct != null ? pct + "%" : ""}</span></div>
+      <div class="muted small">${esc(detail)}</div><div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div></div>`;
+  }).join("");
+}
+$("#job-tray")?.addEventListener("click", () => go("activity"));
+pollJobTray();
+setInterval(pollJobTray, 4000);
+
+// --- ⌘K command palette: jump anywhere, run anything, or search ---------------------
+const CMDS = [
+  ["For You", "page", () => go("foryou")], ["Megaboard", "page", () => go("board")],
+  ["Search moments", "page", () => go("explore")], ["Performers", "page", () => go("performers")],
+  ["Catalogue", "page", () => go("catalogue")], ["Review queue", "page", () => go("review")],
+  ["Duplicates", "page", () => go("dupes")], ["Insights", "page", () => go("statistics")],
+  ["Taste — teach", "page", () => go("taste")], ["Activity", "page", () => go("activity")],
+  ["Settings", "page", () => go("dashboard")],
+  ["Ingest new files", "run", () => { go("activity"); startIngest(); }],
+  ["Embed new scenes", "run", () => { go("activity"); $("#btn-embed").click(); }],
+  ["Sync with Stash", "run", () => { go("activity"); $("#btn-sync").click(); }],
+  ["Find duplicates", "run", () => { go("dupes"); $("#btn-dupe-scan").click(); }],
+  ["Train tier model on my grades", "run", () => { go("catalogue"); $("#btn-cat-train").click(); }],
+  ["Rebuild For You", "run", () => { go("foryou"); $("#btn-foryou-rebuild").click(); }],
+  ["Taste Radio", "run", () => startRadio()],
+  ["Check tier tags…", "run", () => { go("dashboard"); showSettingsSection("tiers"); $("#btn-tag-sync").click(); }],
+  ["Back up grades now", "run", () => { go("activity"); $("#btn-backup-now").click(); }],
+  ["Delete rejected scenes…", "run", () => openDeleteDialog(null)],
+  ...["legendaire", "exceptionnelle", "merveilleuse", "upscale", "unreviewed", "anomaly", "rejected"].map((t) =>
+    [`Catalogue: ${t}`, "tier", () => { cat.tier = t; cat.view = ""; cat.isNew = false; go("catalogue"); openCatalogue(); }]),
+];
+const cmdk = { items: [], idx: 0 };
+function openCmdk() {
+  $("#cmdk").hidden = false;
+  const inp = $("#cmdk-in"); inp.value = ""; renderCmdk(); inp.focus();
+}
+function closeCmdk() { $("#cmdk").hidden = true; }
+const fold = (x) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();   // é → e
+function renderCmdk() {
+  const q = $("#cmdk-in").value.trim(), ql = fold(q);
+  const label = (c) => c[0].replace(/^Catalogue: (\w+)/, (_, t) => "Catalogue: " + (TIER_NAMES[t] || t));
+  let items = CMDS.filter((c) => !ql || fold(label(c)).includes(ql))
+    .map((c) => ({ text: label(c), kind: c[1], run: c[2] }));
+  if (q) {
+    items.push({ text: `Search moments for “${q}”`, kind: "search", run: () => { go("explore"); $("#q").value = q; $("#btn-text").click(); } });
+    items.push({ text: `Find performer “${q}”`, kind: "search", run: () => { go("performers"); $("#perf-search").value = q; $("#btn-perf-search").click(); } });
+    items.push({ text: `Filter catalogue by “${q}”`, kind: "search", run: () => { go("catalogue"); $("#cat-q").value = q; openCatalogue(); } });
+  }
+  cmdk.items = items.slice(0, 12); cmdk.idx = 0;
+  const icon = { page: "→", run: "▸", tier: "●", search: "⌕" };
+  $("#cmdk-list").innerHTML = cmdk.items.map((it, i) =>
+    `<div class="cmdk-it ${i === cmdk.idx ? "on" : ""}" data-i="${i}"><span class="ci">${icon[it.kind]}</span>${esc(it.text)}<span class="ck">${it.kind === "page" ? "Go to" : it.kind === "run" ? "Run" : it.kind === "tier" ? "Filter" : "Search"}</span></div>`).join("")
+    || '<div class="faint" style="padding:12px">No matches</div>';
+}
+function runCmdk(i) { const it = cmdk.items[i]; if (!it) return; closeCmdk(); it.run(); }
+$("#cmd-open")?.addEventListener("click", openCmdk);
+$("#cmdk")?.addEventListener("click", (e) => {
+  const it = e.target.closest(".cmdk-it");
+  if (it) runCmdk(+it.dataset.i); else if (e.target.id === "cmdk") closeCmdk();
+});
+$("#cmdk-in")?.addEventListener("input", renderCmdk);
+$("#cmdk-in")?.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    cmdk.idx = (cmdk.idx + (e.key === "ArrowDown" ? 1 : -1) + cmdk.items.length) % Math.max(1, cmdk.items.length);
+    document.querySelectorAll(".cmdk-it").forEach((el, i) => el.classList.toggle("on", i === cmdk.idx));
+  } else if (e.key === "Enter") { e.preventDefault(); runCmdk(cmdk.idx); }
+  else if (e.key === "Escape") closeCmdk();
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#cmdk").hidden ? openCmdk() : closeCmdk(); }
+  else if (e.key === "/" && !e.target.closest("input, textarea, select") && $("#cmdk").hidden && $("#viewer").hidden) { e.preventDefault(); openCmdk(); }
+});
+
+// --- Review queue: one scene at a time, big player, 1–5 to grade -------------------
+const rv = { items: [], i: 0, label: "", fromCatalogue: false, peaks: [] };
+const RV_GRADES = [
+  ["legendaire", "5★ · O 18 · tag + organize"], ["exceptionnelle", "5★ · O 17 · tag + organize"],
+  ["merveilleuse", "5★ · O 16 · tag + organize"], ["upscale", "5★ · O 0 · tag + organize"],
+  ["reject", "1★ · queued for deletion"],
+];
+function catListLabel() {
+  if (cat.isNew) return "New from ingest";
+  if (cat.view) return (CAT_VIEWS.find((v) => v[0] === cat.view) || [0, cat.view])[1];
+  return cat.tier ? TIER_NAMES[cat.tier] : "All scenes";
+}
+async function openReview() {
+  if (rv.fromCatalogue && cat.items.length) {
+    rv.items = cat.items.slice(); rv.i = Math.max(0, Math.min(cat.focus, rv.items.length - 1));
+    rv.label = catListLabel();
+  } else if (!rv.items.length) {
+    $("#rv-title").textContent = "Loading your queue…";
+    try {
+      let d = await api("/api/catalogue?" + new URLSearchParams({ view: "likely", limit: 200 }));
+      rv.label = "Likely keepers";
+      if (!d.items.length) {
+        d = await api("/api/catalogue?" + new URLSearchParams({ tier: "unreviewed", limit: 200, sort: "date" }));
+        rv.label = TIER_NAMES.unreviewed;
+      }
+      rv.items = d.items; rv.i = 0;
+    } catch (e) { rv.items = []; toast(e.message, true); }
+  }
+  rv.fromCatalogue = false;
+  renderReview();
+}
+function renderReview() {
+  const r = rv.items[rv.i];
+  $("#rv").hidden = !r; $("#rv-empty").hidden = !!r;
+  const v = $("#rv-v");
+  if (!r) {
+    v.removeAttribute("src"); v.load();
+    $("#rv-empty").innerHTML = `<h2>Queue done 🎉</h2><p class="muted">Nothing left in ${esc(rv.label || "this list")}.</p>
+      <button class="btn pri" data-go="catalogue">Back to Catalogue</button>`;
+    return;
+  }
+  $("#rv-title").textContent = r.title;
+  $("#rv-sub").textContent = [r.performers.slice(0, 3).join(", "), r.studio, r.date].filter(Boolean).join(" · ");
+  $("#rv-pos").textContent = `${rv.label} · ${rv.i + 1} of ${rv.items.length}`;
+  // player: start at the best moment, peaks marked on the timeline
+  rv.peaks = (r.moments || []).map((m) => m.t).sort((a, b) => a - b);
+  const start = (r.moments && r.moments.length) ? r.moments.reduce((a, b) => ((b.score || 0) > (a.score || 0) ? b : a)).t : 0;
+  if (v.dataset.sid !== r.scene_id) {
+    v.dataset.sid = r.scene_id;
+    v.src = r.stream;
+    v.onloadedmetadata = () => { v.currentTime = start; v.play().catch(() => {}); };
+  }
+  const dur = r.duration || 1;
+  $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
+    rv.peaks.map((t) => `<span class="pk" style="left:${(100 * t / dur).toFixed(2)}%" data-t="${t}" title="${fmt(t)}"></span>`).join("");
+  // grades: current one outlined, the model's pick highlighted
+  const cur = r.tier === "rejected" ? "reject" : r.tier;
+  const probs = (r.pred || {}).probs || {};
+  const sug = r.suggest ? r.suggest.grade : (r.pred ? r.pred.tier : null);
+  $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) =>
+    `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}"><span class="k">${k + 1}</span>
+      <span class="n">${esc(gradeName(g))}</span><span class="d">${d}</span></button>`).join("");
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "reject"];
+  $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
+    const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
+    return `<div class="pb"><span>${esc(className(c))}</span><div class="b"><i class="tier-bg-${t}" style="width:${p}%"></i></div><span class="muted">${p}%</span></div>`;
+  }).join("") : '<span class="faint">Not embedded yet, or the tier model isn\'t trained — Catalogue → ⋯ → Train.</span>';
+  $("#rv-why").innerHTML = [r.pred && r.pred.keeper != null ? `Keeper ${Math.round(r.pred.keeper * 100)}%` : "",
+    r.flag ? `<span class="warn">⚠ ${esc(r.flag)}</span>` : "", r.suggest ? esc(r.suggest.why) : "",
+    r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>");
+  const q = r.quality || {};
+  $("#rv-facts").innerHTML = `<span>Quality</span><span>${esc(qualityLine(q))}</span>
+    <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
+    <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>
+    ${r.tags && r.tags.length ? `<span>Tags</span><span>${esc(r.tags.slice(0, 8).join(", "))}</span>` : ""}
+    <span>Path</span><span class="faint path" title="${esc(r.path)}">${esc(r.path)}</span>`;
+  $("#rv-queue").innerHTML = rv.items.slice(rv.i + 1, rv.i + 7).map((x, k) => `<div class="qi" data-j="${rv.i + 1 + k}">
+      <div class="pic"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.scene_id)}/cover" onerror="this.style.opacity=.1" /></div>
+      <div><b>${esc(x.title)}</b><span class="muted">${esc(x.performers.slice(0, 2).join(", "))}${x.pred ? " · looks " + esc(className(x.pred.tier)) : ""}</span></div></div>`).join("")
+    || '<span class="faint">Last one in this list.</span>';
+}
+async function rvGrade(grade) {
+  const r = rv.items[rv.i]; if (!r) return;
+  try {
+    const fresh = await applyGrade(r.scene_id, grade);
+    rv.items[rv.i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred };
+    cat.loaded = false;                 // the Catalogue re-reads when you go back
+    rvMove(1);
+  } catch (e) { toast(e.message, true); }
+}
+function rvMove(d) {
+  const n = rv.i + d;
+  if (n < 0) return;
+  rv.i = Math.min(n, rv.items.length);
+  renderReview();
+}
+function rvJump(dir) {
+  const v = $("#rv-v"), t = v.currentTime;
+  const next = dir > 0 ? rv.peaks.find((p) => p > t + 1) : [...rv.peaks].reverse().find((p) => p < t - 1);
+  if (next != null) v.currentTime = next;
+}
+$("#rv-grades")?.addEventListener("click", (e) => { const b = e.target.closest("[data-g]"); if (b) rvGrade(b.dataset.g); });
+$("#rv-queue")?.addEventListener("click", (e) => { const q = e.target.closest("[data-j]"); if (q) { rv.i = +q.dataset.j; renderReview(); } });
+$("#rv-scrub")?.addEventListener("click", (e) => {
+  const v = $("#rv-v"), r = rv.items[rv.i]; if (!r) return;
+  const pk = e.target.closest(".pk");
+  const box = $("#rv-scrub").getBoundingClientRect();
+  v.currentTime = pk ? +pk.dataset.t : Math.max(0, (e.clientX - box.left) / box.width) * (v.duration || r.duration || 0);
+});
+$("#rv-v")?.addEventListener("timeupdate", () => {
+  const v = $("#rv-v"), bar = $("#rv-prog");
+  if (bar && v.duration) bar.style.width = (100 * v.currentTime / v.duration).toFixed(2) + "%";
+});
+$("#rv-v")?.addEventListener("click", () => { const v = $("#rv-v"); v.paused ? v.play() : v.pause(); });
+$("#rv-exit")?.addEventListener("click", () => { $("#rv-v").pause(); go("catalogue"); });
+document.addEventListener("keydown", (e) => {
+  if (!$("#review")?.classList.contains("active") || !$("#viewer").hidden || !$("#cmdk").hidden) return;
+  if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase(), v = $("#rv-v");
+  if (k >= "1" && k <= "5") { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
+  else if (k === "j") { e.preventDefault(); rvMove(1); }
+  else if (k === "k") { e.preventDefault(); rvMove(-1); }
+  else if (k === "arrowright") { e.preventDefault(); rvJump(1); }
+  else if (k === "arrowleft") { e.preventDefault(); rvJump(-1); }
+  else if (k === " ") { e.preventDefault(); v.paused ? v.play() : v.pause(); }
+  else if (k === "m") { e.preventDefault(); v.muted = !v.muted; toast(v.muted ? "🔇 muted" : "🔊 sound on"); }
+  else if (k === "z") {
+    e.preventDefault();
+    const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
+    undoGrade().then((fresh) => {
+      if (!fresh || fresh.bulk) return;
+      const i = rv.items.findIndex((x) => x.scene_id === sid);
+      if (i >= 0) { rv.items[i] = { ...rv.items[i], ...fresh }; rv.i = i; renderReview(); }
+    });
+  } else if (k === "escape") { e.preventDefault(); v.pause(); go("catalogue"); }
+});
