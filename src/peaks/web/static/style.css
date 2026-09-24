@@ -424,3 +424,4 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .cat-flag { font-size: 12px; margin-top: 3px; color: #e8a14d; }
 .cat-sug { font-size: 12px; margin-top: 3px; color: var(--accent); }
 .cat-g.sug { box-shadow: 0 0 0 1px var(--accent) inset; }
+.tier-name-in { width: 9.5em; }

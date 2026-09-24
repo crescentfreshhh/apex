@@ -274,6 +274,30 @@ async function saveExportSettings() {
 $("#btn-export-save")?.addEventListener("click", saveExportSettings);
 loadExportSettings();
 
+// --- tier display names (Settings) --------------------------------------------
+const TIER_NAME_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["merveilleuse", "16"],
+  ["upscale", "0"], ["anomaly", "other O"], ["unreviewed", "unrated"], ["rejected", "1★"]];
+async function loadTierNames() {
+  const box = $("#tier-names"); if (!box) return;
+  try { TIER_NAMES = { ...TIER_NAMES, ...(await api("/api/catalogue/names")) }; } catch {}
+  box.innerHTML = TIER_NAME_KEYS.map(([k, hint]) =>
+    `<label title="${esc(k)}">${esc(hint)} <input data-k="${k}" value="${esc(TIER_NAMES[k] || "")}" class="tier-name-in" /></label>`).join("");
+}
+$("#btn-tier-names-save")?.addEventListener("click", async () => {
+  const names = {};
+  document.querySelectorAll("#tier-names input").forEach((i) => { names[i.dataset.k] = i.value; });
+  try {
+    TIER_NAMES = { ...TIER_NAMES, ...(await api("/api/catalogue/names", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ names }),
+    })) };
+    $("#tier-names-status").textContent = "saved";
+    setTimeout(() => { if ($("#tier-names-status")) $("#tier-names-status").textContent = ""; }, 1500);
+    loadTierNames();
+    if (cat.loaded) { renderCatChips(); renderCatList(); }
+  } catch (e) { toast(e.message, true); }
+});
+// (loadTierNames() is called after TIER_NAMES is declared, below)
+
 // --- moment length (smart clip drift threshold) -----------------------------
 async function loadClipSettings() {
   try {
@@ -440,7 +464,7 @@ function tierBadge(rating100, o, { showUnreviewed = false } = {}) {
   if (t === "unreviewed" && !showUnreviewed) return "";
   return `<span class="tier tier-${t}" title="${esc(TIER_NAMES[t])} · ${rating100 == null ? "unrated" : Math.round(rating100 / 20) + "★"} · O ${o ?? 0}">${esc(TIER_NAMES[t])}</span>`;
 }
-(async () => { try { TIER_NAMES = { ...TIER_NAMES, ...(await api("/api/catalogue/names")) }; } catch {} })();
+loadTierNames();   // fetches the saved names + fills the Settings panel
 
 // a performer's graded keepers, best tier first, e.g. "3 Légendaire · 5 Exceptionnelle"
 function tierTally(tiers, { compact = false } = {}) {
