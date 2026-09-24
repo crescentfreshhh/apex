@@ -9,11 +9,10 @@
 </head>
 <body>
   <header id="bar">
-    <span class="brand">Peaks<span class="dim"> · megaboard</span></span>
-    <label>channel
-      <select id="source"></select>
-    </label>
-    <label>grid
+    <a class="brand" href="/" title="Back to Peaks"><i>▲</i>Peaks</a>
+    <span class="sep"></span>
+    <label class="grp-l">Channel <select id="source"></select></label>
+    <label class="grp-l">Grid
       <select id="grid">
         <option value="2" selected>2 × 2</option>
         <option value="3">3 × 3</option>
@@ -21,19 +20,21 @@
         <option value="5">5 × 5</option>
       </select>
     </label>
-    <button id="toggle" title="Play / pause all (Space)">Pause</button>
-    <button id="reshuffle" title="Fresh mix (R)">Reshuffle</button>
-    <label id="floor-wrap" hidden title="Off = one peak from every scene. Raise it to keep only your strongest scenes.">taste floor
+    <label id="floor-wrap" class="grp-l" hidden title="Off = one peak from every scene. Raise it to keep only your strongest scenes.">Taste floor
       <input type="range" id="floor" min="0" max="0.95" step="0.01" value="0" />
       <span id="floor-val" class="dim">off</span>
     </label>
-    <button id="refresh-lib" title="Rebuild from Stash — pick up newly-added scenes / saved moments">↻ Refresh</button>
-    <button id="save-board" title="Save whatever is currently driving the board as a playlist">💾 Save board</button>
+    <span class="sep"></span>
+    <button id="toggle" class="pri" title="Play / pause all (Space)">Pause</button>
+    <button id="reshuffle" title="Fresh mix (R)">⤮ Reshuffle</button>
     <button id="mute" title="Hover a tile to hear it — M to silence everything">🔊 Sound</button>
     <label id="vol-wrap" title="Volume for the enlarged tile">🔈
       <input type="range" id="volume" min="0" max="1" step="0.05" value="1" />
     </label>
     <span id="status" class="dim"></span>
+    <span class="grow"></span>
+    <button id="save-board" title="Save whatever is currently driving the board as a playlist">＋ Save as playlist</button>
+    <button id="refresh-lib" class="icon" title="Rebuild from Stash — pick up newly-added scenes / saved moments">↻</button>
   </header>
 
   <main id="board"><!-- tiles injected here --></main>

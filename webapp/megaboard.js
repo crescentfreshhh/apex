@@ -1167,8 +1167,10 @@ async function initSources(initial) {
       opts.push(`<option value="collection:${esc(c.safe)}">Playlist: ${esc(c.name)} (${c.count})</option>`);
     for (const t of s.tiers || [])
       opts.push(`<option value="tier:${esc(t.key)}">Tier: ${esc(t.label)}</option>`);
-    if (initial && initial.startsWith("tier:") && !(s.tiers || []).some((t) => "tier:" + t.key === initial))
-      opts.push(`<option value="${esc(initial)}">Tier: ${esc(initial.slice(5))}</option>`);
+    if (initial && initial.startsWith("tier:") && !(s.tiers || []).some((t) => "tier:" + t.key === initial)) {
+      const label = initial.slice(5).split(",").map((k) => MB_TIER_NAMES[k] || k).join(" + ");
+      opts.push(`<option value="${esc(initial)}">Tiers: ${esc(label)}</option>`);
+    }
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);
