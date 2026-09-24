@@ -692,3 +692,71 @@ class LibraryMixin:
                  if frozenset(r["scene_id"] for r in g["scenes"]) not in have]
         cached["groups"] = extra + cached["groups"]
         cached["reclaim"] = sum(g["reclaim"] for g in cached["groups"])
+
+    # --- browsing: facets, saved views, storage -----------------------------------
+
+    @staticmethod
+    def _storage(rows: list[dict]) -> dict:
+        """Space and count per tier (sizes as Stash reports them)."""
+        out: dict[str, dict] = {}
+        for r in rows:
+            t = out.setdefault(r["tier"], {"count": 0, "bytes": 0})
+            t["count"] += 1
+            t["bytes"] += int(r.get("size") or 0)
+        return out
+
+    LOW_TIERS = ("rejected", "unreviewed", "anomaly", "upscale")
+
+    def storage(self, largest: int = 20) -> dict:
+        rows = self._catalogue_all()
+        low = sorted((r for r in rows if r["tier"] in self.LOW_TIERS),
+                     key=lambda r: -int(r.get("size") or 0))[:largest]
+        return {"tiers": self._storage(rows),
+                "total": {"count": len(rows), "bytes": sum(int(r.get("size") or 0) for r in rows)},
+                "largest_low": [{k: r.get(k) for k in ("scene_id", "title", "path", "size", "tier",
+                                                        "quality")} for r in low]}
+
+    def catalogue_facets(self, limit: int = 3000) -> dict:
+        """Performers / studios / tags present in the library, most used first
+        (feeds the Catalogue filter typeahead)."""
+        from collections import Counter
+
+        rows = self._catalogue_all()
+        perf, stud, tags = Counter(), Counter(), Counter()
+        for r in rows:
+            perf.update(set(r["performers"]))
+            if r["studio"]:
+                stud[r["studio"]] += 1
+            tags.update(set(r["tags"]))
+        return {k: [[n, c] for n, c in cnt.most_common(limit)]
+                for k, cnt in (("performers", perf), ("studios", stud), ("tags", tags))}
+
+    SAVED_VIEW_KEYS = ("tier", "view", "new", "q", "res", "min_mbps", "sort", "performer",
+                       "studio", "tag", "date_from", "date_to", "dur_min", "dur_max")
+
+    def saved_views(self) -> list[dict]:
+        return list(self._settings().get("saved_views") or [])
+
+    def save_view(self, name: str, params: dict) -> list[dict]:
+        name = (name or "").strip()[:60]
+        if not name:
+            raise ValueError("a saved view needs a name")
+        clean = {k: v for k, v in (params or {}).items()
+                 if k in self.SAVED_VIEW_KEYS and v not in (None, "", False)}
+        views = [v for v in self.saved_views() if v.get("name") != name]
+        views.append({"name": name, "params": clean})
+        return self._write_views(views)
+
+    def delete_view(self, name: str) -> list[dict]:
+        return self._write_views([v for v in self.saved_views() if v.get("name") != name])
+
+    def _write_views(self, views: list[dict]) -> list[dict]:
+        import json
+
+        s = dict(self._settings())
+        s["saved_views"] = views
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return views

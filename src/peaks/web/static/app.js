@@ -1634,17 +1634,18 @@ async function openStatistics(refresh) {
   $("#stats-status").textContent = "";
   body.innerHTML = '<p class="dim">Crunching your library…</p>';
   try {
-    const [st, metrics] = await Promise.all([
+    const [st, metrics, storage] = await Promise.all([
       api("/api/statistics"),
       api("/api/taste/metrics").catch(() => null),
+      api("/api/storage").catch(() => null),
     ]);
-    renderStatistics(st, metrics);
+    renderStatistics(st, metrics, storage);
     body.dataset.loaded = "1";
   } catch (e) { body.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
 $("#btn-stats-refresh")?.addEventListener("click", () => openStatistics(true));
 
-function renderStatistics(st, metrics) {
+function renderStatistics(st, metrics, storage) {
   const body = $("#stats-body");
   const b = st.build, f = st.freshness;
   const cov = (b.library_scenes && b.library_scenes > 0)
@@ -1729,13 +1730,33 @@ function renderStatistics(st, metrics) {
       </div>`;
   }
 
-  body.innerHTML = buildCard + freshCard + perfCard + sceneCard + coverageCard;
+  body.innerHTML = buildCard + freshCard + perfCard + sceneCard + coverageCard + storageCard(storage);
 
   const slider = $("#stats-floor");
   if (slider) {
     slider.addEventListener("input", () => { updateThreshOut(); writeFloor(+slider.value); });
     updateThreshOut();
   }
+}
+// disk space by tier, and the biggest files in tiers you might trim
+function storageCard(d) {
+  if (!d) return "";
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];
+  const tot = d.total.bytes || 1;
+  const bars = order.filter((t) => d.tiers[t]).map((t) => {
+    const x = d.tiers[t];
+    return `<div class="stor-row"><span class="tier tier-${t}">${esc(TIER_NAMES[t])}</span>
+      <span class="stor-bar"><i class="tier-bg-${t}" style="width:${Math.max(1, Math.round(100 * x.bytes / tot))}%"></i></span>
+      <span class="dim">${fmtBytes(x.bytes)} · ${plural(x.count, "scene")}${t === "rejected" ? " · to delete" : ""}</span></div>`;
+  }).join("");
+  const big = (d.largest_low || []).map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path || "")}">${esc(r.title || r.path)}</span>
+    <span><span class="tier tier-${r.tier}">${esc(TIER_NAMES[r.tier])}</span> <span class="dim">${esc((r.quality || {}).res || "")} ${fmtBytes(r.size)}</span></span></div>`).join("");
+  return `<div class="panel stat-card">
+    <h3>Storage</h3>
+    <p class="dim">${fmtBytes(d.total.bytes)} across ${plural(d.total.count, "scene")}, by tier.</p>
+    ${bars}
+    ${big ? `<h4>Largest files outside your top tiers</h4><div class="dlg-list">${big}</div>` : ""}
+  </div>`;
 }
 function statTile(label, value) {
   return `<span class="pd-stat">${label} <b>${value}</b></span>`;
@@ -2162,8 +2183,11 @@ const CAT_VIEWS = [
 const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict"]);
 const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
+const CAT_FILTERS = [["performer", "#cat-perf"], ["studio", "#cat-studio"], ["tag", "#cat-tag"],
+  ["date_from", "#cat-from"], ["date_to", "#cat-to"], ["dur_min", "#cat-dmin"], ["dur_max", "#cat-dmax"]];
 function catParams(offset, refresh) {
   const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
+  for (const [k, sel] of CAT_FILTERS) { const v = ($(sel)?.value || "").trim(); if (v) qs.set(k, v); }
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
   if (cat.isNew) qs.set("new", "true");
@@ -2193,7 +2217,9 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     }
     cat.loaded = true;
     if (!append) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
-    renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk();
+    renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk(); renderCatStorage(d.storage);
+    const nf = CAT_FILTERS.filter(([, sel]) => ($(sel)?.value || "").trim()).length;
+    $("#btn-cat-filters").textContent = `Filters${nf ? ` (${nf})` : ""} ${$("#cat-filters").hidden ? "▾" : "▴"}`;
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
   } catch (e) {
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
@@ -2246,6 +2272,81 @@ function renderCatTriage() {
   }
   $("#cat-model").textContent = txt;
 }
+function renderCatStorage(st) {
+  const el = $("#cat-storage"); if (!el || !st) return;
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];
+  el.innerHTML = order.filter((t) => st[t] && st[t].bytes).map((t) =>
+    `<span class="stor-chip"><span class="tier-dot tier-bg-${t}"></span>${esc(TIER_NAMES[t])} <b>${fmtBytes(st[t].bytes)}</b>${t === "rejected" ? " awaiting delete" : ""}</span>`).join("");
+}
+// saved views: named filter sets, one click to re-apply
+function catCurrentParams() {
+  const p = { sort: $("#cat-sort").value, q: $("#cat-q").value.trim(), res: $("#cat-res").value,
+    min_mbps: $("#cat-mbps").value };
+  if (cat.view) p.view = cat.view; else if (cat.tier) p.tier = cat.tier;
+  if (cat.isNew) p.new = true;
+  for (const [k, sel] of CAT_FILTERS) p[k] = ($(sel)?.value || "").trim();
+  return p;
+}
+function applyCatParams(p) {
+  setDupeMode(false);
+  cat.view = p.view || ""; cat.tier = p.view ? "" : (p.tier || ""); cat.isNew = !!p.new;
+  $("#cat-sort").value = p.sort || "date"; $("#cat-q").value = p.q || "";
+  $("#cat-res").value = p.res || ""; $("#cat-mbps").value = p.min_mbps || "";
+  for (const [k, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = p[k] || "";
+  if (CAT_FILTERS.some(([k]) => p[k])) $("#cat-filters").hidden = false;
+  openCatalogue();
+}
+let catSaved = [];
+async function loadSavedViews() {
+  try { catSaved = (await api("/api/catalogue/saved-views")).items; } catch { catSaved = []; }
+  renderSavedViews();
+}
+function renderSavedViews() {
+  const box = $("#cat-saved"); if (!box) return;
+  box.innerHTML = catSaved.map((v, i) => `<span class="cat-chip saved-view" data-i="${i}" title="${esc(JSON.stringify(v.params))}">★ ${esc(v.name)}<b class="sv-x" title="Delete this saved view">×</b></span>`).join("") +
+    `<button id="btn-cat-saveview" class="cat-chip" title="Save the current tier, filters and sort as a named view">＋ Save view</button>`;
+}
+$("#cat-saved")?.addEventListener("click", async (e) => {
+  if (e.target.closest("#btn-cat-saveview")) {
+    const name = prompt("Name this view (tier, filters and sort are saved):");
+    if (!name || !name.trim()) return;
+    try {
+      catSaved = (await api("/api/catalogue/saved-views", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, params: catCurrentParams() }) })).items;
+      renderSavedViews(); toast(`Saved view “${name.trim()}”`);
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const chip = e.target.closest(".saved-view"); if (!chip) return;
+  const v = catSaved[+chip.dataset.i];
+  if (e.target.closest(".sv-x")) {
+    if (!confirm(`Delete the saved view “${v.name}”?`)) return;
+    catSaved = (await api("/api/catalogue/saved-views?name=" + encodeURIComponent(v.name), { method: "DELETE" })).items;
+    renderSavedViews(); return;
+  }
+  applyCatParams(v.params);
+});
+let catFacetsLoaded = false;
+async function loadCatFacets() {
+  if (catFacetsLoaded) return;
+  try {
+    const f = await api("/api/catalogue/facets");
+    const fill = (id, list) => { const dl = $(id); if (dl) dl.innerHTML = list.map(([n, c]) => `<option value="${esc(n)}">${c}</option>`).join(""); };
+    fill("#dl-perf", f.performers); fill("#dl-studio", f.studios); fill("#dl-tag", f.tags);
+    catFacetsLoaded = true;
+  } catch { /* typeahead is optional */ }
+}
+$("#btn-cat-filters")?.addEventListener("click", () => {
+  const box = $("#cat-filters"); box.hidden = !box.hidden;
+  if (!box.hidden) loadCatFacets();
+  $("#btn-cat-filters").textContent = $("#btn-cat-filters").textContent.replace(/[▾▴]$/, box.hidden ? "▾" : "▴");
+});
+$("#btn-cat-clear")?.addEventListener("click", () => {
+  for (const [, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = "";
+  openCatalogue();
+});
+for (const [, sel] of CAT_FILTERS) $(sel)?.addEventListener("change", () => openCatalogue());
+loadSavedViews();
 function qualityLine(q) {
   return [q.res, q.mbps != null ? `${q.mbps} Mbps` : null, (q.codec || "").toUpperCase() || null,
           q.fps ? `${Math.round(q.fps)}fps` : null].filter(Boolean).join(" · ") || "quality unknown";
@@ -2273,7 +2374,7 @@ function catCardHTML(r, i) {
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="dim cat-who">${esc(who)}</div>
-      <div class="cat-q">${esc(qualityLine(r.quality))}</div>
+      <div class="cat-q">${esc(qualityLine(r.quality))}${r.size ? ` · ${fmtBytes(r.size)}` : ""}</div>
       ${predLine}${flag}${suggest}${tagLine(r)}
       <div class="cat-moments">${moments || '<span class="dim">not embedded yet — no moments</span>'}</div>
     </div>

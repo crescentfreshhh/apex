@@ -173,3 +173,61 @@ def test_daily_backup_on_first_listing_then_restore_via_api(svc, stash, monkeypa
     assert stash.s["2"]["o_counter"] == 16 and stash.s["3"]["rating100"] == 100
     sources = {e.get("source") for e in svc.history() if e["action"] == "grade"}
     assert sources == {f"backup {name}"}
+
+
+# --- browsing: filters, facets, saved views, storage ---------------------------------
+
+@pytest.fixture
+def browse(tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    st = FakeStash({
+        "1": {"rating100": 100, "o_counter": 18, "date": "2024-05-01", "duration": 1800,
+              "size": 8_000_000_000, "studio": "Vixen", "performers": ["Jia Lissa", "Mia"],
+              "tags": ["pov"], "created_at": "2025-01-01"},
+        "2": {"rating100": 20, "date": "2019-01-01", "duration": 600, "size": 3_000_000_000,
+              "studio": "Tushy", "performers": ["Mia"], "tags": [], "created_at": "2025-03-01"},
+        "3": {"date": "2022-07-01", "duration": 3600, "size": 5_000_000_000,
+              "studio": "Vixen", "performers": ["Anna"], "tags": ["pov", "outdoor"],
+              "created_at": "2025-02-01"},
+    })
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    cfg.modeling.dir = str(tmp_path / "models")
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: st)
+    monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: st)
+    return svc_mod.Service(cfg)
+
+
+def test_browse_filters_and_size_sort(browse):
+    ids = lambda **kw: [r["scene_id"] for r in browse.catalogue(**kw)["items"]]  # noqa: E731
+    assert ids(performer="mia") == ["1", "2"]                     # case-insensitive, exact name
+    assert ids(performer="Mi") == []
+    assert ids(studio="vixen") == ["1", "3"]
+    assert ids(tag="POV") == ["1", "3"]
+    assert ids(date_from="2020-01-01", date_to="2023-12-31") == ["3"]
+    assert ids(dur_min=20) == ["1", "3"] and ids(dur_max=15) == ["2"]
+    assert ids(sort="size") == ["1", "3", "2"]
+    assert ids(sort="added") == ["2", "3", "1"]
+    d = browse.catalogue(studio="Vixen")
+    assert d["storage"]["legendaire"] == {"count": 1, "bytes": 8_000_000_000}
+    assert "rejected" not in d["storage"]                         # storage follows the filters
+
+
+def test_facets_storage_and_saved_views(browse, monkeypatch):
+    client = _api(browse, monkeypatch)
+    f = client.get("/api/catalogue/facets").json()
+    assert f["performers"][0] == ["Mia", 2] and ["Vixen", 2] in f["studios"]
+    assert f["tags"][0] == ["pov", 2]
+    st = client.get("/api/storage").json()
+    assert st["total"] == {"count": 3, "bytes": 16_000_000_000}
+    assert st["tiers"]["rejected"]["bytes"] == 3_000_000_000
+    assert [r["scene_id"] for r in st["largest_low"]] == ["3", "2"]     # Légendaire isn't "low"
+
+    assert client.post("/api/catalogue/saved-views", json={"name": " ", "params": {}}).status_code == 400
+    v = client.post("/api/catalogue/saved-views", json={"name": "4K Vixen", "params": {
+        "studio": "Vixen", "res": "4K", "bogus": 1, "q": ""}}).json()["items"]
+    assert v == [{"name": "4K Vixen", "params": {"studio": "Vixen", "res": "4K"}}]
+    client.post("/api/catalogue/saved-views", json={"name": "4K Vixen", "params": {"studio": "Tushy"}})
+    assert client.get("/api/catalogue/saved-views").json()["items"][0]["params"] == {"studio": "Tushy"}
+    assert client.delete("/api/catalogue/saved-views", params={"name": "4K Vixen"}).json()["items"] == []

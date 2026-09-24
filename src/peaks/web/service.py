@@ -3710,7 +3710,11 @@ class Service(LibraryMixin):
     def catalogue(self, tier: str | None = None, res: str | None = None,
                   min_mbps: float | None = None, q: str | None = None,
                   sort: str = "date", offset: int = 0, limit: int = 60,
-                  refresh: bool = False, view: str | None = None, new: bool = False) -> dict:
+                  refresh: bool = False, view: str | None = None, new: bool = False,
+                  performer: str | None = None, studio: str | None = None,
+                  tag: str | None = None, date_from: str | None = None,
+                  date_to: str | None = None, dur_min: float | None = None,
+                  dur_max: float | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -3724,8 +3728,26 @@ class Service(LibraryMixin):
         fresh = set(ingest.get("new") or []) if new else None
         dupe_ids = set(ingest.get("dupe_ids") or [])
 
+        perf = (performer or "").strip().lower()
+        stud = (studio or "").strip().lower()
+        tagn = (tag or "").strip().lower()
+
         def keep(r) -> bool:
             if fresh is not None and r["scene_id"] not in fresh:
+                return False
+            if perf and perf not in (p.lower() for p in r["performers"]):
+                return False
+            if stud and stud != (r["studio"] or "").lower():
+                return False
+            if tagn and tagn not in (t.lower() for t in r["tags"]):
+                return False
+            if date_from and (r["date"] or "") < date_from:
+                return False
+            if date_to and (not r["date"] or r["date"] > date_to):
+                return False
+            if dur_min and (r["duration"] or 0) < 60 * float(dur_min):
+                return False
+            if dur_max and (r["duration"] or 0) > 60 * float(dur_max):
                 return False
             if resset and (r["quality"]["res"] or "") not in resset:
                 return False
@@ -3738,6 +3760,7 @@ class Service(LibraryMixin):
             return True
 
         pool = [r for r in rows if keep(r)]
+        pool_all = pool
         counts = {t: 0 for t in TIERS}
         for r in pool:
             counts[r["tier"]] += 1
@@ -3768,6 +3791,8 @@ class Service(LibraryMixin):
             "quality": (lambda r: (res_rank.get(r["quality"]["res"] or "", -1),
                                    r["quality"]["mbps"] or 0), True),
             "predicted": (lambda r: (preds.get(r["scene_id"]) or {}).get("expected", -1), True),
+            "size": (lambda r: int(r.get("size") or 0), True),
+            "added": (lambda r: r.get("created_at") or "", True),
         }
         if not in_view:
             fn, rev = keyfns.get(sort, keyfns["date"])
@@ -3791,6 +3816,7 @@ class Service(LibraryMixin):
             "names": self.tier_display_names(), "offset": offset, "limit": limit,
             "model": self.tier_model_status(), "floor": floor,
             "ingest": {"finished": ingest.get("finished"), "new": len(ingest.get("new") or [])},
+            "storage": self._storage(pool_all),
         }
 
     def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,

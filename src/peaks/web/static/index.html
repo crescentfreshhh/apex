@@ -492,6 +492,8 @@
           <option value="quality">Quality (resolution, bitrate)</option>
           <option value="bitrate">Bitrate</option>
           <option value="duration">Longest</option>
+          <option value="size">Largest files</option>
+          <option value="added">Recently added to Stash</option>
           <option value="title">Title</option>
         </select>
         <button id="btn-cat-refresh" class="ghost" title="Re-read grades from Stash (picks up changes made there)">↻ Refresh</button>
@@ -499,8 +501,21 @@
         <button id="btn-cat-delete" class="danger" hidden>🗑 Delete all rejected</button>
         <button id="btn-cat-board" class="ghost" disabled title="Play the selected tier's best moments on the megaboard (pick a tier chip first)">▶ Board</button>
         <button id="btn-cat-reel" class="ghost" disabled title="Export one video of the selected tier's best moments (pick a tier chip first)">⬇ Reel</button>
+        <button id="btn-cat-filters" class="ghost" title="Performer, studio, tag, date and length filters">Filters ▾</button>
         <span id="cat-status" class="dim"></span>
       </div>
+      <div id="cat-filters" class="row cat-filters" hidden>
+        <label>Performer <input id="cat-perf" list="dl-perf" placeholder="any" /></label>
+        <label>Studio <input id="cat-studio" list="dl-studio" placeholder="any" /></label>
+        <label>Tag <input id="cat-tag" list="dl-tag" placeholder="any" /></label>
+        <label>Released <input id="cat-from" type="date" /> – <input id="cat-to" type="date" /></label>
+        <label>Length <input id="cat-dmin" type="number" min="0" step="5" class="num-sm" placeholder="min" /> –
+          <input id="cat-dmax" type="number" min="0" step="5" class="num-sm" placeholder="max" /> min</label>
+        <button id="btn-cat-clear" class="ghost">Clear filters</button>
+        <datalist id="dl-perf"></datalist><datalist id="dl-studio"></datalist><datalist id="dl-tag"></datalist>
+      </div>
+      <div id="cat-saved" class="cat-chips cat-saved"></div>
+      <div id="cat-storage" class="cat-storage dim"></div>
     </div>
     <div id="dupe-box" hidden>
       <div class="panel">

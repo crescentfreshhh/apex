@@ -171,12 +171,16 @@ def _catalogue_models():
     class DupeIgnoreIn(BaseModel):
         scene_ids: list[str]
 
+    class SavedViewIn(BaseModel):
+        name: str
+        params: dict = {}
+
     return (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
-            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn)
+            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn)
 
 
 (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
- TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn) = _catalogue_models()
+ TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn) = _catalogue_models()
 
 
 def _login_model():
@@ -952,11 +956,16 @@ def create_app(cfg=None):
         q: str | None = None, sort: str = "date", offset: int = 0,
         limit: int = Query(60, ge=1, le=500), refresh: bool = False,
         view: str | None = None, new: bool = False,
+        performer: str | None = None, studio: str | None = None, tag: str | None = None,
+        date_from: str | None = None, date_to: str | None = None,
+        dur_min: float | None = None, dur_max: float | None = None,
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
-                                     view=view, new=new)
+                                     view=view, new=new, performer=performer, studio=studio,
+                                     tag=tag, date_from=date_from, date_to=date_to,
+                                     dur_min=dur_min, dur_max=dur_max)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, f"Stash unreachable: {exc}")
 
@@ -1030,6 +1039,37 @@ def create_app(cfg=None):
         if not ids:
             raise HTTPException(400, "no rejected scenes to delete")
         return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject"))
+
+    # --- browsing: facets, saved views, storage --------------------------------
+
+    @app.get("/api/catalogue/facets")
+    def catalogue_facets():
+        try:
+            return service.catalogue_facets()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
+    @app.get("/api/catalogue/saved-views")
+    def saved_views():
+        return {"items": service.saved_views()}
+
+    @app.post("/api/catalogue/saved-views")
+    def save_view(body: SavedViewIn):
+        try:
+            return {"items": service.save_view(body.name, body.params)}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.delete("/api/catalogue/saved-views")
+    def delete_view(name: str):
+        return {"items": service.delete_view(name)}
+
+    @app.get("/api/storage")
+    def storage():
+        try:
+            return service.storage()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
 
     # --- ingest: scan → identify → auto tag (Stash) → embed → duplicates --------
 
