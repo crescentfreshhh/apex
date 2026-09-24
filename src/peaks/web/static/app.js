@@ -334,7 +334,9 @@ async function startEmbed() {
     try { d = (await r.clone().json()).detail; } catch { /* not json */ }
     if (d && d.needs_confirm) {
       if (!confirm(d.message)) throw new Error("Cancelled — library sampling unchanged");
-      return api(url + (q ? "&" : "?") + "confirm=true", { method: "POST" });
+      const job = await api(url + (q ? "&" : "?") + "confirm=true", { method: "POST" });
+      loadSchedule();   // the library's sampling just changed — re-base the counter
+      return job;
     }
   }
   if (r.status === 401) { location.reload(); throw new Error("session expired"); }
@@ -343,7 +345,9 @@ async function startEmbed() {
     try { msg = (await r.json()).detail || msg; } catch {}
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
   }
-  return r.json();   // the form already shows the (now saved) library sampling
+  const job = await r.json();   // the form already shows the (now saved) library sampling
+  loadSchedule();               // refresh the counter — a confirmed change re-bases it
+  return job;
 }
 wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), startEmbed, $("#btn-embed-stop"));
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {

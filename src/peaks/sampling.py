@@ -142,7 +142,30 @@ def _sparse_extract_worker(
     except Exception:
         pass
 
-    max_total_errors = 60
+    try:
+        _sparse_extract(path, interval, resize_short, crop, out_path, np, av)
+    except BaseException as exc:
+        # The parent only sees our exit code; leave the actual reason next to the
+        # output so it can be surfaced in the job log instead of "worker exit 1".
+        try:
+            with open(out_path + ".err", "w") as fh:
+                fh.write(f"{type(exc).__name__}: {exc}"[:500])
+        except OSError:
+            pass
+        raise
+
+
+def _sparse_error_budget(duration: float, interval: float) -> int:
+    """Seek/decode errors tolerated before a scene is declared broken. A fixed
+    count doesn't survive a density change: a file with a small bad stretch that
+    throws ~20 errors at 8s throws ~80 at 2s (4x the seeks) and would trip a
+    fixed cap of 60 even though >95% of its samples decode fine. Scale with the
+    number of samples: fail only if at least 60 AND at least 20% of them error."""
+    expected = int(duration / interval) + 1 if interval > 0 else 0
+    return max(60, int(0.2 * expected))
+
+
+def _sparse_extract(path, interval, resize_short, crop, out_path, np, av) -> None:
     max_scene_hours = 12.0
 
     times: list[float] = []
@@ -166,6 +189,7 @@ def _sparse_extract_worker(
             raise RuntimeError(f"could not determine duration of {path}")
         if duration <= 0 or duration > max_scene_hours * 3600:
             raise RuntimeError(f"implausible duration {duration:.0f}s for {path}")
+        max_total_errors = _sparse_error_budget(duration, interval)
 
         interp_kw: dict = {"interpolation": "BICUBIC"}
         last_pts = None
@@ -182,7 +206,9 @@ def _sparse_extract_worker(
             except Exception:
                 total_errors += 1
                 if total_errors >= max_total_errors:
-                    raise RuntimeError(f"{total_errors} decode errors in {path}")
+                    raise RuntimeError(
+                        f"{total_errors} seek/decode errors (budget {max_total_errors}) in {path}"
+                    )
                 continue
             if frame is None:
                 break
@@ -238,6 +264,7 @@ class FrameSampler:
         queue_frames: int = 256,
         pipeline: str = "raw",
         scene_timeout: float = 180.0,
+        signature: float | None = None,
     ):
         """`frame_size`: short-side pixels for the JPEG pipeline (0 = original
         size). `queue_frames` bounds how far decode runs ahead of the consumer.
@@ -259,6 +286,10 @@ class FrameSampler:
         # hard ceiling on how long a single scene may spend sampling, so one
         # corrupt/pathological file can never stall the whole run. 0 disables.
         self.scene_timeout = scene_timeout
+        # stamp entries with a different signature than this sampler's own — the
+        # Fix job's fallback decoders record rescued scenes as the LIBRARY's
+        # sampling so they count as done instead of being retried every run
+        self._signature = signature
 
     @property
     def interval_signature(self) -> float:
@@ -266,6 +297,8 @@ class FrameSampler:
         change invalidates old entries. Keyframe mode uses -1.0 (its spacing
         is encode-dependent, not an interval); sparse encodes as -(100 +
         interval) so each sparse grid is distinct from every interval grid."""
+        if self._signature is not None:
+            return self._signature
         return sampling_signature(self.mode, self.interval)
 
     @property
@@ -438,9 +471,16 @@ class FrameSampler:
                     f"{path} (corrupt/pathological file?) — killed"
                 )
             if proc.exitcode != 0:
+                reason = ""
+                try:
+                    with open(out_path + ".err") as fh:
+                        reason = fh.read().strip()
+                except OSError:
+                    pass
                 raise SamplerError(
                     f"sparse extraction failed for {path} "
-                    f"(worker exit {proc.exitcode})"
+                    f"(worker exit {proc.exitcode}"
+                    + (f": {reason})" if reason else ")")
                 )
             if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
                 raise SamplerError(f"no frames produced for {path}")
@@ -450,10 +490,11 @@ class FrameSampler:
             for i in range(len(times)):
                 yield float(times[i]), frames[i]
         finally:
-            try:
-                os.unlink(out_path)
-            except OSError:  # pragma: no cover
-                pass
+            for p in (out_path, out_path + ".err"):
+                try:
+                    os.unlink(p)
+                except OSError:  # pragma: no cover
+                    pass
 
     def _iter_frames_raw_interval(self, path: str, *, resize_short: int, crop: int):
         """Fast path: yield (timestamp, HxWx3 uint8 numpy frame) with frames

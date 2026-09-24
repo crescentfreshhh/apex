@@ -1426,6 +1426,7 @@ class Service:
         embedder = self._embedder()
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         iv = self._active_sampling()[1]   # the library's saved interval, not config
+        lib_sig = self._active_signature()  # rescued scenes count as done at it
         to = self.cfg.sampling.scene_timeout
         for e in entries:
             if job and job.cancelled:
@@ -1451,6 +1452,10 @@ class Service:
                     sampler = FrameSampler(
                         interval_seconds=iv, mode=mode, hwaccel=hw,
                         pipeline=pipe, scene_timeout=to,
+                        # a fallback decoder at the library's interval yields frames
+                        # at least as dense/exact as the library's own sampling —
+                        # record it as such so later runs don't retry the scene
+                        signature=lib_sig,
                     )
                     lines: list[str] = []
                     try:

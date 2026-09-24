@@ -134,9 +134,43 @@ def test_sparse_runs_in_killable_subprocess(video):
     assert ".terminate()" in orch and ".kill()" in orch
     assert "scene_timeout" in orch
 
-    worker = inspect.getsource(sampling._sparse_extract_worker)
+    worker = inspect.getsource(sampling._sparse_extract_worker) + inspect.getsource(
+        sampling._sparse_extract)
     assert "total_errors" in worker and "max_total_errors" in worker
     assert "implausible duration" in worker
+
+
+def test_sparse_failure_reason_reaches_the_log(tmp_path):
+    """A worker crash used to surface only as 'worker exit 1'; the child's actual
+    exception must now be in the error the parent raises (→ the job log)."""
+    junk = tmp_path / "not-a-video.mp4"
+    junk.write_bytes(b"this is not a video file" * 100)
+    s = FrameSampler(interval_seconds=4.0, mode="sparse", scene_timeout=60)
+    with pytest.raises(SamplerError) as ei:
+        list(s.iter_frames_raw(str(junk), resize_short=32, crop=32))
+    msg = str(ei.value)
+    assert "worker exit 1: " in msg                      # reason appended…
+    assert len(msg.split("worker exit 1: ", 1)[1]) > 5   # …and non-empty
+    assert not list(tmp_path.glob("*.err"))              # no temp debris left behind
+
+
+def test_sparse_error_budget_scales_with_density():
+    from peaks.sampling import _sparse_error_budget
+
+    # 40-min scene: at 8s (~300 seeks) the budget is the floor of 60; at 2s
+    # (~1200 seeks) a fixed 60 would fail a file with a ~5% bad stretch — the
+    # budget grows to 20% of the samples instead
+    assert _sparse_error_budget(2400, 8.0) == 60
+    assert _sparse_error_budget(2400, 2.0) == 240
+    assert _sparse_error_budget(60, 2.0) == 60          # short scenes keep the floor
+
+
+def test_sampler_signature_override():
+    """The Fix job's fallback decoders stamp rescued scenes with the LIBRARY's
+    signature so they count as done instead of being retried every run."""
+    s = FrameSampler(interval_seconds=2.0, mode="interval", signature=-102.0)
+    assert s.interval_signature == -102.0
+    assert FrameSampler(interval_seconds=2.0, mode="interval").interval_signature == 2.0
 
 
 def test_sparse_timeout_kills_the_worker(video):
