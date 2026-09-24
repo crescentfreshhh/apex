@@ -120,6 +120,25 @@
       </div>
     </div>
 
+    <div class="panel" id="history-panel">
+      <h2>History &amp; backups</h2>
+      <p class="dim">Every change Peaks makes in Stash — grades, undos, restores, deletions,
+        tag syncs, ingests — is logged here with the file it touched. Grades are also backed
+        up daily (and every 25 grades) by <em>file fingerprint</em>, so they survive renames,
+        rescans and even a lost Stash database. Restoring previews the differences first.</p>
+      <div class="row">
+        <button id="btn-hist-refresh" class="ghost">↻ Refresh</button>
+        <a id="hist-download" class="ghost btn-link" href="/api/history/download" download>Download full log</a>
+        <span class="grow"></span>
+        <button id="btn-backup-now" class="ghost">Back up grades now</button>
+        <select id="backup-sel" title="Grade backups, newest first"></select>
+        <button id="btn-backup-preview" class="ghost">Preview restore…</button>
+        <span id="backup-status" class="dim"></span>
+      </div>
+      <div id="backup-diff" hidden></div>
+      <div id="hist-list" class="hist-list dim">Loading…</div>
+    </div>
+
     <div class="panel">
       <h2>Moment length</h2>
       <p class="dim">How long each moment plays in For You, the megaboard and reels. A clip

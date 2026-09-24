@@ -101,13 +101,24 @@ query SceneDetails($ids: [ID!]) {
       rating100
       o_counter
       organized
+      created_at
       studio { name }
       performers { id name gender }
-      tags { name }
-      files { path duration width height bit_rate frame_rate video_codec size }
+      tags { id name }
+      files {
+        path duration width height bit_rate frame_rate video_codec size
+        fingerprints { type value }
+      }
       paths { screenshot preview }
     }
   }
+}
+"""
+
+_SCHEMA_FIELDS_QUERY = """
+query SchemaFields {
+  query: __type(name: "Query") { fields { name } }
+  mutation: __type(name: "Mutation") { fields { name } }
 }
 """
 
@@ -325,11 +336,15 @@ class StashClient:
         for i in range(0, len(ids), BATCH):
             data = self.execute(_SCENE_DETAILS_QUERY, {"ids": ids[i : i + BATCH]})
             scenes.extend(data["findScenes"]["scenes"])
+        from .models import SceneFile
+
         out: dict[str, dict] = {}
         for s in scenes:
             files = s.get("files") or []
             f0 = files[0] if files else {}
             paths = s.get("paths") or {}
+            sf = SceneFile.from_dict(f0) if f0 else None
+            tags = s.get("tags") or []
             out[str(s["id"])] = {
                 "title": s.get("title") or "",
                 "date": s.get("date") or "",
@@ -343,7 +358,12 @@ class StashClient:
                     {"id": p.get("id"), "name": p.get("name", "")}
                     for p in (s.get("performers") or [])
                 ],
-                "tags": [t.get("name", "") for t in (s.get("tags") or [])],
+                "tags": [t.get("name", "") for t in tags],
+                "tag_ids": [str(t["id"]) for t in tags if t.get("id") is not None],
+                "created_at": s.get("created_at") or "",
+                # same rule as the embedding cache key (pipeline.scene_key)
+                "fingerprint": sf.fingerprint() if sf else None,
+                "phash": sf.fingerprints.get("phash") if sf else None,
                 "duration": f0.get("duration"),
                 "width": f0.get("width"),
                 "height": f0.get("height"),
@@ -355,6 +375,20 @@ class StashClient:
                 "cover": paths.get("screenshot"),
             }
         return out
+
+    def capabilities(self) -> dict[str, bool]:
+        """Which optional Stash operations this server's schema offers, by
+        introspection (older/newer Stash versions rename or lack some). Peaks
+        hides a feature whose operation is missing rather than failing mid-way."""
+        data = self.execute(_SCHEMA_FIELDS_QUERY)
+        have = {f["name"] for part in ("query", "mutation")
+                for f in ((data.get(part) or {}).get("fields") or [])}
+        return {name: name in have for name in self.CAPABILITY_FIELDS}
+
+    CAPABILITY_FIELDS = (
+        "scenesDestroy", "findDuplicateScenes", "metadataScan",
+        "metadataIdentify", "metadataAutoTag", "findJob", "configuration",
+    )
 
     def existing_scene_ids(self, ids: list[str]) -> set[str]:
         """Of the given scene ids, the subset that still exist in Stash — so a

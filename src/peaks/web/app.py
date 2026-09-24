@@ -144,10 +144,13 @@ def _catalogue_models():
     class TierNamesIn(BaseModel):
         names: dict[str, str] = {}
 
-    return GradeIn, RestoreIn, TierNamesIn
+    class ConfirmIn(BaseModel):
+        confirm: bool = False
+
+    return GradeIn, RestoreIn, TierNamesIn, ConfirmIn
 
 
-GradeIn, RestoreIn, TierNamesIn = _catalogue_models()
+GradeIn, RestoreIn, TierNamesIn, ConfirmIn = _catalogue_models()
 
 
 def _login_model():
@@ -967,6 +970,61 @@ def create_app(cfg=None):
     @app.post("/api/catalogue/names")
     def catalogue_save_names(body: TierNamesIn):
         return service.save_tier_names(body.names)
+
+    # --- library safety net: capabilities, action log, grade backups --------
+
+    @app.get("/api/stash/capabilities")
+    def stash_capabilities(refresh: bool = False):
+        return service.capabilities(refresh=refresh)
+
+    @app.get("/api/history")
+    def history(limit: int = Query(200, ge=1, le=5000)):
+        return {"items": service.history(limit)}
+
+    @app.get("/api/history/download")
+    def history_download():
+        path = service.action_log().path
+        if not path.is_file():
+            raise HTTPException(404, "nothing logged yet")
+        return FileResponse(path, media_type="application/x-ndjson", filename="peaks-actions.jsonl")
+
+    @app.get("/api/backups")
+    def backups():
+        return {"items": service.list_grade_backups()}
+
+    @app.post("/api/backups")
+    def backup_now():
+        try:
+            return service.backup_grades()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
+    @app.get("/api/backups/{name}/preview")
+    def backup_preview(name: str):
+        try:
+            return service.backup_restore_preview(name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/backups/{name}/restore")
+    def backup_restore(name: str, body: ConfirmIn):
+        if not body.confirm:
+            raise HTTPException(409, "restoring changes grades in Stash — preview, then confirm")
+        try:
+            service.backup_restore_preview(name)          # validates the name up front
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        try:
+            job = jobs.start("library", lambda j: service.backup_restore_apply(j, name, confirm=True))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
 
     @app.get("/api/scene/{scene_id}/cover")
     def scene_cover(scene_id: str):

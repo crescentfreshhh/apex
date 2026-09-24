@@ -83,6 +83,7 @@ async function refreshDashboard() {
   if (typeof refreshReels === "function") refreshReels();
   if (typeof refreshCollections === "function") refreshCollections();
   if (typeof loadSchedule === "function") loadSchedule();
+  if (typeof loadHistory === "function") loadHistory();
   if (typeof reattachJobs === "function") reattachJobs();
 }
 
@@ -323,6 +324,91 @@ $("#clip-sim")?.addEventListener("input", (e) => {
 });
 $("#btn-clip-save")?.addEventListener("click", saveClipSettings);
 loadClipSettings();
+
+// --- library safety net: action history + grade backups (Settings) -------------
+// Resolves with the finished job; `onTick(job)` sees each poll while it runs.
+async function waitJob(id, onTick, every = 800) {
+  for (;;) {
+    const j = await api("/api/jobs/" + id);
+    if (onTick) onTick(j);
+    if (j.status !== "running") return j;
+    await new Promise((r) => setTimeout(r, every));
+  }
+}
+const plural = (n, one, many = one + "s") => `${(+n).toLocaleString()} ${n === 1 ? one : many}`;
+const tierLabel = (t) => (typeof TIER_NAMES !== "undefined" && TIER_NAMES[t]) || t || "—";
+const HIST_VERB = { grade: "Graded", restore: "Restored", delete: "Deleted",
+  duplicate: "Duplicate resolved", "tag-sync": "Tier tag synced", ingest: "Ingest" };
+function histLine(e) {
+  const when = (e.ts || "").replace("T", " ").slice(0, 16);
+  const what = e.title || (e.path || "").split("/").pop() || (e.scene_id ? `scene ${e.scene_id}` : "");
+  let change = "";
+  if (e.before && e.after) change = `${esc(tierLabel(e.before.tier))} → <b>${esc(tierLabel(e.after.tier))}</b>`;
+  else if (e.after) change = `→ <b>${esc(tierLabel(e.after.tier))}</b>`;
+  if (e.detail) change += ` ${esc(e.detail)}`;
+  const src = e.source && e.source !== "catalogue" ? ` <span class="dim">(${esc(e.source)})</span>` : "";
+  return `<div class="hist-row"><span class="dim">${esc(when)}</span>
+    <span class="hist-act hist-${esc(e.action)}">${esc(HIST_VERB[e.action] || e.action)}</span>
+    <span class="hist-what" title="${esc(e.path || "")}">${esc(what)}</span>
+    <span>${change}${src}</span></div>`;
+}
+async function loadHistory() {
+  const box = $("#hist-list"); if (!box) return;
+  try {
+    const [h, b] = await Promise.all([api("/api/history?limit=200"), api("/api/backups")]);
+    box.innerHTML = h.items.length ? h.items.map(histLine).join("")
+      : `<span class="dim">Nothing logged yet — grades made in Peaks will appear here.</span>`;
+    const sel = $("#backup-sel");
+    sel.innerHTML = b.items.length
+      ? b.items.map((x) => `<option value="${esc(x.name)}">${esc(x.created.replace("T", " ").slice(0, 16))} · ${x.count.toLocaleString()} graded</option>`).join("")
+      : `<option value="">no backups yet</option>`;
+    $("#btn-backup-preview").disabled = !b.items.length;
+  } catch (e) { box.textContent = "History unavailable: " + e.message; }
+}
+$("#btn-hist-refresh")?.addEventListener("click", loadHistory);
+$("#btn-backup-now")?.addEventListener("click", async () => {
+  try {
+    const r = await api("/api/backups", { method: "POST" });
+    toast(`Backed up ${r.count.toLocaleString()} graded scenes`); loadHistory();
+  } catch (e) { toast(e.message, true); }
+});
+$("#btn-backup-preview")?.addEventListener("click", async () => {
+  const name = $("#backup-sel").value, box = $("#backup-diff"); if (!name) return;
+  $("#backup-status").textContent = "comparing with Stash…";
+  try {
+    const d = await api(`/api/backups/${encodeURIComponent(name)}/preview`);
+    $("#backup-status").textContent = "";
+    const rows = d.changes.slice(0, 200).map((c) => `<div class="hist-row">
+      <span class="hist-what" title="${esc(c.path)}">${esc(c.title || c.path)}</span>
+      <span>${esc(tierLabel(c.from.tier))} → <b>${esc(tierLabel(c.to.tier))}</b></span></div>`).join("");
+    box.hidden = false;
+    box.innerHTML = `<div class="backup-diff">
+      <p><b>${plural(d.changes.length, "scene")}</b> ${d.changes.length === 1 ? "differs" : "differ"} from this backup ·
+        ${d.same.toLocaleString()} already match · ${plural(d.missing, "file")} no longer in Stash.</p>
+      ${rows}${d.changes.length > 200 ? `<div class="dim">…and ${d.changes.length - 200} more</div>` : ""}
+      <div class="row">${d.changes.length ? `<button id="btn-backup-apply" class="primary">Restore ${plural(d.changes.length, "grade")}</button>` : ""}
+        <button id="btn-backup-close" class="ghost">Close</button></div></div>`;
+    $("#btn-backup-close").onclick = () => { box.hidden = true; };
+    const apply = $("#btn-backup-apply");
+    if (apply) apply.onclick = async () => {
+      if (!confirm(`Re-apply ${plural(d.changes.length, "grade")} from this backup in Stash?`)) return;
+      apply.disabled = true;
+      try {
+        const job = await api(`/api/backups/${encodeURIComponent(name)}/restore`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+        });
+        const j = await waitJob(job.id, (x) => {
+          const p = x.progress || {};
+          $("#backup-status").textContent = `restoring ${p.done ?? 0}/${p.total ?? d.changes.length}…`;
+        });
+        $("#backup-status").textContent = "";
+        if (j.status === "error") toast("Restore failed: " + j.error, true);
+        else toast(`Restored ${j.result.restored} grades${j.result.failed.length ? ` · ${j.result.failed.length} failed` : ""}`);
+        box.hidden = true; loadHistory(); if (cat.loaded) openCatalogue({ refresh: true });
+      } catch (e) { apply.disabled = false; toast(e.message, true); }
+    };
+  } catch (e) { $("#backup-status").textContent = ""; toast(e.message, true); }
+});
 
 function wireToggle(btnSel, panelSel, hintSel) {
   $(btnSel).addEventListener("click", () => {

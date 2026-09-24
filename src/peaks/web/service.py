@@ -17,9 +17,10 @@ from ..config import Config
 from ..embedding import canonical_name
 from ..search import Hit, SearchIndex
 from ..tiers import TIER_WEIGHT, tier_of
+from .library import LibraryMixin
 
 
-class Service:
+class Service(LibraryMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -3631,6 +3632,12 @@ class Service:
             "tier": tier_of(m.get("rating100"), m.get("o_counter")),
             "quality": quality_of(m),
             "path": path,
+            "tag_ids": m.get("tag_ids") or [],
+            "organized": bool(m.get("organized")),
+            "created_at": m.get("created_at") or "",
+            "size": m.get("size"),
+            "fingerprint": m.get("fingerprint"),
+            "phash": m.get("phash"),
         }
 
     def _catalogue_all(self, refresh: bool = False) -> list[dict]:
@@ -3651,6 +3658,7 @@ class Service:
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._sync_hidden_from_ratings(rows)
         self._cat_cache = (_t.monotonic(), rows)
+        self._maybe_daily_backup(rows)
         return rows
 
     def _sync_hidden_from_ratings(self, rows: list[dict]) -> None:
@@ -3833,7 +3841,7 @@ class Service:
         self.invalidate_meta(sid)
         return count
 
-    def grade_scene(self, scene_id: str, grade: str) -> dict:
+    def grade_scene(self, scene_id: str, grade: str, source: str = "catalogue") -> dict:
         """Apply one of the user's grades (peaks.tiers.GRADES) in Stash. Returns
         the updated catalogue row and the previous {rating100, o_counter} so the
         UI can undo."""
@@ -3850,10 +3858,16 @@ class Service:
         self.update_scene(sid, rating100=rating)          # also syncs 1★ → hidden
         if o is not None:
             self.set_o_count(sid, o, current=prev["o_counter"])
+        row = self._cat_update_row(sid)
+        self._log_scene("grade", row, grade=grade, source=source,
+                        before={**prev, "tier": tier_of(prev["rating100"], prev["o_counter"])},
+                        after={"rating100": row["rating100"], "o_counter": row["o_counter"],
+                               "tier": row["tier"]})
         self._note_grade()
-        return {"scene": self._cat_update_row(sid), "previous": prev}
+        return {"scene": row, "previous": prev}
 
-    def restore_scene_grade(self, scene_id: str, rating100: int | None, o_counter: int) -> dict:
+    def restore_scene_grade(self, scene_id: str, rating100: int | None, o_counter: int,
+                            source: str = "undo") -> dict:
         """Undo: put a scene's rating and O-count back exactly (a previously
         unrated scene gets its rating cleared, not set to a value)."""
         sid = str(scene_id)
@@ -3864,12 +3878,24 @@ class Service:
         else:
             self.update_scene(sid, rating100=int(rating100))
         self.set_o_count(sid, int(o_counter or 0))
-        return {"scene": self._cat_update_row(sid)}
+        row = self._cat_update_row(sid)
+        self._log_scene("restore", row, source=source,
+                        after={"rating100": row["rating100"], "o_counter": row["o_counter"],
+                               "tier": row["tier"]})
+        return {"scene": row}
 
     def _note_grade(self) -> None:
         """Count grades since the last triage training; retrain in the background
         every 25 once a model exists, so suggestions keep up with grading."""
         self._grades_since_train = getattr(self, "_grades_since_train", 0) + 1
+        self._grades_since_backup = getattr(self, "_grades_since_backup", 0) + 1
+        if self._grades_since_backup >= 25:
+            self._grades_since_backup = 0
+            try:
+                cached = getattr(self, "_cat_cache", None)
+                self.backup_grades(cached[1] if cached else None)
+            except Exception:  # noqa: BLE001 — backups are best-effort
+                pass
         # (predictions are NOT invalidated: a grade changes a scene's tier, not
         # its picture or bitrate — views are re-derived from rows every request)
         if self._grades_since_train >= 25 and self._tier_model_state()["model"] is not None:

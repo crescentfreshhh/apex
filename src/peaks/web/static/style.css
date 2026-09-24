@@ -425,3 +425,20 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .cat-sug { font-size: 12px; margin-top: 3px; color: var(--accent); }
 .cat-g.sug { box-shadow: 0 0 0 1px var(--accent) inset; }
 .tier-name-in { width: 9.5em; }
+
+/* --- history & backups (Settings) --- */
+.grow { flex: 1; }
+.hist-list { max-height: 360px; overflow: auto; margin-top: 10px; border-top: 1px solid var(--line); }
+.hist-row { display: grid; grid-template-columns: 130px 120px minmax(0, 1fr) auto; gap: 10px;
+  padding: 5px 2px; border-bottom: 1px solid var(--line); font-size: 13px; align-items: baseline; }
+.hist-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.hist-act { font-weight: 600; color: var(--fg); }
+.hist-delete { color: #e0604d; }
+.hist-restore { color: #7fb3aa; }
+.backup-diff { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel2); max-height: 360px; overflow: auto; }
+.backup-diff .hist-row { grid-template-columns: minmax(0, 1fr) auto; }
+@media (max-width: 640px) {
+  .hist-row { grid-template-columns: 1fr; gap: 2px; }
+}
+a.ghost { font-size: 13px; }

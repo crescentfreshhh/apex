@@ -2,13 +2,12 @@
 writes, grading/undo through the API, and quality metadata. Stash is a fake
 that records every mutation, so we assert the exact calls Peaks makes."""
 
-from types import SimpleNamespace
-
 import pytest
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from fakestash import FakeStash  # noqa: E402
 from peaks.config import Config  # noqa: E402
 from peaks.tiers import GRADES, quality_of, res_class, tier_names, tier_of  # noqa: E402
 
@@ -51,47 +50,6 @@ def test_tier_names_overrides():
 
 
 # --- fake Stash --------------------------------------------------------------
-
-class FakeStash:
-    def __init__(self, scenes: dict):
-        self.s = scenes            # sid -> {rating100, o_counter, ...}
-        self.calls: list = []
-
-    def iter_scenes(self, path_prefix=None):
-        for sid in self.s:
-            yield SimpleNamespace(id=sid)
-
-    def scene_details(self, ids):
-        return {str(i): {"path": f"/data/{i}.mp4", "title": f"Scene {i}",
-                         "performers": ["Jane"], **self.s[str(i)]}
-                for i in ids if str(i) in self.s}
-
-    def update_scene(self, scene_id, clear=(), **fields):
-        self.calls.append(("update", scene_id, fields.get("rating100"), tuple(clear)))
-        if "rating100" in clear:
-            self.s[scene_id]["rating100"] = None
-        elif fields.get("rating100") is not None:
-            self.s[scene_id]["rating100"] = fields["rating100"]
-        return {}
-
-    def scene_add_o(self, sid):
-        self.calls.append(("add_o", sid))
-        self.s[sid]["o_counter"] += 1
-        return self.s[sid]["o_counter"]
-
-    def scene_delete_o(self, sid):
-        self.calls.append(("del_o", sid))
-        self.s[sid]["o_counter"] -= 1
-        return self.s[sid]["o_counter"]
-
-    def scene_reset_o(self, sid):
-        self.calls.append(("reset_o", sid))
-        self.s[sid]["o_counter"] = 0
-        return 0
-
-    def stream_url(self, sid, start=None):
-        return f"http://stash/{sid}?t={start}"
-
 
 @pytest.fixture
 def stash():
@@ -144,7 +102,7 @@ def test_grade_then_undo(svc, stash):
     back = svc.restore_scene_grade("1", out["previous"]["rating100"], out["previous"]["o_counter"])
     assert back["scene"]["tier"] == "unreviewed"
     assert stash.s["1"]["rating100"] is None and stash.s["1"]["o_counter"] == 0
-    assert ("update", "1", None, ("rating100",)) in stash.calls
+    assert ("update", "1", {"clear": ("rating100",)}) in stash.calls
 
 
 def test_reject_hides_and_leaves_o_alone(svc, stash):
