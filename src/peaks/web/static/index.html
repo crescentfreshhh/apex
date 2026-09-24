@@ -120,6 +120,22 @@
       </div>
     </div>
 
+    <div class="panel" id="tier-tags-panel">
+      <h2>Tier tags (renamer)</h2>
+      <p class="dim">Grading a scene into one of these tiers gives it <b>exactly one</b> of these
+        Stash tags — every other tier tag is removed first — and marks it <em>organized</em>, in a
+        single update, so your renamer plugin moves the file once. Rejects (1★) only change the
+        rating. Grades made in Stash directly aren't tagged: <b>Check &amp; sync</b> lists them and
+        tags them after you confirm.</p>
+      <div id="tier-tags" class="row"></div>
+      <div class="row">
+        <button id="btn-tier-tags-save" class="ghost">Save names</button>
+        <button id="btn-tag-sync" class="primary">Check &amp; sync…</button>
+        <span id="tier-tags-status" class="dim"></span>
+      </div>
+      <div id="tag-sync-box" hidden></div>
+    </div>
+
     <div class="panel" id="history-panel">
       <h2>History &amp; backups</h2>
       <p class="dim">Every change Peaks makes in Stash — grades, undos, restores, deletions,
@@ -430,7 +446,9 @@
         (16 / 17 / 18), <b>Upscale</b> (5★, O 0) or <b>Reject</b> (1★). Grades are written
         to Stash, and every one can be undone.
         Keys: <kbd>1</kbd>–<kbd>5</kbd> grade · <kbd>J</kbd>/<kbd>K</kbd> next/prev ·
-        <kbd>Enter</kbd> watch · <kbd>Z</kbd> undo.</p>
+        <kbd>Enter</kbd> watch · <kbd>X</kbd> select (shift = range) · <kbd>Z</kbd> undo.
+        Grading into Légendaire / Exceptionnelle / Merveilleuse / Upscale also sets that
+        tier's tag and <em>organized</em>, so your renamer files it.</p>
       <div id="cat-chips" class="cat-chips"></div>
       <div class="cat-triage">
         <span class="dim">Triage:</span>
@@ -460,6 +478,7 @@
           <option value="title">Title</option>
         </select>
         <button id="btn-cat-refresh" class="ghost" title="Re-read grades from Stash (picks up changes made there)">↻ Refresh</button>
+        <button id="btn-cat-select" class="ghost" title="Select every scene loaded in this view, to grade them together">☐ Select all</button>
         <button id="btn-cat-board" class="ghost" disabled title="Play the selected tier's best moments on the megaboard (pick a tier chip first)">▶ Board</button>
         <button id="btn-cat-reel" class="ghost" disabled title="Export one video of the selected tier's best moments (pick a tier chip first)">⬇ Reel</button>
         <span id="cat-status" class="dim"></span>
@@ -467,6 +486,13 @@
     </div>
     <div id="cat-list" class="cat-list"></div>
     <div class="row cat-more"><button id="btn-cat-more" class="ghost" hidden>Load more</button></div>
+    <div id="cat-bulk" class="cat-bulk" hidden>
+      <b id="cat-bulk-n"></b>
+      <span id="cat-bulk-grades" class="cat-bulk-grades"></span>
+      <span class="grow"></span>
+      <button id="btn-cat-selall" class="ghost">Select all loaded</button>
+      <button id="btn-cat-selnone" class="ghost">Clear (Esc)</button>
+    </div>
   </section>
 
   <!-- STATISTICS -->

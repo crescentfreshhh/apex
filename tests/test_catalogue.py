@@ -95,14 +95,17 @@ def test_set_o_count_moves_by_the_difference(svc, stash):
 
 def test_grade_then_undo(svc, stash):
     out = svc.grade_scene("1", "legendaire")
-    assert out["previous"] == {"rating100": None, "o_counter": 0}
+    prev = out["previous"]
+    assert prev == {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False}
     assert out["scene"]["tier"] == "legendaire"
     assert stash.s["1"]["rating100"] == 100 and stash.s["1"]["o_counter"] == 18
     # undo restores an UNRATED scene by clearing the rating, not setting a value
-    back = svc.restore_scene_grade("1", out["previous"]["rating100"], out["previous"]["o_counter"])
+    back = svc.restore_scene_grade("1", prev["rating100"], prev["o_counter"],
+                                   tag_ids=prev["tag_ids"], organized=prev["organized"])
     assert back["scene"]["tier"] == "unreviewed"
     assert stash.s["1"]["rating100"] is None and stash.s["1"]["o_counter"] == 0
-    assert ("update", "1", {"clear": ("rating100",)}) in stash.calls
+    assert stash.calls[-1] == ("update", "1", {"clear": ("rating100",), "tag_ids": [],
+                                               "organized": False})
 
 
 def test_reject_hides_and_leaves_o_alone(svc, stash):
@@ -153,7 +156,7 @@ def test_catalogue_api_grade_and_restore(svc, monkeypatch):
     r = client.post("/api/catalogue/grade", json={"scene_id": "2", "grade": "exceptionnelle"})
     assert r.status_code == 200 and r.json()["scene"]["tier"] == "exceptionnelle"
     prev = r.json()["previous"]
-    assert prev == {"rating100": 100, "o_counter": 16}
+    assert prev == {"rating100": 100, "o_counter": 16, "tag_ids": [], "organized": False}
     r = client.post("/api/catalogue/restore", json={"scene_id": "2", **prev})
     assert r.json()["scene"]["tier"] == "merveilleuse"
     assert client.post("/api/catalogue/grade", json={"scene_id": "2", "grade": "nope"}).status_code == 400

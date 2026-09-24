@@ -140,6 +140,8 @@ def _catalogue_models():
         scene_id: str
         rating100: int | None = None
         o_counter: int = 0
+        tag_ids: list[str] | None = None
+        organized: bool | None = None
 
     class TierNamesIn(BaseModel):
         names: dict[str, str] = {}
@@ -147,10 +149,21 @@ def _catalogue_models():
     class ConfirmIn(BaseModel):
         confirm: bool = False
 
-    return GradeIn, RestoreIn, TierNamesIn, ConfirmIn
+    class BulkGradeIn(BaseModel):
+        scene_ids: list[str]
+        grade: str
+
+    class BulkRestoreIn(BaseModel):
+        items: list[RestoreIn]
+
+    class TierTagsIn(BaseModel):
+        tags: dict[str, str] = {}
+
+    return GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn, TierTagsIn
 
 
-GradeIn, RestoreIn, TierNamesIn, ConfirmIn = _catalogue_models()
+(GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
+ TierTagsIn) = _catalogue_models()
 
 
 def _login_model():
@@ -948,11 +961,56 @@ def create_app(cfg=None):
     @app.post("/api/catalogue/restore")
     def catalogue_restore(body: RestoreIn):
         try:
-            return service.restore_scene_grade(body.scene_id, body.rating100, body.o_counter)
+            return service.restore_scene_grade(body.scene_id, body.rating100, body.o_counter,
+                                               tag_ids=body.tag_ids, organized=body.organized)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash update failed: {exc}")
+
+    def _library_job(fn):
+        """Library writes run as one 'library' job at a time (sequential Stash
+        writes, so the renamer plugin handles one scene at a time)."""
+        try:
+            return jobs.start("library", fn).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/catalogue/grade-bulk")
+    def catalogue_grade_bulk(body: BulkGradeIn):
+        from ..tiers import GRADES
+
+        if body.grade not in GRADES:
+            raise HTTPException(400, f"unknown grade: {body.grade}")
+        if not body.scene_ids:
+            raise HTTPException(400, "no scenes selected")
+        return _library_job(lambda j: service.grade_bulk(j, body.scene_ids, body.grade))
+
+    @app.post("/api/catalogue/restore-bulk")
+    def catalogue_restore_bulk(body: BulkRestoreIn):
+        items = [i.model_dump() for i in body.items]
+        return _library_job(lambda j: service.restore_bulk(j, items))
+
+    @app.get("/api/catalogue/tier-tags")
+    def catalogue_tier_tags():
+        return service.tier_tag_names()
+
+    @app.post("/api/catalogue/tier-tags")
+    def catalogue_save_tier_tags(body: TierTagsIn):
+        return service.save_tier_tags(body.tags)
+
+    @app.get("/api/catalogue/tag-sync")
+    def catalogue_tag_sync_preview():
+        try:
+            return service.tag_sync_preview()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/catalogue/tag-sync")
+    def catalogue_tag_sync(body: ConfirmIn):
+        if not body.confirm:
+            raise HTTPException(409, "syncing tier tags lets the renamer move files — preview, then confirm")
+        return _library_job(lambda j: service.tag_sync_apply(j, confirm=True))
 
     @app.post("/api/catalogue/train")
     def catalogue_train():
@@ -1020,11 +1078,7 @@ def create_app(cfg=None):
             raise HTTPException(400, str(exc))
         except LookupError as exc:
             raise HTTPException(404, str(exc))
-        try:
-            job = jobs.start("library", lambda j: service.backup_restore_apply(j, name, confirm=True))
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
-        return job.as_dict()
+        return _library_job(lambda j: service.backup_restore_apply(j, name, confirm=True))
 
     @app.get("/api/scene/{scene_id}/cover")
     def scene_cover(scene_id: str):

@@ -299,6 +299,72 @@ $("#btn-tier-names-save")?.addEventListener("click", async () => {
 });
 // (loadTierNames() is called after TIER_NAMES is declared, below)
 
+// --- tier tags for the renamer (Settings) ---------------------------------------
+let TIER_TAGS = { legendaire: "legendaire", exceptionnelle: "exceptionnelle",
+  merveilleuse: "merveilleuse", upscale: "personal upscale" };
+const TIER_TAG_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["merveilleuse", "16"], ["upscale", "5★ O 0"]];
+async function loadTierTags() {
+  try { TIER_TAGS = { ...TIER_TAGS, ...(await api("/api/catalogue/tier-tags")) }; } catch {}
+  const box = $("#tier-tags"); if (!box) return;
+  box.innerHTML = TIER_TAG_KEYS.map(([k, hint]) =>
+    `<label title="Stash tag for ${esc(k)}">${esc(hint)} <input data-k="${k}" value="${esc(TIER_TAGS[k] || "")}" class="tier-name-in" /></label>`).join("");
+}
+$("#btn-tier-tags-save")?.addEventListener("click", async () => {
+  const tags = {};
+  document.querySelectorAll("#tier-tags input").forEach((i) => { tags[i.dataset.k] = i.value; });
+  if (!confirm("Change the tier tag names?\n\nScenes already tagged keep their old tag until you run Check & sync — and a renamed tag must match your renamer's rules.")) return;
+  try {
+    TIER_TAGS = { ...TIER_TAGS, ...(await api("/api/catalogue/tier-tags", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tags }),
+    })) };
+    $("#tier-tags-status").textContent = "saved";
+    setTimeout(() => { if ($("#tier-tags-status")) $("#tier-tags-status").textContent = ""; }, 1500);
+    loadTierTags();
+  } catch (e) { toast(e.message, true); }
+});
+$("#btn-tag-sync")?.addEventListener("click", async () => {
+  const box = $("#tag-sync-box");
+  $("#tier-tags-status").textContent = "checking every graded scene…";
+  try {
+    const d = await api("/api/catalogue/tag-sync");
+    $("#tier-tags-status").textContent = "";
+    box.hidden = false;
+    if (!d.count) {
+      box.innerHTML = `<div class="backup-diff"><p>Every Légendaire / Exceptionnelle / Merveilleuse / Upscale scene already carries its one tier tag and is organized. Nothing to do.</p>
+        <button class="ghost" id="btn-tag-sync-close">Close</button></div>`;
+    } else {
+      const rows = d.items.map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path)}">${esc(r.title || r.path)}</span>
+        <span>${r.present.length ? esc(r.present.map((t) => d.tags[t]).join(" + ")) + " → " : ""}<b>${esc(d.tags[r.tier])}</b>${r.organized ? "" : " + organized"}</span></div>`).join("");
+      box.innerHTML = `<div class="backup-diff">
+        <p><b>${plural(d.count, "scene")}</b> would change · the renamer will move about <b>${plural(d.moves, "file")}</b>.
+          Grades are not touched — only the tier tag (other tier tags removed) and organized.</p>
+        ${rows}${d.count > d.items.length ? `<div class="dim">…and ${d.count - d.items.length} more</div>` : ""}
+        <div class="row"><button id="btn-tag-sync-apply" class="primary">Tag ${plural(d.count, "scene")}</button>
+          <button id="btn-tag-sync-close" class="ghost">Close</button></div></div>`;
+    }
+    $("#btn-tag-sync-close").onclick = () => { box.hidden = true; };
+    const apply = $("#btn-tag-sync-apply");
+    if (apply) apply.onclick = async () => {
+      if (!confirm(`Tag ${plural(d.count, "scene")} and mark them organized?\n\nYour renamer plugin will move about ${plural(d.moves, "file")}.`)) return;
+      apply.disabled = true;
+      try {
+        const job = await api("/api/catalogue/tag-sync", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+        });
+        const j = await waitJob(job.id, (x) => {
+          const p = x.progress || {};
+          $("#tier-tags-status").textContent = `tagging ${p.done ?? 0}/${p.total ?? d.count}…`;
+        });
+        $("#tier-tags-status").textContent = "";
+        if (j.status === "error") toast("Tag sync failed: " + j.error, true);
+        else toast(`Tagged ${plural(j.result.synced, "scene")}${j.result.failed.length ? ` · ${j.result.failed.length} failed` : ""}`);
+        box.hidden = true; loadHistory(); if (cat.loaded) openCatalogue({ refresh: true });
+      } catch (e) { apply.disabled = false; toast(e.message, true); }
+    };
+  } catch (e) { $("#tier-tags-status").textContent = ""; toast(e.message, true); }
+});
+loadTierTags();
+
 // --- moment length (smart clip drift threshold) -----------------------------
 async function loadClipSettings() {
   try {
@@ -576,6 +642,7 @@ async function applyGrade(sid, grade) {
 async function undoGrade() {
   const u = gradeUndo.pop();
   if (!u) { toast("nothing to undo"); return null; }
+  if (u.bulk) return undoBulkGrade(u);
   try {
     const r = await api("/api/catalogue/restore", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -583,6 +650,22 @@ async function undoGrade() {
     });
     toast(`Undone (${gradeName(u.grade)})`);
     return r.scene;
+  } catch (e) { gradeUndo.push(u); toast(e.message, true); return null; }
+}
+// a whole bulk grade is one undo step; restored scene by scene server-side
+async function undoBulkGrade(u) {
+  try {
+    const job = await api("/api/catalogue/restore-bulk", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: u.items }),
+    });
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {};
+      toast(`Undoing ${p.done ?? 0}/${p.total ?? u.items.length}…`);
+    });
+    if (j.status === "error") throw new Error(j.error);
+    toast(`Undone: ${plural(j.result.restored, "scene")} back to how they were`);
+    return { bulk: true, ids: u.items.map((x) => x.scene_id) };
   } catch (e) { gradeUndo.push(u); toast(e.message, true); return null; }
 }
 let lastHits = [];
@@ -2060,14 +2143,16 @@ $("#btn-exp-refresh")?.addEventListener("click", () => openExperimental());
 const CAT_PAGE = 60;
 const CAT_CHIPS = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
 const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, views: {}, model: null,
-              focus: 0, loaded: false, busy: false };
+              focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false };
 const CAT_VIEWS = [
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
   ["promote", "Promotion candidates", "Merveilleuse scenes that look like your Exceptionnelle/Légendaire ones"],
   ["second", "Second look", "Exceptionnelle/Légendaire scenes that look more like Merveilleuse or below"],
   ["anomaly", "Anomaly suggestions", "5★ scenes with an O-count outside your scheme, with a suggested tier"],
+  ["conflict", "Tag conflicts", "Scenes carrying two tier tags, or a tier tag that disagrees with their grade — the renamer can't file these. Re-grade to fix."],
 ];
+const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict"]);
 const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
 function catParams(offset, refresh) {
@@ -2092,8 +2177,8 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     cat.items = append ? cat.items.concat(d.items) : d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
     cat.loaded = true;
-    if (!append) cat.focus = 0;
-    renderCatChips(); renderCatTriage(); renderCatList();
+    if (!append) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
+    renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk();
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
   } catch (e) {
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
@@ -2117,7 +2202,7 @@ function renderCatTriage() {
   const m = cat.model || {}, rep = m.report;
   const trained = !!m.trained;
   $("#cat-views").innerHTML = CAT_VIEWS.map(([v, label, tip]) => {
-    const needsModel = v !== "quality" && v !== "anomaly" && !trained;
+    const needsModel = !MODEL_FREE_VIEWS.has(v) && !trained;
     return `<button class="cat-chip cat-view ${cat.view === v ? "on" : ""}" data-v="${v}" title="${esc(tip)}${needsModel ? " (train the model first)" : ""}" ${needsModel ? "disabled" : ""}>${esc(label)} <span class="n">${(cat.views[v] || 0).toLocaleString()}</span></button>`;
   }).join("");
   const btn = $("#btn-cat-train");
@@ -2158,17 +2243,30 @@ function catCardHTML(r, i) {
     : "";
   const flag = r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "";
   const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${esc(r.suggest.why)}</div>` : "";
-  return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""}" data-i="${i}">
+  const sel = cat.sel.has(r.scene_id);
+  return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
+    <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
     <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="dim cat-who">${esc(who)}</div>
       <div class="cat-q">${esc(qualityLine(r.quality))}</div>
-      ${predLine}${flag}${suggest}
+      ${predLine}${flag}${suggest}${tagLine(r)}
       <div class="cat-moments">${moments || '<span class="dim">not embedded yet — no moments</span>'}</div>
     </div>
     <div class="cat-grades">${grades}</div>
   </div>`;
+}
+// the renamer files a scene by its ONE tier tag — surface anything it can't act on
+function tagLine(r) {
+  const st = r.tag_state; if (!st) return "";
+  const names = st.present.map((t) => (TIER_TAGS[t] || t)).join(" + ");
+  if (st.conflict) return `<div class="cat-flag">🏷 Tag conflict: ${esc(names)} — ${esc(st.conflict)}. Re-grade to fix.</div>`;
+  if (st.needs_sync && !r._graded) {
+    const why = [st.present.length ? `tagged ${names}` : "no tier tag", r.organized ? "" : "not organized"].filter(Boolean).join(", ");
+    return `<div class="cat-tag dim" title="Settings → Tier tags → Check &amp; sync fixes these in one go">🏷 Not filed for the renamer: ${esc(why)}</div>`;
+  }
+  return "";
 }
 function renderCatList() {
   const list = $("#cat-list");
@@ -2203,7 +2301,7 @@ async function gradeCat(i, grade) {
     const fresh = await applyGrade(r.scene_id, grade);
     catBumpCounts(r.tier, fresh.tier);
     // stays in place (dimmed) so the list doesn't jump and Z still has context
-    cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, _graded: true };
+    cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred, _graded: true };
     renderCatCard(i);
     focusCat(i + 1);
   } catch (e) { toast(e.message, true); }
@@ -2212,6 +2310,7 @@ async function undoCatGrade() {
   const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
   const fresh = await undoGrade();
   if (!fresh) return;
+  if (fresh.bulk) { openCatalogue(); return; }
   const i = cat.items.findIndex((r) => r.scene_id === sid);
   if (i < 0) return;
   catBumpCounts(cat.items[i].tier, fresh.tier);
@@ -2269,6 +2368,11 @@ $("#btn-cat-train")?.addEventListener("click", async () => {
 $("#cat-list")?.addEventListener("click", (e) => {
   const card = e.target.closest(".cat-card"); if (!card) return;
   const i = +card.dataset.i;
+  if (e.target.closest(".cat-selbox")) {
+    e.preventDefault();
+    toggleCatSel(i, e.shiftKey);
+    return;
+  }
   const g = e.target.closest(".cat-g");
   if (g) { focusCat(i, false); gradeCat(i, g.dataset.g); return; }
   const m = e.target.closest(".cat-m");
@@ -2290,6 +2394,74 @@ document.addEventListener("keydown", (e) => {
   else if (k === "k" || k === "arrowup") { e.preventDefault(); focusCat(cat.focus - 1); }
   else if (k === "enter") { e.preventDefault(); watchCat(cat.focus); }
   else if (k === "z") { e.preventDefault(); undoCatGrade(); }
+  else if (k === "x") { e.preventDefault(); toggleCatSel(cat.focus, e.shiftKey); }
+  else if (k === "escape" && cat.sel.size) { e.preventDefault(); cat.sel.clear(); renderCatList(); renderCatBulk(); }
+});
+
+// --- Catalogue: select several scenes and grade them together ------------------
+function toggleCatSel(i, range) {
+  const r = cat.items[i]; if (!r) return;
+  const on = !cat.sel.has(r.scene_id);
+  const [a, b] = range && cat.anchor != null ? [Math.min(cat.anchor, i), Math.max(cat.anchor, i)] : [i, i];
+  for (let k = a; k <= b; k++) {
+    const id = cat.items[k].scene_id;
+    if (on) cat.sel.add(id); else cat.sel.delete(id);
+    $(`#cat-list .cat-card[data-i="${k}"]`)?.classList.toggle("sel", on);
+    const box = $(`#cat-list .cat-card[data-i="${k}"] .cat-sel`); if (box) box.checked = on;
+  }
+  cat.anchor = i;
+  renderCatBulk();
+}
+function renderCatBulk() {
+  const bar = $("#cat-bulk"); if (!bar) return;
+  const n = cat.sel.size;
+  bar.hidden = n === 0 && !cat.bulkBusy;
+  if (cat.bulkBusy) return;
+  $("#cat-bulk-n").textContent = plural(n, "scene") + " selected";
+  $("#cat-bulk-grades").innerHTML = GRADES.map((g) =>
+    `<button class="cat-g g-${g}" data-g="${g}">${esc(gradeName(g))}</button>`).join("");
+}
+async function gradeSelected(grade) {
+  const ids = cat.items.filter((r) => cat.sel.has(r.scene_id)).map((r) => r.scene_id);
+  if (!ids.length || cat.bulkBusy) return;
+  const tagged = grade !== "reject";
+  const note = tagged
+    ? `\n\nEach one gets the "${TIER_TAGS[grade] || grade}" tag (other tier tags removed) and is marked organized — your renamer will move ${ids.length === 1 ? "the file" : "these files"}.`
+    : "\n\nOnly the rating changes (1★); tags and organized are left alone.";
+  if (!confirm(`Grade ${plural(ids.length, "scene")} as ${gradeName(grade)}?${note}\n\nOne Z undoes the whole batch.`)) return;
+  cat.bulkBusy = true;
+  $("#cat-bulk-grades").innerHTML = "";
+  try {
+    const job = await api("/api/catalogue/grade-bulk", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_ids: ids, grade }),
+    });
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {};
+      $("#cat-bulk-n").textContent = `Grading ${p.done ?? 0}/${p.total ?? ids.length} as ${gradeName(grade)}…`;
+    });
+    if (j.status === "error") throw new Error(j.error);
+    const r = j.result;
+    if (r.previous.length) gradeUndo.push({ bulk: true, items: r.previous, grade });
+    toast(`${plural(r.graded, "scene")} → ${gradeName(grade)}${r.failed.length ? ` · ${r.failed.length} failed` : ""} — Z to undo`, !!r.failed.length);
+  } catch (e) { toast(e.message, true); }
+  cat.bulkBusy = false;
+  cat.sel.clear();
+  openCatalogue();
+}
+$("#cat-bulk")?.addEventListener("click", (e) => {
+  const g = e.target.closest(".cat-g");
+  if (g) { gradeSelected(g.dataset.g); return; }
+  if (e.target.closest("#btn-cat-selall")) {
+    cat.items.forEach((r) => cat.sel.add(r.scene_id));
+    renderCatList(); renderCatBulk();
+  } else if (e.target.closest("#btn-cat-selnone")) {
+    cat.sel.clear(); renderCatList(); renderCatBulk();
+  }
+});
+$("#btn-cat-select")?.addEventListener("click", () => {
+  cat.items.forEach((r) => cat.sel.add(r.scene_id));
+  renderCatList(); renderCatBulk();
 });
 // Z also undoes a grade made from the viewer's grade menu
 document.addEventListener("keydown", (e) => {

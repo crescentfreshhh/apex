@@ -295,15 +295,20 @@ class StashClient:
 
     _EDITABLE = ("rating100", "organized", "title", "date", "details")
 
-    def update_scene(self, scene_id: str, clear: tuple = (), **fields) -> dict:
+    def update_scene(self, scene_id: str, clear: tuple = (),
+                     tag_ids: list[str] | None = None, **fields) -> dict:
         """Update editable scene fields in Stash (only the ones passed; `None`
         values are skipped). Fields named in `clear` are explicitly set to null —
-        e.g. undoing a grade on a scene that was unrated. Returns the updated
-        scene dict."""
+        e.g. undoing a grade on a scene that was unrated. `tag_ids` REPLACES the
+        scene's whole tag list (pass the complete list). Everything goes in one
+        sceneUpdate, so a Stash plugin hooked on scene updates fires once and
+        sees the final state. Returns the updated scene dict."""
         inp: dict = {"id": str(scene_id)}
         for k in self._EDITABLE:
             if k in fields and fields[k] is not None:
                 inp[k] = fields[k]
+        if tag_ids is not None:
+            inp["tag_ids"] = [str(t) for t in tag_ids]
         for k in clear:
             if k in self._EDITABLE:
                 inp[k] = None

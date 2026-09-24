@@ -79,6 +79,48 @@ def tier_names(overrides: dict | None = None) -> dict[str, str]:
     return names
 
 
+# --- tier tags (drive the user's renamer plugin) ---------------------------------
+# Grading into one of these tiers gives the scene exactly ONE of these tags (all
+# others removed) and marks it organized; the renamer plugin then files it into
+# that tier's folder. Two tier tags at once break the plugin. Names are
+# configurable (settings.json `tier_tags`); these are the defaults.
+
+TIER_TAGS: dict[str, str] = {
+    "legendaire": "legendaire",
+    "exceptionnelle": "exceptionnelle",
+    "merveilleuse": "merveilleuse",
+    "upscale": "personal upscale",
+}
+
+
+def tier_tags(overrides: dict | None = None) -> dict[str, str]:
+    tags = dict(TIER_TAGS)
+    for k, v in (overrides or {}).items():
+        if k in tags and isinstance(v, str) and v.strip():
+            tags[k] = v.strip()[:80]
+    return tags
+
+
+def tag_state(tier: str, tag_names: list[str], organized: bool,
+              tags: dict[str, str] | None = None) -> dict:
+    """How a scene's tier tags line up with its grade.
+
+    {present: [tiers whose tag it carries], conflict: str|None, needs_sync: bool}
+    conflict: two or more tier tags, or a tier tag that disagrees with the
+    O-count grade. needs_sync: a tagged tier missing its tag / organized flag,
+    or carrying another tier's tag (fixable by the explicit tag sync)."""
+    tags = tags or TIER_TAGS
+    have = {n.strip().lower() for n in tag_names or []}
+    present = [t for t, name in tags.items() if name.lower() in have]
+    conflict = None
+    if len(present) >= 2:
+        conflict = "several tier tags"
+    elif present and present[0] != tier:
+        conflict = "tier tag disagrees with the grade"
+    needs_sync = tier in tags and (present != [tier] or not organized)
+    return {"present": present, "conflict": conflict, "needs_sync": needs_sync}
+
+
 # --- file quality ------------------------------------------------------------
 
 RES_CLASSES: tuple[str, ...] = ("SD", "720p", "1080p", "1440p", "4K")

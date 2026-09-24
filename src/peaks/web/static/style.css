@@ -442,3 +442,19 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
   .hist-row { grid-template-columns: 1fr; gap: 2px; }
 }
 a.ghost { font-size: 13px; }
+
+/* --- catalogue selection + bulk bar --- */
+.cat-card { position: relative; }
+.cat-selbox { position: absolute; top: 14px; left: 14px; z-index: 1; display: flex;
+  background: rgba(0, 0, 0, .55); border-radius: 5px; padding: 4px; cursor: pointer;
+  opacity: .55; transition: opacity .12s; }
+.cat-card:hover .cat-selbox, .cat-card.sel .cat-selbox, .cat-card.focus .cat-selbox { opacity: 1; }
+.cat-selbox input { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+.cat-card.sel { border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2) inset; }
+.cat-tag { font-size: 12px; margin-top: 3px; }
+.cat-bulk { position: sticky; bottom: 12px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px; margin-top: 12px; padding: 10px 14px; background: var(--panel2);
+  border: 1px solid var(--accent2); border-radius: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, .5); }
+.cat-bulk[hidden] { display: none; }
+.cat-bulk-grades { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat-bulk .cat-g { padding: 6px 10px; font-size: 13px; }

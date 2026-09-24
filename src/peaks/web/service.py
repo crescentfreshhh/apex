@@ -3616,9 +3616,10 @@ class Service(LibraryMixin):
     def _cat_row(self, sid: str, m: dict) -> dict:
         import os
 
-        from ..tiers import quality_of, tier_of
+        from ..tiers import quality_of, tag_state, tier_of
 
         path = m.get("path") or ""
+        tier = tier_of(m.get("rating100"), m.get("o_counter"))
         return {
             "scene_id": sid,
             "title": m.get("title") or os.path.splitext(os.path.basename(path))[0],
@@ -3629,7 +3630,7 @@ class Service(LibraryMixin):
             "tags": m.get("tags") or [],
             "rating100": m.get("rating100"),
             "o_counter": int(m.get("o_counter") or 0),
-            "tier": tier_of(m.get("rating100"), m.get("o_counter")),
+            "tier": tier,
             "quality": quality_of(m),
             "path": path,
             "tag_ids": m.get("tag_ids") or [],
@@ -3638,6 +3639,8 @@ class Service(LibraryMixin):
             "size": m.get("size"),
             "fingerprint": m.get("fingerprint"),
             "phash": m.get("phash"),
+            "tag_state": tag_state(tier, m.get("tags") or [], bool(m.get("organized")),
+                                   self.tier_tag_names()),
         }
 
     def _catalogue_all(self, refresh: bool = False) -> list[dict]:
@@ -3842,9 +3845,17 @@ class Service(LibraryMixin):
         return count
 
     def grade_scene(self, scene_id: str, grade: str, source: str = "catalogue") -> dict:
-        """Apply one of the user's grades (peaks.tiers.GRADES) in Stash. Returns
-        the updated catalogue row and the previous {rating100, o_counter} so the
-        UI can undo."""
+        """Apply one of the user's grades (peaks.tiers.GRADES) in Stash.
+
+        Renamer-safe write order for the tagged tiers (16/17/18 + Upscale):
+        1) move the O-count to the grade's value, then 2) ONE sceneUpdate with
+        the rating, the complete tag list (every tier tag removed, this tier's
+        added) and organized = true — so a plugin hooked on scene updates fires
+        once and only ever sees the final state. A reject changes the rating
+        only (tags, organized and O-count stay as they are).
+
+        Returns the updated catalogue row and the previous state
+        {rating100, o_counter, tag_ids, organized} so the UI can undo."""
         from ..tiers import GRADES
 
         if grade not in GRADES:
@@ -3853,31 +3864,43 @@ class Service(LibraryMixin):
         cur = self._meta_client().scene_details([sid]).get(sid)
         if not cur:
             raise LookupError(f"scene {sid} not found in Stash")
-        prev = {"rating100": cur.get("rating100"), "o_counter": int(cur.get("o_counter") or 0)}
+        prev = {"rating100": cur.get("rating100"), "o_counter": int(cur.get("o_counter") or 0),
+                "tag_ids": list(cur.get("tag_ids") or []), "organized": bool(cur.get("organized"))}
         rating, o = GRADES[grade]
-        self.update_scene(sid, rating100=rating)          # also syncs 1★ → hidden
         if o is not None:
             self.set_o_count(sid, o, current=prev["o_counter"])
+        tag_ids = self._tier_tag_list(prev["tag_ids"], grade)
+        if tag_ids is None:                               # reject: rating only
+            self.update_scene(sid, rating100=rating)      # also syncs 1★ → hidden
+        else:
+            self.client().update_scene(sid, rating100=rating, tag_ids=tag_ids, organized=True)
+            self.invalidate_meta(sid)
+            self.set_scene_hidden(sid, False)
         row = self._cat_update_row(sid)
         self._log_scene("grade", row, grade=grade, source=source,
-                        before={**prev, "tier": tier_of(prev["rating100"], prev["o_counter"])},
+                        before={"rating100": prev["rating100"], "o_counter": prev["o_counter"],
+                                "tier": tier_of(prev["rating100"], prev["o_counter"])},
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
         self._note_grade()
         return {"scene": row, "previous": prev}
 
     def restore_scene_grade(self, scene_id: str, rating100: int | None, o_counter: int,
-                            source: str = "undo") -> dict:
-        """Undo: put a scene's rating and O-count back exactly (a previously
-        unrated scene gets its rating cleared, not set to a value)."""
+                            source: str = "undo", tag_ids: list[str] | None = None,
+                            organized: bool | None = None) -> dict:
+        """Undo: put a scene's rating and O-count (and, when given, its tags and
+        organized flag) back exactly. Same order as a grade: O-count first, then
+        one final sceneUpdate. A previously unrated scene gets its rating
+        cleared, not set to a value."""
         sid = str(scene_id)
-        if rating100 is None or int(rating100) <= 0:
-            self.client().update_scene(sid, clear=("rating100",))
-            self.invalidate_meta(sid)
-            self.set_scene_hidden(sid, False)
-        else:
-            self.update_scene(sid, rating100=int(rating100))
         self.set_o_count(sid, int(o_counter or 0))
+        unrated = rating100 is None or int(rating100) <= 0
+        self.client().update_scene(
+            sid, clear=("rating100",) if unrated else (),
+            rating100=None if unrated else int(rating100),
+            tag_ids=tag_ids, organized=organized)
+        self.invalidate_meta(sid)
+        self.set_scene_hidden(sid, not unrated and int(rating100) <= 20)
         row = self._cat_update_row(sid)
         self._log_scene("restore", row, source=source,
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
@@ -4049,7 +4072,7 @@ class Service(LibraryMixin):
         label = (names or {}).get(g, g)
         return {"grade": g, "why": f"looks {round(100 * keepers[g] / sum(keepers.values()))}% like your {label} scenes"}
 
-    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly")
+    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict")
 
     def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict) -> list[dict]:
         from ..tier_model import ORDINAL, quality_flag
@@ -4075,6 +4098,8 @@ class Service(LibraryMixin):
                    and r["scene_id"] in preds
                    and ORDINAL[preds[r["scene_id"]]["tier"]] <= ORDINAL["merveilleuse"]]
             return sorted(out, key=lambda r: preds[r["scene_id"]]["expected"])
+        if view == "conflict":
+            return [r for r in pool if r["tag_state"]["conflict"]]
         if view == "anomaly":
             out = [r for r in pool if r["tier"] == "anomaly"]
             return sorted(out, key=lambda r: -(preds.get(r["scene_id"]) or {}).get("conf", 0))
