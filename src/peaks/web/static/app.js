@@ -1949,11 +1949,21 @@ $("#btn-exp-refresh")?.addEventListener("click", () => openExperimental());
 // --- Catalogue: grade & filter the library with your tiers -------------------
 const CAT_PAGE = 60;
 const CAT_CHIPS = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
-const cat = { tier: "unreviewed", items: [], total: 0, counts: {}, focus: 0, loaded: false, busy: false };
+const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, views: {}, model: null,
+              focus: 0, loaded: false, busy: false };
+const CAT_VIEWS = [
+  ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
+  ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
+  ["promote", "Promotion candidates", "Merveilleuse scenes that look like your Exceptionnelle/Légendaire ones"],
+  ["second", "Second look", "Exceptionnelle/Légendaire scenes that look more like Merveilleuse or below"],
+  ["anomaly", "Anomaly suggestions", "5★ scenes with an O-count outside your scheme, with a suggested tier"],
+];
+const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
 function catParams(offset, refresh) {
   const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
-  if (cat.tier) qs.set("tier", cat.tier);
+  if (cat.view) qs.set("view", cat.view);
+  else if (cat.tier) qs.set("tier", cat.tier);
   const q = $("#cat-q").value.trim(); if (q) qs.set("q", q);
   const res = $("#cat-res").value; if (res) qs.set("res", res);
   const mb = $("#cat-mbps").value; if (mb !== "") qs.set("min_mbps", mb);
@@ -1970,9 +1980,10 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     const d = await api("/api/catalogue?" + catParams(offset, refresh));
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     cat.items = append ? cat.items.concat(d.items) : d.items;
-    cat.total = d.total; cat.counts = d.counts; cat.loaded = true;
+    cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
+    cat.loaded = true;
     if (!append) cat.focus = 0;
-    renderCatChips(); renderCatList();
+    renderCatChips(); renderCatTriage(); renderCatList();
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
   } catch (e) {
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
@@ -1982,8 +1993,34 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
 function renderCatChips() {
   const all = Object.values(cat.counts).reduce((a, b) => a + b, 0);
   const chip = (t, label, n) =>
-    `<button class="cat-chip ${cat.tier === t ? "on" : ""} ${t ? "tier-" + t : ""}" data-t="${t}">${esc(label)} <span class="n">${(n || 0).toLocaleString()}</span></button>`;
+    `<button class="cat-chip ${!cat.view && cat.tier === t ? "on" : ""} ${t ? "tier-" + t : ""}" data-t="${t}">${esc(label)} <span class="n">${(n || 0).toLocaleString()}</span></button>`;
   $("#cat-chips").innerHTML = chip("", "All", all) + CAT_CHIPS.map((t) => chip(t, TIER_NAMES[t], cat.counts[t])).join("");
+}
+function renderCatTriage() {
+  const m = cat.model || {}, rep = m.report;
+  const trained = !!m.trained;
+  $("#cat-views").innerHTML = CAT_VIEWS.map(([v, label, tip]) => {
+    const needsModel = v !== "quality" && v !== "anomaly" && !trained;
+    return `<button class="cat-chip cat-view ${cat.view === v ? "on" : ""}" data-v="${v}" title="${esc(tip)}${needsModel ? " (train the model first)" : ""}" ${needsModel ? "disabled" : ""}>${esc(label)} <span class="n">${(cat.views[v] || 0).toLocaleString()}</span></button>`;
+  }).join("");
+  const btn = $("#btn-cat-train");
+  btn.textContent = m.training ? "Training…" : trained ? "Retrain" : "Train on my grades";
+  btn.disabled = !!m.training;
+  let txt = "";
+  if (rep && rep.trained) {
+    const pct = (x) => Math.round(x * 100) + "%";
+    const gain = Math.round((rep.quality_gain || 0) * 100);
+    txt = `Trained on ${rep.n} scenes (${rep.trained_at}) · ${pct(rep.cv.exact)} exact · ${pct(rep.cv.within_one)} within one tier` +
+      ` · file quality ${gain >= 0 ? "+" : ""}${gain} pts` +
+      (m.grades_since_train ? ` · ${m.grades_since_train} grades since` : "");
+    const short = Object.entries(rep.short || {}).map(([c, n]) => `${className(c)} (${n})`);
+    if (short.length) txt += ` · too few to learn: ${short.join(", ")}`;
+  } else if (rep && !rep.trained) {
+    txt = rep.reason;
+  } else {
+    txt = "Not trained yet — learns your tiers from the scenes you've graded.";
+  }
+  $("#cat-model").textContent = txt;
 }
 function qualityLine(q) {
   return [q.res, q.mbps != null ? `${q.mbps} Mbps` : null, (q.codec || "").toUpperCase() || null,
@@ -1994,14 +2031,23 @@ function catCardHTML(r, i) {
   const moments = (r.moments || []).map((m, j) =>
     `<img class="cat-m" loading="lazy" src="${m.thumb}" data-j="${j}" title="${fmt(m.t)}${m.score != null ? " · taste " + Math.round(m.score * 100) + "%" : ""}" />`).join("");
   const cur = r.tier === "rejected" ? "reject" : r.tier;   // highlight the grade it already has
+  const sug = r.suggest ? r.suggest.grade : null;
   const grades = GRADES.map((g, k) =>
-    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><kbd>${k + 1}</kbd> ${esc(gradeName(g))}</button>`).join("");
+    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><kbd>${k + 1}</kbd> ${esc(gradeName(g))}</button>`).join("");
+  const p = r.pred;
+  const predLine = p
+    ? `<div class="cat-pred">Looks like <span class="tier tier-${p.tier === "reject" ? "rejected" : p.tier}">${esc(className(p.tier))}</span> ${Math.round(p.conf * 100)}%` +
+      (p.keeper != null ? ` · keeper ${Math.round(p.keeper * 100)}%` : "") + `</div>`
+    : "";
+  const flag = r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "";
+  const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${esc(r.suggest.why)}</div>` : "";
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""}" data-i="${i}">
     <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="dim cat-who">${esc(who)}</div>
       <div class="cat-q">${esc(qualityLine(r.quality))}</div>
+      ${predLine}${flag}${suggest}
       <div class="cat-moments">${moments || '<span class="dim">not embedded yet — no moments</span>'}</div>
     </div>
     <div class="cat-grades">${grades}</div>
@@ -2069,7 +2115,22 @@ function watchCat(i, j = null) {
 }
 $("#cat-chips")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-chip"); if (!b) return;
-  cat.tier = b.dataset.t; openCatalogue();
+  cat.tier = b.dataset.t; cat.view = ""; openCatalogue();
+});
+$("#cat-views")?.addEventListener("click", (e) => {
+  const b = e.target.closest(".cat-view"); if (!b || b.disabled) return;
+  cat.view = cat.view === b.dataset.v ? "" : b.dataset.v;
+  openCatalogue();
+});
+$("#btn-cat-train")?.addEventListener("click", async () => {
+  const btn = $("#btn-cat-train");
+  btn.disabled = true; btn.textContent = "Training…";
+  $("#cat-model").textContent = "learning your tiers from every graded scene — this can take a minute on a big library…";
+  try {
+    const r = await api("/api/catalogue/train", { method: "POST" });
+    toast(r.trained ? `Trained on ${r.n} scenes — ${Math.round(r.cv.exact * 100)}% exact` : r.reason, !r.trained);
+  } catch (err) { toast(err.message, true); }
+  openCatalogue();
 });
 $("#cat-list")?.addEventListener("click", (e) => {
   const card = e.target.closest(".cat-card"); if (!card) return;

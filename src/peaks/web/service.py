@@ -3621,7 +3621,7 @@ class Service:
     def catalogue(self, tier: str | None = None, res: str | None = None,
                   min_mbps: float | None = None, q: str | None = None,
                   sort: str = "date", offset: int = 0, limit: int = 60,
-                  refresh: bool = False) -> dict:
+                  refresh: bool = False, view: str | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -3647,7 +3647,17 @@ class Service:
         counts = {t: 0 for t in TIERS}
         for r in pool:
             counts[r["tier"]] += 1
-        if tiers:
+
+        # keeper triage: model predictions + the learned quality floor
+        from ..tier_model import quality_flag, quality_floor
+
+        floor = quality_floor(rows)
+        preds = self._tier_predictions(rows)
+        views = {v: len(self._triage(v, pool, preds, floor)) for v in self.TRIAGE_VIEWS}
+        in_view = view in self.TRIAGE_VIEWS
+        if in_view:
+            pool = self._triage(view, pool, preds, floor)      # the view's own order
+        elif tiers:
             pool = [r for r in pool if r["tier"] in tiers]
 
         res_rank = {c: i for i, c in enumerate(RES_CLASSES)}
@@ -3658,16 +3668,28 @@ class Service:
             "bitrate": (lambda r: r["quality"]["mbps"] or 0, True),
             "quality": (lambda r: (res_rank.get(r["quality"]["res"] or "", -1),
                                    r["quality"]["mbps"] or 0), True),
+            "predicted": (lambda r: (preds.get(r["scene_id"]) or {}).get("expected", -1), True),
         }
-        fn, rev = keyfns.get(sort, keyfns["date"])
-        pool.sort(key=fn, reverse=rev)
+        if not in_view:
+            fn, rev = keyfns.get(sort, keyfns["date"])
+            pool.sort(key=fn, reverse=rev)
         page = pool[offset: offset + limit]
         moments = self._scene_moment_strips([r["scene_id"] for r in page])
-        items = [{**r, "moments": moments.get(r["scene_id"], []),
-                  "stream": self.stream_url(r["scene_id"], start=0)} for r in page]
+        items = []
+        for r in page:
+            pred = preds.get(r["scene_id"])
+            items.append({
+                **r, "moments": moments.get(r["scene_id"], []),
+                "stream": self.stream_url(r["scene_id"], start=0),
+                "pred": pred,
+                "flag": quality_flag(r["quality"], floor),
+                "suggest": (self._suggest_for_anomaly(r, pred, self.tier_display_names())
+                            if r["tier"] == "anomaly" else None),
+            })
         return {
-            "items": items, "total": len(pool), "counts": counts,
+            "items": items, "total": len(pool), "counts": counts, "views": views,
             "names": self.tier_display_names(), "offset": offset, "limit": limit,
+            "model": self.tier_model_status(), "floor": floor,
         }
 
     def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,
@@ -3775,8 +3797,192 @@ class Service:
         return {"scene": self._cat_update_row(sid)}
 
     def _note_grade(self) -> None:
-        """Counts grades since the last triage-model training (Phase B hook)."""
+        """Count grades since the last triage training; retrain in the background
+        every 25 once a model exists, so suggestions keep up with grading."""
         self._grades_since_train = getattr(self, "_grades_since_train", 0) + 1
+        # (predictions are NOT invalidated: a grade changes a scene's tier, not
+        # its picture or bitrate — views are re-derived from rows every request)
+        if self._grades_since_train >= 25 and self._tier_model_state()["model"] is not None:
+            if not getattr(self, "_tier_training", False):
+                threading.Thread(target=self._train_tier_quietly, daemon=True).start()
+
+    def _train_tier_quietly(self) -> None:
+        try:
+            self.train_tier_model()
+        except Exception:  # noqa: BLE001 — background retrain is best-effort
+            pass
+
+    # --- keeper triage (peaks.tier_model) ----------------------------------------
+
+    def _tier_model_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "tier_model.pkl"
+
+    def _tier_model_state(self) -> dict:
+        """{model, report}, loaded lazily from models/ (persisted across restarts)."""
+        st = getattr(self, "_tier_state", None)
+        if st is not None:
+            return st
+        import json
+
+        from ..tier_model import TierModel
+
+        st = {"model": None, "report": None}
+        path = self._tier_model_path()
+        try:
+            if path.exists():
+                st["model"] = TierModel.load(path)
+                rp = path.with_suffix(".json")
+                st["report"] = json.loads(rp.read_text()) if rp.exists() else None
+        except Exception:  # noqa: BLE001 — unreadable model → untrained
+            st = {"model": None, "report": None}
+        self._tier_state = st
+        return st
+
+    def _scene_features(self, rows: list[dict]) -> dict[str, tuple]:
+        """(visual, quality) feature vectors for rows whose scene is embedded.
+        Visual features are cached per index build (they only change when the
+        index or taste scores do)."""
+        from ..tier_model import quality_features, visual_features
+
+        model = self._model_name()
+        idx = self.index(model)
+        try:
+            scores, _ = self._taste_scores(model)
+        except Exception:  # noqa: BLE001
+            scores = None
+        tag = (id(idx), id(scores))
+        cache = getattr(self, "_vis_feat_cache", None)
+        if cache is None or cache[0] != tag:
+            cache = (tag, {})
+            self._vis_feat_cache = cache
+        vis = cache[1]
+        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        out: dict[str, tuple] = {}
+        for r in rows:
+            sid = r["scene_id"]
+            if sid not in vis:
+                span = idx._key_rows.get(sid_key.get(sid, ""))
+                if not span:
+                    continue
+                a, b = span
+                vis[sid] = visual_features(idx.rows(a, b), None if scores is None else scores[a:b])
+            out[sid] = (vis[sid], quality_features(r["quality"]))
+        return out
+
+    def train_tier_model(self) -> dict:
+        """Fit the triage model on every graded, embedded scene. Returns the
+        report (per-class counts, CV accuracy with and without quality
+        features, chosen PCA size) or why it couldn't train."""
+        import json
+        import time as _t
+
+        from ..tier_model import CLASSES, TIER_CLASS, fit_best, usable_classes
+
+        self._tier_training = True
+        try:
+            rows = [r for r in self._catalogue_all() if r["tier"] in TIER_CLASS]
+            feats = self._scene_features(rows)
+            train = [r for r in rows if r["scene_id"] in feats]
+            y = [TIER_CLASS[r["tier"]] for r in train]
+            counts = {c: y.count(c) for c in CLASSES}
+            ok, short = usable_classes(y)
+            base = {"counts": counts, "short": short,
+                    "unembedded": len(rows) - len(train)}
+            if len(ok) < 2:
+                return {"trained": False, **base,
+                        "reason": "needs at least 10 graded, embedded scenes in two or more tiers"}
+            keep = [i for i, c in enumerate(y) if c in ok]
+            Xv = np.stack([feats[train[i]["scene_id"]][0] for i in keep])
+            Xq = np.stack([feats[train[i]["scene_id"]][1] for i in keep])
+            model, rep = fit_best(Xv, Xq, [y[i] for i in keep])
+            report = {"trained": True, **base, **rep, "classes": model.classes_,
+                      "n": len(keep), "trained_at": _t.strftime("%Y-%m-%d %H:%M")}
+            path = model.save(self._tier_model_path())
+            path.with_suffix(".json").write_text(json.dumps(report, indent=2))
+            self._tier_state = {"model": model, "report": report}
+            self._tier_preds = None
+            self._grades_since_train = 0
+            return report
+        finally:
+            self._tier_training = False
+
+    def tier_model_status(self) -> dict:
+        st = self._tier_model_state()
+        return {"report": st["report"], "trained": st["model"] is not None,
+                "grades_since_train": getattr(self, "_grades_since_train", 0),
+                "training": getattr(self, "_tier_training", False)}
+
+    def _tier_predictions(self, rows: list[dict]) -> dict[str, dict]:
+        """Model summary per embedded scene (cached per model + index build)."""
+        st = self._tier_model_state()
+        if st["model"] is None:
+            return {}
+        # valid for this model + this index build (new embeds → new index → re-score)
+        key = (id(st["model"]), id(self.index(self._model_name())), len(rows))
+        cached = getattr(self, "_tier_preds", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        feats = self._scene_features(rows)
+        sids = list(feats)
+        preds: dict[str, dict] = {}
+        if sids:
+            Xv = np.stack([feats[s][0] for s in sids])
+            Xq = np.stack([feats[s][1] for s in sids])
+            m = st["model"]
+            for s, summ in zip(sids, m.summarize(m.predict_proba(Xv, Xq))):
+                preds[s] = summ
+        self._tier_preds = (key, preds)
+        return preds
+
+    @staticmethod
+    def _suggest_for_anomaly(row: dict, pred: dict | None, names: dict | None = None) -> dict | None:
+        """An anomaly is a 5★ keeper, so suggest among the keeper tiers: an
+        explicit 'upscale' tag/performer wins; otherwise the model's best keeper
+        tier."""
+        marks = [x.lower() for x in (row.get("tags") or []) + (row.get("performers") or [])]
+        if any("upscale" in x for x in marks):
+            return {"grade": "upscale", "why": "tagged 'upscale' in Stash"}
+        if not pred:
+            return None
+        keepers = {c: p for c, p in pred["probs"].items() if c != "reject"}
+        if not keepers:
+            return None
+        g = max(keepers, key=keepers.get)
+        label = (names or {}).get(g, g)
+        return {"grade": g, "why": f"looks {round(100 * keepers[g] / sum(keepers.values()))}% like your {label} scenes"}
+
+    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly")
+
+    def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict) -> list[dict]:
+        from ..tier_model import ORDINAL, quality_flag
+
+        if view == "likely":
+            # scenes under the learned quality floor sink to the bottom: they rarely
+            # make a tier, and they have their own "Quality check" view
+            out = [r for r in pool if r["tier"] == "unreviewed" and r["scene_id"] in preds]
+            return sorted(out, key=lambda r: (quality_flag(r["quality"], floor) is None,
+                                              preds[r["scene_id"]]["expected"]), reverse=True)
+        if view == "quality":
+            out = [r for r in pool if r["tier"] == "unreviewed" and quality_flag(r["quality"], floor)]
+            return sorted(out, key=lambda r: r["quality"]["mbps"] or 0)
+        if view == "promote":
+            def up(r):
+                p = preds[r["scene_id"]]["probs"]
+                return p.get("exceptionnelle", 0) + p.get("legendaire", 0)
+            out = [r for r in pool if r["tier"] == "merveilleuse" and r["scene_id"] in preds
+                   and preds[r["scene_id"]]["tier"] in ("exceptionnelle", "legendaire")]
+            return sorted(out, key=up, reverse=True)
+        if view == "second":
+            out = [r for r in pool if r["tier"] in ("exceptionnelle", "legendaire")
+                   and r["scene_id"] in preds
+                   and ORDINAL[preds[r["scene_id"]]["tier"]] <= ORDINAL["merveilleuse"]]
+            return sorted(out, key=lambda r: preds[r["scene_id"]]["expected"])
+        if view == "anomaly":
+            out = [r for r in pool if r["tier"] == "anomaly"]
+            return sorted(out, key=lambda r: -(preds.get(r["scene_id"]) or {}).get("conf", 0))
+        return pool
 
     def scene_cover(self, scene_id: str):
         return self.client().scene_screenshot(scene_id)

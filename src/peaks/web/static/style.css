@@ -416,3 +416,11 @@ button.danger:hover { background: var(--bad); color: #1a0a06; }
 .cat-g.cur.g-merveilleuse { border-color: #6ea8fe; color: #6ea8fe; }
 .cat-g.cur.g-upscale { border-color: #7fb3aa; color: #7fb3aa; }
 .cat-g.cur.g-reject { border-color: #e0604d; color: #e0604d; }
+/* catalogue triage */
+.cat-triage { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
+.cat-triage .cat-chips { margin: 0; }
+.cat-view:disabled { opacity: .4; cursor: not-allowed; }
+.cat-pred { font-size: 12px; margin-top: 3px; }
+.cat-flag { font-size: 12px; margin-top: 3px; color: #e8a14d; }
+.cat-sug { font-size: 12px; margin-top: 3px; color: var(--accent); }
+.cat-g.sug { box-shadow: 0 0 0 1px var(--accent) inset; }

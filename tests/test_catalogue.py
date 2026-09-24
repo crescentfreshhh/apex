@@ -235,3 +235,91 @@ def test_js_tier_rules_match_python():
         want = tier_of(r, o)
         assert js_app == want, (r, o, js_app, want)
         assert js_mb == want, (r, o, js_mb, want)
+
+
+# --- keeper triage through the service ---------------------------------------------
+
+def _triage_svc(tmp_path, monkeypatch):
+    """36 graded scenes in three visually distinct tiers + unreviewed/anomaly ones."""
+    import numpy as np
+
+    import peaks.web.service as svc_mod
+    from peaks.cache import EmbeddingCache
+
+    pytest.importorskip("sklearn")
+    rng = np.random.default_rng(7)
+    D = 24
+    unit = lambda v: v / np.linalg.norm(v)  # noqa: E731
+    look = {t: unit(rng.standard_normal(D)) for t in ("upscale", "merveilleuse", "legendaire")}
+    scenes, embed = {}, {}
+    grade = {"upscale": (100, 0, 30e6), "merveilleuse": (100, 16, 12e6), "legendaire": (100, 18, 45e6)}
+    n = 0
+    for t, (r, o, br) in grade.items():
+        for _ in range(12):
+            sid = str(n)
+            n += 1
+            scenes[sid] = {"rating100": r, "o_counter": o, "width": 3840, "height": 2160,
+                           "bit_rate": br, "frame_rate": 30, "video_codec": "hevc", "date": "2020-01-01"}
+            embed[sid] = look[t]
+    # unreviewed: one that looks legendary, one that looks like an upscale, one low-bitrate 4K
+    for sid, t, br in (("u1", "legendaire", 40e6), ("u2", "upscale", 30e6), ("u3", "merveilleuse", 4e6)):
+        scenes[sid] = {"rating100": None, "o_counter": 0, "width": 3840, "height": 2160,
+                       "bit_rate": br, "frame_rate": 30, "video_codec": "hevc", "date": "2025-01-01"}
+        embed[sid] = look[t]
+    scenes["a1"] = {"rating100": 100, "o_counter": 5, "width": 3840, "height": 2160,
+                    "bit_rate": 44e6, "frame_rate": 30, "video_codec": "hevc", "date": "2024-01-01"}
+    embed["a1"] = look["legendaire"]
+    stash = FakeStash(scenes)
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    cfg.modeling.dir = str(tmp_path / "models")
+    cfg.embedding.model = "dino"
+    cfg.embedding.dino_model = "dinov2_vits14"         # legacy "dinov2" cache namespace
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    for i, (sid, base) in enumerate(embed.items()):
+        frames = np.stack([unit(base + 0.3 * rng.standard_normal(D)) for _ in range(10)]).astype(np.float32)
+        cache.save(f"k{i}", "dinov2", np.arange(10, dtype=np.float32) * 30, frames,
+                   meta={"scene_id": sid})
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: stash)
+    monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: stash)
+    monkeypatch.setattr(svc_mod.Service, "_taste_scores", lambda self, m, profile=None: (None, None))
+    return svc_mod.Service(cfg), stash
+
+
+def test_triage_train_views_and_suggestions(tmp_path, monkeypatch):
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    rep = svc.train_tier_model()
+    assert rep["trained"] and rep["n"] == 36
+    assert set(rep["classes"]) == {"upscale", "merveilleuse", "legendaire"}
+    assert rep["cv"]["exact"] >= 0.9
+    assert rep["short"] == {} and rep["counts"]["reject"] == 0
+
+    d = svc.catalogue(view="likely")
+    order = [r["scene_id"] for r in d["items"]]
+    assert order[0] == "u1"                                    # looks Légendaire → first
+    assert order[-1] == "u3"                                   # below the quality floor → last
+    assert d["items"][0]["pred"]["tier"] == "legendaire"
+    assert d["views"]["likely"] == 3
+
+    q = svc.catalogue(view="quality")
+    assert [r["scene_id"] for r in q["items"]] == ["u3"]        # 4 Mbps 4K, below every tiered 4K
+    assert "below every 4K scene" in q["items"][0]["flag"]
+
+    a = svc.catalogue(view="anomaly")
+    assert a["items"][0]["suggest"]["grade"] == "legendaire"    # O=5 anomaly that looks legendary
+    assert "your Légendaire scenes" in a["items"][0]["suggest"]["why"]   # display name, not key
+    stash.s["a1"]["tags"] = ["Upscale"]                         # an explicit tag wins
+    a2 = svc.catalogue(view="anomaly", refresh=True)
+    assert a2["items"][0]["suggest"] == {"grade": "upscale", "why": "tagged 'upscale' in Stash"}
+
+    # a persisted model survives a restart
+    from peaks.web.service import Service
+    again = Service(svc.cfg)
+    again.client = svc.client
+    assert again.tier_model_status()["trained"] is True
+
+
+def test_triage_refuses_without_enough_grades(tmp_path, stash, svc):
+    pytest.importorskip("sklearn")
+    rep = svc.train_tier_model()
+    assert rep["trained"] is False and "two or more tiers" in rep["reason"]

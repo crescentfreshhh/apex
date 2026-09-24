@@ -401,6 +401,12 @@
         Keys: <kbd>1</kbd>–<kbd>5</kbd> grade · <kbd>J</kbd>/<kbd>K</kbd> next/prev ·
         <kbd>Enter</kbd> watch · <kbd>Z</kbd> undo.</p>
       <div id="cat-chips" class="cat-chips"></div>
+      <div class="cat-triage">
+        <span class="dim">Triage:</span>
+        <span id="cat-views" class="cat-chips"></span>
+        <button id="btn-cat-train" class="ghost" title="Learn your tiers from the scenes you've graded (the picture + file quality)">Train on my grades</button>
+        <span id="cat-model" class="dim"></span>
+      </div>
       <div class="row">
         <input id="cat-q" placeholder="Search title, performer, studio, path…" />
         <select id="cat-res" title="Resolution">
@@ -416,6 +422,7 @@
         <span class="dim">sort:</span>
         <select id="cat-sort">
           <option value="date">Newest</option>
+          <option value="predicted">Predicted tier (needs training)</option>
           <option value="quality">Quality (resolution, bitrate)</option>
           <option value="bitrate">Bitrate</option>
           <option value="duration">Longest</option>

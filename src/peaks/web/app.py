@@ -922,10 +922,12 @@ def create_app(cfg=None):
         tier: str | None = None, res: str | None = None, min_mbps: float | None = None,
         q: str | None = None, sort: str = "date", offset: int = 0,
         limit: int = Query(60, ge=1, le=500), refresh: bool = False,
+        view: str | None = None,
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort,
-                                     offset=max(0, offset), limit=limit, refresh=refresh)
+                                     offset=max(0, offset), limit=limit, refresh=refresh,
+                                     view=view)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, f"Stash unreachable: {exc}")
 
@@ -948,6 +950,15 @@ def create_app(cfg=None):
             raise HTTPException(400, str(exc))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash update failed: {exc}")
+
+    @app.post("/api/catalogue/train")
+    def catalogue_train():
+        try:
+            return service.train_tier_model()
+        except ImportError:
+            raise HTTPException(501, "keeper triage needs scikit-learn (the [ml] extra)")
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable etc.
+            raise HTTPException(503, str(exc))
 
     @app.get("/api/catalogue/names")
     def catalogue_names():
