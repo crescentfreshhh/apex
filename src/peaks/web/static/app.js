@@ -2343,10 +2343,12 @@ function watchCat(i, j = null) {
 }
 $("#cat-chips")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-chip"); if (!b) return;
+  setDupeMode(false);
   cat.tier = b.dataset.t; cat.view = ""; openCatalogue();
 });
 $("#cat-views")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-view"); if (!b || b.disabled) return;
+  setDupeMode(false);
   cat.view = cat.view === b.dataset.v ? "" : b.dataset.v;
   openCatalogue();
 });
@@ -2474,50 +2476,160 @@ $("#cat-bulk")?.addEventListener("click", (e) => {
   }
 });
 // --- deleting rejects (files included) — preview, tick, then delete ---------------
-async function openDeleteDialog(ids) {
+// One confirm dialog for every file deletion: lists the files, and the delete
+// button only enables after ticking "delete the files from disk too".
+function showDeleteDialog({ title, summary, note, items, total, goLabel, capable = true, run }) {
   const dlg = $("#del-dlg");
+  $("#del-title").textContent = title;
+  $("#del-summary").innerHTML = summary;
+  $("#del-note").textContent = note || "";
+  $("#del-list").innerHTML = items.map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path || "")}">${esc(r.title || r.path)}</span>
+    <span class="dim">${r.size ? fmtBytes(r.size) : ""}</span></div>`).join("") +
+    (total > items.length ? `<div class="dim">…and ${total - items.length} more</div>` : "");
+  const ack = $("#del-ack"), go = $("#btn-del-go"), cancel = $("#btn-del-cancel");
+  ack.checked = false; go.disabled = true; cancel.disabled = false;
+  $("#del-status").textContent = capable ? "" : "Your Stash version can't delete scenes from the API — update Stash to use this.";
+  ack.disabled = !capable;
+  go.textContent = goLabel;
+  ack.onchange = () => { go.disabled = !ack.checked; };
+  cancel.onclick = () => dlg.close();
+  go.onclick = async () => {
+    go.disabled = true; ack.disabled = true; cancel.disabled = true;
+    try {
+      await run((msg) => { $("#del-status").textContent = msg; });
+      dlg.close();
+    } catch (e) { $("#del-status").textContent = e.message; toast(e.message, true); }
+    cancel.disabled = false;
+  };
+  dlg.showModal();
+}
+async function openDeleteDialog(ids) {
   let d;
   try {
     d = await api("/api/catalogue/delete-preview" + (ids ? "?ids=" + encodeURIComponent(ids.join(",")) : ""));
   } catch (e) { toast(e.message, true); return; }
   if (!d.count) { toast("Nothing rated 1★ to delete"); return; }
-  $("#del-title").textContent = ids ? "Delete selected rejects" : "Delete all rejected scenes";
-  $("#del-summary").innerHTML = `<b>${plural(d.count, "scene")}</b> · <b>${fmtBytes(d.bytes)}</b> will be deleted from Stash, with their files.`;
-  $("#del-list").innerHTML = d.items.map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path || "")}">${esc(r.title || r.path)}</span>
-    <span class="dim">${r.size ? fmtBytes(r.size) : ""}</span></div>`).join("") +
-    (d.count > d.items.length ? `<div class="dim">…and ${d.count - d.items.length} more</div>` : "");
-  const ack = $("#del-ack"), go = $("#btn-del-go");
-  ack.checked = false; go.disabled = true; $("#del-status").textContent = "";
-  go.textContent = `Delete ${plural(d.count, "file")}`;
-  if (!d.capable) {
-    ack.disabled = true;
-    $("#del-status").textContent = "Your Stash version can't delete scenes from the API — update Stash to use this.";
-  } else ack.disabled = false;
-  ack.onchange = () => { go.disabled = !ack.checked; };
-  $("#btn-del-cancel").onclick = () => dlg.close();
-  go.onclick = async () => {
-    go.disabled = true; ack.disabled = true; $("#btn-del-cancel").disabled = true;
-    try {
+  showDeleteDialog({
+    title: ids ? "Delete selected rejects" : "Delete all rejected scenes",
+    summary: `<b>${plural(d.count, "scene")}</b> · <b>${fmtBytes(d.bytes)}</b> will be deleted from Stash, with their files.`,
+    note: "Each scene is re-checked right before deletion — anything no longer rated 1★ is skipped. " +
+      "Every deleted file is recorded in Settings → History. Peaks remembers what the rejects looked like, " +
+      "so keeper triage keeps learning from them.",
+    items: d.items, total: d.count, capable: d.capable, goLabel: `Delete ${plural(d.count, "file")}`,
+    run: async (status) => {
       const job = await api("/api/catalogue/delete", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scene_ids: d.ids, confirm: true }),   // exactly what was previewed
       });
       const j = await waitJob(job.id, (x) => {
         const p = x.progress || {};
-        $("#del-status").textContent = `deleting ${p.done ?? 0}/${p.total ?? d.count}…`;
+        status(`deleting ${p.done ?? 0}/${p.total ?? d.count}…`);
       });
       if (j.status === "error") throw new Error(j.error);
       const r = j.result;
       const extra = [r.refused.length ? `${r.refused.length} skipped (no longer 1★)` : "",
         r.failed.length ? `${r.failed.length} failed` : ""].filter(Boolean).join(" · ");
       toast(`Deleted ${plural(r.deleted, "scene")} · freed ${fmtBytes(r.freed_bytes)}${extra ? " · " + extra : ""}`, !!r.failed.length);
-      dlg.close();
       cat.sel.clear(); openCatalogue(); loadHistory();
-    } catch (e) { $("#del-status").textContent = e.message; toast(e.message, true); }
-    $("#btn-del-cancel").disabled = false;
-  };
-  dlg.showModal();
+    },
+  });
 }
+// --- duplicates: Stash's phash groups, judged on file quality -----------------
+const dupe = { on: false, data: null };
+function setDupeMode(on) {
+  dupe.on = on;
+  $("#dupe-box").hidden = !on;
+  $("#cat-list").hidden = on;
+  $("#btn-cat-more").hidden = on || cat.items.length >= cat.total;
+  $("#btn-cat-dupes")?.classList.toggle("on", on);
+  if (on) { cat.sel.clear(); renderCatBulk(); }
+}
+function dupeCopyHTML(r, g) {
+  const q = r.quality || {};
+  const rec = r.scene_id === g.keep;
+  const added = (r.created_at || "").slice(0, 10);
+  return `<div class="dupe-copy ${rec ? "rec" : ""}" data-sid="${esc(r.scene_id)}">
+    <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
+    <div class="dupe-facts">
+      <div>${rec ? '<span class="dupe-rec">★ Recommended</span> ' : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
+      <div class="dupe-q"><b>${esc(q.res || "?")}</b> · <b>${q.mbps != null ? q.mbps + " Mbps" : "? Mbps"}</b> · ${esc((q.codec || "").toUpperCase())} ${q.fps ? Math.round(q.fps) + "fps" : ""}</div>
+      <div class="dim">${r.size ? fmtBytes(r.size) : "size ?"} · ${r.duration ? fmt(r.duration) : "?"}${added ? " · added " + esc(added) : ""}</div>
+      <div class="dim dupe-path" title="${esc(r.path)}">${esc(r.path)}</div>
+    </div>
+    <button class="${rec ? "primary" : "ghost"} dupe-keep">Keep this, delete ${g.scenes.length === 2 ? "the other" : "the others"}</button>
+  </div>`;
+}
+function renderDupes() {
+  const d = dupe.data, box = $("#dupe-list");
+  if (!d || !d.groups) { box.innerHTML = ""; return; }
+  $("#dupe-status").textContent = `${plural(d.groups.length, "group")} · ${fmtBytes(d.reclaim)} reclaimable` +
+    (d.ignored ? ` · ${d.ignored} marked not duplicates` : "") + ` · checked ${d.checked_at}`;
+  box.innerHTML = d.groups.length ? d.groups.map((g, gi) => `<div class="dupe-group" data-g="${gi}">
+      <div class="dupe-head"><b>${esc(g.scenes[0].title)}</b>
+        <span class="dim">${g.scenes.length} copies · ${fmtBytes(g.reclaim)} to reclaim${g.best_grade ? " · graded " + esc(TIER_NAMES[g.best_grade]) : ""}</span>
+        <span class="grow"></span><button class="ghost dupe-ignore">Not duplicates</button></div>
+      <div class="dupe-copies">${g.scenes.map((r) => dupeCopyHTML(r, g)).join("")}</div></div>`).join("")
+    : '<p class="dim">No duplicates at this accuracy. 🎉</p>';
+}
+async function openDupes() {
+  setDupeMode(true);
+  try { const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); } } catch {}
+}
+$("#btn-cat-dupes")?.addEventListener("click", () => (dupe.on ? (setDupeMode(false), openCatalogue()) : openDupes()));
+$("#btn-dupe-scan")?.addEventListener("click", async () => {
+  const btn = $("#btn-dupe-scan"); btn.disabled = true;
+  try {
+    const qs = new URLSearchParams({ accuracy: $("#dupe-acc").value, duration_diff: $("#dupe-dur").value });
+    const job = await api("/api/duplicates/scan?" + qs, { method: "POST" });
+    $("#dupe-status").textContent = "Stash is comparing phashes — this can take a while on a big library…";
+    const j = await waitJob(job.id, null, 1500);
+    if (j.status === "error") throw new Error(j.error);
+    dupe.data = j.result; renderDupes();
+  } catch (e) { $("#dupe-status").textContent = ""; toast(e.message, true); }
+  btn.disabled = false;
+});
+$("#dupe-list")?.addEventListener("click", async (e) => {
+  const gEl = e.target.closest(".dupe-group"); if (!gEl) return;
+  const g = dupe.data.groups[+gEl.dataset.g];
+  if (e.target.closest(".dupe-ignore")) {
+    try {
+      await api("/api/duplicates/ignore", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scene_ids: g.scenes.map((r) => r.scene_id) }) });
+      dupe.data.groups = dupe.data.groups.filter((x) => x !== g); dupe.data.ignored = (dupe.data.ignored || 0) + 1;
+      renderDupes(); toast("Marked as not duplicates — this group won't show again");
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const copy = e.target.closest(".dupe-copy");
+  if (e.target.closest(".dupe-keep") && copy) {
+    const keep = g.scenes.find((r) => r.scene_id === copy.dataset.sid);
+    const others = g.scenes.filter((r) => r !== keep);
+    const order = ["upscale", "merveilleuse", "exceptionnelle", "legendaire"];
+    const carry = g.best_grade && order.indexOf(keep.tier) < order.indexOf(g.best_grade);
+    const bytes = others.reduce((a, r) => a + (+r.size || 0), 0);
+    showDeleteDialog({
+      title: "Keep one copy, delete the others",
+      summary: `Keeping <b>${esc(keep.quality.res || "?")} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
+        `Deleting <b>${plural(others.length, "copy", "copies")}</b> (${fmtBytes(bytes)}) with their files:` +
+        (carry ? `<br>The kept copy is graded <b>${esc(TIER_NAMES[g.best_grade])}</b> first (tier tag + organized), so the grade isn't lost.` : ""),
+      note: "Duplicate copies aren't counted as rejects. Every deleted file is recorded in Settings → History.",
+      items: others, total: others.length, goLabel: `Delete ${plural(others.length, "copy", "copies")}`,
+      run: async (status) => {
+        const job = await api("/api/duplicates/resolve", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keep: keep.scene_id, delete: others.map((r) => r.scene_id), confirm: true }),
+        });
+        const j = await waitJob(job.id, () => status("deleting…"));
+        if (j.status === "error") throw new Error(j.error);
+        const r = j.result;
+        toast(`Kept 1 · deleted ${r.deleted} · freed ${fmtBytes(r.freed_bytes)}${r.carried_grade ? " · grade carried over" : ""}`);
+        dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
+        dupe.data.reclaim -= g.reclaim;
+        renderDupes(); loadHistory();
+      },
+    });
+  }
+});
 $("#btn-cat-delete")?.addEventListener("click", () => openDeleteDialog(null));
 $("#btn-cat-delsel")?.addEventListener("click", () =>
   openDeleteDialog(cat.items.filter((r) => cat.sel.has(r.scene_id)).map((r) => r.scene_id)));

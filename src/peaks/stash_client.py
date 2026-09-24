@@ -122,6 +122,18 @@ query SchemaFields {
 }
 """
 
+_DUPLICATES_QUERY = """
+query Dupes($distance: Int, $duration_diff: Float) {
+  findDuplicateScenes(distance: $distance, duration_diff: $duration_diff) { id }
+}
+"""
+
+_DUPLICATES_QUERY_OLD = """
+query Dupes($distance: Int) {
+  findDuplicateScenes(distance: $distance) { id }
+}
+"""
+
 _SCENES_EXIST_QUERY = """
 query ScenesExist($ids: [ID!]) {
   findScenes(ids: $ids, filter: {per_page: -1}) {
@@ -400,6 +412,22 @@ class StashClient:
         "scenesDestroy", "findDuplicateScenes", "metadataScan",
         "metadataIdentify", "metadataAutoTag", "findJob", "configuration",
     )
+
+    # Stash's own duplicate-checker accuracy presets (phash hamming distance)
+    DUPLICATE_ACCURACY = {"exact": 0, "high": 4, "medium": 8, "low": 10}
+
+    def duplicate_groups(self, distance: int = 0, duration_diff: float = -1.0) -> list[list[str]]:
+        """Groups of scene ids Stash considers duplicates by perceptual hash
+        (its Duplicate Checker). `duration_diff` −1 = any duration; older Stash
+        versions without that argument are asked without it."""
+        try:
+            data = self.execute(_DUPLICATES_QUERY, {"distance": int(distance),
+                                                    "duration_diff": float(duration_diff)})
+        except StashError as exc:
+            if "duration_diff" not in str(exc):
+                raise
+            data = self.execute(_DUPLICATES_QUERY_OLD, {"distance": int(distance)})
+        return [[str(s["id"]) for s in group] for group in data["findDuplicateScenes"] if len(group) > 1]
 
     def existing_scene_ids(self, ids: list[str]) -> set[str]:
         """Of the given scene ids, the subset that still exist in Stash — so a

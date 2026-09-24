@@ -163,12 +163,20 @@ def _catalogue_models():
         scene_ids: list[str] | None = None      # None = every rejected scene
         confirm: bool = False
 
+    class DupeResolveIn(BaseModel):
+        keep: str
+        delete: list[str]
+        confirm: bool = False
+
+    class DupeIgnoreIn(BaseModel):
+        scene_ids: list[str]
+
     return (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
-            TierTagsIn, DeleteIn)
+            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn)
 
 
 (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
- TierTagsIn, DeleteIn) = _catalogue_models()
+ TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn) = _catalogue_models()
 
 
 def _login_model():
@@ -1022,6 +1030,46 @@ def create_app(cfg=None):
         if not ids:
             raise HTTPException(400, "no rejected scenes to delete")
         return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject"))
+
+    # --- duplicates -----------------------------------------------------------
+
+    @app.post("/api/duplicates/scan")
+    def duplicates_scan(accuracy: str = "exact", duration_diff: float = -1.0):
+        from ..stash_client import StashClient
+
+        if accuracy not in StashClient.DUPLICATE_ACCURACY:
+            raise HTTPException(400, f"unknown accuracy: {accuracy}")
+        caps = service.capabilities()
+        if not caps["ops"].get("findDuplicateScenes"):
+            raise HTTPException(501, caps["reason"] or "this Stash version has no duplicate finder")
+        try:
+            job = jobs.start("dupes", lambda j: service.find_duplicates(
+                j, accuracy=accuracy, duration_diff=duration_diff))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
+    @app.get("/api/duplicates")
+    def duplicates():
+        return service.cached_duplicates() or {"groups": None}
+
+    @app.post("/api/duplicates/resolve")
+    def duplicates_resolve(body: DupeResolveIn):
+        if not body.confirm:
+            raise HTTPException(409, "deleting removes the files from disk — confirm first")
+        if not [d for d in body.delete if d != body.keep]:
+            raise HTTPException(400, "nothing to delete")
+        caps = service.capabilities()
+        if not caps["ops"].get("scenesDestroy"):
+            raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
+        return _library_job(lambda j: service.resolve_duplicate(j, body.keep, body.delete, confirm=True))
+
+    @app.post("/api/duplicates/ignore")
+    def duplicates_ignore(body: DupeIgnoreIn):
+        try:
+            return {"ignored": service.ignore_duplicate_group(body.scene_ids)}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
 
     @app.get("/api/catalogue/tier-tags")
     def catalogue_tier_tags():

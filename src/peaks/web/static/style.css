@@ -469,3 +469,19 @@ a.ghost { font-size: 13px; }
 .dlg-ack { display: flex; gap: 8px; align-items: center; margin: 10px 0 4px; color: var(--bad); }
 button.danger:disabled { opacity: .45; cursor: default; background: transparent; color: var(--bad); }
 button.danger[hidden] { display: none; }
+
+/* --- duplicates --- */
+.dupe-list { display: flex; flex-direction: column; gap: 12px; }
+.dupe-group { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.dupe-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+.dupe-copies { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.dupe-copy { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel2); min-width: 0; }
+.dupe-copy.rec { border-color: var(--accent); }
+.dupe-copy .cat-cover { width: 100%; }
+.dupe-facts { font-size: 13px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dupe-q { font-variant-numeric: tabular-nums; }
+.dupe-rec { color: var(--accent); font-weight: 600; font-size: 12px; }
+.dupe-path { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#btn-cat-dupes.on { color: var(--accent); border-color: currentColor; }
+.cat-list[hidden], #dupe-box[hidden] { display: none; }

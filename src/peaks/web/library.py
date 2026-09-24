@@ -393,3 +393,139 @@ class LibraryMixin:
                 job.progress = {"done": min(i + CHUNK, len(ids)), "total": len(ids)}
         return {"deleted": len(deleted), "freed_bytes": freed, "refused": refused,
                 "failed": failed, "ids": deleted}
+
+    # --- duplicates (Stash's phash groups, judged on file quality) --------------
+
+    def _dupe_ignore_path(self) -> Path:
+        return self._state_dir() / "duplicates_ignored.json"
+
+    def _dupe_ignored(self) -> set[frozenset]:
+        import json
+
+        try:
+            return {frozenset(map(str, g)) for g in json.loads(self._dupe_ignore_path().read_text())}
+        except (OSError, ValueError):
+            return set()
+
+    def ignore_duplicate_group(self, scene_ids: list[str]) -> int:
+        """'Not duplicates': this exact group stops showing (a new copy joining
+        it makes it a different group, which shows again)."""
+        import json
+
+        ids = frozenset(str(s) for s in scene_ids)
+        if len(ids) < 2:
+            raise ValueError("a duplicate group needs at least two scenes")
+        groups = self._dupe_ignored() | {ids}
+        p = self._dupe_ignore_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(sorted(sorted(g) for g in groups)))
+        cached = getattr(self, "_dupe_cache", None)
+        if cached:
+            cached["groups"] = [g for g in cached["groups"]
+                                if frozenset(s["scene_id"] for s in g["scenes"]) != ids]
+        return len(groups)
+
+    @staticmethod
+    def dupe_keeper(rows: list[dict]) -> str:
+        """The copy to keep: highest resolution, then bitrate, then file size;
+        an existing keeper grade breaks remaining ties."""
+        from ..tiers import RES_CLASSES
+
+        rank = {c: i for i, c in enumerate(RES_CLASSES)}
+        grade = {"legendaire": 4, "exceptionnelle": 3, "merveilleuse": 2, "upscale": 1}
+        return max(rows, key=lambda r: (rank.get(r["quality"]["res"] or "", -1),
+                                         r["quality"]["mbps"] or 0, int(r.get("size") or 0),
+                                         grade.get(r["tier"], 0)))["scene_id"]
+
+    @staticmethod
+    def dupe_best_grade(rows: list[dict]) -> str | None:
+        for t in ("legendaire", "exceptionnelle", "merveilleuse", "upscale"):
+            if any(r["tier"] == t for r in rows):
+                return t
+        return None
+
+    def find_duplicates(self, job=None, accuracy: str = "exact", duration_diff: float = -1.0,
+                        only_ids: set[str] | None = None) -> dict:
+        """Ask Stash for its phash duplicate groups and lay each out with the
+        facts to judge them (resolution, bitrate, size, tier, path, added) plus a
+        recommended keeper. `only_ids` keeps groups containing one of those
+        scenes (the ingest check). The result is cached for the Catalogue."""
+        import time as _t
+
+        from ..stash_client import StashClient
+
+        self.require_op("findDuplicateScenes")
+        distance = StashClient.DUPLICATE_ACCURACY.get(accuracy)
+        if distance is None:
+            raise ValueError(f"unknown accuracy: {accuracy}")
+        # the phash comparison can take minutes on a big library at low accuracy
+        client = self.client()
+        client.timeout = 900
+        if job is not None:
+            job.log(f"asking Stash for duplicates ({accuracy}, duration ±{duration_diff}s)…")
+        groups = client.duplicate_groups(distance, duration_diff)
+        ignored = self._dupe_ignored()
+        groups = [g for g in groups if frozenset(g) not in ignored]
+        if only_ids is not None:
+            groups = [g for g in groups if set(g) & {str(i) for i in only_ids}]
+        ids = [s for g in groups for s in g]
+        known = {r["scene_id"]: r for r in self._catalogue_all()}
+        missing = [s for s in ids if s not in known]
+        if missing:                       # e.g. copies outside the library folder
+            for sid, m in client.scene_details(missing).items():
+                known[sid] = self._cat_row(sid, m)
+        out = []
+        for g in groups:
+            rows = [known[s] for s in g if s in known]
+            if len(rows) < 2:
+                continue
+            keep = self.dupe_keeper(rows)
+            size = {r["scene_id"]: int(r.get("size") or 0) for r in rows}
+            out.append({"scenes": rows, "keep": keep, "best_grade": self.dupe_best_grade(rows),
+                        "reclaim": sum(size.values()) - size[keep]})
+        out.sort(key=lambda g: -g["reclaim"])
+        result = {"groups": out, "accuracy": accuracy, "duration_diff": duration_diff,
+                  "checked_at": _t.strftime("%Y-%m-%d %H:%M"), "ignored": len(ignored),
+                  "reclaim": sum(g["reclaim"] for g in out)}
+        if only_ids is None:
+            self._dupe_cache = result
+        return result
+
+    def cached_duplicates(self) -> dict | None:
+        return getattr(self, "_dupe_cache", None)
+
+    def resolve_duplicate(self, job, keep_id: str, delete_ids: list[str], confirm: bool = False) -> dict:
+        """Keep one copy, delete the others (files included). If any copy
+        carries a better keeper grade than the kept one, that grade moves to the
+        kept copy FIRST (normal grade path → tier tag + organized), so a grade
+        is never lost with a deleted copy. Deleted copies aren't rejects."""
+        from ..tiers import tier_of
+
+        if not confirm:
+            raise PermissionError("deleting removes the files from disk — confirm first")
+        keep_id = str(keep_id)
+        delete_ids = [str(s) for s in delete_ids if str(s) != keep_id]
+        if not delete_ids:
+            raise ValueError("nothing to delete")
+        self.require_op("scenesDestroy")
+        fresh = self.client().scene_details([keep_id, *delete_ids])
+        if keep_id not in fresh:
+            raise LookupError(f"the copy to keep (scene {keep_id}) is no longer in Stash")
+        rows = [self._cat_row(s, m) for s, m in fresh.items()]
+        best = self.dupe_best_grade(rows)
+        order = ["upscale", "merveilleuse", "exceptionnelle", "legendaire"]
+        kept_tier = tier_of(fresh[keep_id].get("rating100"), fresh[keep_id].get("o_counter"))
+        carried = None
+        if best and (kept_tier not in order or order.index(kept_tier) < order.index(best)):
+            self.grade_scene(keep_id, best, source="duplicate")
+            carried = best
+        res = self.delete_scenes(job, delete_ids, confirm=True, reason="duplicate",
+                                 keep_ids={keep_id})
+        keep_row = self._cat_update_row(keep_id)
+        self._log_scene("duplicate", keep_row, detail=(
+            f"kept this copy, deleted {res['deleted']}" + (f", carried grade {best}" if carried else "")))
+        cached = getattr(self, "_dupe_cache", None)
+        if cached:
+            cached["groups"] = [g for g in cached["groups"]
+                                if keep_id not in {s["scene_id"] for s in g["scenes"]}]
+        return {**res, "kept": keep_id, "carried_grade": carried}

@@ -96,3 +96,8 @@ class FakeStash:
         for sid in scene_ids:
             self.s.pop(str(sid), None)
         return len(scene_ids)
+
+    def duplicate_groups(self, distance=0, duration_diff=-1.0):
+        self.calls.append(("dupes", distance, duration_diff))
+        return [[s for s in g if s in self.s] for g in getattr(self, "dupes", [])
+                if len([s for s in g if s in self.s]) > 1]

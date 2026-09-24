@@ -454,6 +454,7 @@
         <span class="dim">Triage:</span>
         <span id="cat-views" class="cat-chips"></span>
         <button id="btn-cat-train" class="ghost" title="Learn your tiers from the scenes you've graded (the picture + file quality)">Train on my grades</button>
+        <button id="btn-cat-dupes" class="cat-chip" title="Stash's duplicate checker (phash), judged on file quality">⧉ Duplicates</button>
         <span id="cat-model" class="dim"></span>
       </div>
       <div class="row">
@@ -484,6 +485,27 @@
         <button id="btn-cat-reel" class="ghost" disabled title="Export one video of the selected tier's best moments (pick a tier chip first)">⬇ Reel</button>
         <span id="cat-status" class="dim"></span>
       </div>
+    </div>
+    <div id="dupe-box" hidden>
+      <div class="panel">
+        <h2>Duplicates</h2>
+        <p class="dim">Groups found by Stash's duplicate checker (perceptual hash), laid out by what
+          you care about — resolution, bitrate, size. The <b>recommended</b> copy is the highest
+          resolution, then bitrate, then size. <b>Keep this</b> deletes the other copies with their
+          files; if one of them carries a better grade, that grade (and its tier tag) moves to the
+          copy you keep first.</p>
+        <div class="row">
+          <label>Accuracy <select id="dupe-acc">
+            <option value="exact">Exact</option><option value="high">High</option>
+            <option value="medium">Medium</option><option value="low">Low</option></select></label>
+          <label>Duration <select id="dupe-dur">
+            <option value="-1">any</option><option value="0">equal</option>
+            <option value="1">±1 s</option><option value="5">±5 s</option><option value="10">±10 s</option></select></label>
+          <button id="btn-dupe-scan" class="primary">Find duplicates</button>
+          <span id="dupe-status" class="dim"></span>
+        </div>
+      </div>
+      <div id="dupe-list" class="dupe-list"></div>
     </div>
     <div id="cat-list" class="cat-list"></div>
     <div class="row cat-more"><button id="btn-cat-more" class="ghost" hidden>Load more</button></div>
@@ -554,9 +576,7 @@
     <h2 id="del-title">Delete rejected scenes</h2>
     <p id="del-summary"></p>
     <div id="del-list" class="dlg-list"></div>
-    <p class="dim">Each scene is re-checked right before deletion — anything no longer rated 1★
-      is skipped. Every deleted file is recorded in Settings → History. Peaks remembers what the
-      rejects looked like, so keeper triage keeps learning from them.</p>
+    <p id="del-note" class="dim"></p>
     <label class="check dlg-ack"><input type="checkbox" id="del-ack" /> Delete the video files from disk too — this can't be undone</label>
     <div class="row">
       <button id="btn-del-go" class="danger" disabled>Delete</button>
