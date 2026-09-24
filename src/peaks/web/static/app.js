@@ -1995,6 +1995,13 @@ function renderCatChips() {
   const chip = (t, label, n) =>
     `<button class="cat-chip ${!cat.view && cat.tier === t ? "on" : ""} ${t ? "tier-" + t : ""}" data-t="${t}">${esc(label)} <span class="n">${(n || 0).toLocaleString()}</span></button>`;
   $("#cat-chips").innerHTML = chip("", "All", all) + CAT_CHIPS.map((t) => chip(t, TIER_NAMES[t], cat.counts[t])).join("");
+  // ▶ Board / ⬇ Reel act on one keeper tier (the selected chip)
+  const tierOk = !cat.view && ["legendaire", "exceptionnelle", "merveilleuse", "upscale"].includes(cat.tier);
+  for (const [id, verb] of [["#btn-cat-board", "▶ Board"], ["#btn-cat-reel", "⬇ Reel"]]) {
+    const b = $(id); if (!b) continue;
+    b.disabled = !tierOk;
+    b.textContent = tierOk ? `${verb}: ${TIER_NAMES[cat.tier]}` : verb;
+  }
 }
 function renderCatTriage() {
   const m = cat.model || {}, rep = m.report;
@@ -2121,6 +2128,23 @@ $("#cat-views")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-view"); if (!b || b.disabled) return;
   cat.view = cat.view === b.dataset.v ? "" : b.dataset.v;
   openCatalogue();
+});
+$("#btn-cat-board")?.addEventListener("click", () => {
+  if (!cat.tier) return;
+  window.open("/megaboard/?src=" + encodeURIComponent("tier:" + cat.tier), "_blank");
+});
+$("#btn-cat-reel")?.addEventListener("click", async () => {
+  if (!cat.tier) return;
+  const name = TIER_NAMES[cat.tier], count = 300;
+  if (!confirm(`Export the best ${count} moments across your ${name} scenes as one video?\n\n` +
+    `Moments are picked for variety across scenes, each clip held until the picture changes, ` +
+    `and re-encoded to your Export-quality setting — it can take a while. ` +
+    `The file appears under Megaboard → Exported videos.`)) return;
+  try {
+    const j = await api(`/api/catalogue/reel?tiers=${encodeURIComponent(cat.tier)}&count=${count}`, { method: "POST" });
+    toast(`Building the ${name} reel… (Megaboard → Exported videos when ready)`);
+    if (j && j.id) pollPerformerReel(j.id, name);
+  } catch (e) { toast(e.message, true); }
 });
 $("#btn-cat-train")?.addEventListener("click", async () => {
   const btn = $("#btn-cat-train");

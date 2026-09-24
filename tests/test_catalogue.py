@@ -323,3 +323,43 @@ def test_triage_refuses_without_enough_grades(tmp_path, stash, svc):
     pytest.importorskip("sklearn")
     rep = svc.train_tier_model()
     assert rep["trained"] is False and "two or more tiers" in rep["reason"]
+
+
+# --- tier board & reels ---------------------------------------------------------------
+
+def test_tier_board_and_reel_use_only_the_chosen_tiers(tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    legend = {sid for sid, v in stash.s.items() if v["rating100"] == 100 and v["o_counter"] == 18}
+    b = svc.tier_board("legendaire", per_scene=2)
+    assert b["scenes"] == 12 and b["label"] == "Légendaire"
+    assert b["hits"] and {str(h.scene_id) for h in b["hits"]} <= legend
+    both = svc.tier_board("merveilleuse,legendaire")
+    assert both["scenes"] == 24 and both["label"] == "Merveilleuse + Légendaire"
+    with pytest.raises(ValueError):
+        svc.tier_board("rejected")                   # boards/reels are for keeper tiers
+
+    captured = {}
+    monkeypatch.setattr(svc_mod.Service, "_build_reel",
+                        lambda self, specs, out, job=None, log=print:
+                        captured.update(specs=specs, out=str(out)) or {"clips": len(specs)})
+    monkeypatch.setattr(svc_mod.Service, "clip_span",
+                        lambda self, key, t, model=None: (float(t), float(t) + 10))
+    for sid in stash.s:                              # the reel needs file paths
+        stash.s[sid]["path"] = f"/data/{sid}.mp4"
+    res = svc.export_tiers(tiers="legendaire", count=20)
+    assert res["tiers"] == "Légendaire" and res["clips"] == len(captured["specs"]) > 0
+    assert {str(s["scene_id"]) for s in captured["specs"]} <= legend
+    assert "reel-Légendaire-" in captured["out"]
+
+
+def test_tier_api_validation(svc, monkeypatch):
+    import peaks.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    client = TestClient(app_mod.create_app(svc.cfg))
+    assert client.get("/api/board/tier", params={"tiers": "bogus"}).status_code == 400
+    assert client.post("/api/catalogue/reel", params={"tiers": "rejected"}).status_code == 400
+    src = client.get("/api/board/sources").json()
+    assert [t["key"] for t in src["tiers"]][0] == "legendaire"

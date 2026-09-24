@@ -1114,6 +1114,18 @@ async function loadSource(src, opts = {}) {
       if (!State.apexes.length) return showError("No moments for this statistic yet.");
       pickApex = makeQueuePicker(State.apexes);
       document.getElementById("status").textContent = "📈 " + (boardStat?.label || boardStat?.metric || "stat");
+    } else if (src.startsWith("tier:")) {
+      // the best moments of every scene in the chosen tiers (5★ + O-count grades)
+      State.searchMode = true;
+      const tiers = src.slice(5);
+      let d;
+      try { d = await api("/api/board/tier?tiers=" + encodeURIComponent(tiers)); }
+      catch (e) { return showError("Couldn't load this tier.\n\n(" + e.message + ")"); }
+      State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+      if (!State.apexes.length)
+        return showError(`No embedded moments in ${d.label || "this tier"} yet.\n\nGrade some scenes in the Catalogue first.`);
+      pickApex = makeQueuePicker(State.apexes);   // every clip before repeating
+      document.getElementById("status").textContent = `🏆 ${d.label} · ${d.scenes} scenes`;
     } else if (src === "foryou") {
       State.searchMode = true;
       fyReset();
@@ -1153,6 +1165,10 @@ async function initSources(initial) {
     opts.push(`<option value="tag:${esc(s.tag)}">Saved moments</option>`);
     for (const c of s.collections || [])
       opts.push(`<option value="collection:${esc(c.safe)}">Playlist: ${esc(c.name)} (${c.count})</option>`);
+    for (const t of s.tiers || [])
+      opts.push(`<option value="tier:${esc(t.key)}">Tier: ${esc(t.label)}</option>`);
+    if (initial && initial.startsWith("tier:") && !(s.tiers || []).some((t) => "tier:" + t.key === initial))
+      opts.push(`<option value="${esc(initial)}">Tier: ${esc(initial.slice(5))}</option>`);
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);
@@ -1205,6 +1221,7 @@ async function main() {
     boardStat = { metric, id: params.get("id"), label: LABELS[metric] || metric };
   }
   else if (params.get("src") === "foryou") initial = "foryou";
+  else if ((params.get("src") || "").startsWith("tier:")) initial = params.get("src");
   else if (params.get("collection")) initial = "collection:" + params.get("collection");
   const sel = await initSources(initial);
   if (initial) sel.value = initial;

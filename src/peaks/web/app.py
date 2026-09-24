@@ -991,6 +991,30 @@ def create_app(cfg=None):
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
+    @app.get("/api/board/tier")
+    def board_tier(tiers: str, count: int = Query(3000, ge=1, le=10000),
+                   per_scene: int = Query(4, ge=1, le=50)):
+        """Megaboard source: the best moments of every scene in the chosen tiers
+        (comma-separated keys, e.g. 'exceptionnelle,legendaire')."""
+        try:
+            r = service.tier_board(tiers, count=count, per_scene=per_scene)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+        return {"items": _hit_payload(service, r["hits"]), "scenes": r["scenes"], "label": r["label"]}
+
+    @app.post("/api/catalogue/reel")
+    def catalogue_reel(tiers: str, count: int = Query(300, ge=1, le=2000)):
+        try:
+            service.tier_label(tiers)            # validate before starting a job
+            job = jobs.start("reel", lambda j: service.export_tiers(j, tiers=tiers, count=count))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
     @app.post("/api/performer/reel")
     def performer_reel(id: str | None = None, name: str | None = None, count: int = Query(300)):
         try:

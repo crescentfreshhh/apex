@@ -833,12 +833,7 @@ class Service:
         smart, content-aware clip (`clip_span`: hold from the moment until the frame
         drifts), and clips play in the MMR order — dissimilar moments interleaved
         across the whole reel."""
-        import os
-        import time as _t
-        from pathlib import Path
-
         log = (job.log if job else print)
-        model = self._model_name()
         # Generous pool: up to 40 moments/scene so rich scenes aren't pre-truncated
         # (like the endless channel), best-first by taste, capped so MMR stays fast.
         pool_count = max(count * 5, 1500)
@@ -849,6 +844,21 @@ class Service:
         if not pool:
             log(f"no moments found for {pname}")
             return {"clips": 0, "performer": pname}
+        res = self._export_pool(job, pool, count, label=f"{pname}-best",
+                                what=f"performer reel: {pname}")
+        res["performer"] = pname
+        return res
+
+    def _export_pool(self, job, pool: list, count: int, *, label: str, what: str) -> dict:
+        """Shared reel tail for performer and tier reels: MMR-select `count`
+        diverse moments from a best-first `pool`, cut each to its smart clip span,
+        and encode via `_build_reel` (export-quality settings apply)."""
+        import os
+        import time as _t
+        from pathlib import Path
+
+        log = (job.log if job else print)
+        model = self._model_name()
         # MMR select+order: quality-proportional, de-duplicated, interleaved for
         # variety (order_all so short pools still get reordered, not left in score
         # order). Honors the configured feed diversity, floored so an explicitly
@@ -875,12 +885,65 @@ class Service:
 
         exports = Path(os.environ.get("PEAKS_EXPORT_DIR", "/config/exports"))
         exports.mkdir(parents=True, exist_ok=True)
-        fname = _safe_reel_name(f"reel-{pname}-best-{_t.strftime('%Y%m%d-%H%M%S')}") + ".mp4"
-        log(f"performer reel: {pname} — {len(specs)} diverse moments (target {count}, "
+        fname = _safe_reel_name(f"reel-{label}-{_t.strftime('%Y%m%d-%H%M%S')}") + ".mp4"
+        log(f"{what} — {len(specs)} diverse moments (target {count}, "
             f"from a pool of {len(pool)})")
         res = self._build_reel(specs, exports / fname, job=job, log=log)
         res["name"] = fname
-        res["performer"] = pname
+        return res
+
+    # --- tiers on the board / in reels ---------------------------------------------
+
+    def _moment_pool_for_scenes(self, scene_ids: list[str], per_scene: int, count: int) -> list:
+        """Best-first moments across an arbitrary scene set — taste-ranked when a
+        taste exists, else a time-spread sample (same rule as performer_best)."""
+        model = self._model_name()
+        try:
+            qvec, _, _ = self._taste_centroid(model)
+        except Exception:  # noqa: BLE001 — no taste / Stash markers unreachable
+            qvec = None
+        if qvec is None:
+            hits = self._moments_for_scenes(scene_ids, per_scene=per_scene)
+        else:
+            hits = self._ranked_moments_for_scenes(scene_ids, qvec, per_scene=per_scene, model=model)
+        return hits[:count]
+
+    @staticmethod
+    def _parse_tiers(tiers) -> list[str]:
+        from ..tiers import KEEPER_TIERS
+
+        want = [t for t in (tiers.split(",") if isinstance(tiers, str) else (tiers or [])) if t]
+        bad = [t for t in want if t not in KEEPER_TIERS]
+        if bad or not want:
+            raise ValueError(f"tiers must be among {', '.join(KEEPER_TIERS)}")
+        return want
+
+    def tier_label(self, tiers) -> str:
+        names = self.tier_display_names()
+        return " + ".join(names[t] for t in self._parse_tiers(tiers))
+
+    def tier_scene_ids(self, tiers) -> list[str]:
+        want = set(self._parse_tiers(tiers))
+        return [r["scene_id"] for r in self._catalogue_all() if r["tier"] in want]
+
+    def tier_board(self, tiers, count: int = 3000, per_scene: int = 4) -> dict:
+        """Megaboard supply for chosen tiers: each tier scene's best moments."""
+        sids = self.tier_scene_ids(tiers)
+        return {"hits": self._moment_pool_for_scenes(sids, per_scene, count),
+                "scenes": len(sids), "label": self.tier_label(tiers)}
+
+    def export_tiers(self, job=None, tiers="legendaire", count: int = 300) -> dict:
+        """One reel of the best moments across every scene in the chosen tiers."""
+        log = (job.log if job else print)
+        label = self.tier_label(tiers)
+        sids = self.tier_scene_ids(tiers)
+        pool = self._moment_pool_for_scenes(sids, per_scene=40, count=max(count * 5, 1500))
+        if not pool:
+            log(f"no embedded moments in {label}")
+            return {"clips": 0, "tiers": label}
+        res = self._export_pool(job, pool, count, label=label.replace(" + ", "+"),
+                                what=f"tier reel: {label} ({len(sids)} scenes)")
+        res["tiers"] = label
         return res
 
     # --- reel builder: probe → stream-copy if uniform, else normalize --------
@@ -1271,7 +1334,14 @@ class Service:
         return build_playlist(self.client(), [tag or self.cfg.markers.tag_name], limit=None)
 
     def board_sources(self) -> dict:
-        return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections()}
+        names = self.tier_display_names()
+        tiers = [   # always offered (no Stash call); the board loads the scenes on pick
+            {"key": "legendaire", "label": names["legendaire"]},
+            {"key": "exceptionnelle,legendaire", "label": f"{names['exceptionnelle']} +"},
+            {"key": "merveilleuse,exceptionnelle,legendaire", "label": f"{names['merveilleuse']} +"},
+        ]
+        return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections(),
+                "tiers": tiers}
 
     def run_playlist(self, job=None, tags=None, log=None) -> dict:
         """(Re)build the megaboard playlist from Stash markers → the mounted
