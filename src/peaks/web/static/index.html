@@ -172,6 +172,20 @@
       </div>
     </div>
 
+    <div class="panel" id="ingest-panel">
+      <h2>Ingest new files</h2>
+      <p class="dim">Your Stash routine in one click: <b>scan</b> (phashes always on) → <b>identify</b>
+        → <b>auto tag</b>, each with the defaults saved on Stash's Tasks page, then Peaks
+        <b>embeds</b> just the new scenes and checks them for <b>duplicates</b>. Identify and
+        auto tag only touch the new scenes. New scenes land in Catalogue → <em>New</em>.</p>
+      <div class="row">
+        <button id="btn-ingest" class="primary">Ingest new files</button>
+        <button id="btn-ingest-stop" class="ghost" hidden>Stop</button>
+        <span id="ingest-status" class="dim"></span>
+      </div>
+      <pre id="ingest-log" class="log" hidden></pre>
+    </div>
+
     <div class="panel">
       <h2>Embed</h2>
       <p class="dim">Sample &amp; embed scenes into the cache. Skips anything already done.</p>
@@ -454,6 +468,8 @@
         <span class="dim">Triage:</span>
         <span id="cat-views" class="cat-chips"></span>
         <button id="btn-cat-train" class="ghost" title="Learn your tiers from the scenes you've graded (the picture + file quality)">Train on my grades</button>
+        <button id="btn-cat-new" class="cat-chip" hidden title="Scenes added by the last ingest">✦ New</button>
+        <button id="btn-cat-ingest" class="cat-chip" title="Scan → identify → auto tag in Stash, then embed + duplicate-check the new scenes">⤓ Ingest</button>
         <button id="btn-cat-dupes" class="cat-chip" title="Stash's duplicate checker (phash), judged on file quality">⧉ Duplicates</button>
         <span id="cat-model" class="dim"></span>
       </div>

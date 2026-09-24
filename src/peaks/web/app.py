@@ -951,12 +951,12 @@ def create_app(cfg=None):
         tier: str | None = None, res: str | None = None, min_mbps: float | None = None,
         q: str | None = None, sort: str = "date", offset: int = 0,
         limit: int = Query(60, ge=1, le=500), refresh: bool = False,
-        view: str | None = None,
+        view: str | None = None, new: bool = False,
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
-                                     view=view)
+                                     view=view, new=new)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, f"Stash unreachable: {exc}")
 
@@ -1030,6 +1030,26 @@ def create_app(cfg=None):
         if not ids:
             raise HTTPException(400, "no rejected scenes to delete")
         return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject"))
+
+    # --- ingest: scan → identify → auto tag (Stash) → embed → duplicates --------
+
+    @app.post("/api/ingest")
+    def ingest():
+        caps = service.capabilities()
+        missing = [op for op in ("metadataScan", "findJob") if not caps["ops"].get(op)]
+        if missing:
+            raise HTTPException(501, caps["reason"] or f"this Stash version lacks {', '.join(missing)}")
+        try:
+            job = jobs.start("ingest", lambda j: service.run_ingest(
+                j, embed_busy=lambda: jobs.running("embed") is not None))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
+
+    @app.get("/api/ingest")
+    def ingest_status():
+        running = jobs.running("ingest")
+        return {"last": service.last_ingest(), "running": running.as_dict() if running else None}
 
     # --- duplicates -----------------------------------------------------------
 

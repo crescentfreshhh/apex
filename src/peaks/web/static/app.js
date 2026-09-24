@@ -155,6 +155,7 @@ const JOB_PANELS = {
   fix: { btn: "#btn-fix", status: "#fix-status", log: "#fix-log", stop: "#btn-fix-stop" },
   reel: { btn: "#btn-reel", status: "#reel-status", log: "#reel-log", stop: "#btn-reel-stop" },
   playlist: { btn: "#btn-playlist", status: "#playlist-status", log: "#playlist-log" },
+  ingest: { btn: "#btn-ingest", status: "#ingest-status", log: "#ingest-log", stop: "#btn-ingest-stop" },
 };
 const tracked = new Set(); // job ids we're already polling in this tab
 function wireStop(stopBtn, statusEl, id) {
@@ -2148,7 +2149,8 @@ $("#btn-exp-refresh")?.addEventListener("click", () => openExperimental());
 const CAT_PAGE = 60;
 const CAT_CHIPS = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
 const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, views: {}, model: null,
-              focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false };
+              focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false,
+              isNew: false };
 const CAT_VIEWS = [
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
@@ -2164,6 +2166,7 @@ function catParams(offset, refresh) {
   const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
+  if (cat.isNew) qs.set("new", "true");
   const q = $("#cat-q").value.trim(); if (q) qs.set("q", q);
   const res = $("#cat-res").value; if (res) qs.set("res", res);
   const mb = $("#cat-mbps").value; if (mb !== "") qs.set("min_mbps", mb);
@@ -2181,6 +2184,13 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     cat.items = append ? cat.items.concat(d.items) : d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
+    const nb = $("#btn-cat-new"), ing = d.ingest || {};
+    if (nb) {
+      nb.hidden = !ing.new && !cat.isNew;
+      nb.classList.toggle("on", cat.isNew);
+      nb.innerHTML = `✦ New <span class="n">${(ing.new || 0).toLocaleString()}</span>`;
+      nb.title = ing.finished ? `Scenes added by the last ingest (${ing.finished.replace("T", " ").slice(0, 16)})` : "Scenes added by the last ingest";
+    }
     cat.loaded = true;
     if (!append) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
     renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk();
@@ -2253,7 +2263,8 @@ function catCardHTML(r, i) {
     ? `<div class="cat-pred">Looks like <span class="tier tier-${p.tier === "reject" ? "rejected" : p.tier}">${esc(className(p.tier))}</span> ${Math.round(p.conf * 100)}%` +
       (p.keeper != null ? ` · keeper ${Math.round(p.keeper * 100)}%` : "") + `</div>`
     : "";
-  const flag = r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "";
+  const flag = (r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "") +
+    (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate — see ⧉ Duplicates</div>` : "");
   const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${esc(r.suggest.why)}</div>` : "";
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
@@ -2344,6 +2355,7 @@ function watchCat(i, j = null) {
 $("#cat-chips")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-chip"); if (!b) return;
   setDupeMode(false);
+  cat.isNew = false;
   cat.tier = b.dataset.t; cat.view = ""; openCatalogue();
 });
 $("#cat-views")?.addEventListener("click", (e) => {
@@ -2575,6 +2587,40 @@ async function openDupes() {
   setDupeMode(true);
   try { const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); } } catch {}
 }
+$("#btn-cat-new")?.addEventListener("click", () => {
+  setDupeMode(false);
+  cat.isNew = !cat.isNew;
+  if (cat.isNew) { cat.tier = ""; cat.view = ""; }
+  openCatalogue();
+});
+async function startIngest() {
+  try {
+    const job = await api("/api/ingest", { method: "POST" });
+    tracked.add(job.id);
+    const btn = $("#btn-ingest"), statusEl = $("#ingest-status"), logEl = $("#ingest-log"), stop = $("#btn-ingest-stop");
+    if (btn) { btn.disabled = true; logEl.hidden = false; wireStop(stop, statusEl, job.id); }
+    const cb = $("#btn-cat-ingest"); if (cb) cb.disabled = true;
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {}, line = (x.log || []).slice(-1)[0] || "starting…";
+      $("#cat-status").textContent = "Ingest: " + line;
+      if (statusEl) statusEl.textContent = `${x.status}${p.stage && p.stage !== "done" ? " · " + p.stage : ""} · ${x.elapsed}s`;
+      if (logEl) { logEl.textContent = (x.log || []).join("\n"); logEl.scrollTop = logEl.scrollHeight; }
+    }, 1500);
+    if (btn) { btn.disabled = false; if (stop) stop.hidden = true; }
+    if (cb) cb.disabled = false;
+    if (j.status === "error") { toast("Ingest failed: " + j.error, true); $("#cat-status").textContent = ""; return; }
+    if (j.status === "cancelled") { toast("Ingest stopped."); return; }
+    const r = j.result;
+    toast(`Ingest done: ${plural(r.new, "new scene")}${r.duplicates ? ` · ${plural(r.duplicates, "duplicate group")}` : ""}`);
+    loadHistory();
+    if (r.new) { setDupeMode(false); cat.isNew = true; cat.tier = ""; cat.view = ""; }
+    if (cat.loaded || r.new) openCatalogue({ refresh: true });
+  } catch (e) { toast(e.message, true); }
+}
+$("#btn-ingest")?.addEventListener("click", startIngest);
+$("#btn-cat-ingest")?.addEventListener("click", () => {
+  if (confirm("Ingest new files?\n\nStash scans the library (phashes on), identifies and auto-tags the new scenes with your saved task defaults, then Peaks embeds them and checks for duplicates.")) startIngest();
+});
 $("#btn-cat-dupes")?.addEventListener("click", () => (dupe.on ? (setDupeMode(false), openCatalogue()) : openDupes()));
 $("#btn-dupe-scan")?.addEventListener("click", async () => {
   const btn = $("#btn-dupe-scan"); btn.disabled = true;

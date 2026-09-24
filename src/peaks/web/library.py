@@ -462,7 +462,8 @@ class LibraryMixin:
         client = self.client()
         client.timeout = 900
         if job is not None:
-            job.log(f"asking Stash for duplicates ({accuracy}, duration ±{duration_diff}s)…")
+            dur = "any duration" if duration_diff < 0 else f"duration ±{duration_diff:g}s"
+            job.log(f"asking Stash for duplicates ({accuracy}, {dur})…")
         groups = client.duplicate_groups(distance, duration_diff)
         ignored = self._dupe_ignored()
         groups = [g for g in groups if frozenset(g) not in ignored]
@@ -529,3 +530,165 @@ class LibraryMixin:
             cached["groups"] = [g for g in cached["groups"]
                                 if keep_id not in {s["scene_id"] for s in g["scenes"]}]
         return {**res, "kept": keep_id, "carried_grade": carried}
+
+    # --- ingest: new files end to end (the user's Stash routine, then Peaks) ----
+    # scan (phashes on) → identify → auto tag, each with Stash's saved task
+    # defaults and waited on; then Peaks embeds the new scenes and checks them
+    # for duplicates. Identify and auto tag are limited to the new scenes.
+
+    INGEST_POLL = 2.0
+    _DONE = {"FINISHED", "CANCELLED", "FAILED"}
+
+    def _ingest_path(self) -> Path:
+        return self._state_dir() / "ingest.json"
+
+    def last_ingest(self) -> dict:
+        import json
+
+        try:
+            return json.loads(self._ingest_path().read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _wait_stash_job(self, client, stash_job: str, label: str, job) -> dict:
+        """Poll a Stash job until it ends. Stopping the Peaks job stops it."""
+        last = None
+        while True:
+            if job is not None and job.cancelled:
+                try:
+                    client.stop_job(stash_job)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise InterruptedError(f"{label} stopped")
+            info = client.find_job(stash_job)
+            if info is None:                       # finished and already forgotten
+                return {"status": "FINISHED"}
+            status = info.get("status")
+            if job is not None:
+                pct = info.get("progress")
+                msg = f"{label}: {status.lower() if status else '?'}" + (
+                    f" {round(100 * pct)}%" if isinstance(pct, (int, float)) and pct >= 0 else "")
+                if msg != last:
+                    job.log(msg)
+                    last = msg
+                job.progress = {"stage": label, "pct": pct}
+            if status in self._DONE:
+                if status != "FINISHED":
+                    raise RuntimeError(f"{label} {status.lower()}: {info.get('error') or 'see Stash logs'}")
+                return info
+            time.sleep(self.INGEST_POLL)
+
+    def run_ingest(self, job=None, embed_busy=None) -> dict:
+        import json
+
+        log = job.log if job is not None else print
+        for op in ("metadataScan", "findJob"):
+            self.require_op(op)
+        client = self.client()
+        client.timeout = 120
+        started = time.strftime("%Y-%m-%dT%H:%M:%S")
+        stages: dict[str, str] = {}
+        before = client.all_scene_ids()
+        try:
+            defaults = client.config_defaults()
+        except Exception as exc:  # noqa: BLE001
+            log(f"couldn't read Stash's saved task defaults ({exc}) — using Stash's own defaults")
+            defaults = {"scan": None, "identify": None, "autoTag": None}
+
+        # 1. scan — saved defaults, phashes always on (duplicate detection needs them)
+        scan_in = client.fit_input(defaults.get("scan") or {}, "ScanMetadataInput")
+        if client.input_has("ScanMetadataInput", "scanGeneratePhashes"):
+            scan_in["scanGeneratePhashes"] = True
+        log("1/5 scan: " + (", ".join(k for k, v in scan_in.items() if v is True) or "Stash defaults"))
+        self._wait_stash_job(client, client.metadata_scan(scan_in), "scan", job)
+        new = sorted(client.all_scene_ids() - before, key=lambda x: int(x) if x.isdigit() else 0)
+        stages["scan"] = f"{len(new)} new scene(s)"
+        log(f"scan done: {len(new)} new scene(s)")
+
+        dupes = None
+        if new:
+            details = client.scene_details(new)
+            paths = [m["path"] for m in details.values() if m.get("path")]
+
+            # 2. identify — saved sources/options, only the new scenes
+            ident = defaults.get("identify") or {}
+            if self.capabilities()["ops"].get("metadataIdentify") and ident.get("sources"):
+                ident_in = client.fit_input(ident, "IdentifyMetadataInput")
+                ident_in.pop("paths", None)
+                ident_in["sceneIDs"] = new
+                log(f"2/5 identify: {len(ident_in.get('sources') or [])} source(s), {len(new)} scene(s)")
+                self._wait_stash_job(client, client.metadata_identify(ident_in), "identify", job)
+                stages["identify"] = "done"
+            else:
+                stages["identify"] = "skipped — no identify sources saved in Stash's Tasks page"
+                log("2/5 identify: " + stages["identify"])
+
+            # 3. auto tag — saved choice of performers/studios/tags, only the new files
+            if self.capabilities()["ops"].get("metadataAutoTag"):
+                at = defaults.get("autoTag") or {}
+                picked = {k: at.get(k) for k in ("performers", "studios", "tags") if at.get(k)}
+                at_in = picked or {"performers": ["*"], "studios": ["*"], "tags": ["*"]}
+                at_in = client.fit_input({**at_in, "paths": paths}, "AutoTagMetadataInput")
+                log(f"3/5 auto tag: {', '.join(k for k in ('performers', 'studios', 'tags') if k in at_in)}")
+                self._wait_stash_job(client, client.metadata_auto_tag(at_in), "auto tag", job)
+                stages["auto tag"] = "done"
+            else:
+                stages["auto tag"] = "skipped — not supported by this Stash"
+
+            # 4. Peaks embed — only the new scenes, never the whole backlog
+            if job is not None:
+                job.progress = {"stage": "embed"}
+            if embed_busy and embed_busy():
+                stages["embed"] = "skipped — an embed pass is already running; the next pass picks these up"
+                log("4/5 embed: " + stages["embed"])
+            else:
+                log(f"4/5 embed: {len(new)} new scene(s)")
+                st = self.run_embed(job, scene_ids=set(new))
+                stages["embed"] = f"{st.get('embedded', 0)} embedded, {st.get('failed', 0)} failed"
+
+            # 5. duplicates among the new scenes
+            if self.capabilities()["ops"].get("findDuplicateScenes"):
+                if job is not None:
+                    job.progress = {"stage": "duplicates"}
+                log("5/5 duplicates: checking the new scenes against the library")
+                dupes = self.find_duplicates(job, only_ids=set(new))
+                stages["duplicates"] = f"{len(dupes['groups'])} group(s)"
+                self._merge_dupes(dupes)
+            else:
+                stages["duplicates"] = "skipped — not supported by this Stash"
+        else:
+            for k in ("identify", "auto tag", "embed", "duplicates"):
+                stages[k] = "nothing new"
+
+        dupe_ids = sorted({r["scene_id"] for g in (dupes or {}).get("groups", []) for r in g["scenes"]})
+        record = {"started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                  "new": new, "dupe_ids": dupe_ids, "stages": stages}
+        try:
+            self._ingest_path().parent.mkdir(parents=True, exist_ok=True)
+            self._ingest_path().write_text(json.dumps(record, indent=1))
+        except OSError:
+            pass
+        self._cat_cache = None                     # new scenes → re-read the listing
+        try:
+            self.action_log().append("ingest", detail=f"{len(new)} new scene(s)", stages=stages)
+        except Exception:  # noqa: BLE001
+            pass
+        if job is not None:
+            job.progress = {"stage": "done"}
+        log("done — " + " · ".join(f"{k}: {v}" for k, v in stages.items()))
+        return {"new": len(new), "stages": stages,
+                "duplicates": len((dupes or {}).get("groups", []))}
+
+    def _merge_dupes(self, found: dict) -> None:
+        """Show groups found by an ingest in the Duplicates view straight away."""
+        if not found.get("groups"):
+            return
+        cached = getattr(self, "_dupe_cache", None)
+        if cached is None:
+            self._dupe_cache = dict(found)
+            return
+        have = {frozenset(r["scene_id"] for r in g["scenes"]) for g in cached["groups"]}
+        extra = [g for g in found["groups"]
+                 if frozenset(r["scene_id"] for r in g["scenes"]) not in have]
+        cached["groups"] = extra + cached["groups"]
+        cached["reclaim"] = sum(g["reclaim"] for g in cached["groups"])

@@ -120,4 +120,4 @@ def test_not_duplicates_is_remembered(svc, stash, monkeypatch):
 def test_only_ids_limits_to_groups_with_new_scenes(svc):
     got = svc.find_duplicates(only_ids={"5"})
     assert [g["keep"] for g in got["groups"]] == ["5"]
-    assert svc.cached_duplicates() is None                  # a scoped check doesn't replace the view
+    assert svc.cached_duplicates() is None                  # a scoped check alone does not fill the view

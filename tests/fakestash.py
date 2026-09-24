@@ -101,3 +101,50 @@ class FakeStash:
         self.calls.append(("dupes", distance, duration_diff))
         return [[s for s in g if s in self.s] for g in getattr(self, "dupes", [])
                 if len([s for s in g if s in self.s]) > 1]
+
+    # --- tasks / jobs (ingest) -------------------------------------------------
+    # `arriving` scenes appear when a scan runs; each started task is a job
+    # that reports RUNNING once, then `job_outcome.get(kind, "FINISHED")`.
+
+    def all_scene_ids(self):
+        return set(self.s)
+
+    def config_defaults(self):
+        return getattr(self, "defaults", {"scan": None, "identify": None, "autoTag": None})
+
+    def fit_input(self, value, type_name):
+        return {k: v for k, v in (value or {}).items() if v is not None}
+
+    def input_has(self, type_name, field):
+        return True
+
+    def _task(self, kind, inp):
+        self.calls.append((kind, inp))
+        jobs = self.__dict__.setdefault("jobs", {})
+        jid = str(len(jobs) + 1)
+        jobs[jid] = {"kind": kind, "polls": 0}
+        if kind == "scan":
+            for sid, v in getattr(self, "arriving", {}).items():
+                self.s[sid] = {"rating100": None, "o_counter": 0, "tag_ids": [],
+                               "organized": False, "fingerprint": f"fp{sid}", **v}
+        return jid
+
+    def metadata_scan(self, inp):
+        return self._task("scan", inp)
+
+    def metadata_identify(self, inp):
+        return self._task("identify", inp)
+
+    def metadata_auto_tag(self, inp):
+        return self._task("auto_tag", inp)
+
+    def find_job(self, jid):
+        j = self.jobs[jid]
+        j["polls"] += 1
+        if j["polls"] == 1:
+            return {"id": jid, "status": "RUNNING", "progress": 0.5}
+        return {"id": jid, "status": getattr(self, "job_outcome", {}).get(j["kind"], "FINISHED"),
+                "progress": 1.0, "error": "boom"}
+
+    def stop_job(self, jid):
+        self.calls.append(("stop", jid))

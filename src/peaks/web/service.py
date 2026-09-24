@@ -579,8 +579,10 @@ class Service(LibraryMixin):
         workers: int | None = None,
         scene_timeout: float | None = None,
         batch_size: int | None = None,
+        scene_ids: set[str] | None = None,
     ) -> dict:
-        """One incremental embed pass (skips already-cached scenes).
+        """One incremental embed pass (skips already-cached scenes). With
+        `scene_ids`, only those scenes are considered (the ingest of new files).
 
         Every keyword overrides the corresponding config value for this run
         only — so the web UI can pick the model (e.g. a CLIP pass) or tweak
@@ -610,6 +612,8 @@ class Service(LibraryMixin):
         # re-scan from the top of the whole library. `limit` caps new scenes.
         signature = getattr(sampler, "interval_signature", sampler.interval)
         scanned = self.scenes()
+        if scene_ids is not None:
+            scanned = [sc for sc in scanned if str(sc.id) in scene_ids]
         pending = [sc for sc in scanned
                    if not cache.has(scene_key(sc), embedder.name, interval=signature)]
         if limit:
@@ -3706,7 +3710,7 @@ class Service(LibraryMixin):
     def catalogue(self, tier: str | None = None, res: str | None = None,
                   min_mbps: float | None = None, q: str | None = None,
                   sort: str = "date", offset: int = 0, limit: int = 60,
-                  refresh: bool = False, view: str | None = None) -> dict:
+                  refresh: bool = False, view: str | None = None, new: bool = False) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -3716,8 +3720,13 @@ class Service(LibraryMixin):
         tiers = {t for t in (tier or "").split(",") if t}
         resset = {r for r in (res or "").split(",") if r}
         needle = (q or "").strip().lower()
+        ingest = self.last_ingest()
+        fresh = set(ingest.get("new") or []) if new else None
+        dupe_ids = set(ingest.get("dupe_ids") or [])
 
         def keep(r) -> bool:
+            if fresh is not None and r["scene_id"] not in fresh:
+                return False
             if resset and (r["quality"]["res"] or "") not in resset:
                 return False
             if min_mbps and (r["quality"]["mbps"] or 0) < float(min_mbps):
@@ -3775,11 +3784,13 @@ class Service(LibraryMixin):
                 "flag": quality_flag(r["quality"], floor),
                 "suggest": (self._suggest_for_anomaly(r, pred, self.tier_display_names())
                             if r["tier"] == "anomaly" else None),
+                "dupe": r["scene_id"] in dupe_ids,
             })
         return {
             "items": items, "total": len(pool), "counts": counts, "views": views,
             "names": self.tier_display_names(), "offset": offset, "limit": limit,
             "model": self.tier_model_status(), "floor": floor,
+            "ingest": {"finished": ingest.get("finished"), "new": len(ingest.get("new") or [])},
         }
 
     def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,

@@ -134,6 +134,21 @@ query Dupes($distance: Int) {
 }
 """
 
+_TYPE_QUERY = """
+query TypeInfo($name: String!) {
+  __type(name: $name) {
+    kind name
+    fields { name type { ...T } }
+    inputFields { name type { ...T } }
+  }
+}
+fragment T on __Type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
+"""
+
+_ALL_SCENE_IDS_QUERY = """
+query AllSceneIds { findScenes(filter: {per_page: -1}) { scenes { id } } }
+"""
+
 _SCENES_EXIST_QUERY = """
 query ScenesExist($ids: [ID!]) {
   findScenes(ids: $ids, filter: {per_page: -1}) {
@@ -428,6 +443,109 @@ class StashClient:
                 raise
             data = self.execute(_DUPLICATES_QUERY_OLD, {"distance": int(distance)})
         return [[str(s["id"]) for s in group] for group in data["findDuplicateScenes"] if len(group) > 1]
+
+    # --- Stash tasks (scan / identify / auto tag), driven with the user's saved
+    # task defaults. Stash's option types grow between versions, so queries and
+    # inputs are built from schema introspection instead of hard-coded fields.
+
+    def _type(self, name: str) -> dict | None:
+        cache = self.__dict__.setdefault("_type_cache", {})
+        if name not in cache:
+            cache[name] = self.execute(_TYPE_QUERY, {"name": name}).get("__type")
+        return cache[name]
+
+    @staticmethod
+    def _named(t: dict) -> dict:
+        while t.get("ofType"):
+            t = t["ofType"]
+        return t
+
+    def _selection(self, type_name: str, depth: int = 4) -> str:
+        """Every scalar/enum field of an object type, nested objects included."""
+        info = self._type(type_name) or {}
+        parts = []
+        for f in info.get("fields") or []:
+            t = self._named(f["type"])
+            if t["kind"] in ("SCALAR", "ENUM"):
+                parts.append(f["name"])
+            elif t["kind"] == "OBJECT" and depth > 0:
+                sub = self._selection(t["name"], depth - 1)
+                if sub:
+                    parts.append(f"{f['name']} {{ {sub} }}")
+        return " ".join(parts)
+
+    def fit_input(self, value, type_name: str):
+        """Reshape an output object (e.g. saved task defaults) into the input
+        type a mutation takes: keep only the input's fields, drop nulls,
+        recurse into nested inputs."""
+        info = self._type(type_name) or {}
+        fields = {f["name"]: self._named(f["type"]) for f in info.get("inputFields") or []}
+
+        def fit(v, t):
+            if v is None:
+                return None
+            if isinstance(v, list):
+                return [x for x in (fit(i, t) for i in v) if x is not None]
+            if t["kind"] == "INPUT_OBJECT" and isinstance(v, dict):
+                return self.fit_input(v, t["name"])
+            return v
+
+        out = {}
+        for k, v in (value or {}).items():
+            if k in fields and v is not None:
+                fv = fit(v, fields[k])
+                if fv is not None:
+                    out[k] = fv
+        return out
+
+    def input_has(self, type_name: str, field: str) -> bool:
+        info = self._type(type_name) or {}
+        return any(f["name"] == field for f in info.get("inputFields") or [])
+
+    def config_defaults(self) -> dict:
+        """The saved task defaults from Stash's Tasks page: {scan, identify,
+        autoTag} (None where not saved / not supported by this Stash)."""
+        info = self._type("ConfigDefaultSettingsResult") or {}
+        wanted = {f["name"]: self._named(f["type"]) for f in info.get("fields") or []
+                  if f["name"] in ("scan", "identify", "autoTag")}
+        parts = [f"{k} {{ {self._selection(t['name'])} }}" for k, t in wanted.items()
+                 if t["kind"] == "OBJECT"]
+        if not parts:
+            return {"scan": None, "identify": None, "autoTag": None}
+        data = self.execute("query Defaults { configuration { defaults { %s } } }" % " ".join(parts))
+        d = (data.get("configuration") or {}).get("defaults") or {}
+        return {k: d.get(k) for k in ("scan", "identify", "autoTag")}
+
+    def _start_task(self, mutation: str, input_type: str, inp: dict) -> str:
+        data = self.execute(f"mutation Task($input: {input_type}!) {{ {mutation}(input: $input) }}",
+                            {"input": inp})
+        return str(data[mutation])
+
+    def metadata_scan(self, inp: dict) -> str:
+        return self._start_task("metadataScan", "ScanMetadataInput", inp)
+
+    def metadata_identify(self, inp: dict) -> str:
+        return self._start_task("metadataIdentify", "IdentifyMetadataInput", inp)
+
+    def metadata_auto_tag(self, inp: dict) -> str:
+        return self._start_task("metadataAutoTag", "AutoTagMetadataInput", inp)
+
+    def find_job(self, job_id: str) -> dict | None:
+        """{id, status, progress, description, error?} — None once Stash has
+        forgotten the job (it only keeps finished jobs for a while)."""
+        info = self._type("Job") or {}
+        have = {f["name"] for f in info.get("fields") or []}
+        sel = " ".join(f for f in ("id", "status", "progress", "description", "error") if f in have)
+        data = self.execute("query J($input: FindJobInput!) { findJob(input: $input) { %s } }" % sel,
+                            {"input": {"id": str(job_id)}})
+        return data.get("findJob")
+
+    def stop_job(self, job_id: str) -> None:
+        self.execute("mutation S($id: ID!) { stopJob(job_id: $id) }", {"id": str(job_id)})
+
+    def all_scene_ids(self) -> set[str]:
+        data = self.execute(_ALL_SCENE_IDS_QUERY)
+        return {str(s["id"]) for s in data["findScenes"]["scenes"]}
 
     def existing_scene_ids(self, ids: list[str]) -> set[str]:
         """Of the given scene ids, the subset that still exist in Stash — so a
