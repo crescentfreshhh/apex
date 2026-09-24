@@ -86,8 +86,8 @@ class Service:
             "clip_model": self._active_clip_model(),
             "clip_cached": len(cache.keys(self._clip_name())),
             "device": self.cfg.embedding.device or "auto",
-            "interval": self.cfg.sampling.interval_seconds,
-            "mode": self.cfg.sampling.mode,
+            "interval": self._active_sampling()[1],
+            "mode": self._active_sampling()[0],
             "failures": len(failure_log_for(self.cfg)),
         }
 
@@ -249,6 +249,87 @@ class Service:
         self._settings_cache = s
         return self.get_export_settings()
 
+    # --- library sampling (persisted) ------------------------------------------
+    # The sampling mode/interval the LIBRARY is embedded at. It used to live only
+    # in config/env, while the Advanced form applied per-run overrides — so after
+    # a page reload the form (and the scheduler, and Fix) silently fell back to
+    # the config default, and one "Embed" click re-embedded the whole library at
+    # the old density. Now it's a saved setting that every embed path follows,
+    # and changing it goes through an explicit confirm (see /api/embed).
+
+    _SAMPLING_MODES = ("sparse", "interval", "keyframes")
+
+    def _active_sampling(self) -> tuple[str, float]:
+        s = self._settings()
+        mode = s.get("sampling_mode") or self.cfg.sampling.mode
+        if mode not in self._SAMPLING_MODES:
+            mode = self.cfg.sampling.mode
+        try:
+            iv = float(s.get("sampling_interval") or self.cfg.sampling.interval_seconds)
+        except (TypeError, ValueError):
+            iv = float(self.cfg.sampling.interval_seconds)
+        if iv <= 0:
+            iv = float(self.cfg.sampling.interval_seconds)
+        return mode, iv
+
+    def _active_signature(self) -> float:
+        from ..sampling import sampling_signature
+
+        return sampling_signature(*self._active_sampling())
+
+    def get_sampling_settings(self) -> dict:
+        mode, iv = self._active_sampling()
+        s = self._settings()
+        return {
+            "mode": mode, "interval": iv,
+            "saved": bool(s.get("sampling_mode") or s.get("sampling_interval")),
+            "config_mode": self.cfg.sampling.mode,
+            "config_interval": self.cfg.sampling.interval_seconds,
+        }
+
+    def save_sampling_settings(self, mode=None, interval=None) -> dict:
+        """Persist the library's sampling. Changing it makes every cached scene
+        at other settings 'pending' — callers must confirm that (see
+        `sampling_change_impact`)."""
+        import json
+
+        s = dict(self._settings())
+        if mode is not None:
+            if mode not in self._SAMPLING_MODES:
+                raise ValueError(f"unknown sampling mode: {mode}")
+            s["sampling_mode"] = mode
+        if interval is not None:
+            iv = float(interval)
+            if iv <= 0:
+                raise ValueError(f"interval must be > 0: {interval}")
+            s["sampling_interval"] = iv
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.get_sampling_settings()
+
+    def sampling_change_impact(self, mode: str | None, interval: float | None,
+                               model: str | None = None) -> dict:
+        """Would an embed at (mode, interval) change the library's sampling, and
+        how many already-cached scenes would it re-embed? `changes` is False when
+        the run matches the saved setting (normal incremental / resume)."""
+        from ..sampling import sampling_signature
+
+        cur_mode, cur_iv = self._active_sampling()
+        mode = mode or cur_mode
+        iv = float(interval) if interval is not None else cur_iv
+        new_sig = sampling_signature(mode, iv)
+        cur_sig = sampling_signature(cur_mode, cur_iv)
+        sigs = EmbeddingCache(self.cfg.embedding.cache_dir).signatures(model or self._model_name())
+        reembed = sum(1 for v in sigs.values() if v is None or abs(v - new_sig) > 1e-6)
+        return {
+            "changes": abs(new_sig - cur_sig) > 1e-6,
+            "from": {"mode": cur_mode, "interval": cur_iv},
+            "to": {"mode": mode, "interval": iv},
+            "cached": len(sigs), "reembed": reembed,
+        }
+
     # smart clip length — the drift threshold is GUI-tunable (settings.json
     # overlay overriding config) so it can be eyeballed against the board live.
     def _clip_similarity(self) -> float:
@@ -359,7 +440,15 @@ class Service:
         import time as _t
 
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        embedded = len(cache.keys(self._model_name()))
+        # count only scenes embedded at the library's CURRENT sampling — during a
+        # re-embed (e.g. 8s → 2s) the old-density files still exist and used to
+        # read as "5,818 / 5,822 embedded" while the job reported 0 done.
+        sigs = cache.signatures(self._model_name())
+        cur = self._active_signature()
+        embedded = sum(1 for v in sigs.values() if v is not None and abs(v - cur) < 1e-6)
+        stale = len(sigs) - embedded
+        mode, iv = self._active_sampling()
+        extra = {"stale": stale, "mode": mode, "interval": iv}
         total = None
         try:
             cached = getattr(self, "_scope_count_cache", None)
@@ -372,9 +461,9 @@ class Service:
         except Exception:  # noqa: BLE001 — Stash down
             total = None
         if total is None:
-            return {"embedded": embedded, "total": None, "pending": None}
+            return {"embedded": embedded, "total": None, "pending": None, **extra}
         embedded = min(embedded, total)  # clamp: orphan/out-of-scope keys never make pending<0
-        return {"embedded": embedded, "total": total, "pending": max(0, total - embedded)}
+        return {"embedded": embedded, "total": total, "pending": max(0, total - embedded), **extra}
 
     # --- taste profiles (each = its own labels + Stash tag + model + feed) -----
 
@@ -453,7 +542,7 @@ class Service:
             similarity=self._clip_similarity(),   # GUI-tunable (settings.json overlay)
             min_dur=sc.min_duration,
             max_dur=(sc.max_duration or 0.0),
-            interval=(self.cfg.sampling.interval_seconds or 2.0),
+            interval=(self._active_sampling()[1] or 2.0),   # fallback only; per-scene step wins
         )
 
     def _embedder(self, model: str | None = None):
@@ -502,9 +591,10 @@ class Service:
 
         s, e = self.cfg.sampling, self.cfg.embedding
         log = (job.log if job else print)
+        lib_mode, lib_iv = self._active_sampling()   # the library's saved sampling
         sampler = FrameSampler(
-            interval_seconds=(s.interval_seconds if interval is None else interval),
-            mode=(s.mode if mode is None else mode),
+            interval_seconds=(lib_iv if interval is None else interval),
+            mode=(lib_mode if mode is None else mode),
             hwaccel=(s.hwaccel if hwaccel is None else hwaccel),
             pipeline=(s.pipeline if pipeline is None else pipeline),
             scene_timeout=(s.scene_timeout if scene_timeout is None else scene_timeout),
@@ -1335,7 +1425,7 @@ class Service:
 
         embedder = self._embedder()
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-        iv = self.cfg.sampling.interval_seconds
+        iv = self._active_sampling()[1]   # the library's saved interval, not config
         to = self.cfg.sampling.scene_timeout
         for e in entries:
             if job and job.cancelled:
@@ -2059,14 +2149,20 @@ class Service:
             return None, None
         clf = self._taste_model(profile, model)
         if clf is not None:
-            scores = np.asarray(clf.predict_proba(idx.matrix), dtype=np.float32).reshape(-1)
+            # chunked: a whole-matrix predict_proba would upcast millions of rows
+            # to a transient float64 copy (tens of GB at 2s sampling)
+            scores = np.asarray(
+                idx.apply(lambda b: np.asarray(clf.predict_proba(b), dtype=np.float32).reshape(-1)),
+                dtype=np.float32,
+            ).reshape(-1)
             scored_by = "classifier"
         else:
             modes = self._taste_modes(model, profile=profile)
             if modes is None:
                 return None, None
             # cosine to every mode, keep each moment's best → spans your whole taste
-            scores = (idx.matrix @ modes.T).max(axis=1).astype(np.float32)
+            m = np.asarray(modes, dtype=np.float32)
+            scores = idx.apply(lambda b: (b @ m.T).max(axis=1)).astype(np.float32)
             scored_by = "modes"
         out = (scores, scored_by)
         self._board_score_cache[ckey] = out
@@ -2337,7 +2433,7 @@ class Service:
         rows = rng.choice(idx.size, size=min(pool, idx.size), replace=False)
         clf = self._taste_model(profile, model)
         if clf is not None:
-            p = np.asarray(clf.predict_proba(idx.matrix[rows]), dtype=np.float32)
+            p = np.asarray(clf.predict_proba(idx.take(rows)), dtype=np.float32)
             unc = -np.abs(p - 0.5)  # nearest the 0.5 decision boundary
         else:
             # use the centroid only if it's already cached — never trigger a
@@ -2345,7 +2441,7 @@ class Service:
             cached = self._taste_src_cache.get((model, profile))
             if cached is not None and cached[0].shape[0] > 0:
                 c = self._unit(cached[0].mean(axis=0))
-                sims = idx.matrix[rows] @ c
+                sims = idx.take(rows) @ c
                 unc = -np.abs(sims - float(np.median(sims)))  # mid-similarity = ambiguous
             else:
                 unc = rng.random(rows.shape[0])  # cold start: anything
@@ -2498,7 +2594,7 @@ class Service:
             if not rows:
                 continue
             start, end = rows
-            scores = idx.matrix[start:end] @ q
+            scores = idx.rows(start, end) @ q
             order = np.argsort(-scores)[:per_scene]
             for j in order:
                 i = start + int(j)
@@ -2635,9 +2731,10 @@ class Service:
                     continue
                 start, end = rows_span
                 moments += end - start
-                vsum += idx.matrix[start:end].sum(axis=0)
+                blk = idx.rows(start, end)        # float32 (index may be float16)
+                vsum += blk.sum(axis=0)
                 if cu is not None:
-                    s = idx.matrix[start:end] @ cu
+                    s = blk @ cu
                     best = max(best, float(s.max()))
                     mean_sum += float(s.sum())
                     j = int(np.argmax(s))
@@ -2733,7 +2830,7 @@ class Service:
         sc = self.cfg.scoring
         segments: dict[str, list] = {}
         if sc.normalize in ("", "none"):
-            flat = np.asarray(fn(idx.matrix), dtype=np.float32).reshape(-1)
+            flat = idx.apply(lambda b: np.asarray(fn(b), dtype=np.float32).reshape(-1))
             high = float(np.percentile(flat, 90.0)) if flat.size else sc.high
             low = float(np.percentile(flat, 75.0)) if flat.size else sc.low
             for key, (start, end) in idx._key_rows.items():
@@ -2754,7 +2851,7 @@ class Service:
                 sid = str((idx.key_meta.get(key) or {}).get("scene_id"))
                 if not sid or sid == "None":
                     continue
-                segs = score_scene(idx.times[start:end], idx.matrix[start:end], fn, scoring)
+                segs = score_scene(idx.times[start:end], idx.rows(start, end), fn, scoring)
                 if segs:
                     segments[sid] = segs
 
@@ -2989,7 +3086,7 @@ class Service:
             if not rows_span:
                 continue
             start, end = rows_span
-            block = idx.matrix[start:end]
+            block = idx.rows(start, end)          # float32 (index may be float16)
             vsum = block.sum(axis=0) if vsum is None else vsum + block.sum(axis=0)
             n += end - start
         if not n:
@@ -3026,7 +3123,7 @@ class Service:
             for sid in scenes:
                 rs = idx._key_rows.get(sid_key.get(str(sid), ""))
                 if rs:
-                    parts.append(idx.matrix[rs[0]:rs[1]] @ cu)
+                    parts.append(idx.rows(rs[0], rs[1]) @ cu)
             if parts:
                 s = np.concatenate(parts)
                 counts, edges = np.histogram(s, bins=20)
@@ -3187,7 +3284,7 @@ class Service:
         if c is None or idx.size == 0:
             return base
 
-        scores = (idx.matrix @ c).astype(np.float32)
+        scores = idx.dot(c)  # chunked float32 (index may be float16)
         scene_ids = np.asarray([s if s is not None else "" for s in idx.scene_ids])
         sorted_scores = np.sort(scores)
         # per-scene best moment: "scenes on-taste at t" = scenes whose max ≥ t.

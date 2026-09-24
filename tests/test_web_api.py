@@ -664,7 +664,8 @@ def test_embed_forwards_advanced_overrides(client, monkeypatch):
     jid = client.post(
         "/api/embed",
         params={"model": "clip", "mode": "interval", "interval": 4,
-                "hwaccel": "", "workers": 2, "timeout": 600, "batch_size": 16},
+                "hwaccel": "", "workers": 2, "timeout": 600, "batch_size": 16,
+                "confirm": "true"},   # a sampling change must be confirmed (guard)
     ).json()["id"]
     for _ in range(50):
         if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
@@ -711,6 +712,63 @@ def test_embed_without_overrides_stays_bare(client, monkeypatch):
             break
         time.sleep(0.02)
     assert seen["kw"] == {}  # nothing forwarded → run_embed uses config defaults
+
+
+def _wait_job(client, jid):
+    for _ in range(50):
+        if client.get(f"/api/jobs/{jid}").json()["status"] != "running":
+            return
+        time.sleep(0.02)
+
+
+def test_embed_sampling_change_requires_confirm_then_persists(client, monkeypatch):
+    """A run at a different sampling than the library's would re-embed every
+    cached scene — refused until confirmed; once confirmed it becomes the saved
+    library sampling, so reloads/scheduler/Fix never silently revert it."""
+    from peaks.web import service as svc
+
+    monkeypatch.setattr(svc.Service, "run_embed", lambda self, job=None, limit=0, **kw: {"embedded": 0})
+    before = client.get("/api/defaults").json()
+
+    r = client.post("/api/embed", params={"mode": "sparse", "interval": 2})
+    assert r.status_code == 409
+    d = r.json()["detail"]
+    assert d["needs_confirm"] is True and d["changes"] is True
+    assert d["reembed"] == 2 and d["cached"] == 2          # both fixture scenes
+    assert "RE-EMBEDDED" in d["message"]
+    # refused → nothing saved
+    assert client.get("/api/defaults").json()["interval"] == before["interval"]
+
+    r = client.post("/api/embed", params={"mode": "sparse", "interval": 2, "confirm": "true"})
+    assert r.status_code == 200
+    _wait_job(client, r.json()["id"])
+    d2 = client.get("/api/defaults").json()
+    assert d2["mode"] == "sparse" and d2["interval"] == 2.0   # form now pre-fills the library's sampling
+
+    # same sampling again → no guard (normal incremental / resume)
+    r = client.post("/api/embed", params={"mode": "sparse", "interval": 2})
+    assert r.status_code == 200
+    _wait_job(client, r.json()["id"])
+
+
+def test_embed_status_counts_only_current_sampling(cfg, tmp_path):
+    """Mid re-embed, scenes still at the old sampling are 'stale', not 'embedded'."""
+    from peaks.web.service import Service
+
+    cache = EmbeddingCache(cfg.embedding.cache_dir)
+    # k1 re-embedded at sparse/2s (signature -102); k2 still at the old 8s grid
+    cache.save("k1", "dinov2", np.array([0.0, 2.0], dtype=np.float32),
+               np.stack([_unit([1, 0, 0]), _unit([0, 1, 0])]),
+               meta={"scene_id": "1", "interval": -102.0})
+    cache.save("k2", "dinov2", np.array([0.0], dtype=np.float32),
+               np.stack([_unit([0.9, 0.1, 0])]),
+               meta={"scene_id": "2", "interval": -108.0})
+    svc = Service(cfg)
+    svc.save_sampling_settings(mode="sparse", interval=2)
+    svc.scenes = lambda: [object(), object()]   # scoped total without Stash
+    st = svc.embed_status()
+    assert st["embedded"] == 1 and st["stale"] == 1 and st["pending"] == 1
+    assert st["mode"] == "sparse" and st["interval"] == 2.0
 
 
 def test_scene_edit_endpoints(client, monkeypatch):

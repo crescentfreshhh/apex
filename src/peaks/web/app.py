@@ -326,10 +326,11 @@ def create_app(cfg=None):
         """Current embed/sampling settings, so the Advanced form pre-fills to
         what the container is configured with."""
         s, e, sc = service.cfg.sampling, service.cfg.embedding, service.cfg.scoring
+        lib_mode, lib_iv = service._active_sampling()   # the library's SAVED sampling
         return {
             "model": e.model,
-            "mode": s.mode,
-            "interval": s.interval_seconds,
+            "mode": lib_mode,
+            "interval": lib_iv,
             "hwaccel": s.hwaccel,
             "pipeline": s.pipeline,
             "workers": e.workers,
@@ -354,9 +355,35 @@ def create_app(cfg=None):
         workers: int | None = None,
         timeout: float | None = None,
         batch_size: int | None = None,
+        confirm: bool = False,
     ):
-        # sampling knobs actually supplied; absent ones fall back to config.
-        # The active backbone/variant come from the saved model settings.
+        # Guard: a run at a different mode/interval than the library's saved
+        # sampling re-embeds every cached scene at the old settings (days of GPU
+        # work). Refuse unless explicitly confirmed; once confirmed, the new
+        # sampling becomes the library's saved setting so reloads, the scheduler
+        # and Fix all follow it instead of silently reverting.
+        save_to = None
+        if mode is not None or interval is not None:
+            try:
+                impact = service.sampling_change_impact(mode, interval)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            if impact["changes"]:
+                if impact["reembed"] > 0 and not confirm:
+                    f, t = impact["from"], impact["to"]
+                    raise HTTPException(409, {
+                        "needs_confirm": True, **impact,
+                        "message": (
+                            f"This changes the library's sampling from {f['mode']} · "
+                            f"{f['interval']:g}s to {t['mode']} · {t['interval']:g}s.\n\n"
+                            f"{impact['reembed']:,} of {impact['cached']:,} embedded scenes "
+                            f"are at other settings and will be RE-EMBEDDED.\n\n"
+                            f"Continue?"
+                        ),
+                    })
+                save_to = impact["to"]   # persisted once the job actually starts
+        # sampling knobs actually supplied; absent ones fall back to the library's
+        # saved sampling. The active backbone/variant come from the saved models.
         sampling = {
             k: v
             for k, v in dict(
@@ -379,6 +406,8 @@ def create_app(cfg=None):
             job = jobs.start("embed", target)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
+        if save_to is not None:   # confirmed sampling change → the library's new setting
+            service.save_sampling_settings(mode=save_to["mode"], interval=save_to["interval"])
         return job.as_dict()
 
     @app.post("/api/score")

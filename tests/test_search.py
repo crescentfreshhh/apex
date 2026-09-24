@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from peaks.cache import EmbeddingCache
 from peaks.search import Hit, SearchIndex
@@ -44,7 +45,8 @@ def test_vector_around_pools_within_window(tmp_path):
     assert idx.vector_around("k1", 3.0, window=0.5) is not None
 
 
-def test_build_preallocates_matches_manual_stack(tmp_path):
+def test_build_preallocates_matches_manual_stack(tmp_path, monkeypatch):
+    monkeypatch.delenv("PEAKS_INDEX_DTYPE", raising=False)   # auto → float32 when small
     # the preallocated build must produce the exact same matrix/times/rows as a
     # naive per-scene stack (parity guard for the memory-lean rewrite).
     cache = EmbeddingCache(tmp_path)
@@ -55,8 +57,9 @@ def test_build_preallocates_matches_manual_stack(tmp_path):
     idx = SearchIndex(cache, "dino").build(keys)
 
     expected = np.concatenate([cache.load(k, "dino")[1] for k in keys], axis=0)
-    assert idx.matrix.dtype == np.float32
-    assert np.array_equal(idx.matrix, expected)
+    # small index → float32 storage (auto); the float32 accessor matches exactly
+    assert idx.storage == "float32"
+    assert np.array_equal(idx.rows(0, idx.size), expected)
     assert idx.times.tolist() == [0.0, 8.0, 4.0, 1.0, 2.0]
     assert idx._key_rows == {"k1": (0, 2), "k2": (2, 3), "k3": (3, 5)}
     assert idx.keys == ["k1", "k1", "k2", "k3", "k3"]
@@ -163,6 +166,68 @@ def test_vector_at_picks_nearest_time(tmp_path):
     np.testing.assert_allclose(idx.vector_at("k1", 1.0), a, atol=2e-3)  # nearest 0.0
     np.testing.assert_allclose(idx.vector_at("k1", 9.0), b, atol=2e-3)  # nearest 10.0
     assert idx.vector_at("missing", 0.0) is None
+
+
+def test_clip_span_tail_uses_scene_own_step(tmp_path):
+    """The tail after the last similar frame is the scene's OWN sampling step, not
+    the configured interval — a 2s-embedded scene must not get an 8s tail (the
+    library may be half-converted, and per-run overrides never touch config)."""
+    cache = EmbeddingCache(tmp_path)
+    same, cut = _unit([1, 0, 0]), _unit([0, 1, 0])
+    _seed(cache, "k1", "1", [same, same, cut], [10.0, 12.0, 14.0])   # 2s grid
+    idx = SearchIndex(cache, "dino").build(["k1"])
+    s, e = idx.clip_span("k1", 10.0, similarity=0.5, min_dur=1.0, max_dur=30.0, interval=8.0)
+    assert (s, e) == (10.0, 14.0)      # last similar frame 12.0 + 2s own step (not +8)
+
+
+def test_cache_meta_reads_skip_vectors(tmp_path, monkeypatch):
+    """Resume checks read only meta — never the (multi-GB in aggregate) vectors."""
+    cache = EmbeddingCache(tmp_path)
+    cache.save("k1", "dino", np.array([0.0], dtype=np.float32),
+               np.stack([_unit([1, 0, 0])]), meta={"interval": -102.0})
+    cache.save("k2", "dino", np.array([0.0], dtype=np.float32),
+               np.stack([_unit([0, 1, 0])]), meta={})
+    monkeypatch.setattr(EmbeddingCache, "load", lambda *a, **k: (_ for _ in ()).throw(AssertionError("loaded vectors")))
+    assert cache.has("k1", "dino", interval=-102.0)
+    assert not cache.has("k1", "dino", interval=-108.0)
+    assert cache.signatures("dino") == {"k1": -102.0, "k2": None}
+    assert cache.signatures("dino") == {"k1": -102.0, "k2": None}   # memoized path
+
+
+@pytest.mark.parametrize("storage", ["float32", "bfloat16"])
+def test_index_math_is_dtype_safe(tmp_path, monkeypatch, storage):
+    """Every accessor returns float32 matching exact float32 math, for both the
+    float32 and the RAM-lean bfloat16 storage."""
+    monkeypatch.setenv("PEAKS_INDEX_DTYPE", storage)
+    cache = EmbeddingCache(tmp_path)
+    rng = np.random.default_rng(0)
+    vecs = [_unit(rng.standard_normal(16)) for _ in range(7)]
+    _seed(cache, "k1", "1", vecs[:4], [0.0, 2.0, 4.0, 6.0])
+    _seed(cache, "k2", "2", vecs[4:], [0.0, 2.0, 4.0])
+    idx = SearchIndex(cache, "dino").build(["k1", "k2"])
+    assert idx.storage == storage
+    exact = np.concatenate([cache.load(k, "dino")[1] for k in ("k1", "k2")]).astype(np.float32)
+    q = _unit(rng.standard_normal(16))
+    tol = 1e-6 if storage == "float32" else 1e-2    # bf16: ~3 significant digits
+    got = idx.dot(q)
+    assert got.dtype == np.float32 and np.allclose(got, exact @ q, atol=tol)
+    for chunk in (1, 3, 100):                       # chunk boundaries don't matter
+        assert np.allclose(idx.apply(lambda b: b @ q, chunk=chunk), exact @ q, atol=tol)
+    assert np.allclose(idx.rows(4, 7), exact[4:7], atol=tol)
+    assert np.allclose(idx.take(np.array([6, 0])), exact[[6, 0]], atol=tol)
+    v = idx.vector_at("k2", 2.0)
+    assert v.dtype == np.float32 and np.allclose(v, exact[5], atol=tol)
+    hits = idx.search(exact[2], top_k=1)
+    assert hits[0].key == "k1" and hits[0].time == 4.0   # nearest is itself
+
+
+def test_bf16_encoding_is_near_lossless():
+    from peaks.search import _bf16_into_f32, _f32_to_bf16
+    rng = np.random.default_rng(1)
+    a = rng.standard_normal((50, 32)).astype(np.float32)
+    back = _bf16_into_f32(_f32_to_bf16(a), np.zeros(a.shape, np.float32))
+    rel = np.abs(back - a) / np.maximum(np.abs(a), 1e-30)
+    assert rel.max() <= 2 ** -8                     # round-to-nearest: ≤ half an ulp of 8 bits
 
 
 def test_clip_span_holds_until_shot_change(tmp_path):

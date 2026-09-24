@@ -28,6 +28,12 @@ def path_key(path: str) -> str:
     return "path-" + hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
 
 
+# (root, model) -> {key: (mtime, signature)} — memo for `signatures()`, shared
+# across the short-lived EmbeddingCache instances the web service creates, so a
+# status poll only re-reads the meta of files that changed since last time.
+_SIG_MEMO: dict[tuple[str, str], dict[str, tuple[float, float | None]]] = {}
+
+
 class EmbeddingCache:
     def __init__(self, root: Path | str, dtype: str = "float16"):
         """`dtype` is the on-disk storage type. float16 halves disk usage for
@@ -50,11 +56,50 @@ class EmbeddingCache:
         if interval is None:
             return True
         try:
-            _, _, meta = self.load(key, model_name)
+            meta = self.peek_meta(key, model_name)  # meta only — never the vectors
         except Exception:
             return False  # unreadable cache entry: treat as absent
         cached = meta.get("interval")
         return cached is not None and abs(float(cached) - interval) < 1e-6
+
+    def peek_meta(self, key: str, model_name: str) -> dict:
+        """An entry's meta dict WITHOUT loading its vectors (npz members load
+        lazily). Resuming an embed checks every scene's signature; reading the
+        full vectors for that read the whole multi-GB cache off disk."""
+        with np.load(self._file(key, model_name), allow_pickle=False) as data:
+            return json.loads(str(data["meta"]))
+
+    def signatures(self, model_name: str) -> dict[str, float | None]:
+        """`{key: sampling signature}` for every cached scene of a model (None
+        when the entry has no/unreadable meta). Memoized by file mtime, so
+        repeated calls (status polls) only re-read entries rewritten since."""
+        model_dir = self.root / model_name
+        if not model_dir.exists():
+            return {}
+        memo = _SIG_MEMO.setdefault((str(self.root), model_name), {})
+        seen: set[str] = set()
+        out: dict[str, float | None] = {}
+        for p in model_dir.glob("*.npz"):
+            key = p.stem
+            seen.add(key)
+            try:
+                mt = p.stat().st_mtime
+            except OSError:
+                continue
+            hit = memo.get(key)
+            if hit is not None and hit[0] == mt:
+                out[key] = hit[1]
+                continue
+            try:
+                v = self.peek_meta(key, model_name).get("interval")
+                sig = float(v) if v is not None else None
+            except Exception:  # noqa: BLE001 — unreadable/mid-write entry
+                sig = None
+            memo[key] = (mt, sig)
+            out[key] = sig
+        for gone in set(memo) - seen:          # deleted entries
+            memo.pop(gone, None)
+        return out
 
     def save(
         self,

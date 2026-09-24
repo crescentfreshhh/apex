@@ -214,6 +214,18 @@ def _sparse_extract_worker(
     )
 
 
+def sampling_signature(mode: str, interval: float) -> float:
+    """The cache signature for a sampling config (see
+    `FrameSampler.interval_signature`): keyframes → -1.0, sparse →
+    -(100 + interval), interval → interval. Pure, so status/guard code can
+    compare against the cache without building a sampler."""
+    if mode == "keyframes":
+        return -1.0
+    if mode == "sparse":
+        return -(100.0 + float(interval))
+    return float(interval)
+
+
 class FrameSampler:
     def __init__(
         self,
@@ -254,11 +266,7 @@ class FrameSampler:
         change invalidates old entries. Keyframe mode uses -1.0 (its spacing
         is encode-dependent, not an interval); sparse encodes as -(100 +
         interval) so each sparse grid is distinct from every interval grid."""
-        if self.mode == "keyframes":
-            return -1.0
-        if self.mode == "sparse":
-            return -(100.0 + self.interval)
-        return self.interval
+        return sampling_signature(self.mode, self.interval)
 
     @property
     def wants_raw(self) -> bool:

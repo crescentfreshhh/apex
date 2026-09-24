@@ -90,9 +90,13 @@ async function loadSchedule() {
   try {
     const d = await api("/api/schedule");
     const pend = $("#embed-pending");
+    // counts are at the library's CURRENT sampling; scenes still at older
+    // settings (mid re-embed) are called out instead of counted as done
+    const at = d.mode ? ` at ${d.mode} · ${d.interval}s` : "";
+    const stale = d.stale ? ` · ${d.stale.toLocaleString()} still at older settings` : "";
     if (pend) pend.textContent = d.total == null
-      ? `${(d.embedded || 0).toLocaleString()} scenes embedded (Stash unreachable for a total)`
-      : `${(d.embedded || 0).toLocaleString()} / ${d.total.toLocaleString()} scenes embedded · ${(d.pending || 0).toLocaleString()} not yet embedded`;
+      ? `${(d.embedded || 0).toLocaleString()} scenes embedded${at}${stale} (Stash unreachable for a total)`
+      : `${(d.embedded || 0).toLocaleString()} / ${d.total.toLocaleString()} scenes embedded${at}${stale} · ${(d.pending || 0).toLocaleString()} to embed`;
     const on = $("#sched-on"), h = $("#sched-hours"), sy = $("#sched-sync"), pr = $("#sched-prune");
     if (on) on.checked = d.embed_hours > 0;
     if (h) h.value = d.embed_hours > 0 ? d.embed_hours : 6;
@@ -178,6 +182,8 @@ async function reattachJobs() {
 }
 
 // --- embed advanced overrides (per-run model / sampling, no restart) --------
+// Sampling/interval pre-fill from the LIBRARY'S saved sampling (not config), so a
+// reload never silently reverts them; changing them requires a confirm.
 let defaultsLoaded = false;
 (async () => {
   try {
@@ -316,10 +322,30 @@ function embedQuery() {
   }
   return qs.toString();
 }
-wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), () => {
+// Start an embed. If the Advanced sampling differs from the library's saved
+// sampling, the server refuses with needs_confirm (it would re-embed every scene
+// cached at the old settings) — ask, then retry with confirm=true.
+async function startEmbed() {
   const q = embedQuery();
-  return api("/api/embed" + (q ? "?" + q : ""), { method: "POST" });
-}, $("#btn-embed-stop"));
+  const url = "/api/embed" + (q ? "?" + q : "");
+  const r = await fetch(url, { method: "POST" });
+  if (r.status === 409) {
+    let d = null;
+    try { d = (await r.clone().json()).detail; } catch { /* not json */ }
+    if (d && d.needs_confirm) {
+      if (!confirm(d.message)) throw new Error("Cancelled — library sampling unchanged");
+      return api(url + (q ? "&" : "?") + "confirm=true", { method: "POST" });
+    }
+  }
+  if (r.status === 401) { location.reload(); throw new Error("session expired"); }
+  if (!r.ok) {
+    let msg = r.status;
+    try { msg = (await r.json()).detail || msg; } catch {}
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return r.json();   // the form already shows the (now saved) library sampling
+}
+wireJob($("#btn-embed"), $("#embed-status"), $("#embed-log"), startEmbed, $("#btn-embed-stop"));
 wireJob($("#btn-sync"), $("#sync-status"), $("#sync-log"), () => {
   const prune = $("#sync-prune").checked;
   return api("/api/sync?prune=" + (prune ? "true" : "false"), { method: "POST" });
