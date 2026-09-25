@@ -646,7 +646,7 @@ let TIER_NAMES = {
   unreviewed: "Unreviewed", rejected: "Rejected", anomaly: "Anomaly", upscale: "Upscale",
   merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire",
 };
-const GRADES = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "reject"];   // keys 1–5
+const GRADES = ["reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–5, worst → best
 function tierOf(rating100, o) {
   const r = +rating100 || 0;
   if (r <= 0) return "unreviewed";
@@ -3049,10 +3049,11 @@ document.addEventListener("keydown", (e) => {
 // --- Review queue: one scene at a time, big player, 1–5 to grade -------------------
 const rv = { items: [], i: 0, label: "", fromCatalogue: false, peaks: [], source: "",
   graded: new Set(), live: null, forceIngest: false };
+// same order as GRADES: key 1 = Reject … key 5 = Légendaire
 const RV_GRADES = [
-  ["legendaire", "5★ · O 18 · tag + organize"], ["exceptionnelle", "5★ · O 17 · tag + organize"],
-  ["merveilleuse", "5★ · O 16 · tag + organize"], ["upscale", "5★ · O 0 · tag + organize"],
-  ["reject", "1★ · queued for deletion"],
+  ["reject", "1★ · queued for deletion"], ["upscale", "5★ · O 0 · tag + organize"],
+  ["merveilleuse", "5★ · O 16 · tag + organize"], ["exceptionnelle", "5★ · O 17 · tag + organize"],
+  ["legendaire", "5★ · O 18 · tag + organize"],
 ];
 function catListLabel() {
   if (cat.isNew) return "New from ingest";
