@@ -393,3 +393,20 @@ input[type=checkbox] { accent-color: var(--gold); }
 .rv-nopeaks { position: absolute; left: 16px; bottom: 44px; font-size: 12px; color: #d8d8e0; background: rgba(0,0,0,.6);
   padding: 4px 9px; border-radius: 7px; }
 .rv-nopeaks[hidden] { display: none; }
+
+/* For You on big screens (4K): a wider page, a ~70% hero, a full-width teach frame */
+@media (min-width: 1600px) {
+  #foryou.view { max-width: none; }
+  .hero { grid-template-columns: minmax(0, 2.3fr) minmax(380px, 1fr); gap: 22px; margin-bottom: 20px; }
+  .hero-big { aspect-ratio: 16 / 9; max-height: 70vh; }
+  .hero-big .ov { padding: clamp(22px, 1.6vw, 40px); gap: 12px; }
+  .hero-big h2 { font-size: clamp(23px, 1.6vw, 40px); }
+  .hero-big .btn { height: 38px; padding: 0 16px; font-size: 14px; }
+  .hero-side { grid-template-rows: 1fr auto; gap: 16px; }
+  /* the frame takes all the height the card has (cropped to fill), caption + buttons below */
+  #fy-teach { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  #fy-teach > .row { margin-top: 0; }
+  .fy-teach-frame { display: flex; flex-direction: column; gap: 8px; margin: 0; flex: 1; min-height: 0; }
+  .fy-teach-frame .pic { width: 100%; flex: 1; min-height: 240px; aspect-ratio: auto; }
+  #fy-teach .row .btn { height: 36px; padding: 0 16px; }
+}
