@@ -273,12 +273,13 @@
     <div id="rv" class="rv">
       <div class="rv-main">
         <div class="head tight"><h1 id="rv-title">…</h1><span id="rv-sub" class="sub2"></span><span class="grow"></span>
-          <span id="rv-pos" class="muted"></span>
+          <button id="rv-ingest" class="chip-live" data-go="activity" hidden></button><span id="rv-pos" class="muted"></span>
           <button class="btn sm ghost" id="rv-theater" title="Theater mode — the biggest video that fits (T)">▭ Theater <kbd>T</kbd></button>
           <button class="btn sm ghost" id="rv-full" title="Fullscreen video — grading keys still work (F)">⛶ <kbd>F</kbd></button>
           <button class="btn sm ghost" id="rv-exit">✕ Exit <kbd>Esc</kbd></button></div>
         <div class="rv-player"><video id="rv-v" playsinline muted></video>
-          <div class="rv-scrub" id="rv-scrub"><div class="rv-track"><i id="rv-prog"></i></div></div></div>
+          <div class="rv-scrub" id="rv-scrub"><div class="rv-track"><i id="rv-prog"></i></div></div>
+          <div class="rv-nopeaks" id="rv-nopeaks" hidden>Not embedded yet — no peaks · <kbd>←</kbd>/<kbd>→</kbd> skip 30 s</div></div>
         <div class="rv-grades" id="rv-grades"></div>
         <div class="kbdrow"><span><kbd>1</kbd>–<kbd>5</kbd> grade</span><span><kbd>J</kbd>/<kbd>K</kbd> next / previous scene</span>
           <span><kbd>←</kbd>/<kbd>→</kbd> jump between peaks</span><span><kbd>Space</kbd> play</span><span><kbd>M</kbd> sound</span><span><kbd>Z</kbd> undo</span><span><kbd>T</kbd> theater</span><span><kbd>F</kbd> fullscreen</span></div>
@@ -356,6 +357,7 @@
   <!-- ACTIVITY: every job + history -->
   <section id="activity" class="view">
     <div class="head"><h1>Activity</h1><span class="sub2">everything Peaks runs or changes, in one place</span><span class="grow"></span>
+      <button id="btn-ingest-review" class="btn" hidden>▶ Review new scenes</button>
       <button id="btn-ingest" class="btn pri">⤓ Ingest new files</button>
       <button id="btn-ingest-stop" class="btn danger" hidden>Stop</button></div>
     <div class="cards" id="stat-cards"></div>

@@ -203,3 +203,57 @@ def test_scan_options_saved_locked_and_fitted_to_the_schema(svc, stash, monkeypa
     scan = next(c[1] for c in stash.calls if c[0] == "scan")
     assert "scanGenerateImagePhashes" not in scan
     assert scan["scanGenerateSprites"] and scan["scanGenerateCovers"] and scan["scanGeneratePhashes"]
+
+
+# --- reviewing while the ingest runs ------------------------------------------------
+
+def test_new_scenes_are_published_right_after_the_scan(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    seen = {}
+    real = stash.metadata_identify
+
+    def identify(inp):
+        # mid-ingest: the new scenes are already listed and reviewable
+        seen["ingest"] = svc.last_ingest()
+        seen["listing"] = [i["scene_id"] for i in
+                           client.get("/api/catalogue", params={"new": True, "tier": ""}).json()["items"]]
+        return real(inp)
+    monkeypatch.setattr(stash, "metadata_identify", identify)
+    svc.run_ingest()
+    assert seen["ingest"]["running"] is True and seen["ingest"]["new"] == ["10", "11"]
+    assert seen["ingest"]["stage"] == "identify"
+    assert sorted(seen["listing"]) == ["10", "11"]
+    final = svc.last_ingest()
+    assert final["running"] is False and final["stage"] == "done" and final["new"] == ["10", "11"]
+
+
+def test_a_grade_made_mid_ingest_survives_identify_and_a_move(svc, stash, monkeypatch):
+    real_identify, real_auto = stash.metadata_identify, stash.metadata_auto_tag
+
+    def identify(inp):
+        # the user grades scene 10 Légendaire while Stash identifies…
+        svc.grade_scene("10", "legendaire")
+        # …the renamer moves it, and identify (tags: overwrite) wipes its tags
+        stash.s["10"]["path"] = "/library/legendaire/10.mp4"
+        jid = real_identify(inp)
+        stash.s["10"]["tag_ids"] = []
+        return jid
+
+    def auto_tag(inp):
+        auto_tag.paths = inp["paths"]
+        return real_auto(inp)
+    monkeypatch.setattr(stash, "metadata_identify", identify)
+    monkeypatch.setattr(stash, "metadata_auto_tag", auto_tag)
+    svc.run_ingest()
+    tag = stash.find_tag_by_name("legendaire")
+    assert stash.s["10"]["tag_ids"] == [tag.id] and stash.s["10"]["organized"]   # re-tagged
+    assert "/library/legendaire/10.mp4" in auto_tag.paths                         # new path used
+    assert any(e["action"] == "tag-sync" and e.get("source") == "ingest" for e in svc.history())
+
+
+def test_a_failed_stage_still_leaves_a_finished_record(svc, stash):
+    stash.job_outcome = {"auto_tag": "FAILED"}
+    with pytest.raises(RuntimeError):
+        svc.run_ingest()
+    rec = svc.last_ingest()
+    assert rec["running"] is False and rec["new"] == ["10", "11"]

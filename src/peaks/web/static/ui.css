@@ -385,3 +385,11 @@ input[type=checkbox] { accent-color: var(--gold); }
 .rv-player:fullscreen { border-radius: 0; aspect-ratio: auto; }
 .rv-player:fullscreen video { height: 100vh; }
 @media (max-width: 1100px) { .rv.theater .rv-side { grid-template-columns: 1fr; } }
+
+/* Review queue while an ingest runs */
+.chip-live { height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(212,174,85,.5); background: rgba(212,174,85,.1);
+  color: var(--gold); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.chip-live[hidden] { display: none; }
+.rv-nopeaks { position: absolute; left: 16px; bottom: 44px; font-size: 12px; color: #d8d8e0; background: rgba(0,0,0,.6);
+  padding: 4px 9px; border-radius: 7px; }
+.rv-nopeaks[hidden] { display: none; }

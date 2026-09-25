@@ -2816,6 +2816,9 @@ async function startIngest() {
     const cb = $("#btn-cat-ingest"); if (cb) cb.disabled = true;
     const j = await waitJob(job.id, (x) => {
       renderIngestSteps(x);
+      const m = (x.log || []).join("\n").match(/scan done: (\d+) new/);
+      const rb = $("#btn-ingest-review");
+      if (rb && m && +m[1] > 0) { rb.hidden = false; rb.textContent = `▶ Review ${plural(+m[1], "new scene")} now`; }
       const p = x.progress || {}, line = (x.log || []).slice(-1)[0] || "starting…";
       $("#cat-status").textContent = "Ingest: " + line;
       if (statusEl) statusEl.textContent = `${x.status}${p.stage && p.stage !== "done" ? " · " + p.stage : ""} · ${x.elapsed}s`;
@@ -2850,6 +2853,7 @@ function renderIngestSteps(job) {
   });
 }
 $("#btn-ingest")?.addEventListener("click", startIngest);
+$("#btn-ingest-review")?.addEventListener("click", () => { rv.forceIngest = true; go("review"); });
 $("#btn-top-ingest")?.addEventListener("click", () => {
   if (confirm("Ingest new files?\n\nStash scans the library (phashes on), identifies and auto-tags the new scenes with your saved task defaults, then Peaks embeds them and checks for duplicates.")) {
     go("activity"); startIngest();
@@ -3043,7 +3047,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 // --- Review queue: one scene at a time, big player, 1–5 to grade -------------------
-const rv = { items: [], i: 0, label: "", fromCatalogue: false, peaks: [] };
+const rv = { items: [], i: 0, label: "", fromCatalogue: false, peaks: [], source: "",
+  graded: new Set(), live: null, forceIngest: false };
 const RV_GRADES = [
   ["legendaire", "5★ · O 18 · tag + organize"], ["exceptionnelle", "5★ · O 17 · tag + organize"],
   ["merveilleuse", "5★ · O 16 · tag + organize"], ["upscale", "5★ · O 0 · tag + organize"],
@@ -3054,10 +3059,28 @@ function catListLabel() {
   if (cat.view) return (CAT_VIEWS.find((v) => v[0] === cat.view) || [0, cat.view])[1];
   return cat.tier ? TIER_NAMES[cat.tier] : "All scenes";
 }
+// new scenes from the running (or last) ingest, in the order they're embedded
+async function loadIngestQueue() {
+  const d = await api("/api/catalogue?" + new URLSearchParams({ new: "true", tier: "unreviewed", sort: "added", limit: 500 }));
+  if (!d.items.length) return false;
+  const idn = (x) => +x.scene_id || 0;
+  rv.items = d.items.sort((a, b) => idn(a) - idn(b)); rv.i = 0; rv.graded = new Set();   // = embed order
+  rv.label = "New from ingest"; rv.source = "ingest";
+  return true;
+}
+async function ingestInfo() {
+  try { const d = await api("/api/ingest"); return { ...(d.last || {}), live: !!(d.running || (d.last || {}).running) }; }
+  catch { return {}; }
+}
 async function openReview() {
+  const ing = await ingestInfo();
+  const force = rv.forceIngest; rv.forceIngest = false;
   if (rv.fromCatalogue && cat.items.length) {
     rv.items = cat.items.slice(); rv.i = Math.max(0, Math.min(cat.focus, rv.items.length - 1));
-    rv.label = catListLabel();
+    rv.label = catListLabel(); rv.source = "catalogue";
+  } else if ((force || (ing.live && rv.source !== "ingest") || (!rv.items.length && (ing.new || []).length))
+             && await loadIngestQueue().catch(() => false)) {
+    /* reviewing the ingest's new scenes */
   } else if (!rv.items.length) {
     $("#rv-title").textContent = "Loading your queue…";
     try {
@@ -3067,11 +3090,44 @@ async function openReview() {
         d = await api("/api/catalogue?" + new URLSearchParams({ tier: "unreviewed", limit: 200, sort: "date" }));
         rv.label = TIER_NAMES.unreviewed;
       }
-      rv.items = d.items; rv.i = 0;
+      rv.items = d.items; rv.i = 0; rv.source = "default";
     } catch (e) { rv.items = []; toast(e.message, true); }
   }
   rv.fromCatalogue = false;
   renderReview();
+  rvLiveTick(ing);
+}
+// while an ingest runs, keep the queue's scenes fresh: titles/performers after
+// identify + auto tag, moments + the model's opinion once each is embedded
+async function rvLiveTick(known) {
+  clearTimeout(rv.live);
+  const ing = known || await ingestInfo();
+  const chip = $("#rv-ingest");
+  if (chip) {
+    chip.hidden = !ing.live;
+    if (ing.live) {
+      chip.textContent = `⤓ Ingesting · ${ing.stage || "…"}`;
+      chip.title = "New scenes are reviewable now. Titles and performers fill in after identify / auto tag, peaks once each scene is embedded. Click for Activity.";
+    }
+  }
+  if (rv.source === "ingest" && !known) await rvMergeFresh();
+  if (ing.live && $("#review")?.classList.contains("active")) rv.live = setTimeout(() => rvLiveTick(), 8000);
+  else if (!known && rv.source === "ingest") await rvMergeFresh();     // one last refresh at the end
+}
+async function rvMergeFresh() {
+  let d;
+  try { d = await api("/api/catalogue?" + new URLSearchParams({ new: "true", sort: "added", limit: 500 })); } catch { return; }
+  const fresh = new Map(d.items.map((x) => [x.scene_id, x]));
+  const have = new Set(rv.items.map((x) => x.scene_id));
+  rv.items = rv.items.map((x) => {
+    const f = fresh.get(x.scene_id);
+    if (!f || rv.graded.has(x.scene_id)) return x;
+    return { ...x, title: f.title, performers: f.performers, studio: f.studio, tags: f.tags, date: f.date,
+      moments: f.moments, pred: f.pred, flag: f.flag, dupe: f.dupe, suggest: f.suggest, path: f.path, quality: f.quality };
+  });
+  d.items.filter((f) => !have.has(f.scene_id) && f.tier === "unreviewed")
+    .sort((a, b) => (+a.scene_id || 0) - (+b.scene_id || 0)).forEach((f) => rv.items.push(f));
+  if ($("#review")?.classList.contains("active")) renderReview();
 }
 function renderReview() {
   const r = rv.items[rv.i];
@@ -3095,6 +3151,7 @@ function renderReview() {
     v.onloadedmetadata = () => { v.currentTime = start; v.play().catch(() => {}); };
   }
   const dur = r.duration || 1;
+  $("#rv-nopeaks").hidden = rv.peaks.length > 0;
   $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
     rv.peaks.map((t) => `<span class="pk" style="left:${(100 * t / dur).toFixed(2)}%" data-t="${t}" title="${fmt(t)}"></span>`).join("");
   // grades: current one outlined, the model's pick highlighted
@@ -3108,7 +3165,9 @@ function renderReview() {
   $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
     const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
     return `<div class="pb"><span>${esc(className(c))}</span><div class="b"><i class="tier-bg-${t}" style="width:${p}%"></i></div><span class="muted">${p}%</span></div>`;
-  }).join("") : '<span class="faint">Not embedded yet, or the tier model isn\'t trained — Catalogue → ⋯ → Train.</span>';
+  }).join("") : (r.moments && r.moments.length
+    ? '<span class="faint">The tier model isn\'t trained yet — Catalogue → ⋯ → Train.</span>'
+    : '<span class="faint">Not embedded yet — the model\'s opinion appears once it is.</span>');
   $("#rv-why").innerHTML = [r.pred && r.pred.keeper != null ? `Keeper ${Math.round(r.pred.keeper * 100)}%` : "",
     r.flag ? `<span class="warn">⚠ ${esc(r.flag)}</span>` : "", r.suggest ? esc(r.suggest.why) : "",
     r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>");
@@ -3127,6 +3186,7 @@ async function rvGrade(grade) {
   const r = rv.items[rv.i]; if (!r) return;
   try {
     const fresh = await applyGrade(r.scene_id, grade);
+    rv.graded.add(r.scene_id);
     rv.items[rv.i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred };
     cat.loaded = false;                 // the Catalogue re-reads when you go back
     rvMove(1);
@@ -3140,6 +3200,7 @@ function rvMove(d) {
 }
 function rvJump(dir) {
   const v = $("#rv-v"), t = v.currentTime;
+  if (!rv.peaks.length) { v.currentTime = Math.max(0, t + 30 * dir); return; }   // not embedded yet
   const next = dir > 0 ? rv.peaks.find((p) => p > t + 1) : [...rv.peaks].reverse().find((p) => p < t - 1);
   if (next != null) v.currentTime = next;
 }
