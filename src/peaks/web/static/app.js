@@ -2951,12 +2951,7 @@ $("#btn-logout").addEventListener("click", async () => {
 });
 
 refreshDashboard();  // conn status + job reattach (runs even though it's not the landing view)
-// land on the page in the URL (#/catalogue …), else For You — the home page
-go((location.hash.match(/^#\/(\w+)/) || [])[1] || "foryou");
-window.addEventListener("hashchange", () => {
-  const v = (location.hash.match(/^#\/(\w+)/) || [])[1];
-  if (v && !$("#" + v)?.classList.contains("active")) go(v);
-});
+
 
 // --- live job tray (sidebar): whatever is running, from any page -------------------
 const JOB_LABEL = { embed: "Embedding", ingest: "Ingest", score: "Writing markers", sync: "Syncing",
@@ -3162,6 +3157,21 @@ $("#rv-v")?.addEventListener("timeupdate", () => {
 });
 $("#rv-v")?.addEventListener("click", () => { const v = $("#rv-v"); v.paused ? v.play() : v.pause(); });
 $("#rv-exit")?.addEventListener("click", () => { $("#rv-v").pause(); go("catalogue"); });
+// theater mode: the biggest 16:9 player that fits the window (default on — big screens)
+function setTheater(on) {
+  $("#rv")?.classList.toggle("theater", on);
+  $("#review")?.classList.toggle("theater", on);
+  $("#rv-theater")?.classList.toggle("on", on);
+  try { localStorage.setItem("peaks_theater", on ? "1" : "0"); } catch { /* ignore */ }
+}
+function rvFullscreen() {
+  const box = $(".rv-player");
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else box?.requestFullscreen?.().catch(() => {});
+}
+$("#rv-theater")?.addEventListener("click", () => setTheater(!$("#rv").classList.contains("theater")));
+$("#rv-full")?.addEventListener("click", rvFullscreen);
+setTheater((() => { try { return localStorage.getItem("peaks_theater") !== "0"; } catch { return true; } })());
 document.addEventListener("keydown", (e) => {
   if (!$("#review")?.classList.contains("active") || !$("#viewer").hidden || !$("#cmdk").hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -3181,7 +3191,13 @@ document.addEventListener("keydown", (e) => {
       const i = rv.items.findIndex((x) => x.scene_id === sid);
       if (i >= 0) { rv.items[i] = { ...rv.items[i], ...fresh }; rv.i = i; renderReview(); }
     });
-  } else if (k === "escape") { e.preventDefault(); v.pause(); go("catalogue"); }
+  } else if (k === "t") { e.preventDefault(); setTheater(!$("#rv").classList.contains("theater")); }
+  else if (k === "f") { e.preventDefault(); rvFullscreen(); }
+  else if (k === "escape") {
+    e.preventDefault();
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+    v.pause(); go("catalogue");
+  }
 });
 
 // --- Settings → Ingest: what Stash generates when Peaks scans ---------------------
@@ -3230,3 +3246,11 @@ $("#btn-ingest-scan-save")?.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 loadScanOptions();
+
+// (last, so every page's code is defined before the first route runs)
+// land on the page in the URL (#/catalogue …), else For You — the home page
+go((location.hash.match(/^#\/(\w+)/) || [])[1] || "foryou");
+window.addEventListener("hashchange", () => {
+  const v = (location.hash.match(/^#\/(\w+)/) || [])[1];
+  if (v && !$("#" + v)?.classList.contains("active")) go(v);
+});
