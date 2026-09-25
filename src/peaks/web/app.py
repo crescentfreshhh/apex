@@ -1086,6 +1086,15 @@ def create_app(cfg=None):
             raise HTTPException(409, str(exc))
         return job.as_dict()
 
+    @app.get("/api/ingest/scan-options")
+    def ingest_scan_options():
+        return {"options": service.ingest_scan_options(),
+                "labels": {k: v[0] for k, v in service.INGEST_SCAN_FIELDS.items()}}
+
+    @app.post("/api/ingest/scan-options")
+    def save_ingest_scan_options(body: dict):
+        return {"options": service.save_ingest_scan(body.get("options") or {})}
+
     @app.get("/api/ingest")
     def ingest_status():
         running = jobs.running("ingest")

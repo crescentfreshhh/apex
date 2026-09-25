@@ -74,7 +74,9 @@ def test_full_ingest_order_and_inputs(svc, stash, monkeypatch):
     assert j["status"] == "done", j
     assert _kinds(stash) == ["scan", "identify", "auto_tag", "embed", "dupes"]
     calls = {c[0]: c for c in stash.calls}
-    assert calls["scan"][1] == {"scanGenerateCovers": True, "scanGeneratePhashes": True}   # phash forced
+    # the user's scan settings (covers + video phashes, nothing else), not Stash's saved ones
+    assert calls["scan"][1] == {**{k: False for k in svc.INGEST_SCAN_FIELDS},
+                                "scanGenerateCovers": True, "scanGeneratePhashes": True}
     ident = calls["identify"][1]
     assert ident["sceneIDs"] == ["10", "11"] and "paths" not in ident                      # new scenes only
     assert ident["sources"][0]["source"]["stash_box_endpoint"].startswith("https://stashdb")
@@ -184,3 +186,20 @@ def test_client_builds_queries_and_inputs_from_the_schema():
     assert fitted == {"sources": [{"source": {"stash_box_endpoint": "e"}}]}
     j = c.find_job("7")
     assert j["status"] == "RUNNING" and "error" not in c.queries[-1]       # this Stash has no Job.error
+
+
+def test_scan_options_saved_locked_and_fitted_to_the_schema(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    got = client.post("/api/ingest/scan-options", json={"options": {
+        "scanGenerateSprites": True, "scanGeneratePhashes": False,      # phashes can't go off
+        "scanGenerateImagePreviews": True, "bogus": True}}).json()["options"]
+    assert got["scanGenerateSprites"] and got["scanGeneratePhashes"]
+    assert got["scanGenerateImagePreviews"] is False                    # previews are off
+    assert "bogus" not in got
+    assert client.get("/api/ingest/scan-options").json()["labels"]["rescan"] == "rescan files"
+    # an older Stash without image phashes: that field is left out of the input
+    monkeypatch.setattr(stash, "input_has", lambda t, f: f != "scanGenerateImagePhashes", raising=False)
+    svc.run_ingest()
+    scan = next(c[1] for c in stash.calls if c[0] == "scan")
+    assert "scanGenerateImagePhashes" not in scan
+    assert scan["scanGenerateSprites"] and scan["scanGenerateCovers"] and scan["scanGeneratePhashes"]

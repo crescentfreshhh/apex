@@ -494,6 +494,7 @@
         <button data-sec="playback">Playback &amp; moments</button>
         <button data-sec="export">Export</button>
         <button data-sec="models">AI models</button>
+        <button data-sec="ingest">Ingest</button>
       </nav>
       <div class="sets">
         <div class="sec" data-sec="tiers">
@@ -554,6 +555,14 @@
             <div class="row"><select id="sel-clip">
               <option value="ViT-H-14">largest</option>
             </select><span id="models-status" class="dim"></span></div></div>
+        </div>
+        <div class="sec" data-sec="ingest" hidden>
+          <h2>Ingest</h2>
+          <p class="lead">What Stash generates when Peaks scans for new files. Identify and auto tag use
+            the defaults saved on Stash's Tasks page.</p>
+          <div class="field"><div class="l"><b>Scan</b><span>same options as Stash → Tasks → Scan</span></div>
+            <div><div id="ingest-scan" class="toggles"></div>
+              <div class="row"><button id="btn-ingest-scan-save" class="btn sm pri">Save</button><span id="ingest-scan-status" class="dim"></span></div></div></div>
         </div>
       </div>
     </div>

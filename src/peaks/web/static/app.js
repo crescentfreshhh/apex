@@ -3183,3 +3183,50 @@ document.addEventListener("keydown", (e) => {
     });
   } else if (k === "escape") { e.preventDefault(); v.pause(); go("catalogue"); }
 });
+
+// --- Settings → Ingest: what Stash generates when Peaks scans ---------------------
+// Rows in Stash's own order and wording; "animated image previews" is a sub-option
+// of previews, and video phashes are locked on (duplicates need them).
+const SCAN_ROWS = [
+  ["scanGenerateCovers", "Generate scene covers"],
+  ["scanGeneratePreviews", "Generate previews"],
+  ["scanGenerateImagePreviews", "Generate animated image previews", "sub"],
+  ["scanGenerateSprites", "Generate scrubber sprites"],
+  ["scanGeneratePhashes", "Generate video perceptual hashes", "lock"],
+  ["scanGenerateThumbnails", "Generate thumbnails for images"],
+  ["scanGenerateImagePhashes", "Generate image perceptual hashes"],
+  ["scanGenerateClipPreviews", "Generate previews for image clips"],
+  ["rescan", "Rescan files"],
+];
+let scanOpts = {};
+function renderScanToggles() {
+  const box = $("#ingest-scan"); if (!box) return;
+  box.innerHTML = SCAN_ROWS.map(([k, label, kind]) => {
+    const off = (kind === "sub" && !scanOpts.scanGeneratePreviews) || kind === "lock";
+    return `<label class="tog-row ${kind === "sub" ? "sub" : ""} ${off ? "off" : ""}">
+      <span>${esc(label)}${kind === "lock" ? ' <span class="faint small">· needed for duplicates</span>' : ""}</span>
+      <input type="checkbox" class="switch" data-k="${k}" ${scanOpts[k] ? "checked" : ""} ${off ? "disabled" : ""} /></label>`;
+  }).join("");
+  const on = SCAN_ROWS.filter(([k]) => scanOpts[k]).map(([, l]) => l.replace(/^Generate /, "").replace("video perceptual hashes", "video phashes"));
+  const cap = $('#ingest-steps [data-st="scan"] span');
+  if (cap) cap.textContent = on.join(" + ") || "nothing extra";
+}
+async function loadScanOptions() {
+  try { scanOpts = (await api("/api/ingest/scan-options")).options; renderScanToggles(); } catch {}
+}
+$("#ingest-scan")?.addEventListener("change", (e) => {
+  const k = e.target.dataset.k; if (!k) return;
+  scanOpts[k] = e.target.checked;
+  if (k === "scanGeneratePreviews" && !e.target.checked) scanOpts.scanGenerateImagePreviews = false;
+  renderScanToggles();
+});
+$("#btn-ingest-scan-save")?.addEventListener("click", async () => {
+  try {
+    scanOpts = (await api("/api/ingest/scan-options", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: scanOpts }) })).options;
+    renderScanToggles();
+    $("#ingest-scan-status").textContent = "saved";
+    setTimeout(() => { $("#ingest-scan-status").textContent = ""; }, 1500);
+  } catch (e) { toast(e.message, true); }
+});
+loadScanOptions();

@@ -578,6 +578,40 @@ class LibraryMixin:
                 return info
             time.sleep(self.INGEST_POLL)
 
+    # Stash scan options → (label, default). Defaults are the user's Stash scan
+    # settings: covers + video phashes, nothing else.
+    INGEST_SCAN_FIELDS = {
+        "scanGenerateCovers": ("covers", True),
+        "scanGeneratePreviews": ("previews", False),
+        "scanGenerateImagePreviews": ("animated image previews", False),
+        "scanGenerateSprites": ("scrubber sprites", False),
+        "scanGeneratePhashes": ("video phashes", True),
+        "scanGenerateThumbnails": ("image thumbnails", False),
+        "scanGenerateImagePhashes": ("image phashes", False),
+        "scanGenerateClipPreviews": ("image clip previews", False),
+        "rescan": ("rescan files", False),
+    }
+
+    def ingest_scan_options(self) -> dict[str, bool]:
+        saved = self._settings().get("ingest_scan") or {}
+        opts = {k: bool(saved.get(k, d)) for k, (_, d) in self.INGEST_SCAN_FIELDS.items()}
+        opts["scanGeneratePhashes"] = True                   # duplicates need them
+        if not opts["scanGeneratePreviews"]:
+            opts["scanGenerateImagePreviews"] = False        # a sub-option of previews
+        return opts
+
+    def save_ingest_scan(self, opts: dict) -> dict[str, bool]:
+        import json
+
+        s = dict(self._settings())
+        s["ingest_scan"] = {k: bool(v) for k, v in (opts or {}).items()
+                            if k in self.INGEST_SCAN_FIELDS and isinstance(v, bool)}
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.ingest_scan_options()
+
     def run_ingest(self, job=None, embed_busy=None) -> dict:
         import json
 
@@ -595,11 +629,12 @@ class LibraryMixin:
             log(f"couldn't read Stash's saved task defaults ({exc}) — using Stash's own defaults")
             defaults = {"scan": None, "identify": None, "autoTag": None}
 
-        # 1. scan — saved defaults, phashes always on (duplicate detection needs them)
-        scan_in = client.fit_input(defaults.get("scan") or {}, "ScanMetadataInput")
-        if client.input_has("ScanMetadataInput", "scanGeneratePhashes"):
-            scan_in["scanGeneratePhashes"] = True
-        log("1/5 scan: " + (", ".join(k for k, v in scan_in.items() if v is True) or "Stash defaults"))
+        # 1. scan — Peaks' own scan options (Settings → Ingest), video phashes
+        # always on; only fields this Stash version's scan input actually has
+        opts = self.ingest_scan_options()
+        scan_in = {k: v for k, v in opts.items() if client.input_has("ScanMetadataInput", k)}
+        on = [label for k, (label, _) in self.INGEST_SCAN_FIELDS.items() if scan_in.get(k)]
+        log("1/5 scan: " + (", ".join(on) or "nothing extra generated"))
         self._wait_stash_job(client, client.metadata_scan(scan_in), "scan", job)
         new = sorted(client.all_scene_ids() - before, key=lambda x: int(x) if x.isdigit() else 0)
         stages["scan"] = f"{len(new)} new scene(s)"
