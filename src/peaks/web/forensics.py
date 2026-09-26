@@ -26,7 +26,7 @@ from pathlib import Path
 CLEAN = "[clean-exit]"
 KEEP_LINES = 2000
 _state: dict = {"fh": None, "path": None, "report": None, "routes": Counter(),
-                "lock": threading.Lock(), "gpu": True}
+                "lock": threading.Lock(), "gpu": True, "busy": Counter()}
 
 
 def _stamp() -> str:
@@ -112,6 +112,26 @@ def note_request(path: str) -> None:
     _state["routes"][path] += 1
 
 
+class busy:
+    """`with forensics.busy("tier-train"):` — heavy in-process work (not a
+    job) that the heartbeat should name, so a crash log shows what ran."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __enter__(self):
+        with _state["lock"]:
+            _state["busy"][self.name] += 1
+        return self
+
+    def __exit__(self, *exc):
+        with _state["lock"]:
+            _state["busy"][self.name] -= 1
+            if _state["busy"][self.name] <= 0:
+                del _state["busy"][self.name]
+        return False
+
+
 # --- the heartbeat -------------------------------------------------------------------
 
 def _descendants(pid: int) -> list[tuple[int, str]]:
@@ -171,6 +191,9 @@ def health_line(jobs=None) -> str:
     if jobs is not None:
         running = sorted({j.kind for j in jobs.list() if j.status == "running"})
         parts.append("jobs=" + (",".join(running) or "-"))
+    work = sorted(k for k, n in _state["busy"].items() if n > 0)
+    if work:
+        parts.append("work=" + ",".join(work))
     routes, _state["routes"] = _state["routes"], Counter()
     if routes:
         parts.append("req=" + ",".join(f"{r}×{n}" for r, n in routes.most_common(3)))

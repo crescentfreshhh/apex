@@ -547,7 +547,7 @@ def build_training_set(
             continue
         for lab in labs:
             idx = int(np.argmin(np.abs(times - lab.time)))
-            rows.append(vecs[idx])
+            rows.append(vecs[idx].copy())  # a view would pin the whole scene
             ys.append(lab.label)
             tss.append(getattr(lab, "ts", 0.0) or 0.0)
     if not rows:
@@ -695,6 +695,9 @@ def gather_candidates(
 AUTO_MLP_MIN_SAMPLES = 200
 # ±frames of temporal context tried by `context="auto"`
 AUTO_CONTEXT = 2
+# at most this many whole scenes are held for the jump-to-peak benchmark
+# (each is its full frame matrix — unbounded, a big taste set exhausted RAM)
+MAX_PEAK_SCENES = 120
 
 
 @dataclass
@@ -832,11 +835,18 @@ def train_profile(
         by_key[r[0]].append(i)
     feats = {c: [None] * len(rows) for c in contexts}
     keep_row = np.ones(len(rows), dtype=bool)
-    scenes: dict = {c: {} for c in contexts}
     pos_times: dict[str, list[float]] = defaultdict(list)
     for r in rows:
         if r[3] == 1 and r[6] and r[1] is not None:
             pos_times[r[0]].append(r[1])
+    # the jump-to-peak benchmark scores whole scenes — keep a bounded sample of
+    # them (raw, half precision) and build features per fold, never all at once
+    peak_keys = sorted(pos_times)
+    if len(peak_keys) > MAX_PEAK_SCENES:
+        pick = np.random.default_rng(seed).choice(len(peak_keys), MAX_PEAK_SCENES, replace=False)
+        peak_keys = [peak_keys[i] for i in sorted(pick)]
+    peak_keys = set(peak_keys)
+    scenes: dict = {}
     for key, ids in by_key.items():
         if not cache.has(key, model_name):
             keep_row[ids] = False
@@ -850,9 +860,12 @@ def train_profile(
             for i in ids:
                 r = rows[i]
                 fi = r[2] if r[2] is not None else int(np.argmin(np.abs(times - r[1])))
-                feats[c][i] = fx[fi]
-            if key in pos_times:
-                scenes[c][key] = (np.asarray(times), fx, pos_times[key])
+                # copy: a view would pin the scene's whole frame matrix in RAM
+                feats[c][i] = fx[fi].copy()
+            del fx
+        if key in peak_keys:
+            scenes[key] = (np.asarray(times), np.asarray(vecs, dtype=np.float16), pos_times[key])
+        del vecs
     rows = [r for i, r in enumerate(rows) if keep_row[i]]
     if not rows:
         raise ValueError("need both positive (1) and negative (0) labels to train; got none")
@@ -884,6 +897,12 @@ def train_profile(
             return m.predict_proba
         return fit
 
+    def _featurizer(c: int):
+        def f(raw):
+            v = np.asarray(raw, dtype=np.float32)
+            return with_context(v, c) if c else v
+        return f
+
     candidates = [(k, c) for c in contexts for k in kinds]  # simplest first
     results: list[dict] = []
     best, best_res = candidates[0], None
@@ -891,7 +910,7 @@ def train_profile(
         for k, c in candidates:
             try:
                 res = grouped_oof(_fitter(k, c), feats[c], y, w, groups, ev, bg,
-                                  scenes=scenes[c], seed=seed)
+                                  scenes=scenes, featurize=_featurizer(c), seed=seed)
             except ValueError:
                 res = None
             results.append({"kind": k, "context": c, **(res or {})})

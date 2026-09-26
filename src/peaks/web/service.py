@@ -31,6 +31,10 @@ class Service(LibraryMixin):
         self._meta_lock = threading.Lock()
         self._taste: dict[str, object] = {}  # taste classifiers, keyed by file
         self._taste_lock = threading.Lock()
+        # one heavy model fit at a time (tier retrain, taste training): concurrent
+        # native BLAS/LAPACK fits are the prime suspect in the segfaults
+        self._train_lock = threading.Lock()
+        self._train_gate = threading.Lock()   # guards claiming the tier retrain
         self._vocab_cache = None  # (labels, CLIP-text matrix) for classification
         self._pool = None  # cached scene pool for the shuffle board
         self._settings_cache = None  # GUI-saved active models (lazily read)
@@ -2070,9 +2074,6 @@ class Service(LibraryMixin):
         """Fit a preference classifier from your thumbs (plus what your grades
         and markers imply), in one embedding space. Each training is benchmarked
         on held-out scenes and appended to the quality history."""
-        import json
-        import time as _t
-
         from ..pipeline import train_profile
 
         profile = profile or self.cfg.markers.tag_name
@@ -2083,7 +2084,15 @@ class Service(LibraryMixin):
                           else ([], set()))
         ctx = str(mc.taste_context).strip().lower()
         context = "auto" if ctx == "auto" else int(float(ctx or 0))
-        clf, stats = train_profile(
+        from . import forensics
+
+        with self._train_lock, forensics.busy("taste-train"):
+            clf, stats = self._train_profile_locked(
+                train_profile, cache, model, profile, mc, weak, in_taste, context)
+        return self._finish_taste_training(clf, stats, profile, model)
+
+    def _train_profile_locked(self, train_profile, cache, model, profile, mc, weak, in_taste, context):
+        return train_profile(
             self._label_store(), cache, model, profile,
             kind=mc.taste_classifier,
             recency_halflife_days=mc.recency_halflife_days,
@@ -2095,6 +2104,11 @@ class Service(LibraryMixin):
             weak=weak, exclude_bg_keys=in_taste if mc.taste_pu_filter else None,
             pu_filter=mc.taste_pu_filter, context=context,
         )
+
+    def _finish_taste_training(self, clf, stats: dict, profile: str, model: str) -> dict:
+        import json
+        import time as _t
+
         out = self._taste_path(profile, model)
         out.parent.mkdir(parents=True, exist_ok=True)
         prev = self.taste_quality(profile, model, last=1)["latest"]
@@ -2156,14 +2170,15 @@ class Service(LibraryMixin):
         from ..classifier import with_context
 
         w = int(getattr(clf, "context", 0) or 0)
-        if not w:
-            # chunked: a whole-matrix predict_proba would upcast millions of rows
-            # to a transient float64 copy (tens of GB at 2s sampling)
-            return np.asarray(
-                idx.apply(lambda b: np.asarray(clf.predict_proba(b), dtype=np.float32).reshape(-1)),
-                dtype=np.float32,
-            ).reshape(-1)
         out = np.zeros(idx.size, dtype=np.float32)
+        if not w:
+            # always chunked, whatever the index storage: a whole-matrix call
+            # would allocate model activations for millions of rows at once
+            # (the MLP's hidden layer alone is rows × 128)
+            for s in range(0, idx.size, 8192):
+                e = min(idx.size, s + 8192)
+                out[s:e] = np.asarray(clf.predict_proba(idx.rows(s, e)), dtype=np.float32).reshape(-1)
+            return out
         spans = sorted(idx._key_rows.values())
         batch, spans_in = [], []
         n = 0
@@ -4260,8 +4275,15 @@ class Service(LibraryMixin):
         # (predictions are NOT invalidated: a grade changes a scene's tier, not
         # its picture or bitrate — views are re-derived from rows every request)
         if self._grades_since_train >= 25 and self._tier_model_state()["model"] is not None:
-            if not getattr(self, "_tier_training", False):
-                threading.Thread(target=self._train_tier_quietly, daemon=True).start()
+            with self._train_gate:
+                if getattr(self, "_tier_training", False):
+                    return
+                # claim it before the thread starts, and restart the count even if
+                # the train fails — otherwise every later grade spawns another one
+                self._tier_training = True
+                self._grades_since_train = 0
+            threading.Thread(target=self._train_tier_quietly, daemon=True,
+                             name="peaks-tier-train").start()
 
     def _train_tier_quietly(self) -> None:
         try:
@@ -4336,6 +4358,7 @@ class Service(LibraryMixin):
         import time as _t
 
         from ..tier_model import CLASSES, TIER_CLASS, fit_best, usable_classes
+        from . import forensics
 
         self._tier_training = True
         try:
@@ -4365,7 +4388,9 @@ class Service(LibraryMixin):
             keep = [i for i, c in enumerate(y) if c in ok]
             Xv = np.stack([vis[i] for i in keep])
             Xq = np.stack([qual[i] for i in keep])
-            model, rep = fit_best(Xv, Xq, [y[i] for i in keep])
+            # one heavy fit at a time, process-wide (taste training shares it)
+            with self._train_lock, forensics.busy("tier-train"):
+                model, rep = fit_best(Xv, Xq, [y[i] for i in keep])
             report = {"trained": True, **base, **rep, "classes": model.classes_,
                       "n": len(keep), "trained_at": _t.strftime("%Y-%m-%d %H:%M")}
             path = model.save(self._tier_model_path())

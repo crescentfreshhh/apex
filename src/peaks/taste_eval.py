@@ -31,14 +31,15 @@ def _auc(y: np.ndarray, s: np.ndarray) -> float | None:
 def grouped_oof(
     fit, X: np.ndarray, y: np.ndarray, w: np.ndarray, groups: np.ndarray,
     eval_mask: np.ndarray, bg_mask: np.ndarray, *, scenes: dict | None = None,
-    folds: int = 5, seed: int = 0,
+    featurize=None, folds: int = 5, seed: int = 0,
 ) -> dict | None:
     """Out-of-fold evaluation. `fit(X, y, w)` returns a `predict(X)` callable.
 
     Rows are split by `groups` (scene key), stratified by label. Background rows
     (`bg_mask`) only ever train, and never from a test fold's own scenes.
-    `scenes`, if given, is {key: (times, feats, positive_times)} for the
-    peak-hit metric (feats already in the same feature space as X).
+    `scenes`, if given, is {key: (times, frames, positive_times)} for the
+    peak-hit metric; `featurize(frames)` maps a scene's raw frames into X's
+    feature space (built per scene, per fold — never all held at once).
     Returns None when there aren't enough scenes of each class to evaluate."""
     from sklearn.model_selection import StratifiedGroupKFold
 
@@ -68,9 +69,10 @@ def grouped_oof(
             sc = (scenes or {}).get(g)
             if sc is None:
                 continue
-            times, feats, pos_t = sc
+            times, frames, pos_t = sc
             if not len(pos_t) or not len(times):
                 continue
+            feats = featurize(frames) if featurize else frames
             best = float(times[int(np.argmax(predict(feats)))])
             tried += 1
             hits += int(np.min(np.abs(np.asarray(pos_t) - best)) <= PEAK_TOLERANCE)

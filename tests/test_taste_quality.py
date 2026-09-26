@@ -233,3 +233,59 @@ def test_active_learning_skips_rejects_and_varies(svc):
     asked = [svc.next_uncertain() for _ in range(8)]
     assert all(a and a["scene_id"] != "5" for a in asked)
     assert len({(a["key"], a["time"]) for a in asked}) >= 6
+
+
+# --- memory & crash safety ---------------------------------------------------------
+
+def test_training_does_not_pin_whole_scenes_in_memory(tmp_path, monkeypatch):
+    """Regression: each training row was a view into its scene's full frame
+    matrix, so every scene touched stayed resident — a real library OOM'd.
+    (The jump-to-peak benchmark legitimately holds a capped sample of scenes;
+    the cap is pinned low here so only a leak could blow the budget.)"""
+    import tracemalloc
+
+    import peaks.pipeline as pl
+
+    monkeypatch.setattr(pl, "MAX_PEAK_SCENES", 4)
+    rng = np.random.default_rng(0)
+    cache = EmbeddingCache(str(tmp_path / "cache"))
+    store = LabelStore(tmp_path / "labels.json")
+    n, frames, dim = 80, 600, 64
+    for i in range(n):
+        v = _unit(rng.normal(0, 1, (frames, dim)))
+        cache.save(f"k{i}", "m", np.arange(frames, dtype=np.float32), v, meta={"scene_id": str(i)})
+        store.add(f"k{i}", float(rng.integers(0, frames)), int(i % 2 == 0), "a")
+    library = n * frames * dim * 4
+    kw = dict(background_ratio=2.0, context="auto", pu_filter=True)
+    train_profile(store, cache, "m", "a", **kw)   # warm-up: sklearn's lazy imports aren't training
+    tracemalloc.start()
+    train_profile(store, cache, "m", "a", **kw)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 0.35 * library, f"peak {peak / 1e6:.1f} MB vs library {library / 1e6:.1f} MB"
+
+
+def test_grade_bursts_start_one_background_retrain(svc, monkeypatch):
+    import threading
+
+    started = []
+    gate = threading.Event()
+    monkeypatch.setattr(type(svc), "_tier_model_state", lambda self: {"model": object(), "report": None})
+
+    def fake_train(self):
+        started.append(1)
+        gate.wait(2)
+        self._tier_training = False
+    monkeypatch.setattr(type(svc), "_train_tier_quietly", fake_train)
+    for _ in range(80):                  # a fast grading burst
+        svc._note_grade()
+    gate.set()
+    assert len(started) == 1
+
+
+def test_health_line_names_in_process_work():
+    from peaks.web import forensics
+
+    with forensics.busy("tier-train"):
+        assert "work=tier-train" in forensics.health_line()
+    assert "work=" not in forensics.health_line()

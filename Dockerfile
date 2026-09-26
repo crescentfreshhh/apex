@@ -62,6 +62,14 @@ ENV TORCH_HOME=/config/torch \
     XDG_CACHE_HOME=/config/.cache
 
 ENV PEAKS_WEBAPP_DIR=/config/webapp
+
+# numpy/scipy BLAS single-threaded. Two segfaults in crash.log landed while a
+# background model fit ran LAPACK on OpenBLAS's worker-thread pool alongside the
+# web server's request threads; single-threaded BLAS takes that pool out of the
+# picture. Peaks' matrices are small or memory-bound, so it costs ~nothing
+# (torch/embedding threads are separate and unaffected). Override as a container
+# Variable (e.g. 4) if a crash-free week says it's not the cause.
+ENV OPENBLAS_NUM_THREADS=1
 WORKDIR /config
 EXPOSE 8800 7860
 ENTRYPOINT ["/entrypoint.sh"]
