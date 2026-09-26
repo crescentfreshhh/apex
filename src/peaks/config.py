@@ -135,6 +135,12 @@ class ModelingConfig:
     # Learn softly from where you seek and linger in the Review player.
     # (Env: PEAKS_TASTE_ENGAGEMENT=0 to disable)
     taste_engagement: bool = True
+    # The full "Train & measure" (tries every model variant, benchmarks each)
+    # runs overnight at this local hour once this many new ratings + grades have
+    # piled up since the last one. -1 = never automatically.
+    # (Env: PEAKS_TASTE_MEASURE_HOUR, PEAKS_TASTE_MEASURE_MIN_SIGNALS)
+    taste_measure_hour: int = 3
+    taste_measure_min_signals: int = 200
 
 
 @dataclass
@@ -331,6 +337,12 @@ class Config:
             taste_context=str(os.environ.get(
                 "PEAKS_TASTE_CONTEXT",
                 modeling_raw.get("taste_context", ModelingConfig.taste_context))),
+            taste_measure_hour=int(os.environ.get(
+                "PEAKS_TASTE_MEASURE_HOUR",
+                modeling_raw.get("taste_measure_hour", ModelingConfig.taste_measure_hour))),
+            taste_measure_min_signals=int(os.environ.get(
+                "PEAKS_TASTE_MEASURE_MIN_SIGNALS",
+                modeling_raw.get("taste_measure_min_signals", ModelingConfig.taste_measure_min_signals))),
             taste_engagement=_as_bool(os.environ.get("PEAKS_TASTE_ENGAGEMENT"),
                 modeling_raw.get("taste_engagement", ModelingConfig.taste_engagement)),
         )

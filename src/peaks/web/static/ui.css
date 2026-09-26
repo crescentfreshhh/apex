@@ -446,3 +446,6 @@ input[type=checkbox] { accent-color: var(--gold); }
 .tq-spark polyline { fill: none; stroke: var(--gold); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
 .tq-src { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--dim); }
 .tq-src b { color: var(--fg); font-weight: 600; }
+.tq-run { display: flex; flex-direction: column; gap: 6px; }
+.tq-run .bar { height: 4px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.tq-run .bar i { display: block; height: 100%; background: var(--gold); transition: width .4s; }

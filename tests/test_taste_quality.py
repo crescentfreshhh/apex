@@ -205,8 +205,8 @@ def test_training_learns_from_grades_markers_and_logs_quality(svc):
         svc.add_label(key, svc._peaks[key], 1, scene_id=key[1:])
     for key in ("k2", "k4", "k5", "k7", "k8"):
         svc.add_label(key, 5.0, 0, scene_id=key[1:])
-    svc.train_taste()                                  # first model → tier rows can be picked
-    out = svc.train_taste()
+    svc.train_taste(mode="full")                       # first model → tier rows can be picked
+    out = svc.train_taste(mode="full")
     src = out["sources"]
     assert src.get("marker") == 1 and src.get("tier", 0) >= 3 and src.get("reject", 0) >= 1
     q = svc.taste_quality()
@@ -289,3 +289,67 @@ def test_health_line_names_in_process_work():
     with forensics.busy("tier-train"):
         assert "work=tier-train" in forensics.health_line()
     assert "work=" not in forensics.health_line()
+
+
+# --- quick retrain vs. full measure, and when the full one runs ---------------------
+
+def test_quick_retrain_reuses_the_measured_variant_and_logs_nothing(svc):
+    for key in ("k0", "k15", "k18", "k21"):
+        svc.add_label(key, svc._peaks[key], 1, scene_id=key[1:])
+    for key in ("k2", "k4", "k5", "k7", "k8"):
+        svc.add_label(key, 5.0, 0, scene_id=key[1:])
+    quick = svc.train_taste()                          # default: quick, nothing measured yet
+    assert quick["mode"] == "quick" and quick["kind"] == "logreg" and "holdout" not in quick
+    assert svc.taste_quality()["history"] == []
+    full = svc.train_taste(mode="full")
+    assert full["mode"] == "full" and "holdout" in full
+    q = svc.taste_quality()
+    assert len(q["history"]) == 1 and q["schedule"]["signals"] == 0   # reset by the measure
+    again = svc.train_taste()
+    assert (again["kind"], again["context"]) == (full["kind"], full["context"])
+    assert len(svc.taste_quality()["history"]) == 1
+
+
+def test_overnight_measure_needs_the_hour_and_enough_new_signals(svc):
+    import time
+
+    svc.cfg.modeling.taste_measure_hour = 3
+    svc.cfg.modeling.taste_measure_min_signals = 5
+    t3 = time.mktime((2026, 9, 27, 3, 10, 0, 0, 0, -1))
+    t14 = time.mktime((2026, 9, 27, 14, 10, 0, 0, 0, -1))
+    assert not svc.measure_due(t3)                     # nothing new yet
+    for i in range(3):
+        svc.add_label("k0", float(i), 1, scene_id="0")
+    svc.grade_scene("30", "legendaire")                # grades count too
+    svc.grade_scene("31", "merveilleuse")
+    assert svc.measure_schedule()["signals"] == 5
+    assert svc.measure_due(t3) and not svc.measure_due(t14)
+    svc._measure_state_update(reset=True)              # a measure just ran
+    assert not svc.measure_due(t3)
+    svc.cfg.modeling.taste_measure_hour = -1
+    assert not svc.measure_due(t3)
+
+
+def test_measure_runs_as_a_job_with_progress(svc, monkeypatch):
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    for key in ("k0", "k15", "k18"):
+        svc.add_label(key, svc._peaks[key], 1, scene_id=key[1:])
+    for key in ("k2", "k4", "k5"):
+        svc.add_label(key, 5.0, 0, scene_id=key[1:])
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(app_mod.create_app(svc.cfg))
+    jid = api.post("/api/taste/measure").json()["job"]
+    assert api.post("/api/taste/measure").status_code in (200, 409)
+    for _ in range(300):
+        job = next(j for j in api.get("/api/jobs").json() if j["id"] == jid)
+        if job["status"] != "running":
+            break
+        time.sleep(0.1)
+    assert job["status"] == "done", job
+    assert job["result"]["mode"] == "full" and job["progress"]["pct"] >= 0.9
+    assert api.get("/api/taste/quality").json()["latest"] is not None

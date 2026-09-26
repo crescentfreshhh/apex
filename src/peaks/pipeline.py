@@ -716,11 +716,12 @@ class WeakLabel:
 
 def sample_background_frames(
     cache: EmbeddingCache, model_name: str, n: int,
-    exclude_keys: set | None = None, seed: int = 0,
+    exclude_keys: set | None = None, seed: int = 0, per_scene: int = 4,
 ) -> list[tuple[str, int]]:
-    """(key, frame index) of `n` random library moments, a few per scene, never
-    from `exclude_keys` — the implicit-negative sample (see
-    `sample_background_negatives`)."""
+    """(key, frame index) of `n` random library moments, `per_scene` from each
+    of ~n/per_scene random scenes, never from `exclude_keys` — the implicit-
+    negative sample (see `sample_background_negatives`). Only each scene's
+    small `times` array is read here; its vectors are loaded once, later."""
     if n <= 0:
         return []
     exclude_keys = exclude_keys or set()
@@ -729,21 +730,32 @@ def sample_background_frames(
         return []
     rng = np.random.default_rng(seed)
     rng.shuffle(keys)
-    n_keys = min(len(keys), n)
-    per = max(1, -(-n // n_keys))
+    # a few frames per scene saves reads on big samples, but a small sample
+    # should still span ≥50 scenes (variety matters more than reads there)
+    per = max(1, min(per_scene, n // 50), -(-n // len(keys)))
     out: list[tuple[str, int]] = []
-    for k in keys[:n_keys]:
+    for k in keys:
         try:
-            times, _vecs, _meta = cache.load(k, model_name)
+            count = cache.peek_count(k, model_name)
         except Exception:  # noqa: BLE001 — skip an unreadable scene
             continue
-        if len(times) == 0:
+        if count == 0:
             continue
-        for i in rng.choice(len(times), size=int(min(per, len(times))), replace=False):
+        for i in rng.choice(count, size=int(min(per, count)), replace=False):
             out.append((k, int(i)))
         if len(out) >= n:
             break
     return out[:n]
+
+
+def _context_row(vecs: np.ndarray, i: int, w: int) -> np.ndarray:
+    """One frame's context features (see classifier.with_context) without
+    building them for the whole scene."""
+    v = np.asarray(vecs[i], dtype=np.float32)
+    if w <= 0:
+        return v.copy()
+    lo, hi = max(0, i - w), min(len(vecs), i + w + 1)
+    return np.concatenate([v, np.asarray(vecs[lo:hi], dtype=np.float32).mean(axis=0)])
 
 
 def _spy_filter(X, y, w, bg, seed: int = 0, cap: float = 0.3) -> np.ndarray:
@@ -779,9 +791,13 @@ def train_profile(
     background_ratio: float = 0.0, background_weight: float = 0.5,
     weak: list | None = None, exclude_bg_keys: set | None = None,
     pu_filter: bool = False, context: int | str = 0, evaluate: bool = True,
-    seed: int = 0,
+    seed: int = 0, progress=None, folds: int | None = None,
 ):
     """Build the training set and fit a TasteClassifier for `profile`.
+
+    `progress(stage, fraction)` is called as it goes (for a job's progress bar).
+    `evaluate=False` skips the benchmark entirely and fits `kind`/`context` as
+    given — the quick retrain.
 
     Rows: your label-store ratings (recency-weighted by `recency_halflife_days`),
     plus any `weak` rows (WeakLabel), plus — with `background_ratio`>0 — random
@@ -841,13 +857,17 @@ def train_profile(
             pos_times[r[0]].append(r[1])
     # the jump-to-peak benchmark scores whole scenes — keep a bounded sample of
     # them (raw, half precision) and build features per fold, never all at once
-    peak_keys = sorted(pos_times)
+    say = progress or (lambda stage, frac: None)
+    peak_keys = sorted(pos_times) if evaluate else []
     if len(peak_keys) > MAX_PEAK_SCENES:
         pick = np.random.default_rng(seed).choice(len(peak_keys), MAX_PEAK_SCENES, replace=False)
         peak_keys = [peak_keys[i] for i in sorted(pick)]
     peak_keys = set(peak_keys)
     scenes: dict = {}
-    for key, ids in by_key.items():
+    n_keys = max(1, len(by_key))
+    for done, (key, ids) in enumerate(by_key.items()):
+        if done % 50 == 0:
+            say(f"Reading embeddings · {done:,} / {n_keys:,} scenes", 0.4 * done / n_keys)
         if not cache.has(key, model_name):
             keep_row[ids] = False
             continue
@@ -855,14 +875,12 @@ def train_profile(
         if len(times) == 0:
             keep_row[ids] = False
             continue
-        for c in contexts:
-            fx = with_context(vecs, c) if c else np.asarray(vecs, dtype=np.float32)
-            for i in ids:
-                r = rows[i]
-                fi = r[2] if r[2] is not None else int(np.argmin(np.abs(times - r[1])))
-                # copy: a view would pin the scene's whole frame matrix in RAM
-                feats[c][i] = fx[fi].copy()
-            del fx
+        for i in ids:
+            r = rows[i]
+            fi = r[2] if r[2] is not None else int(np.argmin(np.abs(times - r[1])))
+            for c in contexts:
+                # its own copy: a view would pin the scene's whole matrix in RAM
+                feats[c][i] = _context_row(vecs, fi, c)
         if key in peak_keys:
             scenes[key] = (np.asarray(times), np.asarray(vecs, dtype=np.float16), pos_times[key])
         del vecs
@@ -906,11 +924,16 @@ def train_profile(
     candidates = [(k, c) for c in contexts for k in kinds]  # simplest first
     results: list[dict] = []
     best, best_res = candidates[0], None
+    if folds is None:   # big sets: fewer, larger folds are just as telling and far cheaper
+        folds = 5 if y.shape[0] < 2000 else 3
     if evaluate:
-        for k, c in candidates:
+        for n_done, (k, c) in enumerate(candidates):
+            label = f"{'non-linear' if k == 'mlp' else 'linear'} model" + (f", ±{c} frames" if c else "")
+            say(f"Measuring {n_done + 1} of {len(candidates)}: {label}",
+                0.4 + 0.55 * n_done / len(candidates))
             try:
                 res = grouped_oof(_fitter(k, c), feats[c], y, w, groups, ev, bg,
-                                  scenes=scenes, featurize=_featurizer(c), seed=seed)
+                                  scenes=scenes, featurize=_featurizer(c), folds=folds, seed=seed)
             except ValueError:
                 res = None
             results.append({"kind": k, "context": c, **(res or {})})
@@ -918,6 +941,7 @@ def train_profile(
                 best, best_res = (k, c), res
     resolved, ctx = best
 
+    say("Fitting the final model", 0.96)
     clf = TasteClassifier(kind=resolved, model_name=model_name, profile=profile, context=ctx)
     clf.train(feats[ctx], y, sample_weight=w)
     srcs: dict[str, int] = defaultdict(int)

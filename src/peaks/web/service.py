@@ -1815,6 +1815,7 @@ class Service(LibraryMixin):
         store.add(key, float(time), int(label), profile, scene_id=scene_id)
         store.save()
         self._labels_since_train += 1
+        self._measure_state_update(add=1)
         # Reflect the new rating immediately: without this the cached taste
         # sources/modes/board scores stay stale until the next autotrain (~25
         # ratings) or a manual Train — so ratings appeared not to "take" and the
@@ -2068,44 +2069,58 @@ class Service(LibraryMixin):
         except (OSError, ValueError):
             pass
         return {"profile": profile, "model": model, "history": hist,
-                "latest": hist[-1] if hist else None}
+                "latest": hist[-1] if hist else None, "schedule": self.measure_schedule()}
 
-    def train_taste(self, profile: str | None = None, model: str | None = None) -> dict:
-        """Fit a preference classifier from your thumbs (plus what your grades
-        and markers imply), in one embedding space. Each training is benchmarked
-        on held-out scenes and appended to the quality history."""
+    def train_taste(self, profile: str | None = None, model: str | None = None,
+                    mode: str = "quick", job=None) -> dict:
+        """Fit the taste model from your thumbs (plus what your grades and
+        markers imply), in one embedding space.
+
+        `mode="quick"` (every autotrain, "Train now"): refit the model variant the
+        last full measure chose — no benchmark, seconds to a minute.
+        `mode="full"` ("Train & measure", and overnight when enough is new): try
+        every variant, benchmark each on held-out scenes, keep the winner, and
+        log the result to the quality history. `job` gets progress updates."""
         from ..pipeline import train_profile
+        from . import forensics
 
         profile = profile or self.cfg.markers.tag_name
         model = model or self._model_name()
         mc = self.cfg.modeling
+        full = mode == "full"
+
+        def say(stage: str, frac: float) -> None:
+            if job is not None:
+                job.progress = {"stage": stage, "pct": round(float(frac), 3)}
+
+        say("Gathering what you've rated and graded", 0.0)
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         weak, in_taste = (self._weak_taste_rows(profile, model) if mc.taste_weak_labels
                           else ([], set()))
-        ctx = str(mc.taste_context).strip().lower()
-        context = "auto" if ctx == "auto" else int(float(ctx or 0))
-        from . import forensics
+        if full:
+            ctx = str(mc.taste_context).strip().lower()
+            kind, context = mc.taste_classifier, ("auto" if ctx == "auto" else int(float(ctx or 0)))
+        else:   # reuse what the last full measure picked (linear, no context before any)
+            last = self.taste_quality(profile, model, last=1)["latest"] or {}
+            kind, context = last.get("kind", "logreg"), int(last.get("context", 0) or 0)
+        with self._train_lock, forensics.busy("taste-measure" if full else "taste-train"):
+            clf, stats = train_profile(
+                self._label_store(), cache, model, profile,
+                kind=kind, recency_halflife_days=mc.recency_halflife_days,
+                # your likes + ⭐-saves are mostly positives, so without a negative
+                # contrast the model saturates ("everything is your taste"). Augment
+                # with a random library background as implicit negatives — cleaned
+                # of in-taste moments when the PU filter is on.
+                background_ratio=2.0 if mc.taste_pu_filter else 1.0,
+                weak=weak, exclude_bg_keys=in_taste if mc.taste_pu_filter else None,
+                pu_filter=mc.taste_pu_filter, context=context, evaluate=full,
+                progress=say,
+            )
+        say("Saving", 0.99)
+        return self._finish_taste_training(clf, stats, profile, model, full=full)
 
-        with self._train_lock, forensics.busy("taste-train"):
-            clf, stats = self._train_profile_locked(
-                train_profile, cache, model, profile, mc, weak, in_taste, context)
-        return self._finish_taste_training(clf, stats, profile, model)
-
-    def _train_profile_locked(self, train_profile, cache, model, profile, mc, weak, in_taste, context):
-        return train_profile(
-            self._label_store(), cache, model, profile,
-            kind=mc.taste_classifier,
-            recency_halflife_days=mc.recency_halflife_days,
-            # your likes + ⭐-saves are mostly positives, so without a negative
-            # contrast the model saturates ("everything is your taste"). Augment
-            # with a random library background as implicit negatives — cleaned
-            # of in-taste moments when the PU filter is on.
-            background_ratio=2.0 if mc.taste_pu_filter else 1.0,
-            weak=weak, exclude_bg_keys=in_taste if mc.taste_pu_filter else None,
-            pu_filter=mc.taste_pu_filter, context=context,
-        )
-
-    def _finish_taste_training(self, clf, stats: dict, profile: str, model: str) -> dict:
+    def _finish_taste_training(self, clf, stats: dict, profile: str, model: str,
+                               full: bool = True) -> dict:
         import json
         import time as _t
 
@@ -2116,6 +2131,11 @@ class Service(LibraryMixin):
         with self._taste_lock:
             self._taste.pop(str(out), None)
         self._invalidate_taste_caches()  # board must re-score with the new model
+        res = {"model": model, "profile": profile, "mode": "full" if full else "quick", **stats}
+        if not full:
+            if prev:
+                res["measured_at"] = prev.get("ts")
+            return res
         entry = {"ts": _t.time(), "kind": stats["kind"], "context": stats.get("context", 0),
                  "samples": stats["samples"], "sources": stats.get("sources", {}),
                  "pu_dropped": stats.get("pu_dropped", 0), **(stats.get("holdout") or {})}
@@ -2124,10 +2144,66 @@ class Service(LibraryMixin):
                 fh.write(json.dumps(entry) + "\n")
         except OSError:
             pass
-        res = {"model": model, "profile": profile, **stats}
+        self._measure_state_update(reset=True)
         if prev and prev.get("auc") is not None and entry.get("auc") is not None:
             res["auc_delta"] = round(entry["auc"] - prev["auc"], 3)
         return res
+
+    # --- when to run the full measure again --------------------------------------
+
+    def _measure_state_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "taste" / "measure_state.json"
+
+    def _measure_state(self) -> dict:
+        import json
+
+        try:
+            return json.loads(self._measure_state_path().read_text())
+        except (OSError, ValueError):
+            return {"signals": 0, "last_full": 0.0}
+
+    def _measure_state_update(self, add: int = 0, reset: bool = False) -> None:
+        """Count new ratings/grades since the last full measure (persisted, so a
+        restart doesn't forget them); `reset` marks a measure just finished."""
+        import json
+        import time as _t
+
+        with self._taste_lock:
+            st = self._measure_state()
+            if reset:
+                st = {"signals": 0, "last_full": _t.time()}
+            else:
+                st["signals"] = int(st.get("signals", 0)) + add
+            try:
+                p = self._measure_state_path()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(st))
+            except OSError:
+                pass
+
+    def measure_schedule(self) -> dict:
+        """What the quality card shows about the next overnight measure."""
+        mc = self.cfg.modeling
+        st = self._measure_state()
+        return {"signals": int(st.get("signals", 0)), "needed": int(mc.taste_measure_min_signals),
+                "hour": int(mc.taste_measure_hour), "last_full": st.get("last_full") or None}
+
+    def measure_due(self, now: float | None = None) -> bool:
+        """Overnight full measure: at the configured local hour, once enough new
+        ratings/grades piled up, and not twice in one night."""
+        import time as _t
+
+        sch = self.measure_schedule()
+        if sch["hour"] < 0:
+            return False
+        now = _t.time() if now is None else now
+        if _t.localtime(now).tm_hour != sch["hour"]:
+            return False
+        if sch["signals"] < sch["needed"]:
+            return False
+        return (now - float(sch["last_full"] or 0)) > 20 * 3600
 
     # --- taste scoring that respects temporal context --------------------------
 
@@ -4264,6 +4340,7 @@ class Service(LibraryMixin):
         """Count grades since the last triage training; retrain in the background
         every 25 once a model exists, so suggestions keep up with grading."""
         self._grades_since_train = getattr(self, "_grades_since_train", 0) + 1
+        self._measure_state_update(add=1)      # grades also feed the taste model
         self._grades_since_backup = getattr(self, "_grades_since_backup", 0) + 1
         if self._grades_since_backup >= 25:
             self._grades_since_backup = 0

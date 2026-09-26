@@ -800,7 +800,7 @@ def test_label_and_train_endpoints(client, monkeypatch):
                         lambda self, key, t, label, profile=None, scene_id=None:
                         seen.update(key=key, t=t, label=label, scene_id=scene_id) or {"positive": 1, "negative": 0})
     monkeypatch.setattr(svc.Service, "train_taste",
-                        lambda self, profile=None, model=None: {"samples": 4, "positives": 2, "cv_auc": 0.9})
+                        lambda self, profile=None, model=None, mode="quick", job=None: {"samples": 4, "positives": 2, "cv_auc": 0.9})
 
     r = client.post("/api/label", params={"key": "k1", "t": 3.0, "label": 1, "scene_id": "7"})
     assert r.status_code == 200 and r.json()["positive"] == 1

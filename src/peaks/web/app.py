@@ -709,7 +709,7 @@ def create_app(cfg=None):
         res["autotrain"] = False
         if service.autotrain_due(profile):
             try:
-                jobs.start("train", lambda j: service.train_taste(profile=profile))
+                jobs.start("train", lambda j: service.train_taste(profile=profile, mode="quick"))
                 service.reset_labels_since_train()
                 res["autotrain"] = True
             except RuntimeError:
@@ -751,12 +751,24 @@ def create_app(cfg=None):
 
     @app.post("/api/train")
     def train_taste(profile: str | None = None, model: str | None = None):
+        """The quick retrain: refit the last-measured model variant (seconds)."""
         try:
-            out = service.train_taste(profile=profile, model=model)
+            out = service.train_taste(profile=profile, model=model, mode="quick")
             service.reset_labels_since_train()
             return out
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
+
+    @app.post("/api/taste/measure")
+    def taste_measure(profile: str | None = None):
+        """The full Train & measure, as a background job (progress in the tray)."""
+        try:
+            job = jobs.start("taste-measure", lambda j: service.train_taste(
+                profile=profile, mode="full", job=j))
+        except RuntimeError:
+            raise HTTPException(409, "a measure is already running")
+        service.reset_labels_since_train()
+        return {"job": job.id}
 
     @app.get("/api/taste/quality")
     def taste_quality(profile: str | None = None, last: int = 20):
@@ -1552,6 +1564,12 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 secs = service.schedule_settings().get("embed_seconds", 0.0)
             except Exception:  # noqa: BLE001
                 secs = 0.0
+            try:   # overnight full taste measure, when idle and enough is new
+                busy = any(jobs.running(k) for k in ("embed", "ingest", "taste-measure", "train"))
+                if not busy and service.measure_due():
+                    jobs.start("taste-measure", lambda j: service.train_taste(mode="full", job=j))
+            except Exception:  # noqa: BLE001 — never let the scheduler die
+                pass
             if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
                 if jobs.running("embed") is None:
                     try:

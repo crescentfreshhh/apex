@@ -1948,6 +1948,9 @@ function openTaste() { loadNextSwipe(); loadLabelCounts(); loadTasteQuality(); }
 // --- taste quality: the held-out benchmark, in plain words -------------------
 function trainSummary(s) {
   const h = s.holdout || {};
+  if (s.mode === "quick")
+    return `Retrained on ${s.samples.toLocaleString()} moments · ${s.kind === "mlp" ? "non-linear" : "linear"} model` +
+      (s.context ? `, ±${s.context} frames` : "") + " (from the last measure)";
   const bits = [`Trained on ${s.samples.toLocaleString()} moments`];
   if (h.peak_hit != null) bits.push(`jump-to-peak ${Math.round(h.peak_hit * 100)}%`);
   if (h.auc != null) bits.push(`AUC ${h.auc}` + (s.auc_delta ? ` (${s.auc_delta > 0 ? "+" : ""}${s.auc_delta})` : ""));
@@ -1963,6 +1966,56 @@ function tqSpark(hist, key) {
 }
 const TQ_SRC = [["explicit", "your ratings"], ["marker", "⭐ markers"], ["tier", "graded-scene moments"],
   ["reject", "reject moments"], ["engage", "from watching"], ["background", "library background"]];
+// the full measure runs as a background job; the card follows it
+const tqJob = { id: null, timer: null };
+async function startMeasure() {
+  try {
+    const r = await api("/api/taste/measure?" + new URLSearchParams(pparam()), { method: "POST" });
+    tqJob.id = r.job;
+    toast("Measuring in the background — follow it in the sidebar tray");
+  } catch (e) { toast(e.message, true); }
+  followMeasure();
+}
+async function followMeasure() {
+  clearTimeout(tqJob.timer);
+  let job = null;
+  try {
+    const jobs = await api("/api/jobs");
+    job = tqJob.id ? jobs.find((j) => j.id === tqJob.id) : jobs.find((j) => j.kind === "taste-measure" && j.status === "running");
+  } catch { return; }
+  if (!job) { renderMeasureRun(null); return; }
+  tqJob.id = job.id;
+  if (job.status === "running") {
+    renderMeasureRun(job);
+    tqJob.timer = setTimeout(followMeasure, 3000);
+    return;
+  }
+  tqJob.id = null;
+  renderMeasureRun(null);
+  if (job.status === "done" && job.result) { toast(trainSummary(job.result)); loadTasteQuality(); loadForYou(false); }
+  else if (job.status === "error") toast("Measure failed: " + (job.error || "unknown error"), true);
+}
+function renderMeasureRun(job) {
+  const run = $("#tq-run"), btn = $("#btn-tq-train");
+  if (btn) { btn.disabled = !!job; btn.textContent = job ? "Measuring…" : "Train & measure"; }
+  if (!run) return;
+  run.hidden = !job;
+  if (!job) return;
+  const p = job.progress || {}, pct = Math.round(100 * (p.pct || 0));
+  run.innerHTML = `<div class="row between small"><span>${esc(p.stage || "Starting…")}</span>
+    <span class="muted">${pct}% · ${Math.round(job.elapsed / 60)} min</span></div>
+    <div class="bar"><i style="width:${pct}%"></i></div>`;
+}
+function tqScheduleLine(sch) {
+  if (!sch) return "";
+  const quick = "Quick retrain after every 25 ratings.";
+  if (sch.hour < 0) return `${quick} Full measure: only when you click it.`;
+  const at = new Date(); at.setHours(sch.hour, 0, 0, 0);
+  const when = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const left = Math.max(0, sch.needed - sch.signals);
+  return `${quick} Next full measure: overnight at ${when}` +
+    (left ? ` once ${left.toLocaleString()} more ratings or grades come in (${sch.signals.toLocaleString()} / ${sch.needed.toLocaleString()}).` : " — enough is new, so tonight.");
+}
 async function loadTasteQuality() {
   const box = $("#taste-quality"); if (!box) return;
   let q;
@@ -1970,8 +2023,9 @@ async function loadTasteQuality() {
   const L = q.latest, hist = q.history || [];
   if (!L) {
     box.innerHTML = `<div class="tq-empty"><b>How well does Peaks know your taste?</b>
-      <span class="muted">Train once and it measures itself on scenes it didn't learn from.</span>
-      <button class="btn pri sm" id="btn-tq-train">Train &amp; measure</button></div>`;
+      <span class="muted">Measure once and it tests itself on scenes it didn't learn from — a background job, it can take a while.</span>
+      <button class="btn pri sm" id="btn-tq-train">Train &amp; measure</button></div><div id="tq-run" class="tq-run" hidden></div>`;
+    followMeasure();
     return;
   }
   const prev = hist.length > 1 ? hist[hist.length - 2] : null;
@@ -1999,9 +2053,12 @@ async function loadTasteQuality() {
         ${tqSpark(hist, "auc") || '<span class="faint small">AUC · trend after 2 trainings</span>'}</div>
     </div>
     <div class="tq-src"><span class="faint">Learned from</span>${src}${L.pu_dropped ? `<span class="faint">· ${L.pu_dropped} look-alike background frames set aside</span>` : ""}</div>
-    <div class="faint small">${model}</div>`;
+    <div class="faint small">${model}</div>
+    <div class="faint small">${esc(tqScheduleLine(q.schedule))}</div>
+    <div id="tq-run" class="tq-run" hidden></div>`;
+  followMeasure();
 }
-document.addEventListener("click", (e) => { if (e.target.closest("#btn-tq-train")) trainNow(e.target.closest("button")); });
+document.addEventListener("click", (e) => { if (e.target.closest("#btn-tq-train")) startMeasure(); });
 wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); });
 wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); });
 
@@ -3083,7 +3140,7 @@ refreshDashboard();  // conn status + job reattach (runs even though it's not th
 // --- live job tray (sidebar): whatever is running, from any page -------------------
 const JOB_LABEL = { embed: "Embedding", ingest: "Ingest", score: "Writing markers", sync: "Syncing",
   fix: "Retrying failed", reel: "Exporting video", playlist: "Building board", library: "Updating Stash",
-  dupes: "Finding duplicates", train: "Training taste" };
+  dupes: "Finding duplicates", train: "Training taste", "taste-measure": "Measuring taste" };
 async function pollJobTray() {
   const tray = $("#job-tray");
   if (!tray || document.hidden) return;
@@ -3091,7 +3148,7 @@ async function pollJobTray() {
   try { jobs = await api("/api/jobs"); } catch { return; }
   const running = jobs.filter((j) => j.status === "running");
   const kinds = new Set(running.map((j) => j.kind));
-  const LIB = ["library", "ingest", "dupes", "train", "embed", "fix", "sync"];
+  const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync"];
   if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || kinds.has("ingest")) refreshSidebar();
   pollJobTray.prev = [...kinds];
   const badge = $("#nav-ct-jobs");
