@@ -121,6 +121,20 @@ class ModelingConfig:
     # your loved moments) rather than one average, so the board scores a moment by
     # its nearest mode and spans your distinct interests. (Env: PEAKS_TASTE_MODES)
     taste_modes: int = 24
+    # Learn from what you already told Stash: ⭐ markers, the best moments of
+    # scenes you graded Merveilleuse+, and random moments of rejects.
+    # (Env: PEAKS_TASTE_WEAK_LABELS=0 to disable)
+    taste_weak_labels: bool = True
+    # Drop "background" negatives that look like your positives (PU learning),
+    # and never sample background from scenes graded Merveilleuse+.
+    # (Env: PEAKS_TASTE_PU_FILTER=0 to disable)
+    taste_pu_filter: bool = True
+    # ±frames of temporal context the taste model sees: 0 = single frame, N, or
+    # "auto" (the held-out benchmark decides). (Env: PEAKS_TASTE_CONTEXT)
+    taste_context: str = "auto"
+    # Learn softly from where you seek and linger in the Review player.
+    # (Env: PEAKS_TASTE_ENGAGEMENT=0 to disable)
+    taste_engagement: bool = True
 
 
 @dataclass
@@ -310,6 +324,15 @@ class Config:
                     modeling_raw.get("taste_modes", ModelingConfig.taste_modes),
                 )
             ),
+            taste_weak_labels=_as_bool(os.environ.get("PEAKS_TASTE_WEAK_LABELS"),
+                modeling_raw.get("taste_weak_labels", ModelingConfig.taste_weak_labels)),
+            taste_pu_filter=_as_bool(os.environ.get("PEAKS_TASTE_PU_FILTER"),
+                modeling_raw.get("taste_pu_filter", ModelingConfig.taste_pu_filter)),
+            taste_context=str(os.environ.get(
+                "PEAKS_TASTE_CONTEXT",
+                modeling_raw.get("taste_context", ModelingConfig.taste_context))),
+            taste_engagement=_as_bool(os.environ.get("PEAKS_TASTE_ENGAGEMENT"),
+                modeling_raw.get("taste_engagement", ModelingConfig.taste_engagement)),
         )
         library = LibraryConfig(
             path=os.environ.get(

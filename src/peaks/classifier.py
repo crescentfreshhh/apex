@@ -35,12 +35,30 @@ def _weighted_resample(X, y, w, seed: int = 0):
     return X[sel], y[sel]
 
 
+def with_context(vecs: np.ndarray, w: int) -> np.ndarray:
+    """Temporal context for one scene's contiguous frame sequence: each frame's
+    vector joined with the mean of its ±`w` neighbours (clipped at the scene's
+    edges) → (n, 2·dim). A peak is a multi-second event, so the window mean lets
+    the model see "what's happening around this frame", not one still."""
+    v = np.asarray(vecs, dtype=np.float32)
+    if w <= 0 or v.shape[0] == 0:
+        return v
+    n = v.shape[0]
+    csum = np.vstack([np.zeros((1, v.shape[1]), dtype=np.float64), np.cumsum(v, axis=0, dtype=np.float64)])
+    i = np.arange(n)
+    lo, hi = np.clip(i - w, 0, n), np.clip(i + w + 1, 0, n)
+    mean = ((csum[hi] - csum[lo]) / (hi - lo)[:, None]).astype(np.float32)
+    return np.hstack([v, mean])
+
+
 class TasteClassifier:
-    def __init__(self, kind: str = "logreg", model_name: str = "", profile: str = ""):
+    def __init__(self, kind: str = "logreg", model_name: str = "", profile: str = "",
+                 context: int = 0):
         self.kind = kind
         self.model_name = model_name  # which embedder produced the features
         self.profile = profile
-        self.dim: int | None = None
+        self.context = int(context)   # ±frames of temporal context (0 = single frame)
+        self.dim: int | None = None   # feature dim the estimator was fit on
         self._clf = None
         self._pos_index = 1  # column of predict_proba that is the positive class
 
@@ -55,7 +73,8 @@ class TasteClassifier:
             from sklearn.neural_network import MLPClassifier
 
             # a touch of L2 (alpha) to keep the non-linear model honest
-            return MLPClassifier(hidden_layer_sizes=(128,), max_iter=500, alpha=1e-3)
+            return MLPClassifier(hidden_layer_sizes=(128,), max_iter=500, alpha=1e-3,
+                                 random_state=0)
         raise ValueError(f"unknown classifier kind: {self.kind!r}")
 
     def train(
@@ -72,6 +91,11 @@ class TasteClassifier:
                 f"got classes {sorted(classes)}"
             )
         self._clf = self._new_estimator()
+        import warnings
+
+        from sklearn.exceptions import ConvergenceWarning
+
+        warnings.filterwarnings("ignore", category=ConvergenceWarning)
         if sample_weight is not None and self.kind == "mlp":
             # MLPClassifier has no sample_weight → emulate it with a per-class
             # weighted bootstrap (keeps both classes and their balance).
@@ -91,13 +115,26 @@ class TasteClassifier:
 
     # --- score ---------------------------------------------------------------
 
+    @property
+    def raw_dim(self) -> int | None:
+        """The embedder's frame dim (before context features)."""
+        if self.dim is None:
+            return None
+        return self.dim // 2 if self.context else self.dim
+
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Probability of the positive class for each row → (n,) in [0, 1]."""
+        """Probability of the positive class for each row → (n,) in [0, 1].
+
+        A context model accepts either ready-made context features (2·dim, from
+        a caller that knows each row's neighbours) or raw frames, which are then
+        read as ONE scene's contiguous sequence (the per-scene scoring path)."""
         if not self.fitted:
             raise RuntimeError("classifier is not trained")
         X = np.asarray(X, dtype=np.float32)
         if X.shape[0] == 0:
             return np.zeros((0,), dtype=np.float32)
+        if self.context and X.ndim == 2 and X.shape[1] == self.raw_dim:
+            X = with_context(X, self.context)
         if self.dim is not None and X.shape[1] != self.dim:
             raise ValueError(
                 f"feature dim {X.shape[1]} != classifier dim {self.dim} "
@@ -122,6 +159,7 @@ class TasteClassifier:
                     "profile": self.profile,
                     "dim": self.dim,
                     "pos_index": self._pos_index,
+                    "context": self.context,
                     "clf": self._clf,
                 },
                 fh,
@@ -139,6 +177,7 @@ class TasteClassifier:
             kind=data["kind"],
             model_name=data.get("model_name", ""),
             profile=data.get("profile", ""),
+            context=data.get("context", 0),
         )
         obj.dim = data["dim"]
         obj._pos_index = data.get("pos_index", 1)

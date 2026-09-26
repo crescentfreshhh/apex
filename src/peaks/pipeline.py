@@ -693,71 +693,237 @@ def gather_candidates(
 # "auto" taste classifier switches to the non-linear MLP once there's enough
 # data for it not to overfit; below this it stays on the robust logreg.
 AUTO_MLP_MIN_SAMPLES = 200
+# ±frames of temporal context tried by `context="auto"`
+AUTO_CONTEXT = 2
+
+
+@dataclass
+class WeakLabel:
+    """A training row Peaks inferred rather than you rating a frame directly:
+    a ⭐ marker the label store never saw, a top moment of a scene you graded
+    Légendaire, a random moment of a scene you rejected. `evaluate` marks
+    rows trusted enough to score the model against (markers are; guesses aren't)."""
+    key: str
+    time: float
+    label: int
+    weight: float
+    source: str
+    evaluate: bool = False
+
+
+def sample_background_frames(
+    cache: EmbeddingCache, model_name: str, n: int,
+    exclude_keys: set | None = None, seed: int = 0,
+) -> list[tuple[str, int]]:
+    """(key, frame index) of `n` random library moments, a few per scene, never
+    from `exclude_keys` — the implicit-negative sample (see
+    `sample_background_negatives`)."""
+    if n <= 0:
+        return []
+    exclude_keys = exclude_keys or set()
+    keys = [k for k in cache.keys(model_name) if k not in exclude_keys]
+    if not keys:
+        return []
+    rng = np.random.default_rng(seed)
+    rng.shuffle(keys)
+    n_keys = min(len(keys), n)
+    per = max(1, -(-n // n_keys))
+    out: list[tuple[str, int]] = []
+    for k in keys[:n_keys]:
+        try:
+            times, _vecs, _meta = cache.load(k, model_name)
+        except Exception:  # noqa: BLE001 — skip an unreadable scene
+            continue
+        if len(times) == 0:
+            continue
+        for i in rng.choice(len(times), size=int(min(per, len(times))), replace=False):
+            out.append((k, int(i)))
+        if len(out) >= n:
+            break
+    return out[:n]
+
+
+def _spy_filter(X, y, w, bg, seed: int = 0, cap: float = 0.3) -> np.ndarray:
+    """Positive-unlabeled cleanup: some "background" frames are really your
+    taste (the library is full of it). Hide ~15% of the positives among the
+    background as spies, fit a quick model, and drop background frames that
+    score like the spies do. Returns a keep-mask (never drops > `cap` of bg)."""
+    from sklearn.linear_model import LogisticRegression
+
+    keep = np.ones(y.shape[0], dtype=bool)
+    pos = np.where((y == 1) & ~bg)[0]
+    bgi = np.where(bg)[0]
+    if pos.size < 10 or bgi.size < 10:
+        return keep
+    rng = np.random.default_rng(seed)
+    spies = rng.choice(pos, size=max(2, int(round(0.15 * pos.size))), replace=False)
+    yt = y.copy()
+    yt[spies] = 0
+    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
+    clf.fit(X, yt, sample_weight=w)
+    s = clf.predict_proba(X)[:, list(clf.classes_).index(1)]
+    thr = float(np.percentile(s[spies], 10))
+    drop = bgi[s[bgi] >= thr]
+    if drop.size > cap * bgi.size:
+        drop = bgi[np.argsort(-s[bgi])[: int(cap * bgi.size)]]
+    keep[drop] = False
+    return keep
 
 
 def train_profile(
     label_store, cache: EmbeddingCache, model_name: str, profile: str,
     kind: str = "logreg", recency_halflife_days: float = 0.0,
     background_ratio: float = 0.0, background_weight: float = 0.5,
+    weak: list | None = None, exclude_bg_keys: set | None = None,
+    pu_filter: bool = False, context: int | str = 0, evaluate: bool = True,
+    seed: int = 0,
 ):
     """Build the training set and fit a TasteClassifier for `profile`.
 
-    `kind="auto"` picks logreg on small data (robust) and the non-linear MLP
-    once there's enough (captures multi-modal taste). `recency_halflife_days`>0
-    weights recent ratings more, so the model evolves with you. When there are
-    enough labels, stats include `cv_auc`: mean ROC-AUC over stratified CV folds
-    — a quick "is this model any good" signal (1.0 = perfect, 0.5 = coin flip).
+    Rows: your label-store ratings (recency-weighted by `recency_halflife_days`),
+    plus any `weak` rows (WeakLabel), plus — with `background_ratio`>0 — random
+    library moments as implicit negatives at `background_weight`. Without that
+    contrast a likes-heavy taste set saturates ("everything is your taste").
+    `exclude_bg_keys` keeps scenes known to be in-taste out of the background,
+    and `pu_filter` drops background frames that look like your positives.
 
-    `background_ratio`>0 augments the negatives with a random library-background
-    sample (≈ that many × the positives), giving a positives-heavy taste set the
-    contrast it otherwise lacks — without it a classifier trained on likes+saves
-    saturates and calls everything in-taste. Background rows carry `background_weight`
-    (they're noisy negatives). The augmented model is trained as calibrated logreg."""
-    from .classifier import TasteClassifier
+    Model choice: `kind` logreg | mlp | auto, `context` 0 | N | "auto" (±frames
+    of temporal context). With several candidates each is scored by the
+    held-out, scene-grouped benchmark (`taste_eval`) and the best wins; a more
+    complex candidate must beat a simpler one by a margin. Stats carry the
+    benchmark (`holdout`: auc, p_at_50, peak_hit) and where the rows came from."""
+    from .classifier import TasteClassifier, with_context
+    from .taste_eval import better, grouped_oof
 
-    X, y, ts = build_training_set(
-        label_store, cache, model_name, profile, with_recency=True
-    )
-    sample_weight = recency_weights(ts, recency_halflife_days)
+    # --- rows: (key, time|None, frame idx|None, label, weight, source, eval) --
+    rows: list[list] = []
+    labs = list(label_store.for_profile(profile))
+    rec = recency_weights(np.array([getattr(lab, "ts", 0.0) or 0.0 for lab in labs]),
+                          recency_halflife_days) if labs else None
+    for i, lab in enumerate(labs):
+        src = getattr(lab, "source", "explicit") or "explicit"
+        wt = float(getattr(lab, "weight", 1.0) or 1.0) * (float(rec[i]) if rec is not None else 1.0)
+        rows.append([lab.key, float(lab.time), None, int(lab.label), wt, src, src == "explicit"])
+    for wl in weak or []:
+        rows.append([wl.key, float(wl.time), None, int(wl.label), float(wl.weight), wl.source,
+                     bool(wl.evaluate)])
 
-    background = 0
-    if background_ratio > 0 and X.shape[0] and int((y == 1).sum()) > 0:
-        pos_keys = {lab.key for lab in label_store.for_profile(profile) if int(lab.label) == 1}
-        n_pos, n_neg = int((y == 1).sum()), int((y == 0).sum())
-        n_bg = max(0, int(round(background_ratio * n_pos)) - n_neg)
-        xbg = sample_background_negatives(cache, model_name, n_bg, exclude_keys=pos_keys)
-        if xbg.shape[0] and xbg.shape[1] == X.shape[1]:
-            background = int(xbg.shape[0])
-            base_w = sample_weight if sample_weight is not None else np.ones(y.shape[0], dtype=np.float64)
-            X = np.vstack([X, xbg])
-            y = np.concatenate([y, np.zeros(background, dtype=int)])
-            sample_weight = np.concatenate([base_w, np.full(background, background_weight, dtype=np.float64)])
+    n_pos = sum(1 for r in rows if r[3] == 1)
+    n_neg = sum(1 for r in rows if r[3] == 0)
+    if background_ratio > 0 and n_pos:
+        pos_keys = {r[0] for r in rows if r[3] == 1} | set(exclude_bg_keys or ())
+        want = max(0, int(round(background_ratio * n_pos)) - n_neg)
+        if pu_filter:
+            want = int(want * 1.4)   # the spy filter will drop some
+        for k, fi in sample_background_frames(cache, model_name, want, exclude_keys=pos_keys, seed=seed):
+            rows.append([k, None, fi, 0, float(background_weight), "background", False])
 
-    if background:
-        resolved = "logreg"   # background-augmented taste → linear + well-calibrated
-    elif kind == "auto":
-        resolved = "mlp" if int(X.shape[0]) >= AUTO_MLP_MIN_SAMPLES else "logreg"
+    # --- features: load each scene once, raw + context variants ---------------
+    if kind == "auto":
+        kinds = ["logreg"]
     else:
-        resolved = kind
+        kinds = [kind]
+    if context == "auto":
+        contexts = [0, AUTO_CONTEXT]
+    else:
+        contexts = [int(context or 0)]
+    by_key: dict[str, list[int]] = defaultdict(list)
+    for i, r in enumerate(rows):
+        by_key[r[0]].append(i)
+    feats = {c: [None] * len(rows) for c in contexts}
+    keep_row = np.ones(len(rows), dtype=bool)
+    scenes: dict = {c: {} for c in contexts}
+    pos_times: dict[str, list[float]] = defaultdict(list)
+    for r in rows:
+        if r[3] == 1 and r[6] and r[1] is not None:
+            pos_times[r[0]].append(r[1])
+    for key, ids in by_key.items():
+        if not cache.has(key, model_name):
+            keep_row[ids] = False
+            continue
+        times, vecs, _ = cache.load(key, model_name)
+        if len(times) == 0:
+            keep_row[ids] = False
+            continue
+        for c in contexts:
+            fx = with_context(vecs, c) if c else np.asarray(vecs, dtype=np.float32)
+            for i in ids:
+                r = rows[i]
+                fi = r[2] if r[2] is not None else int(np.argmin(np.abs(times - r[1])))
+                feats[c][i] = fx[fi]
+            if key in pos_times:
+                scenes[c][key] = (np.asarray(times), fx, pos_times[key])
+    rows = [r for i, r in enumerate(rows) if keep_row[i]]
+    if not rows:
+        raise ValueError("need both positive (1) and negative (0) labels to train; got none")
+    for c in contexts:
+        feats[c] = np.asarray([f for i, f in enumerate(feats[c]) if keep_row[i]], dtype=np.float32)
+    y = np.asarray([r[3] for r in rows], dtype=int)
+    w = np.asarray([r[4] for r in rows], dtype=np.float64)
+    groups = np.asarray([r[0] for r in rows])
+    bg = np.asarray([r[5] == "background" for r in rows])
+    ev = np.asarray([bool(r[6]) for r in rows])
 
-    clf = TasteClassifier(kind=resolved, model_name=model_name, profile=profile)
-    clf.train(X, y, sample_weight=sample_weight)
+    pu_dropped = 0
+    if pu_filter and bg.any():
+        keep = _spy_filter(feats[contexts[0]], y, w, bg, seed=seed)
+        pu_dropped = int((~keep).sum())
+        if pu_dropped:
+            y, w, groups, bg, ev = y[keep], w[keep], groups[keep], bg[keep], ev[keep]
+            rows = [r for r, k in zip(rows, keep) if k]
+            for c in contexts:
+                feats[c] = feats[c][keep]
+    if kind == "auto" and y.shape[0] >= AUTO_MLP_MIN_SAMPLES:
+        kinds.append("mlp")
+
+    # --- pick the candidate the benchmark likes best --------------------------
+    def _fitter(k: str, c: int):
+        def fit(Xa, ya, wa):
+            m = TasteClassifier(kind=k, model_name=model_name, profile=profile, context=c)
+            m.train(Xa, ya, sample_weight=wa)
+            return m.predict_proba
+        return fit
+
+    candidates = [(k, c) for c in contexts for k in kinds]  # simplest first
+    results: list[dict] = []
+    best, best_res = candidates[0], None
+    if evaluate:
+        for k, c in candidates:
+            try:
+                res = grouped_oof(_fitter(k, c), feats[c], y, w, groups, ev, bg,
+                                  scenes=scenes[c], seed=seed)
+            except ValueError:
+                res = None
+            results.append({"kind": k, "context": c, **(res or {})})
+            if res is not None and (best_res is None or better(res, best_res)):
+                best, best_res = (k, c), res
+    resolved, ctx = best
+
+    clf = TasteClassifier(kind=resolved, model_name=model_name, profile=profile, context=ctx)
+    clf.train(feats[ctx], y, sample_weight=w)
+    srcs: dict[str, int] = defaultdict(int)
+    for r in rows:
+        srcs[r[5]] += 1
     stats = {
-        "samples": int(X.shape[0]), "positives": int((y == 1).sum()),
-        "negatives": int((y == 0).sum()), "background": background,
-        "kind": resolved, "recency": sample_weight is not None,
+        "samples": int(y.shape[0]), "positives": int((y == 1).sum()),
+        "negatives": int((y == 0).sum()), "background": int(bg.sum()),
+        "kind": resolved, "context": ctx, "recency": rec is not None,
+        "sources": dict(srcs), "pu_dropped": pu_dropped,
     }
+    if best_res is not None:
+        stats["holdout"] = best_res
+        stats["cv_auc"] = best_res.get("auc")
+        stats["cv_folds"] = best_res.get("folds")
+    else:
+        # too few distinct scenes to hold any out: fall back to plain row-level
+        # CV (optimistic — neighbouring frames leak — but better than nothing)
+        folds = min(5, int((y == 1).sum()), int((y == 0).sum()))
+        if folds >= 2 and resolved == "logreg":
+            from sklearn.model_selection import cross_val_score
 
-    # CV quality signal (logreg only — cheap, and MLP CV is slow/unweighted)
-    n_pos = int((y == 1).sum())
-    n_neg = int((y == 0).sum())
-    folds = min(5, n_pos, n_neg)
-    if resolved == "logreg" and folds >= 2:
-        from sklearn.model_selection import cross_val_score
-
-        scores = cross_val_score(
-            clf._new_estimator(), X, y, cv=folds, scoring="roc_auc"
-        )
-        stats["cv_auc"] = round(float(scores.mean()), 3)
-        stats["cv_folds"] = folds
+            scores = cross_val_score(clf._new_estimator(), feats[ctx], y, cv=folds, scoring="roc_auc")
+            stats["cv_auc"] = round(float(scores.mean()), 3)
+            stats["cv_folds"] = folds
+    if len(results) > 1:
+        stats["candidates"] = results
     return clf, stats

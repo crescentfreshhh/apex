@@ -1820,6 +1820,40 @@ class Service(LibraryMixin):
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
 
+    ENGAGE_WEIGHT = 0.3
+
+    def record_engagement(self, scene_id: str, t: float, kind: str = "dwell") -> dict:
+        """A soft positive from watching: you sought to `t` in the Review player
+        and stayed. Stored as a low-weight "engage" label (training only — never a
+        👍, never in the taste centroid), at most one per 10 s of a scene, and
+        dropped again if you reject the scene."""
+        if not self.cfg.modeling.taste_engagement:
+            return {"kept": False, "reason": "off"}
+        sid = str(scene_id)
+        if sid in self.hidden_scene_ids():
+            return {"kept": False, "reason": "rejected"}
+        key = self._key_for_scene(sid, self._model_name())
+        if not key:
+            return {"kept": False, "reason": "not embedded"}
+        profile = self.cfg.markers.tag_name
+        store = self._label_store()
+        if any(lab.key == key and abs(lab.time - float(t)) < 10.0 for lab in store.for_profile(profile)):
+            return {"kept": False, "reason": "already known"}
+        store.add(key, float(t), 1, profile, scene_id=sid, source="engage", weight=self.ENGAGE_WEIGHT)
+        store.save()
+        return {"kept": True, "kind": kind}
+
+    def _drop_engagement(self, scene_id: str) -> int:
+        sid = str(scene_id)
+        try:
+            store = self._label_store()
+            n = store.remove_where(lambda lab: lab.source == "engage" and str(lab.scene_id) == sid)
+            if n:
+                store.save()
+            return n
+        except Exception:  # noqa: BLE001 — never block a grade
+            return 0
+
     def delete_taste(
         self,
         profile: str | None = None,
@@ -1931,30 +1965,235 @@ class Service(LibraryMixin):
 
         return Path(self.cfg.modeling.dir) / "taste" / f"{safe_tag(profile)}__{model}.pkl"
 
+    # tier → weight of its best moments as weak positives
+    _TIER_WEAK = {"legendaire": 0.5, "exceptionnelle": 0.35, "merveilleuse": 0.2}
+
+    def _weak_taste_rows(self, profile: str, model: str):
+        """(weak rows, in-taste scene keys) — what you've already told Stash,
+        turned into training signal:
+        - ⭐ markers the label store never saw (saved before the scene embedded)
+        - the 3 best moments (≥10 s apart, by the current scorer) of each scene
+          graded Merveilleuse / Exceptionnelle / Légendaire
+        - 3 random moments of each rejected scene, as soft negatives
+        Tier and reject rows are scaled so, in total, they never outweigh your
+        explicit ratings. The in-taste keys are kept out of background negatives."""
+        from ..pipeline import WeakLabel
+
+        idx = self.index(model)
+        sid_key: dict[str, str] = {}
+        for k, m in idx.key_meta.items():
+            if m.get("scene_id") is not None:
+                sid_key.setdefault(str(m["scene_id"]), k)
+        labs = self._label_store().for_profile(profile)
+        near: dict[str, list[float]] = {}
+        for lab in labs:
+            near.setdefault(lab.key, []).append(float(lab.time))
+        weak: list = []
+        try:
+            # fast-fail client: training must not stall behind retry backoff
+            for mk in self._meta_client().iter_markers_by_tag(profile):
+                key = sid_key.get(str(mk.get("scene_id")))
+                t = float(mk.get("seconds") or 0.0)
+                if key and not any(abs(t - x) < 2.0 for x in near.get(key, [])):
+                    weak.append(WeakLabel(key, t, 1, 1.0, "marker", evaluate=True))
+                    near.setdefault(key, []).append(t)
+        except Exception:  # noqa: BLE001 — Stash down: your labels only
+            return weak, set()
+
+        in_taste: set[str] = set()
+        if profile != self.cfg.markers.tag_name:
+            return weak, in_taste   # grades describe your main taste, not a sub-profile
+        try:
+            rows = self._catalogue_all()
+        except Exception:  # noqa: BLE001
+            return weak, in_taste
+        scores, _ = self._taste_scores(model, profile=profile)
+        rng = np.random.default_rng(0)
+        tier_rows, rej_rows = [], []
+        for r in rows:
+            key = sid_key.get(str(r["scene_id"]))
+            span = idx._key_rows.get(key) if key else None
+            if not span or span[1] <= span[0]:
+                continue
+            start, end = span
+            times = idx.times[start:end]
+            if r["tier"] in self._TIER_WEAK:
+                in_taste.add(key)
+                if scores is None:
+                    continue
+                picked: list[float] = []
+                for i in np.argsort(-scores[start:end]):
+                    t = float(times[int(i)])
+                    if all(abs(t - x) >= 10.0 for x in picked):
+                        picked.append(t)
+                    if len(picked) == 3:
+                        break
+                tier_rows += [WeakLabel(key, t, 1, self._TIER_WEAK[r["tier"]], "tier") for t in picked]
+            elif r["tier"] == "rejected":
+                for i in rng.choice(end - start, size=min(3, end - start), replace=False):
+                    rej_rows.append(WeakLabel(key, float(times[int(i)]), 0, 0.3, "reject"))
+
+        def _cap(extra: list, budget: float) -> list:
+            tot = sum(x.weight for x in extra)
+            if tot > budget > 0:
+                for x in extra:
+                    x.weight *= budget / tot
+            return extra
+
+        pos_w = sum(1.0 for lab in labs if lab.label == 1) + sum(1.0 for x in weak if x.label == 1)
+        neg_w = sum(1.0 for lab in labs if lab.label == 0)
+        weak += _cap(tier_rows, max(pos_w, 50.0)) + _cap(rej_rows, max(neg_w, 50.0))
+        return weak, in_taste
+
+    def _taste_eval_path(self, profile: str, model: str):
+        return self._taste_path(profile, model).with_suffix(".eval.jsonl")
+
+    def taste_quality(self, profile: str | None = None, model: str | None = None,
+                      last: int = 20) -> dict:
+        """The benchmark history: one entry per training, newest last."""
+        import json
+
+        profile = profile or self.cfg.markers.tag_name
+        model = model or self._model_name()
+        p = self._taste_eval_path(profile, model)
+        hist = []
+        try:
+            for ln in p.read_text().splitlines()[-last:]:
+                if ln.strip():
+                    hist.append(json.loads(ln))
+        except (OSError, ValueError):
+            pass
+        return {"profile": profile, "model": model, "history": hist,
+                "latest": hist[-1] if hist else None}
+
     def train_taste(self, profile: str | None = None, model: str | None = None) -> dict:
-        """Fit a preference classifier from your thumbs, in one embedding space
-        (kept separate from scoring's models so the two never collide)."""
+        """Fit a preference classifier from your thumbs (plus what your grades
+        and markers imply), in one embedding space. Each training is benchmarked
+        on held-out scenes and appended to the quality history."""
+        import json
+        import time as _t
+
         from ..pipeline import train_profile
 
         profile = profile or self.cfg.markers.tag_name
         model = model or self._model_name()
+        mc = self.cfg.modeling
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        weak, in_taste = (self._weak_taste_rows(profile, model) if mc.taste_weak_labels
+                          else ([], set()))
+        ctx = str(mc.taste_context).strip().lower()
+        context = "auto" if ctx == "auto" else int(float(ctx or 0))
         clf, stats = train_profile(
             self._label_store(), cache, model, profile,
-            kind=self.cfg.modeling.taste_classifier,
-            recency_halflife_days=self.cfg.modeling.recency_halflife_days,
-            # your likes + ⭐-saves are all positives, so without a negative
+            kind=mc.taste_classifier,
+            recency_halflife_days=mc.recency_halflife_days,
+            # your likes + ⭐-saves are mostly positives, so without a negative
             # contrast the model saturates ("everything is your taste"). Augment
-            # with a random library background as implicit negatives.
-            background_ratio=1.0,
+            # with a random library background as implicit negatives — cleaned
+            # of in-taste moments when the PU filter is on.
+            background_ratio=2.0 if mc.taste_pu_filter else 1.0,
+            weak=weak, exclude_bg_keys=in_taste if mc.taste_pu_filter else None,
+            pu_filter=mc.taste_pu_filter, context=context,
         )
         out = self._taste_path(profile, model)
         out.parent.mkdir(parents=True, exist_ok=True)
+        prev = self.taste_quality(profile, model, last=1)["latest"]
         clf.save(out)
         with self._taste_lock:
             self._taste.pop(str(out), None)
         self._invalidate_taste_caches()  # board must re-score with the new model
-        return {"model": model, "profile": profile, **stats}
+        entry = {"ts": _t.time(), "kind": stats["kind"], "context": stats.get("context", 0),
+                 "samples": stats["samples"], "sources": stats.get("sources", {}),
+                 "pu_dropped": stats.get("pu_dropped", 0), **(stats.get("holdout") or {})}
+        try:
+            with open(self._taste_eval_path(profile, model), "a") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass
+        res = {"model": model, "profile": profile, **stats}
+        if prev and prev.get("auc") is not None and entry.get("auc") is not None:
+            res["auc_delta"] = round(entry["auc"] - prev["auc"], 3)
+        return res
+
+    # --- taste scoring that respects temporal context --------------------------
+
+    def _row_bounds(self, idx):
+        """Per-row (start, end) of its scene's rows — cached on the index."""
+        cached = getattr(idx, "_peaks_row_bounds", None)
+        if cached is not None and cached[0] == idx.size:
+            return cached[1], cached[2]
+        lo = np.zeros(idx.size, dtype=np.int64)
+        hi = np.zeros(idx.size, dtype=np.int64)
+        for s, e in idx._key_rows.values():
+            lo[s:e], hi[s:e] = s, e
+        idx._peaks_row_bounds = (idx.size, lo, hi)
+        return lo, hi
+
+    def _taste_proba_rows(self, clf, idx, rows) -> np.ndarray:
+        """Taste probability for arbitrary index rows; a context model gets
+        each row's ±w neighbours from its own scene."""
+        rows = np.asarray(rows, dtype=np.int64)
+        if rows.size == 0:
+            return np.zeros((0,), dtype=np.float32)
+        w = int(getattr(clf, "context", 0) or 0)
+        base = idx.take(rows)
+        if not w:
+            return np.asarray(clf.predict_proba(base), dtype=np.float32).reshape(-1)
+        lo, hi = self._row_bounds(idx)
+        acc = np.zeros_like(base)
+        cnt = np.zeros((rows.size, 1), dtype=np.float32)
+        for d in range(-w, w + 1):
+            r = rows + d
+            ok = (r >= lo[rows]) & (r < hi[rows])
+            if ok.any():
+                acc[ok] += idx.take(r[ok])
+                cnt[ok] += 1
+        feats = np.hstack([base, acc / np.maximum(cnt, 1)])
+        return np.asarray(clf.predict_proba(feats), dtype=np.float32).reshape(-1)
+
+    def _taste_proba_all(self, clf, idx) -> np.ndarray:
+        """Taste probability for every indexed row, in bounded chunks."""
+        from ..classifier import with_context
+
+        w = int(getattr(clf, "context", 0) or 0)
+        if not w:
+            # chunked: a whole-matrix predict_proba would upcast millions of rows
+            # to a transient float64 copy (tens of GB at 2s sampling)
+            return np.asarray(
+                idx.apply(lambda b: np.asarray(clf.predict_proba(b), dtype=np.float32).reshape(-1)),
+                dtype=np.float32,
+            ).reshape(-1)
+        out = np.zeros(idx.size, dtype=np.float32)
+        spans = sorted(idx._key_rows.values())
+        batch, spans_in = [], []
+        n = 0
+
+        def _flush():
+            if batch:
+                p = np.asarray(clf.predict_proba(np.vstack(batch)), dtype=np.float32).reshape(-1)
+                o = 0
+                for s, e in spans_in:
+                    out[s:e] = p[o:o + (e - s)]
+                    o += e - s
+                batch.clear()
+                spans_in.clear()
+
+        for s, e in spans:
+            batch.append(with_context(idx.rows(s, e), w))
+            spans_in.append((s, e))
+            n += e - s
+            if n >= 8192:
+                _flush()
+                n = 0
+        _flush()
+        return out
+
+    def _row_at(self, idx, key: str, t: float) -> int | None:
+        span = idx._key_rows.get(key)
+        if not span or span[1] <= span[0]:
+            return None
+        s, e = span
+        return s + int(np.argmin(np.abs(idx.times[s:e] - t)))
 
     def _taste_model(self, profile: str, model: str):
         from ..classifier import TasteClassifier
@@ -1988,11 +2227,11 @@ class Service(LibraryMixin):
         if clf is None or not hits:
             return hits
         idx = self.index(model)
-        vecs = []
-        for h in hits:
-            v = idx.vector_at(h.key, h.time)
-            vecs.append(v if v is not None else np.zeros(idx.dim or 1, dtype=np.float32))
-        taste = np.asarray(clf.predict_proba(np.stack(vecs)), dtype=np.float32)
+        rows = [self._row_at(idx, h.key, h.time) for h in hits]
+        ok = np.array([r is not None for r in rows])
+        taste = np.zeros(len(hits), dtype=np.float32)
+        if ok.any():
+            taste[ok] = self._taste_proba_rows(clf, idx, [r for r in rows if r is not None])
         ss = np.array([h.score for h in hits], dtype=np.float32)
         span = float(ss.max() - ss.min()) or 1.0
         snorm = (ss - float(ss.min())) / span
@@ -2043,7 +2282,7 @@ class Service(LibraryMixin):
         # thumbs-up labels — from the swipe trainer / viewer
         try:
             for lab in self._label_store().for_profile(profile):
-                if lab.label == 1:
+                if lab.label == 1 and getattr(lab, "source", "explicit") == "explicit":
                     _add(lab.key, lab.time, lab.scene_id, "thumb")
         except Exception:  # noqa: BLE001
             pass
@@ -2230,12 +2469,7 @@ class Service(LibraryMixin):
             return None, None
         clf = self._taste_model(profile, model)
         if clf is not None:
-            # chunked: a whole-matrix predict_proba would upcast millions of rows
-            # to a transient float64 copy (tens of GB at 2s sampling)
-            scores = np.asarray(
-                idx.apply(lambda b: np.asarray(clf.predict_proba(b), dtype=np.float32).reshape(-1)),
-                dtype=np.float32,
-            ).reshape(-1)
+            scores = self._taste_proba_all(clf, idx)
             scored_by = "classifier"
         else:
             modes = self._taste_modes(model, profile=profile)
@@ -2501,20 +2735,29 @@ class Service(LibraryMixin):
 
     def next_uncertain(self, model: str | None = None, pool: int = 800,
                        profile: str | None = None) -> dict | None:
-        """The unlabeled frame the taste model is least sure about — active
-        learning: rating the ambiguous ones teaches it fastest. Falls back to
-        centroid-ambiguity, then random, when there's no model/centroid yet."""
+        """The unlabeled frame the taste model most needs you to rate — active
+        learning. Candidates are a random library sample plus the top of the
+        board (where a wrong call costs the most); the 30 nearest the decision
+        boundary are then narrowed to the one least like the last frames you
+        were asked about, so you're never shown ten near-identical stills.
+        Hidden (rejected) scenes are skipped. Falls back to centroid-ambiguity,
+        then random, when there's no model/centroid yet."""
         model = model or self._model_name()
         idx = self.index(model, refresh=True)  # pick up frames from an in-progress embed
         if idx.size == 0:
             return None
         profile = profile or self.cfg.markers.tag_name
         labeled = self._label_store().labeled_ids(profile)
+        hidden = self.hidden_scene_ids()
         rng = np.random.default_rng()
         rows = rng.choice(idx.size, size=min(pool, idx.size), replace=False)
         clf = self._taste_model(profile, model)
         if clf is not None:
-            p = np.asarray(clf.predict_proba(idx.take(rows)), dtype=np.float32)
+            cached = self._board_score_cache.get((model, profile))
+            if cached is not None and cached[0] is not None and cached[0].shape[0] == idx.size:
+                top = np.argpartition(-cached[0], min(200, idx.size - 1))[:200]
+                rows = np.unique(np.concatenate([rows, top]))
+            p = self._taste_proba_rows(clf, idx, rows)
             unc = -np.abs(p - 0.5)  # nearest the 0.5 decision boundary
         else:
             # use the centroid only if it's already cached — never trigger a
@@ -2526,13 +2769,32 @@ class Service(LibraryMixin):
                 unc = -np.abs(sims - float(np.median(sims)))  # mid-similarity = ambiguous
             else:
                 unc = rng.random(rows.shape[0])  # cold start: anything
+        short: list[int] = []
         for j in np.argsort(-unc):
             i = int(rows[j])
             key, t = idx.keys[i], float(idx.times[i])
-            if (key, round(t, 2)) in labeled:
+            if (key, round(t, 2)) in labeled or str(idx.scene_ids[i]) in hidden:
                 continue
-            return {"key": key, "time": round(t, 2), "scene_id": idx.scene_ids[i], "score": 0.0}
-        return None
+            short.append(i)
+            if len(short) >= 30:
+                break
+        if not short:
+            return None
+        pick = short[0]
+        size, recent = getattr(self, "_asked_recent", (0, []))
+        recent = list(recent) if size == idx.size else []   # rows shift when the index grows
+        if recent and len(short) > 1:
+            cand = idx.take(np.asarray(short))
+            seen = idx.take(np.asarray(recent))
+            cn = cand / np.maximum(np.linalg.norm(cand, axis=1, keepdims=True), 1e-8)
+            sn = seen / np.maximum(np.linalg.norm(seen, axis=1, keepdims=True), 1e-8)
+            # uncertainty rank (0 = most) vs. similarity to what you just saw
+            sim = (cn @ sn.T).max(axis=1)
+            score = -np.arange(len(short)) / len(short) - sim
+            pick = short[int(np.argmax(score))]
+        self._asked_recent = (idx.size, (recent + [pick])[-20:])
+        return {"key": idx.keys[pick], "time": round(float(idx.times[pick]), 2),
+                "scene_id": idx.scene_ids[pick], "score": 0.0}
 
     def sample_frames(
         self, count: int = 10, model: str | None = None, seed: int | None = None
@@ -2917,7 +3179,11 @@ class Service(LibraryMixin):
         sc = self.cfg.scoring
         segments: dict[str, list] = {}
         if sc.normalize in ("", "none"):
-            flat = idx.apply(lambda b: np.asarray(fn(b), dtype=np.float32).reshape(-1))
+            ts, by = self._taste_scores(model) if source == "taste model" else (None, None)
+            if ts is not None and by == "classifier":
+                flat = ts   # same scores the board uses (context-aware, cached)
+            else:
+                flat = idx.apply(lambda b: np.asarray(fn(b), dtype=np.float32).reshape(-1))
             high = float(np.percentile(flat, 90.0)) if flat.size else sc.high
             low = float(np.percentile(flat, 75.0)) if flat.size else sc.low
             for key, (start, end) in idx._key_rows.items():
@@ -3300,7 +3566,9 @@ class Service(LibraryMixin):
         `{labels:[{key,time,scene_id,label,thumb}], total, positive, negative,
         has_model}`."""
         profile = profile or self.cfg.markers.tag_name
-        labs = sorted(self._label_store().for_profile(profile), key=lambda x: (x.ts or 0.0), reverse=True)
+        labs = sorted((lab for lab in self._label_store().for_profile(profile)
+                       if getattr(lab, "source", "explicit") == "explicit"),
+                      key=lambda x: (x.ts or 0.0), reverse=True)
         pos = sum(1 for lab in labs if lab.label == 1)
         page = labs[offset:] if limit is None else labs[offset:offset + max(0, int(limit))]
         items = [{
@@ -3941,6 +4209,7 @@ class Service(LibraryMixin):
         tag_ids = self._tier_tag_list(prev["tag_ids"], grade)
         if tag_ids is None:                               # reject: rating only
             self.update_scene(sid, rating100=rating)      # also syncs 1★ → hidden
+            self._drop_engagement(sid)                    # lingering there meant nothing
         else:
             self.client().update_scene(sid, rating100=rating, tag_ids=tag_ids, organized=True)
             self.invalidate_meta(sid)

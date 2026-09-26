@@ -758,6 +758,16 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001 — surface training issues to the UI
             raise HTTPException(400, str(exc))
 
+    @app.get("/api/taste/quality")
+    def taste_quality(profile: str | None = None, last: int = 20):
+        """The held-out benchmark history — one entry per training."""
+        return service.taste_quality(profile=profile, last=last)
+
+    @app.post("/api/taste/engage")
+    def taste_engage(scene_id: str, t: float, kind: str = "dwell"):
+        """A soft positive: you sought to `t` in the Review player and stayed."""
+        return service.record_engagement(scene_id, t, kind=kind)
+
     # --- taste profiles (separate 👍/👎, saved moments, model, feed) ---------
 
     @app.get("/api/profiles")

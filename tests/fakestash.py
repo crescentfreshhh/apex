@@ -15,6 +15,7 @@ class FakeStash:
             v.setdefault("organized", False)
             v.setdefault("fingerprint", f"fp{sid}")
         self.tags = dict(tags or {})  # tag id -> name
+        self.markers: list[dict] = []  # {scene_id, seconds, marker_id} under the taste tag
         self.calls: list = []
         self.caps = {"scenesDestroy": True, "findDuplicateScenes": True,
                      "metadataScan": True, "metadataIdentify": True,
@@ -25,6 +26,9 @@ class FakeStash:
     def iter_scenes(self, path_prefix=None):
         for sid in self.s:
             yield SimpleNamespace(id=sid)
+
+    def iter_markers_by_tag(self, tag):
+        yield from self.markers
 
     def scene_details(self, ids):
         out = {}

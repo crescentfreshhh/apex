@@ -223,7 +223,8 @@ def test_taste_label_train_and_rerank(tmp_path, monkeypatch):
     assert counts["positive"] == 2 and counts["negative"] == 2
 
     stats = svc.train_taste(model="dinov2")
-    assert stats["samples"] == 4 and svc.has_taste()
+    # 4 ratings (+ library background as implicit negatives)
+    assert stats["positives"] == 2 and stats["samples"] >= 4 and svc.has_taste()
 
     # re-rank: a B-ish hit ranked above an A-ish hit should flip toward A
     hits = [Hit(scene_id="2", key="B", time=0.0, score=0.9),

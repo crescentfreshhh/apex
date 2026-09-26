@@ -790,7 +790,7 @@ $("#btn-train").addEventListener("click", async () => {
   const btn = $("#btn-train"); btn.disabled = true;
   try {
     const s = await api("/api/train?" + new URLSearchParams(pparam()), { method: "POST" });
-    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    toast(trainSummary(s)); loadTasteQuality();
   } catch (e) { toast(e.message, true); }
   btn.disabled = false;
 });
@@ -1540,7 +1540,7 @@ async function trainNow(btn) {
   if (btn) btn.disabled = true;
   try {
     const s = await api("/api/train?" + new URLSearchParams(pparam()), { method: "POST" });
-    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    toast(trainSummary(s)); loadTasteQuality();
     loadForYou(false); loadLabelCounts();
     tasteVisualCollapse?.reloadIfOpen();   // refresh only the panels you're actually viewing
   } catch (e) { toast(e.message, true); }
@@ -1943,7 +1943,65 @@ async function loadLibraryToday() {
     setNavCounts(d);
   } catch { box.innerHTML = '<span class="faint">Stash unreachable</span>'; }
 }
-function openTaste() { loadNextSwipe(); loadLabelCounts(); }
+function openTaste() { loadNextSwipe(); loadLabelCounts(); loadTasteQuality(); }
+
+// --- taste quality: the held-out benchmark, in plain words -------------------
+function trainSummary(s) {
+  const h = s.holdout || {};
+  const bits = [`Trained on ${s.samples.toLocaleString()} moments`];
+  if (h.peak_hit != null) bits.push(`jump-to-peak ${Math.round(h.peak_hit * 100)}%`);
+  if (h.auc != null) bits.push(`AUC ${h.auc}` + (s.auc_delta ? ` (${s.auc_delta > 0 ? "+" : ""}${s.auc_delta})` : ""));
+  return bits.join(" · ");
+}
+const pct = (x) => (x == null ? "—" : Math.round(x * 100) + "%");
+function tqSpark(hist, key) {
+  const pts = hist.map((h) => h[key]).filter((x) => x != null);
+  if (pts.length < 2) return "";
+  const lo = Math.min(...pts) - 0.03, hi = Math.max(...pts) + 0.03, W = 120, H = 28;
+  const xy = pts.map((p, i) => `${(i / (pts.length - 1) * W).toFixed(1)},${(H - 2 - (p - lo) / (hi - lo || 1) * (H - 4)).toFixed(1)}`);
+  return `<svg class="tq-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${xy.join(" ")}" /></svg>`;
+}
+const TQ_SRC = [["explicit", "your ratings"], ["marker", "⭐ markers"], ["tier", "graded-scene moments"],
+  ["reject", "reject moments"], ["engage", "from watching"], ["background", "library background"]];
+async function loadTasteQuality() {
+  const box = $("#taste-quality"); if (!box) return;
+  let q;
+  try { q = await api("/api/taste/quality?" + new URLSearchParams(pparam())); } catch { return; }
+  const L = q.latest, hist = q.history || [];
+  if (!L) {
+    box.innerHTML = `<div class="tq-empty"><b>How well does Peaks know your taste?</b>
+      <span class="muted">Train once and it measures itself on scenes it didn't learn from.</span>
+      <button class="btn pri sm" id="btn-tq-train">Train &amp; measure</button></div>`;
+    return;
+  }
+  const prev = hist.length > 1 ? hist[hist.length - 2] : null;
+  const delta = (k) => {        // percentage points, or raw for AUC
+    if (!prev || prev[k] == null || L[k] == null) return "";
+    const d = Math.round((L[k] - prev[k]) * 100);
+    const txt = k === "auc" ? (Math.abs(d) / 100).toFixed(2) : `${Math.abs(d)} pts`;
+    return d ? `<span class="tq-d ${d > 0 ? "up" : "down"}" title="since the previous training">${d > 0 ? "▲" : "▼"} ${txt}</span>` : "";
+  };
+  const model = `${L.kind === "mlp" ? "Non-linear" : "Linear"} model` + (L.context ? ` · sees ±${L.context} frames of context` : " · single frames");
+  const src = TQ_SRC.filter(([k]) => (L.sources || {})[k]).map(([k, n]) => `<span><b>${L.sources[k].toLocaleString()}</b> ${n}</span>`).join("");
+  box.innerHTML = `
+    <div class="tq-head"><b>How well Peaks knows your taste</b>
+      <span class="faint small">measured on scenes it didn't train on · ${new Date(L.ts * 1000).toLocaleString()}</span>
+      <button class="btn ghost sm" id="btn-tq-train">Train &amp; measure</button></div>
+    <div class="tq-stats">
+      <div class="tq-stat" title="For scenes holding a moment you loved: how often the model's single best moment lands within 10 s of it — i.e. how often 'jump to peak' lands on your moment.">
+        <span class="tq-l">Jump-to-peak lands on your moment</span><span class="tq-v">${pct(L.peak_hit)}${delta("peak_hit")}</span>
+        <span class="faint small">${L.peak_scenes || 0} held-out scenes</span></div>
+      <div class="tq-stat" title="Of the held-out moments it ranks highest, the share you actually loved.">
+        <span class="tq-l">Its top picks you love</span><span class="tq-v">${pct(L.p_at_50)}${delta("p_at_50")}</span>
+        <span class="faint small">vs ${pct(L.base_rate)} by chance</span></div>
+      <div class="tq-stat" title="ROC-AUC on your held-out ratings: 1.0 = always ranks a loved moment above a passed one, 0.5 = coin flip.">
+        <span class="tq-l">Tells love from pass</span><span class="tq-v">${L.auc != null ? L.auc.toFixed(2) : "—"}${delta("auc")}</span>
+        ${tqSpark(hist, "auc") || '<span class="faint small">AUC · trend after 2 trainings</span>'}</div>
+    </div>
+    <div class="tq-src"><span class="faint">Learned from</span>${src}${L.pu_dropped ? `<span class="faint">· ${L.pu_dropped} look-alike background frames set aside</span>` : ""}</div>
+    <div class="faint small">${model}</div>`;
+}
+document.addEventListener("click", (e) => { if (e.target.closest("#btn-tq-train")) trainNow(e.target.closest("button")); });
 wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); });
 wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); });
 
@@ -2118,7 +2176,7 @@ $("#btn-swipe-train")?.addEventListener("click", async () => {
   const btn = $("#btn-swipe-train"); btn.disabled = true;
   try {
     const s = await api("/api/train?" + new URLSearchParams(pparam()), { method: "POST" });
-    toast(`Trained on ${s.samples} labels (${s.positives}+)` + (s.kind ? ` · ${s.kind}` : "") + (s.cv_auc ? ` · AUC ${s.cv_auc}` : ""));
+    toast(trainSummary(s)); loadTasteQuality();
     loadNextSwipe();
   } catch (e) { toast(e.message, true); }
   btn.disabled = false;
@@ -3301,9 +3359,28 @@ function rvExit() {
 }
 function rvJump(dir) {
   const v = $("#rv-v"), t = v.currentTime;
-  if (!rv.peaks.length) { v.currentTime = Math.max(0, t + 30 * dir); return; }   // not embedded yet
+  if (!rv.peaks.length) { v.currentTime = Math.max(0, t + 30 * dir); rvLanded(v.currentTime); return; }   // not embedded yet
   const next = dir > 0 ? rv.peaks.find((p) => p > t + 1) : [...rv.peaks].reverse().find((p) => p < t - 1);
-  if (next != null) v.currentTime = next;
+  if (next != null) { v.currentTime = next; rvLanded(next); }
+}
+// Implicit taste signal: after YOU seek somewhere, watching on for 6 s tells
+// Peaks that moment mattered — sent once as a soft "engage" (never a 👍, and
+// dropped again if you reject the scene).
+const rvEngage = { sid: null, t: null, sent: new Set() };
+function rvLanded(t) {
+  const r = rv.items[rv.i]; if (!r) return;
+  rvEngage.sid = r.scene_id; rvEngage.t = t;
+}
+function rvEngageTick(v) {
+  if (rvEngage.t == null || v.paused || v.dataset.sid !== rvEngage.sid) return;
+  const d = v.currentTime - rvEngage.t;
+  if (d < 0 || d > 60) { rvEngage.t = null; return; }       // they moved on
+  if (d < 6) return;
+  const t = rvEngage.t + 1, sig = `${rvEngage.sid}@${Math.round(t / 10)}`;
+  rvEngage.t = null;
+  if (rvEngage.sent.has(sig)) return;
+  rvEngage.sent.add(sig);
+  api(`/api/taste/engage?${new URLSearchParams({ scene_id: rvEngage.sid, t: t.toFixed(2) })}`, { method: "POST" }).catch(() => {});
 }
 $("#rv-grades")?.addEventListener("click", (e) => { const b = e.target.closest("[data-g]"); if (b) rvGrade(b.dataset.g); });
 $("#rv-queue")?.addEventListener("click", (e) => { const q = e.target.closest("[data-j]"); if (q) { rv.i = +q.dataset.j; renderReview(); } });
@@ -3323,13 +3400,15 @@ $("#rv-scrub")?.addEventListener("pointerdown", (e) => {
   el.setPointerCapture(e.pointerId); el.classList.add("drag");
   rvSeekTo(e);
   const move = (ev) => rvSeekTo(ev);
-  const up = () => { el.classList.remove("drag"); el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+  const up = () => { el.classList.remove("drag"); el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up);
+    rvLanded($("#rv-v").currentTime); };
   el.addEventListener("pointermove", move); el.addEventListener("pointerup", up);
 });
 $("#rv-scrub")?.addEventListener("click", (e) => e.stopPropagation());
 $("#rv-v")?.addEventListener("timeupdate", () => {
   const v = $("#rv-v"), bar = $("#rv-prog");
   if (bar && v.duration) bar.style.width = (100 * v.currentTime / v.duration).toFixed(2) + "%";
+  rvEngageTick(v);
 });
 $("#rv-v")?.addEventListener("click", () => { const v = $("#rv-v"); v.paused ? v.play() : v.pause(); });
 // volume: a mute button + slider, remembered per browser (starts muted so the

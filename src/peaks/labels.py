@@ -25,6 +25,8 @@ class Label:
     profile: str  # taste tag this label belongs to
     scene_id: str | None = None
     ts: float = 0.0  # when the rating was made (unix time); 0 = pre-dates the field
+    source: str = "explicit"  # "explicit" (👍/👎/⭐) or "engage" (implicit, from watching)
+    weight: float = 1.0       # training weight (implicit signals count for less)
 
 
 class LabelStore:
@@ -62,12 +64,22 @@ class LabelStore:
         label: int,
         profile: str,
         scene_id: str | None = None,
+        source: str = "explicit",
+        weight: float = 1.0,
     ) -> None:
         lab = Label(
             key=key, time=float(time), label=int(label), profile=profile,
             scene_id=scene_id, ts=_now(),  # re-rating counts as recent activity
+            source=source, weight=float(weight),
         )
         self._labels[self._id(key, time, profile)] = lab
+
+    def remove_where(self, pred) -> int:
+        """Delete every label matching `pred(label)`. Caller should save()."""
+        drop = [k for k, lab in self._labels.items() if pred(lab)]
+        for k in drop:
+            del self._labels[k]
+        return len(drop)
 
     def for_profile(self, profile: str) -> list[Label]:
         return [l for l in self._labels.values() if l.profile == profile]
@@ -82,7 +94,8 @@ class LabelStore:
         }
 
     def counts(self, profile: str) -> tuple[int, int]:
-        labs = self.for_profile(profile)
+        """(👍, 👎) you gave explicitly — implicit engagement isn't counted."""
+        labs = [lab for lab in self.for_profile(profile) if lab.source == "explicit"]
         pos = sum(1 for l in labs if l.label == 1)
         return pos, len(labs) - pos
 
