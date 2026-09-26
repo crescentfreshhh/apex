@@ -427,15 +427,20 @@ class LibraryMixin:
 
     @staticmethod
     def dupe_keeper(rows: list[dict]) -> str:
-        """The copy to keep: highest resolution, then bitrate, then file size;
-        an existing keeper grade breaks remaining ties."""
+        """The copy to keep: most pixels (8K VR beats 4K), then resolution class
+        when dimensions are unknown, then bitrate, then file size; an existing
+        keeper grade breaks remaining ties."""
         from ..tiers import RES_CLASSES
 
         rank = {c: i for i, c in enumerate(RES_CLASSES)}
         grade = {"legendaire": 4, "exceptionnelle": 3, "merveilleuse": 2, "upscale": 1}
-        return max(rows, key=lambda r: (rank.get(r["quality"]["res"] or "", -1),
-                                         r["quality"]["mbps"] or 0, int(r.get("size") or 0),
-                                         grade.get(r["tier"], 0)))["scene_id"]
+
+        def key(r):
+            q = r["quality"]
+            pixels = (q.get("w") or 0) * (q.get("h") or 0)
+            return (pixels, rank.get(q.get("res") or "", -1), q.get("mbps") or 0,
+                    int(r.get("size") or 0), grade.get(r["tier"], 0))
+        return max(rows, key=key)["scene_id"]
 
     @staticmethod
     def dupe_best_grade(rows: list[dict]) -> str | None:

@@ -222,6 +222,10 @@
       <input id="cat-q" class="search" placeholder="Filter by title, performer, studio, path…" />
       <select id="cat-res" title="Resolution">
         <option value="">any resolution</option>
+        <option value="8K">8K</option>
+        <option value="7K">7K</option>
+        <option value="6K">6K</option>
+        <option value="5K">5K</option>
         <option value="4K">4K</option>
         <option value="1440p">1440p</option>
         <option value="1080p">1080p</option>
@@ -306,7 +310,7 @@
           <option value="-1">any</option><option value="0">equal</option>
           <option value="1">±1 s</option><option value="5">±5 s</option><option value="10">±10 s</option></select></label>
         <button id="btn-dupe-scan" class="btn pri">Find duplicates</button>
-        <span class="faint small">Recommended = highest resolution → bitrate → size. Keeping a copy moves the best grade to it first.</span>
+        <span class="faint small">Recommended = most pixels (8K VR beats 4K) → bitrate → size. Keeping a copy moves the best grade to it first.</span>
       </div>
       <div id="dupe-list" class="dupe-list"></div>
     </div>

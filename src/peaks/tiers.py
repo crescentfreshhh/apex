@@ -123,19 +123,30 @@ def tag_state(tier: str, tag_names: list[str], organized: bool,
 
 # --- file quality ------------------------------------------------------------
 
-RES_CLASSES: tuple[str, ...] = ("SD", "720p", "1080p", "1440p", "4K")
+RES_CLASSES: tuple[str, ...] = ("SD", "720p", "1080p", "1440p", "4K", "5K", "6K", "7K", "8K")
 
 
 def res_class(width, height) -> str | None:
-    """Resolution class from the SHORT side, so vertical video classifies the
-    same as landscape (1080x1920 is 1080p)."""
+    """Resolution class. Up to 1440p it goes by the SHORT side, so vertical
+    video classifies like landscape (1080x1920 is 1080p). From 4K up it goes by
+    the LONG side — how 4K–8K (and VR, often 2:1 side-by-side: 5760x2880 is 6K,
+    8192x4096 is 8K) are named — so a 3840x1920 VR file is 4K, not 1080p."""
     try:
-        short = min(int(width), int(height))
+        w, h = int(width), int(height)
     except (TypeError, ValueError):
         return None
+    short, long_ = min(w, h), max(w, h)
     if short <= 0:
         return None
-    if short >= 2000:
+    if long_ >= 3800 or short >= 2000:
+        if long_ >= 7600:
+            return "8K"
+        if long_ >= 6600:
+            return "7K"
+        if long_ >= 5600:
+            return "6K"
+        if long_ >= 4800:
+            return "5K"
         return "4K"
     if short >= 1400:
         return "1440p"
@@ -165,8 +176,14 @@ def quality_of(meta: dict) -> dict:
             bpp = br / (int(w) * int(h) * fps)
     except (TypeError, ValueError):
         bpp = None
+    try:
+        dims = (int(w), int(h)) if int(w) > 0 and int(h) > 0 else None
+    except (TypeError, ValueError):
+        dims = None
     return {
         "res": res_class(w, h),
+        "w": dims[0] if dims else None,
+        "h": dims[1] if dims else None,
         "mbps": round(br / 1e6, 1) if br > 0 else None,
         "fps": round(fps, 2) if fps > 0 else None,
         "codec": (meta.get("video_codec") or "").lower() or None,

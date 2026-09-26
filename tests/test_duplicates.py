@@ -121,3 +121,13 @@ def test_only_ids_limits_to_groups_with_new_scenes(svc):
     got = svc.find_duplicates(only_ids={"5"})
     assert [g["keep"] for g in got["groups"]] == ["5"]
     assert svc.cached_duplicates() is None                  # a scoped check alone does not fill the view
+
+
+def test_keeper_prefers_more_pixels_8k_vr_over_4k(svc):
+    from peaks.tiers import quality_of
+    rows = [{"scene_id": "a", "tier": "unreviewed", "size": 9e9,
+             "quality": quality_of({"width": 3840, "height": 2160, "bit_rate": 60e6})},
+            {"scene_id": "b", "tier": "unreviewed", "size": 7e9,
+             "quality": quality_of({"width": 8192, "height": 4096, "bit_rate": 45e6})}]
+    assert rows[1]["quality"]["res"] == "8K"
+    assert svc.dupe_keeper(rows) == "b"

@@ -37,9 +37,27 @@ def test_quality_and_resolution():
     assert res_class(None, 720) is None
     q = quality_of({"width": 3840, "height": 2160, "bit_rate": 42_000_000,
                     "frame_rate": 60, "video_codec": "HEVC"})
-    assert q == {"res": "4K", "mbps": 42.0, "fps": 60.0, "codec": "hevc",
+    assert q == {"res": "4K", "w": 3840, "h": 2160, "mbps": 42.0, "fps": 60.0, "codec": "hevc",
                  "bpp": round(42e6 / (3840 * 2160 * 60), 4)}
     assert quality_of({})["mbps"] is None and quality_of({})["bpp"] is None
+
+
+@pytest.mark.parametrize("w,h,want", [
+    (3840, 2160, "4K"), (4096, 2160, "4K"), (2160, 3840, "4K"),     # UHD, DCI, vertical
+    (3840, 1920, "4K"),                                              # VR 2:1 — was "1080p"
+    (5120, 2560, "5K"), (5760, 2880, "6K"), (7200, 3600, "7K"),      # VR side-by-side
+    (7680, 4320, "8K"), (8192, 4096, "8K"),
+    (3440, 1440, "1440p"), (2560, 1440, "1440p"), (1920, 1080, "1080p"),
+])
+def test_res_class_above_4k_and_vr(w, h, want):
+    assert res_class(w, h) == want
+
+
+def test_tier_features_keep_their_size_for_8k():
+    from peaks.tier_model import quality_features
+    base = quality_features(quality_of({"width": 3840, "height": 2160, "bit_rate": 40e6, "frame_rate": 60}))
+    vr8k = quality_features(quality_of({"width": 8192, "height": 4096, "bit_rate": 80e6, "frame_rate": 60}))
+    assert base.shape == vr8k.shape                      # saved models / reject memory stay valid
 
 
 def test_tier_names_overrides():

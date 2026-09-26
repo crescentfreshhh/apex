@@ -60,6 +60,9 @@ def visual_features(frames: np.ndarray, scores: np.ndarray | None = None,
     return np.concatenate([mean, top]).astype(np.float32)
 
 
+_FEAT_RES: tuple[str, ...] = ("SD", "720p", "1080p", "1440p", "4K")
+
+
 def quality_features(q: dict) -> np.ndarray:
     """A scene's quality facts (peaks.tiers.quality_of) → a fixed-length vector.
     Unknown values become 0 with an explicit 'missing' flag, so a file Stash
@@ -76,7 +79,12 @@ def quality_features(q: dict) -> np.ndarray:
         0.0 if mbps else 1.0,                       # bitrate missing
         0.0 if res else 1.0,                        # resolution missing
     ]
-    feats += [1.0 if res == c else 0.0 for c in RES_CLASSES]
+    # one-hot over the classes the model was built with; 5K–8K share the top
+    # slot so saved models and reject memories keep their feature size (bitrate
+    # and bpp still tell them apart)
+    top = _FEAT_RES[-1]
+    r = top if res and RES_CLASSES.index(res) >= RES_CLASSES.index(top) else res
+    feats += [1.0 if r == c else 0.0 for c in _FEAT_RES]
     feats += [1.0 if codec == c else 0.0 for c in _CODECS]
     feats.append(1.0 if codec and codec not in _CODECS else 0.0)
     return np.asarray(feats, dtype=np.float32)

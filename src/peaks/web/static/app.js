@@ -2458,7 +2458,7 @@ function qualityLine(q) {
 function qualityChips(r) {
   const q = r.quality || {};
   const chip = (txt, cls = "") => txt ? `<span class="q ${cls}">${esc(txt)}</span>` : "";
-  const hiRes = q.res === "4K", lowRes = q.res === "SD" || q.res === "720p";
+  const hiRes = ["4K", "5K", "6K", "7K", "8K"].includes(q.res), lowRes = q.res === "SD" || q.res === "720p";
   return chip(q.res || "?", hiRes ? "hi" : lowRes ? "warn" : "") +
     chip(q.mbps != null ? `${q.mbps} Mbps` : "", r.flag ? "warn" : (q.mbps >= 30 ? "hi" : "")) +
     chip((q.codec || "").toUpperCase()) + chip(q.fps ? `${Math.round(q.fps)}fps` : "") +
@@ -2778,7 +2778,7 @@ function dupeCopyHTML(r, g) {
     <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
     <div class="dupe-facts">
       <div>${rec ? '<span class="dupe-rec">★ Recommended</span> ' : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
-      <div class="dupe-q"><b>${esc(q.res || "?")}</b> · <b>${q.mbps != null ? q.mbps + " Mbps" : "? Mbps"}</b> · ${esc((q.codec || "").toUpperCase())} ${q.fps ? Math.round(q.fps) + "fps" : ""}</div>
+      <div class="dupe-q"><b>${esc(q.res || "?")}</b>${q.w ? ` <span class="muted">${q.w}×${q.h}</span>` : ""} · <b>${q.mbps != null ? q.mbps + " Mbps" : "? Mbps"}</b> · ${esc((q.codec || "").toUpperCase())} ${q.fps ? Math.round(q.fps) + "fps" : ""}</div>
       <div class="dim">${r.size ? fmtBytes(r.size) : "size ?"} · ${r.duration ? fmt(r.duration) : "?"}${added ? " · added " + esc(added) : ""}</div>
       <div class="dim dupe-path" title="${esc(r.path)}">${esc(r.path)}</div>
     </div>
@@ -2916,7 +2916,7 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
     const bytes = others.reduce((a, r) => a + (+r.size || 0), 0);
     showDeleteDialog({
       title: "Keep one copy, delete the others",
-      summary: `Keeping <b>${esc(keep.quality.res || "?")} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
+      summary: `Keeping <b>${esc(keep.quality.res || "?")}${keep.quality.w ? ` (${keep.quality.w}×${keep.quality.h})` : ""} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
         `Deleting <b>${plural(others.length, "copy", "copies")}</b> (${fmtBytes(bytes)}) with their files:` +
         (carry ? `<br>The kept copy is graded <b>${esc(TIER_NAMES[g.best_grade])}</b> first (tier tag + organized), so the grade isn't lost.` : ""),
       note: "Duplicate copies aren't counted as rejects. Every deleted file is recorded in Settings → History.",
@@ -3193,7 +3193,7 @@ function renderReview() {
     r.flag ? `<span class="warn">⚠ ${esc(r.flag)}</span>` : "", r.suggest ? esc(r.suggest.why) : "",
     r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>");
   const q = r.quality || {};
-  $("#rv-facts").innerHTML = `<span>Quality</span><span>${esc(qualityLine(q))}</span>
+  $("#rv-facts").innerHTML = `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
     <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
     <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>
     ${r.tags && r.tags.length ? `<span>Tags</span><span>${esc(r.tags.slice(0, 8).join(", "))}</span>` : ""}
