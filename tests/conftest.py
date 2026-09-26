@@ -15,3 +15,16 @@ import pytest
 def _isolate_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_measure_state(tmp_path, monkeypatch):
+    """Ratings and grades bump the taste-measure counter under the configured
+    models dir; tests that build a default Config (relative "models") would
+    otherwise write it into the repo."""
+    try:
+        import peaks.web.service as svc_mod
+    except ImportError:  # web extras not installed
+        return
+    monkeypatch.setattr(svc_mod.Service, "_measure_state_path",
+                        lambda self: tmp_path / "taste-measure" / "measure_state.json")
