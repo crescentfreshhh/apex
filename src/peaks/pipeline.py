@@ -95,6 +95,9 @@ def embed_library(
     import time as _time
 
     signature = getattr(sampler, "interval_signature", sampler.interval)
+    if hasattr(sampler, "on_fallback") and sampler.on_fallback is None:
+        sampler.on_fallback = lambda path, why: log(
+            f"  ~ seeking failed in {path} ({why}) — decoding it start to finish instead")
     # raw path: numpy frames straight to the GPU — no JPEG/PIL round-trip.
     # Samplers advertise it via wants_raw (sparse mode is always raw).
     use_raw = getattr(sampler, "wants_raw", None)

@@ -222,3 +222,67 @@ def test_sparse_feeds_embed_library(video, tmp_path):
     assert vecs.shape[1] == 16 and len(times) == stats["frames"]
     assert meta["mode"] == "sparse" and meta["pipeline"] == "raw"
     assert meta["interval"] == -(100.0 + 8.0)  # sparse signature
+
+
+# --- files whose seeks mostly fail are decoded linearly on the spot ---------------------
+
+def _budget_error(path="x.mp4"):
+    from peaks.sampling import SamplerError
+    return SamplerError(f"sparse extraction failed for {path} (worker exit 1: RuntimeError: "
+                        f"292 seek/decode errors (budget 292) in {path})")
+
+
+def test_seek_error_budget_falls_back_to_linear_decode(monkeypatch):
+    import numpy as np
+
+    from peaks.sampling import FrameSampler, sampling_signature
+
+    s = FrameSampler(interval_seconds=2, mode="sparse", hwaccel="cuda")
+
+    def sparse(self, path, **kw):
+        raise _budget_error(path)
+        yield  # pragma: no cover
+
+    used = {}
+
+    def linear(self, path, **kw):
+        used.update(mode=self.mode, hwaccel=self.hwaccel, sig=self.interval_signature)
+        yield 0.0, np.zeros((4, 4, 3), np.uint8)
+        yield 2.0, np.zeros((4, 4, 3), np.uint8)
+    monkeypatch.setattr(FrameSampler, "_iter_frames_sparse", sparse)
+    monkeypatch.setattr(FrameSampler, "_iter_frames_raw_interval", linear)
+    notes = []
+    s.on_fallback = lambda path, why: notes.append((path, why))
+    got = [t for t, _ in s.iter_frames_raw("bad.mp4", resize_short=4, crop=4)]
+    assert got == [0.0, 2.0]
+    # CPU linear decode, stored at the library's sparse signature (counts as done)
+    assert used == {"mode": "interval", "hwaccel": "", "sig": sampling_signature("sparse", 2)}
+    assert notes and notes[0][0] == "bad.mp4" and "292 seek/decode errors" in notes[0][1]
+
+
+def test_other_sparse_failures_still_fail(monkeypatch):
+    from peaks.sampling import FrameSampler, SamplerError
+
+    def sparse(self, path, **kw):
+        raise SamplerError("scene sampling exceeded 180s on x — killed")
+        yield  # pragma: no cover
+    monkeypatch.setattr(FrameSampler, "_iter_frames_sparse", sparse)
+    with pytest.raises(SamplerError, match="exceeded"):
+        list(FrameSampler(mode="sparse").iter_frames_raw("x", resize_short=4, crop=4))
+    s = FrameSampler(mode="sparse")
+    s.linear_fallback = False
+    monkeypatch.setattr(FrameSampler, "_iter_frames_sparse",
+                        lambda self, path, **kw: (_ for _ in ()).throw(_budget_error()))
+    with pytest.raises(SamplerError, match="seek/decode"):
+        list(s.iter_frames_raw("x", resize_short=4, crop=4))
+
+
+def test_worker_exits_quietly_with_its_reason(tmp_path):
+    pytest.importorskip("av")
+    from peaks.sampling import _sparse_extract_worker
+
+    out = str(tmp_path / "o.npz")
+    with pytest.raises(SystemExit) as e:
+        _sparse_extract_worker(str(tmp_path / "missing.mp4"), 2.0, 16, 16, out)
+    assert e.value.code == 1
+    assert (tmp_path / "o.npz.err").read_text()

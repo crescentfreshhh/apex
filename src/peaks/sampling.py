@@ -152,7 +152,9 @@ def _sparse_extract_worker(
                 fh.write(f"{type(exc).__name__}: {exc}"[:500])
         except OSError:
             pass
-        raise
+        # exit quietly: the parent reports the reason above in the job log; a
+        # re-raise would also dump a full libav traceback into the container log
+        raise SystemExit(1) from None
 
 
 def _sparse_error_budget(duration: float, interval: float) -> int:
@@ -290,6 +292,11 @@ class FrameSampler:
         # Fix job's fallback decoders record rescued scenes as the LIBRARY's
         # sampling so they count as done instead of being retried every run
         self._signature = signature
+        # sparse mode: a file whose seeks mostly fail (e.g. h264 "missing picture
+        # in access unit" after every seek) is decoded linearly instead, on the
+        # spot. on_fallback(path, reason) lets the caller log it.
+        self.linear_fallback = True
+        self.on_fallback = None
 
     @property
     def interval_signature(self) -> float:
@@ -418,13 +425,34 @@ class FrameSampler:
         geometry — the raw path. Dispatches on mode: sparse seeks per sample;
         interval streams a full decode over a pipe."""
         if self.mode == "sparse":
-            yield from self._iter_frames_sparse(
-                path, resize_short=resize_short, crop=crop
-            )
+            try:
+                # (sparse yields only after its worker finished, so a failure
+                # here means nothing has been yielded yet — safe to fall back)
+                yield from self._iter_frames_sparse(
+                    path, resize_short=resize_short, crop=crop
+                )
+            except SamplerError as exc:
+                if not (self.linear_fallback and "seek/decode errors" in str(exc)):
+                    raise
+                if self.on_fallback:
+                    self.on_fallback(path, str(exc).split(" in ")[0].split(": ")[-1])
+                yield from self._linear_fallback_sampler()._iter_frames_raw_interval(
+                    path, resize_short=resize_short, crop=crop
+                )
         else:
             yield from self._iter_frames_raw_interval(
                 path, resize_short=resize_short, crop=crop
             )
+
+    def _linear_fallback_sampler(self) -> "FrameSampler":
+        """Same grid, full linear CPU decode (the most forgiving decoder — what
+        the Fix job's last rung uses), recorded at this sampler's signature."""
+        return FrameSampler(
+            interval_seconds=self.interval, ffmpeg=self.ffmpeg, ffprobe=self.ffprobe,
+            frame_size=self.frame_size, mode="interval", hwaccel="",
+            queue_frames=self.queue_frames, pipeline="raw",
+            scene_timeout=self.scene_timeout, signature=self.interval_signature,
+        )
 
     def _iter_frames_sparse(self, path: str, *, resize_short: int, crop: int):
         """Seek-based sampling, run in a CHILD PROCESS with a hard kill-timeout.
