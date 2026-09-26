@@ -127,3 +127,19 @@ def test_memory_refuses_mismatched_feature_sizes(tmp_path):
         mem.add({"b": (np.ones(9), np.ones(3))})
     fps, v, q = mem.rows(exclude={"a"})
     assert fps == [] and v is None
+
+
+def test_delete_files_by_default_or_keep_them(lib, monkeypatch):
+    svc, stash = lib
+    client = _api(svc, monkeypatch)
+    j = _wait(client, client.post("/api/catalogue/delete",
+                                  json={"scene_ids": ["r0"], "confirm": True}).json())
+    assert ("destroy", ("r0",), True, True) in stash.calls           # default: files go
+    assert j["result"]["files_deleted"] is True and j["result"]["freed_bytes"] == 500_000_000
+    j = _wait(client, client.post("/api/catalogue/delete",
+                                  json={"scene_ids": ["r1"], "confirm": True, "delete_file": False}).json())
+    assert ("destroy", ("r1",), False, True) in stash.calls          # unticked: file kept
+    r = j["result"]
+    assert r["deleted"] == 1 and r["freed_bytes"] == 0 and r["files_deleted"] is False
+    kept = [e for e in svc.history() if e["action"] == "delete" and e["scene_id"] == "r1"]
+    assert kept and "file kept" in kept[0]["detail"] and kept[0]["file_deleted"] is False

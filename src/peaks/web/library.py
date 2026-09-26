@@ -325,8 +325,10 @@ class LibraryMixin:
             cached[1][:] = [r for r in cached[1] if r["scene_id"] not in gone]
 
     def delete_scenes(self, job, scene_ids: list[str], confirm: bool = False,
-                      reason: str = "reject", keep_ids: set[str] | None = None) -> dict:
-        """Delete scenes AND their files from Stash, a few at a time.
+                      reason: str = "reject", keep_ids: set[str] | None = None,
+                      delete_file: bool = True) -> dict:
+        """Delete scenes from Stash, a few at a time — with their files unless
+        `delete_file` is False (then the files stay on disk).
 
         reason="reject": each scene is re-read right before deletion and refused
         unless it is still rated 1★; its features go to the reject memory first.
@@ -373,26 +375,28 @@ class LibraryMixin:
                         job.log(f"reject memory: {exc}")
             try:
                 client.destroy_scenes([r["scene_id"] for r in ok_rows],
-                                      delete_file=True, delete_generated=True)
+                                      delete_file=bool(delete_file), delete_generated=True)
             except Exception as exc:  # noqa: BLE001
                 failed += [{"scene_id": r["scene_id"], "error": str(exc)} for r in ok_rows]
                 if job is not None:
                     job.log(f"delete failed: {exc}")
                 continue
             for r in ok_rows:
-                freed += int(r.get("size") or 0)
+                if delete_file:
+                    freed += int(r.get("size") or 0)
                 deleted.append(r["scene_id"])
-                self._log_scene("delete", r, reason=reason, size=r.get("size"),
+                self._log_scene("delete", r, reason=reason, size=r.get("size"), file_deleted=bool(delete_file),
                                 before={"rating100": r["rating100"], "o_counter": r["o_counter"],
                                         "tier": r["tier"]},
-                                detail=f"file deleted ({reason})")
+                                detail=(f"file deleted ({reason})" if delete_file
+                                        else f"removed from Stash, file kept ({reason})"))
                 if job is not None:
-                    job.log(f"deleted {r['path']}")
+                    job.log(("deleted " if delete_file else "removed from Stash (file kept) ") + str(r["path"]))
             self._drop_local(ok_rows)
             if job is not None:
                 job.progress = {"done": min(i + CHUNK, len(ids)), "total": len(ids)}
         return {"deleted": len(deleted), "freed_bytes": freed, "refused": refused,
-                "failed": failed, "ids": deleted}
+                "failed": failed, "ids": deleted, "files_deleted": bool(delete_file)}
 
     # --- duplicates (Stash's phash groups, judged on file quality) --------------
 
@@ -500,7 +504,8 @@ class LibraryMixin:
     def cached_duplicates(self) -> dict | None:
         return getattr(self, "_dupe_cache", None)
 
-    def resolve_duplicate(self, job, keep_id: str, delete_ids: list[str], confirm: bool = False) -> dict:
+    def resolve_duplicate(self, job, keep_id: str, delete_ids: list[str], confirm: bool = False,
+                          delete_file: bool = True) -> dict:
         """Keep one copy, delete the others (files included). If any copy
         carries a better keeper grade than the kept one, that grade moves to the
         kept copy FIRST (normal grade path → tier tag + organized), so a grade
@@ -526,7 +531,7 @@ class LibraryMixin:
             self.grade_scene(keep_id, best, source="duplicate")
             carried = best
         res = self.delete_scenes(job, delete_ids, confirm=True, reason="duplicate",
-                                 keep_ids={keep_id})
+                                 keep_ids={keep_id}, delete_file=delete_file)
         keep_row = self._cat_update_row(keep_id)
         self._log_scene("duplicate", keep_row, detail=(
             f"kept this copy, deleted {res['deleted']}" + (f", carried grade {best}" if carried else "")))

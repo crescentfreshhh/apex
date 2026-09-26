@@ -2732,27 +2732,36 @@ $("#cat-bulk")?.addEventListener("click", (e) => {
   }
 });
 // --- deleting rejects (files included) — preview, tick, then delete ---------------
-// One confirm dialog for every file deletion: lists the files, and the delete
-// button only enables after ticking "delete the files from disk too".
+// One confirm dialog for every deletion: lists the files; "Delete the video
+// files too" starts ticked (like Stash) — unticked removes the scenes from Stash
+// but leaves the files on disk. `summary` / `goLabel` may be functions of it.
 function showDeleteDialog({ title, summary, note, items, total, goLabel, capable = true, run }) {
   const dlg = $("#del-dlg");
+  const val = (x, df) => (typeof x === "function" ? x(df) : x);
   $("#del-title").textContent = title;
-  $("#del-summary").innerHTML = summary;
   $("#del-note").textContent = note || "";
   $("#del-list").innerHTML = items.map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path || "")}">${esc(r.title || r.path)}</span>
     <span class="dim">${r.size ? fmtBytes(r.size) : ""}</span></div>`).join("") +
     (total > items.length ? `<div class="dim">…and ${total - items.length} more</div>` : "");
   const ack = $("#del-ack"), go = $("#btn-del-go"), cancel = $("#btn-del-cancel");
-  ack.checked = false; go.disabled = true; cancel.disabled = false;
+  ack.checked = true; cancel.disabled = false;
   $("#del-status").textContent = capable ? "" : "Your Stash version can't delete scenes from the API — update Stash to use this.";
-  ack.disabled = !capable;
-  go.textContent = goLabel;
-  ack.onchange = () => { go.disabled = !ack.checked; };
+  ack.disabled = !capable; go.disabled = !capable;
+  const sync = () => {
+    const df = ack.checked;
+    $("#del-summary").innerHTML = val(summary, df);
+    go.textContent = val(goLabel, df);
+    go.classList.toggle("keep-files", !df);
+    $("#del-keep-note").hidden = df;
+  };
+  sync();
+  ack.onchange = sync;
   cancel.onclick = () => dlg.close();
   go.onclick = async () => {
+    const deleteFile = ack.checked;
     go.disabled = true; ack.disabled = true; cancel.disabled = true;
     try {
-      await run((msg) => { $("#del-status").textContent = msg; });
+      await run((msg) => { $("#del-status").textContent = msg; }, deleteFile);
       dlg.close();
     } catch (e) { $("#del-status").textContent = e.message; toast(e.message, true); }
     cancel.disabled = false;
@@ -2767,15 +2776,18 @@ async function openDeleteDialog(ids) {
   if (!d.count) { toast("Nothing rated 1★ to delete"); return; }
   showDeleteDialog({
     title: ids ? "Delete selected rejects" : "Delete all rejected scenes",
-    summary: `<b>${plural(d.count, "scene")}</b> · <b>${fmtBytes(d.bytes)}</b> will be deleted from Stash, with their files.`,
+    summary: (df) => df
+      ? `<b>${plural(d.count, "scene")}</b> · <b>${fmtBytes(d.bytes)}</b> will be deleted from Stash, with their files.`
+      : `<b>${plural(d.count, "scene")}</b> will be removed from Stash — the files (${fmtBytes(d.bytes)}) stay on disk.`,
     note: "Each scene is re-checked right before deletion — anything no longer rated 1★ is skipped. " +
       "Every deleted file is recorded in Settings → History. Peaks remembers what the rejects looked like, " +
       "so keeper triage keeps learning from them.",
-    items: d.items, total: d.count, capable: d.capable, goLabel: `Delete ${plural(d.count, "file")}`,
-    run: async (status) => {
+    items: d.items, total: d.count, capable: d.capable,
+    goLabel: (df) => df ? `Delete ${plural(d.count, "file")}` : `Remove ${plural(d.count, "scene")} from Stash`,
+    run: async (status, deleteFile) => {
       const job = await api("/api/catalogue/delete", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scene_ids: d.ids, confirm: true }),   // exactly what was previewed
+        body: JSON.stringify({ scene_ids: d.ids, confirm: true, delete_file: deleteFile }),   // exactly what was previewed
       });
       const j = await waitJob(job.id, (x) => {
         const p = x.progress || {};
@@ -2785,7 +2797,9 @@ async function openDeleteDialog(ids) {
       const r = j.result;
       const extra = [r.refused.length ? `${r.refused.length} skipped (no longer 1★)` : "",
         r.failed.length ? `${r.failed.length} failed` : ""].filter(Boolean).join(" · ");
-      toast(`Deleted ${plural(r.deleted, "scene")} · freed ${fmtBytes(r.freed_bytes)}${extra ? " · " + extra : ""}`, !!r.failed.length);
+      toast((r.files_deleted === false
+        ? `Removed ${plural(r.deleted, "scene")} from Stash · files kept`
+        : `Deleted ${plural(r.deleted, "scene")} · freed ${fmtBytes(r.freed_bytes)}`) + (extra ? " · " + extra : ""), !!r.failed.length);
       cat.sel.clear(); openCatalogue(); loadHistory();
     },
   });
@@ -2943,20 +2957,23 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
     const bytes = others.reduce((a, r) => a + (+r.size || 0), 0);
     showDeleteDialog({
       title: "Keep one copy, delete the others",
-      summary: `Keeping <b>${esc(keep.quality.res || "?")}${keep.quality.w ? ` (${keep.quality.w}×${keep.quality.h})` : ""} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
-        `Deleting <b>${plural(others.length, "copy", "copies")}</b> (${fmtBytes(bytes)}) with their files:` +
+      summary: (df) => `Keeping <b>${esc(keep.quality.res || "?")}${keep.quality.w ? ` (${keep.quality.w}×${keep.quality.h})` : ""} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
+        (df ? `Deleting <b>${plural(others.length, "copy", "copies")}</b> (${fmtBytes(bytes)}) with their files:`
+            : `Removing <b>${plural(others.length, "copy", "copies")}</b> from Stash — the files stay on disk:`) +
         (carry ? `<br>The kept copy is graded <b>${esc(TIER_NAMES[g.best_grade])}</b> first (tier tag + organized), so the grade isn't lost.` : ""),
       note: "Duplicate copies aren't counted as rejects. Every deleted file is recorded in Settings → History.",
-      items: others, total: others.length, goLabel: `Delete ${plural(others.length, "copy", "copies")}`,
-      run: async (status) => {
+      items: others, total: others.length,
+      goLabel: (df) => df ? `Delete ${plural(others.length, "copy", "copies")}` : `Remove ${plural(others.length, "copy", "copies")} from Stash`,
+      run: async (status, deleteFile) => {
         const job = await api("/api/duplicates/resolve", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keep: keep.scene_id, delete: others.map((r) => r.scene_id), confirm: true }),
+          body: JSON.stringify({ keep: keep.scene_id, delete: others.map((r) => r.scene_id), confirm: true, delete_file: deleteFile }),
         });
         const j = await waitJob(job.id, () => status("deleting…"));
         if (j.status === "error") throw new Error(j.error);
         const r = j.result;
-        toast(`Kept 1 · deleted ${r.deleted} · freed ${fmtBytes(r.freed_bytes)}${r.carried_grade ? " · grade carried over" : ""}`);
+        toast((r.files_deleted === false ? `Kept 1 · removed ${r.deleted} from Stash (files kept)`
+          : `Kept 1 · deleted ${r.deleted} · freed ${fmtBytes(r.freed_bytes)}`) + (r.carried_grade ? " · grade carried over" : ""));
         dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
         dupe.data.reclaim -= g.reclaim;
         renderDupes(); loadHistory();

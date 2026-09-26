@@ -598,7 +598,8 @@
     <p id="del-summary"></p>
     <div id="del-list" class="dlg-list"></div>
     <p id="del-note" class="dim"></p>
-    <label class="check dlg-ack"><input type="checkbox" id="del-ack" /> Delete the video files from disk too — this can't be undone</label>
+    <label class="check dlg-ack"><input type="checkbox" id="del-ack" checked /> Delete the video files too — this can't be undone</label>
+    <p id="del-keep-note" class="dim small" hidden>The files stay on disk. Stash will add them back on its next scan unless you move them out of the library.</p>
     <div class="row">
       <button id="btn-del-go" class="danger" disabled>Delete</button>
       <button id="btn-del-cancel" class="ghost">Cancel</button>

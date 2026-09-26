@@ -162,11 +162,13 @@ def _catalogue_models():
     class DeleteIn(BaseModel):
         scene_ids: list[str] | None = None      # None = every rejected scene
         confirm: bool = False
+        delete_file: bool = True                # False = remove from Stash, keep the file
 
     class DupeResolveIn(BaseModel):
         keep: str
         delete: list[str]
         confirm: bool = False
+        delete_file: bool = True
 
     class DupeIgnoreIn(BaseModel):
         scene_ids: list[str]
@@ -1038,7 +1040,8 @@ def create_app(cfg=None):
             raise HTTPException(503, str(exc))
         if not ids:
             raise HTTPException(400, "no rejected scenes to delete")
-        return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject"))
+        return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject",
+                                                            delete_file=body.delete_file))
 
     # --- browsing: facets, saved views, storage --------------------------------
 
@@ -1143,7 +1146,8 @@ def create_app(cfg=None):
         caps = service.capabilities()
         if not caps["ops"].get("scenesDestroy"):
             raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
-        return _library_job(lambda j: service.resolve_duplicate(j, body.keep, body.delete, confirm=True))
+        return _library_job(lambda j: service.resolve_duplicate(j, body.keep, body.delete, confirm=True,
+                                                                delete_file=body.delete_file))
 
     @app.post("/api/duplicates/ignore")
     def duplicates_ignore(body: DupeIgnoreIn):

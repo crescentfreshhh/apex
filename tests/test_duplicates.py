@@ -131,3 +131,10 @@ def test_keeper_prefers_more_pixels_8k_vr_over_4k(svc):
              "quality": quality_of({"width": 8192, "height": 4096, "bit_rate": 45e6})}]
     assert rows[1]["quality"]["res"] == "8K"
     assert svc.dupe_keeper(rows) == "b"
+
+
+def test_resolve_can_keep_the_other_files(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    j = _wait(client, client.post("/api/duplicates/resolve",
+                                  json={"keep": "5", "delete": ["4"], "confirm": True, "delete_file": False}).json())
+    assert ("destroy", ("4",), False, True) in stash.calls and j["result"]["freed_bytes"] == 0
