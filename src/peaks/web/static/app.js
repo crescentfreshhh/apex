@@ -1,6 +1,8 @@
 /* Peaks control panel + explorer. Vanilla JS, no build step. */
 
 const $ = (s) => document.querySelector(s);
+// writes that change what the library-management counts show
+const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train)|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
 const api = async (path, opts) => {
   const r = await fetch(path, opts);
   if (r.status === 401) { location.reload(); throw new Error("session expired"); }
@@ -9,6 +11,8 @@ const api = async (path, opts) => {
     try { msg = (await r.json()).detail || msg; } catch {}
     throw new Error(msg);
   }
+  const method = ((opts && opts.method) || "GET").toUpperCase();
+  if (method !== "GET" && LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar();
   return r.headers.get("content-type")?.includes("json") ? r.json() : r;
 };
 const toast = (msg, bad) => {
@@ -2302,10 +2306,8 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     setNavCounts(d);
     const nb = $("#btn-cat-new"), ing = d.ingest || {};
     if (nb) {
-      nb.hidden = !ing.new && !cat.isNew;
       nb.classList.toggle("on", cat.isNew);
-      nb.innerHTML = `✦ New <span class="n">${(ing.new || 0).toLocaleString()}</span>`;
-      nb.title = ing.finished ? `Scenes added by the last ingest (${ing.finished.replace("T", " ").slice(0, 16)})` : "Scenes added by the last ingest";
+      nb.title = ing.finished ? `Unreviewed scenes from the last ingest (${ing.finished.replace("T", " ").slice(0, 16)})` : "Unreviewed scenes from the last ingest";
     }
     cat.loaded = true;
     if (!append) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
@@ -2318,13 +2320,39 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     $("#cat-status").textContent = "";
   } finally { cat.busy = false; }
 }
-// sidebar counts: library size, the review queue, duplicate groups
-function setNavCounts(d) {
-  const all = Object.values(d.counts || {}).reduce((a, b) => a + b, 0);
-  const set = (id, v) => { const el = $(id); if (el) el.textContent = v ? (+v).toLocaleString() : ""; };
-  if (!cat.isNew && !cat.view) set("#nav-ct-cat", all);
-  set("#nav-ct-review", (d.counts || {}).unreviewed);
+// sidebar counts — library-wide, refreshed after every library change (grades,
+// undos, bulk, deletes, duplicates, tag syncs, restores, training, ingest), when a
+// background job finishes, and every 30 s (changes from another tab or device).
+// Grades made directly in Stash show after Catalogue → ⋯ → Re-read from Stash.
+const side = { views: null, model: null, timer: null, busy: false, again: false };
+function refreshSidebar(delay = 250) {
+  clearTimeout(side.timer);
+  side.timer = setTimeout(loadSidebar, delay);
 }
+async function loadSidebar() {
+  if (side.busy) { side.again = true; return; }
+  side.busy = true;
+  try {
+    const d = await api("/api/catalogue/summary");
+    side.views = d.views; side.model = d.model;
+    const set = (id, v) => { const el = $(id); if (el) el.textContent = v ? (+v).toLocaleString() : ""; };
+    set("#nav-ct-cat", d.total);
+    set("#nav-ct-review", d.counts.unreviewed);
+    if (d.dupes != null) setDupeCount(d.dupes);
+    const nb = $("#btn-cat-new");
+    if (nb) {
+      nb.hidden = !d.new && !cat.isNew;
+      nb.innerHTML = `✦ New <span class="n">${(d.new || 0).toLocaleString()}</span>`;
+    }
+    if (!cat.model) cat.model = d.model;
+    renderCatTriage();
+  } catch { /* Stash unreachable — keep the last numbers */ }
+  side.busy = false;
+  if (side.again) { side.again = false; refreshSidebar(); }
+}
+setInterval(() => { if (!document.hidden) refreshSidebar(0); }, 30000);
+// kept for existing callers: counts now come from the library-wide summary
+function setNavCounts() { refreshSidebar(); }
 function setDupeCount(n) {
   const el = $("#nav-ct-dupes"); if (!el) return;
   el.hidden = !n; el.textContent = n || "";
@@ -2349,11 +2377,12 @@ function renderCatChips() {
   }
 }
 function renderCatTriage() {
-  const m = cat.model || {}, rep = m.report;
+  const m = side.model || cat.model || {}, rep = m.report;
   const trained = !!m.trained;
+  const views = side.views || cat.views || {};
   $("#cat-views").innerHTML = CAT_VIEWS.map(([v, label, tip]) => {
     const needsModel = !MODEL_FREE_VIEWS.has(v) && !trained;
-    return `<button class="cat-chip cat-view ${cat.view === v ? "on" : ""}" data-v="${v}" title="${esc(tip)}${needsModel ? " (train the model first)" : ""}" ${needsModel ? "disabled" : ""}>${esc(label)} <span class="n">${(cat.views[v] || 0).toLocaleString()}</span></button>`;
+    return `<button class="cat-chip cat-view ${cat.view === v ? "on" : ""}" data-v="${v}" title="${esc(tip)}${needsModel ? " (train the model first)" : ""}" ${needsModel ? "disabled" : ""}>${esc(label)} <span class="n">${(views[v] || 0).toLocaleString()}</span></button>`;
   }).join("");
   const btn = $("#btn-cat-train");
   btn.textContent = m.training ? "Training…" : trained ? "Retrain" : "Train on my grades";
@@ -2985,6 +3014,10 @@ async function pollJobTray() {
   let jobs;
   try { jobs = await api("/api/jobs"); } catch { return; }
   const running = jobs.filter((j) => j.status === "running");
+  const kinds = new Set(running.map((j) => j.kind));
+  const LIB = ["library", "ingest", "dupes", "train", "embed", "fix", "sync"];
+  if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || kinds.has("ingest")) refreshSidebar();
+  pollJobTray.prev = [...kinds];
   const badge = $("#nav-ct-jobs");
   if (badge) { badge.hidden = !running.length; badge.textContent = running.length || ""; }
   tray.hidden = !running.length;
@@ -3396,6 +3429,7 @@ loadScanOptions();
 
 // (last, so every page's code is defined before the first route runs)
 // land on the page in the URL (#/catalogue …), else For You — the home page
+refreshSidebar(0);   // sidebar counts from the start, not only once the Catalogue opens
 go((location.hash.match(/^#\/(\w+)/) || [])[1] || "foryou");
 window.addEventListener("hashchange", () => {
   const v = (location.hash.match(/^#\/(\w+)/) || [])[1];

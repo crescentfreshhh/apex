@@ -1042,6 +1042,13 @@ def create_app(cfg=None):
 
     # --- browsing: facets, saved views, storage --------------------------------
 
+    @app.get("/api/catalogue/summary")
+    def catalogue_summary():
+        try:
+            return service.library_summary()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
     @app.get("/api/catalogue/facets")
     def catalogue_facets():
         try:

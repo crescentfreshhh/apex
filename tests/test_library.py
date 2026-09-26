@@ -231,3 +231,13 @@ def test_facets_storage_and_saved_views(browse, monkeypatch):
     client.post("/api/catalogue/saved-views", json={"name": "4K Vixen", "params": {"studio": "Tushy"}})
     assert client.get("/api/catalogue/saved-views").json()["items"][0]["params"] == {"studio": "Tushy"}
     assert client.delete("/api/catalogue/saved-views", params={"name": "4K Vixen"}).json()["items"] == []
+
+
+def test_library_summary_follows_every_grade(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    s = client.get("/api/catalogue/summary").json()
+    assert s["total"] == 4 and s["counts"]["unreviewed"] == 1 and s["counts"]["rejected"] == 1
+    assert set(s["views"]) >= {"likely", "quality", "anomaly", "conflict"}
+    client.post("/api/catalogue/grade", json={"scene_id": "1", "grade": "legendaire"})
+    s2 = client.get("/api/catalogue/summary").json()        # no refresh needed: updated in place
+    assert s2["counts"]["unreviewed"] == 0 and s2["counts"]["legendaire"] == 2

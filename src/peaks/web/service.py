@@ -3819,6 +3819,27 @@ class Service(LibraryMixin):
             "storage": self._storage(pool_all),
         }
 
+    def library_summary(self) -> dict:
+        """Library-wide counts for the sidebar — per tier, per smart view, the
+        last ingest's unreviewed new scenes, duplicate groups — without paging
+        or thumbnails, so the UI can refresh it after every change."""
+        from ..tier_model import quality_floor
+        from ..tiers import TIERS
+
+        rows = self._catalogue_all()
+        counts = {t: 0 for t in TIERS}
+        for r in rows:
+            counts[r["tier"]] += 1
+        preds = self._tier_predictions(rows)
+        floor = quality_floor(rows)
+        views = {v: len(self._triage(v, rows, preds, floor)) for v in self.TRIAGE_VIEWS}
+        fresh = set(self.last_ingest().get("new") or [])
+        new = sum(1 for r in rows if r["scene_id"] in fresh and r["tier"] == "unreviewed")
+        dupes = self.cached_duplicates()
+        return {"total": len(rows), "counts": counts, "views": views, "new": new,
+                "dupes": len(dupes["groups"]) if dupes else None,
+                "model": self.tier_model_status()}
+
     def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,
                              min_gap: float = 20.0) -> dict[str, list[dict]]:
         """Up to `n` well-spaced best moments per scene for the catalogue cards:
@@ -4096,8 +4117,12 @@ class Service(LibraryMixin):
     def _tier_predictions(self, rows: list[dict]) -> dict[str, dict]:
         """Model summary per embedded scene (cached per model + index build)."""
         st = self._tier_model_state()
-        if st["model"] is None or getattr(self, "_ingest_stash_busy", False):
-            return {}          # (no index reloads while Stash's ingest stages run)
+        if st["model"] is None:
+            return {}
+        if getattr(self, "_ingest_stash_busy", False):
+            # no index reloads while Stash's ingest stages run — last results stand
+            cached = getattr(self, "_tier_preds", None)
+            return cached[1] if cached else {}
         # valid for this model + this index build (new embeds → new index → re-score)
         key = (id(st["model"]), id(self.index(self._model_name())), len(rows))
         cached = getattr(self, "_tier_preds", None)
