@@ -1074,7 +1074,12 @@ def create_app(cfg=None):
     # --- ingest: scan → identify → auto tag (Stash) → embed → duplicates --------
 
     @app.post("/api/ingest")
-    def ingest():
+    def ingest(confirm: bool = False):
+        if jobs.running("embed") is not None and not confirm:
+            raise HTTPException(409, {"needs_confirm": True, "message": (
+                "An embed pass is running. The ingest's Stash scan will compete with it "
+                "for memory (the embed keeps its model and index loaded).\n\n"
+                "Start the ingest anyway?")})
         caps = service.capabilities()
         missing = [op for op in ("metadataScan", "findJob") if not caps["ops"].get(op)]
         if missing:

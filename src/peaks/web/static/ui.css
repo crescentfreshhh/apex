@@ -410,3 +410,14 @@ input[type=checkbox] { accent-color: var(--gold); }
   .fy-teach-frame .pic { width: 100%; flex: 1; min-height: 240px; aspect-ratio: auto; }
   #fy-teach .row .btn { height: 36px; padding: 0 16px; }
 }
+
+/* Review player: volume, and a tall seek band (the bar + everything below it) */
+.rv-vol { display: inline-flex; align-items: center; gap: 6px; }
+.rv-vol input { width: 96px; }
+.rv-scrub { left: 0; right: 0; bottom: 0; height: 64px; padding: 0 16px; cursor: pointer; touch-action: none;
+  background: linear-gradient(0deg, rgba(0,0,0,.45), transparent); opacity: .85; transition: opacity .15s; }
+.rv-scrub:hover, .rv-scrub.drag { opacity: 1; }
+.rv-scrub .rv-track { left: 16px; right: 16px; top: auto; bottom: 22px; transition: height .12s, bottom .12s; }
+.rv-scrub:hover .rv-track, .rv-scrub.drag .rv-track { height: 7px; bottom: 21px; }
+.rv-scrub .pk { top: auto; bottom: 14px; }
+.rv-nopeaks { bottom: 70px; }

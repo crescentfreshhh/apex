@@ -257,3 +257,67 @@ def test_a_failed_stage_still_leaves_a_finished_record(svc, stash):
         svc.run_ingest()
     rec = svc.last_ingest()
     assert rec["running"] is False and rec["new"] == ["10", "11"]
+
+
+# --- memory: Peaks steps aside while Stash scans ---------------------------------------
+
+def test_index_is_released_and_not_reloaded_during_stash_stages(svc, stash, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    calls = []
+    monkeypatch.setattr(svc_mod.Service, "shed_memory",
+                        lambda self, drop_indexes=True: calls.append(("shed", drop_indexes)) or {})
+    monkeypatch.setattr(svc_mod.Service, "invalidate_index",
+                        lambda self, model=None: calls.append(("invalidate", model)))
+    real_scan = stash.metadata_scan
+
+    def scan(inp):
+        calls.append(("scan",))
+        return real_scan(inp)
+    monkeypatch.setattr(stash, "metadata_scan", scan)
+
+    def no_index(self, model=None, rebuild=False):
+        raise AssertionError("the index must not load while Stash's stages run")
+    real_identify = stash.metadata_identify
+
+    def identify(inp):
+        real_index = svc_mod.Service.index
+        svc_mod.Service.index = no_index
+        try:
+            listing = svc.catalogue(new=True)          # the Review queue polling mid-ingest
+        finally:
+            svc_mod.Service.index = real_index
+        assert listing["items"] and all(i["moments"] == [] for i in listing["items"])
+        return real_identify(inp)
+    monkeypatch.setattr(stash, "metadata_identify", identify)
+    svc.run_ingest()
+    assert calls[:3] == [("invalidate", None), ("shed", True), ("scan",)]   # freed BEFORE the scan
+    assert svc._ingest_stash_busy is False
+
+
+def test_index_kept_when_an_embed_pass_is_using_it(svc, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    seen = []
+    monkeypatch.setattr(svc_mod.Service, "invalidate_index", lambda self, model=None: seen.append(model))
+    monkeypatch.setattr(svc_mod.Service, "shed_memory", lambda self, drop_indexes=True: {})
+    svc.run_ingest(embed_busy=lambda: True)
+    assert seen == []
+
+
+def test_ingest_asks_first_while_an_embed_runs(svc, monkeypatch):
+    import threading
+
+    client = _api(svc, monkeypatch)
+    gate = threading.Event()
+    jm = client.app.state.jobs
+    jm.start("embed", lambda j: gate.wait(5))
+    try:
+        r = client.post("/api/ingest")
+        assert r.status_code == 409 and r.json()["detail"]["needs_confirm"]
+        assert "compete" in r.json()["detail"]["message"]
+        j = client.post("/api/ingest", params={"confirm": True})
+        assert j.status_code == 200
+        _wait(client, j.json())
+    finally:
+        gate.set()

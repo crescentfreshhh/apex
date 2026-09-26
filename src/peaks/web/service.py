@@ -3823,6 +3823,8 @@ class Service(LibraryMixin):
                              min_gap: float = 20.0) -> dict[str, list[dict]]:
         """Up to `n` well-spaced best moments per scene for the catalogue cards:
         top taste frames when a taste model exists, otherwise evenly spread."""
+        if getattr(self, "_ingest_stash_busy", False):
+            return {}          # Stash is scanning: don't pull the index back into memory
         try:
             model = self._model_name()
             idx = self.index(model)
@@ -4094,8 +4096,8 @@ class Service(LibraryMixin):
     def _tier_predictions(self, rows: list[dict]) -> dict[str, dict]:
         """Model summary per embedded scene (cached per model + index build)."""
         st = self._tier_model_state()
-        if st["model"] is None:
-            return {}
+        if st["model"] is None or getattr(self, "_ingest_stash_busy", False):
+            return {}          # (no index reloads while Stash's ingest stages run)
         # valid for this model + this index build (new embeds → new index → re-score)
         key = (id(st["model"]), id(self.index(self._model_name())), len(rows))
         cached = getattr(self, "_tier_preds", None)

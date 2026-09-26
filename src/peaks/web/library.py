@@ -657,6 +657,22 @@ class LibraryMixin:
             log(f"re-applied the tier tag on {fixed} scene(s) graded during the ingest")
         return fixed
 
+    def _release_for_stash(self, embed_busy, log) -> None:
+        """Free Peaks' big memory (caches, and the search index unless an embed
+        pass is using it) before Stash starts decoding files."""
+        from . import memwatch
+
+        try:
+            before = memwatch.rss_bytes()
+            if not (embed_busy and embed_busy()):
+                self.invalidate_index()
+            self.shed_memory(drop_indexes=True)
+            freed = max(0, before - memwatch.rss_bytes())
+            if freed >= 64 * 1048576:
+                log(f"released {freed / 1073741824:.1f} GB of Peaks memory for Stash's scan")
+        except Exception:  # noqa: BLE001 — never block an ingest on housekeeping
+            pass
+
     def run_ingest(self, job=None, embed_busy=None) -> dict:
         log = job.log if job is not None else print
         for op in ("metadataScan", "findJob"):
@@ -680,6 +696,11 @@ class LibraryMixin:
             record["stage"] = name
             self._write_ingest(record)
 
+        # Stash's scan/identify/auto tag are the memory-heavy part (an ffmpeg per
+        # file). Give back what Peaks holds and don't reload the index until our
+        # own embed stage needs it.
+        self._ingest_stash_busy = True
+        self._release_for_stash(embed_busy, log)
         try:
             # 1. scan — Peaks' own scan options (Settings → Ingest), video phashes
             # always on; only fields this Stash version's scan input actually has
@@ -733,6 +754,7 @@ class LibraryMixin:
 
                 # 4. Peaks embed — only the new scenes, in id order (the order the
                 # Review queue shows them), never the whole backlog
+                self._ingest_stash_busy = False
                 stage("embed")
                 if job is not None:
                     job.progress = {"stage": "embed"}
@@ -760,6 +782,7 @@ class LibraryMixin:
                 for k in ("identify", "auto tag", "embed", "duplicates"):
                     stages[k] = "nothing new"
         finally:
+            self._ingest_stash_busy = False
             # always leave a finished record, even when a stage failed
             record.update(running=False, stage="done", finished=time.strftime("%Y-%m-%dT%H:%M:%S"),
                           dupe_ids=sorted({r["scene_id"] for g in (dupes or {}).get("groups", [])

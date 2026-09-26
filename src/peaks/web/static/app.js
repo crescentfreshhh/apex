@@ -95,8 +95,8 @@ $("#set-nav")?.addEventListener("click", (e) => {
 // --- dashboard --------------------------------------------------------------
 async function refreshDashboard() {
   try {
-    const [stats, caps] = await Promise.all([
-      api("/api/stats"), api("/api/capabilities"),
+    const [stats, caps, mem] = await Promise.all([
+      api("/api/stats"), api("/api/capabilities"), api("/api/memory").catch(() => null),
     ]);
     $("#conn").textContent = "Stash connected"; $("#conn-dot")?.classList.remove("off");
     const dino = (stats.dino_model || "").replace("dinov2_", "") || stats.model;
@@ -108,6 +108,7 @@ async function refreshDashboard() {
       ["Text-search model", clip],
       ["Device", stats.device],
       ["Failed scenes", stats.failures || 0],
+      ...(mem && mem.rss_mb ? [["Peaks memory", `${(mem.rss_mb / 1024).toFixed(1)}${mem.limit_mb ? " / " + (mem.limit_mb / 1024).toFixed(1) : ""} GB`]] : []),
       ["Library", stats.library_path],
     ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
     // surface the failures panel only when there are casualties to retry
@@ -2807,9 +2808,28 @@ $("#btn-cat-new")?.addEventListener("click", () => {
   if (cat.isNew) { cat.tier = ""; cat.view = ""; }
   openCatalogue();
 });
+// POST that may come back 409 needs_confirm: ask, then retry with confirm=true
+async function postConfirmed(url) {
+  const r = await fetch(url, { method: "POST" });
+  if (r.status === 409) {
+    let d = null;
+    try { d = (await r.clone().json()).detail; } catch { /* not json */ }
+    if (d && d.needs_confirm) {
+      if (!confirm(d.message)) throw new Error("Cancelled");
+      return api(url + (url.includes("?") ? "&" : "?") + "confirm=true", { method: "POST" });
+    }
+  }
+  if (r.status === 401) { location.reload(); throw new Error("session expired"); }
+  if (!r.ok) {
+    let msg = r.status;
+    try { msg = (await r.json()).detail || msg; } catch {}
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return r.json();
+}
 async function startIngest() {
   try {
-    const job = await api("/api/ingest", { method: "POST" });
+    const job = await postConfirmed("/api/ingest");
     tracked.add(job.id);
     const btn = $("#btn-ingest"), statusEl = $("#ingest-status"), logEl = $("#ingest-log"), stop = $("#btn-ingest-stop");
     if (btn) { btn.disabled = true; logEl.hidden = false; wireStop(stop, statusEl, job.id); }
@@ -3154,7 +3174,7 @@ function renderReview() {
   const dur = r.duration || 1;
   $("#rv-nopeaks").hidden = rv.peaks.length > 0;
   $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
-    rv.peaks.map((t) => `<span class="pk" style="left:${(100 * t / dur).toFixed(2)}%" data-t="${t}" title="${fmt(t)}"></span>`).join("");
+    rv.peaks.map((t) => `<span class="pk" style="left:calc(16px + (100% - 32px) * ${(t / dur).toFixed(4)})" data-t="${t}" title="${fmt(t)}"></span>`).join("");
   // grades: current one outlined, the model's pick highlighted
   const cur = r.tier === "rejected" ? "reject" : r.tier;
   const probs = (r.pred || {}).probs || {};
@@ -3207,17 +3227,53 @@ function rvJump(dir) {
 }
 $("#rv-grades")?.addEventListener("click", (e) => { const b = e.target.closest("[data-g]"); if (b) rvGrade(b.dataset.g); });
 $("#rv-queue")?.addEventListener("click", (e) => { const q = e.target.closest("[data-j]"); if (q) { rv.i = +q.dataset.j; renderReview(); } });
-$("#rv-scrub")?.addEventListener("click", (e) => {
+// the whole bottom band of the player — the bar and everything below it — seeks
+// (click or drag); only clicks above it play/pause
+function rvSeekTo(e) {
   const v = $("#rv-v"), r = rv.items[rv.i]; if (!r) return;
-  const pk = e.target.closest(".pk");
-  const box = $("#rv-scrub").getBoundingClientRect();
-  v.currentTime = pk ? +pk.dataset.t : Math.max(0, (e.clientX - box.left) / box.width) * (v.duration || r.duration || 0);
+  const pk = e.type === "pointerdown" ? e.target.closest(".pk") : null;
+  const box = $("#rv-scrub .rv-track").getBoundingClientRect();   // the bar itself, not the band's padding
+  const frac = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
+  v.currentTime = pk ? +pk.dataset.t : frac * (v.duration || r.duration || 0);
+  const bar = $("#rv-prog"); if (bar) bar.style.width = (100 * frac).toFixed(2) + "%";
+}
+$("#rv-scrub")?.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  const el = $("#rv-scrub");
+  el.setPointerCapture(e.pointerId); el.classList.add("drag");
+  rvSeekTo(e);
+  const move = (ev) => rvSeekTo(ev);
+  const up = () => { el.classList.remove("drag"); el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+  el.addEventListener("pointermove", move); el.addEventListener("pointerup", up);
 });
+$("#rv-scrub")?.addEventListener("click", (e) => e.stopPropagation());
 $("#rv-v")?.addEventListener("timeupdate", () => {
   const v = $("#rv-v"), bar = $("#rv-prog");
   if (bar && v.duration) bar.style.width = (100 * v.currentTime / v.duration).toFixed(2) + "%";
 });
 $("#rv-v")?.addEventListener("click", () => { const v = $("#rv-v"); v.paused ? v.play() : v.pause(); });
+// volume: a mute button + slider, remembered per browser (starts muted so the
+// first scene can autoplay; any change here is a user gesture that unlocks sound)
+const rvAudio = (() => {
+  try { return JSON.parse(localStorage.getItem("peaks_rv_audio")) || { vol: 0.8, muted: true }; }
+  catch { return { vol: 0.8, muted: true }; }
+})();
+function rvApplyAudio(save = true) {
+  const v = $("#rv-v"); if (!v) return;
+  v.volume = rvAudio.vol; v.muted = rvAudio.muted || rvAudio.vol === 0;
+  const b = $("#rv-mute"); if (b) b.textContent = v.muted ? "🔇" : rvAudio.vol < 0.5 ? "🔉" : "🔊";
+  const r = $("#rv-volume"); if (r) r.value = v.muted ? 0 : rvAudio.vol;
+  if (save) { try { localStorage.setItem("peaks_rv_audio", JSON.stringify(rvAudio)); } catch { /* ignore */ } }
+}
+function rvToggleMute() {
+  if (rvAudio.muted && rvAudio.vol === 0) rvAudio.vol = 0.8;
+  rvAudio.muted = !rvAudio.muted; rvApplyAudio();
+}
+$("#rv-mute")?.addEventListener("click", rvToggleMute);
+$("#rv-volume")?.addEventListener("input", (e) => {
+  rvAudio.vol = +e.target.value; rvAudio.muted = rvAudio.vol === 0; rvApplyAudio();
+});
+rvApplyAudio(false);
 $("#rv-exit")?.addEventListener("click", () => { $("#rv-v").pause(); go("catalogue"); });
 // theater mode: the biggest 16:9 player that fits the window (default on — big screens)
 function setTheater(on) {
@@ -3244,7 +3300,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "arrowright") { e.preventDefault(); rvJump(1); }
   else if (k === "arrowleft") { e.preventDefault(); rvJump(-1); }
   else if (k === " ") { e.preventDefault(); v.paused ? v.play() : v.pause(); }
-  else if (k === "m") { e.preventDefault(); v.muted = !v.muted; toast(v.muted ? "🔇 muted" : "🔊 sound on"); }
+  else if (k === "m") { e.preventDefault(); rvToggleMute(); toast(v.muted ? "🔇 muted" : "🔊 sound on"); }
   else if (k === "z") {
     e.preventDefault();
     const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
