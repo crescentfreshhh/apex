@@ -2556,17 +2556,15 @@ async function undoCatGrade() {
   cat.items[i] = { ...cat.items[i], ...fresh, _graded: false };
   renderCatCard(i); focusCat(i);
 }
+// watching a Catalogue scene opens the Review player on this same list (Likely
+// keepers, Quality check, a tier…), at that scene — or at the moment clicked
 function watchCat(i, j = null) {
   const r = cat.items[i]; if (!r) return;
-  const hits = cat.items.map((x) => {
-    const m = (x.moments || [])[0];
-    return m ? { scene_id: x.scene_id, key: m.key, time: m.t, stream: m.stream }
-             : { scene_id: x.scene_id, key: "", time: 0, stream: x.stream };
-  });
   const m = j != null ? (r.moments || [])[j] : null;
-  if (m) hits[i] = { scene_id: r.scene_id, key: m.key, time: m.t, stream: m.stream };
-  lastHits = hits;          // viewer ← / → walk the catalogue page
-  openViewerAt(i);
+  rv.startAt = m ? { sid: r.scene_id, t: m.t } : null;
+  cat.focus = i;
+  rv.fromCatalogue = true;
+  go("review");
 }
 $("#cat-chips")?.addEventListener("click", (e) => {
   const b = e.target.closest(".cat-chip"); if (!b) return;
@@ -3162,10 +3160,15 @@ function renderReview() {
   }
   $("#rv-title").textContent = r.title;
   $("#rv-sub").textContent = [r.performers.slice(0, 3).join(", "), r.studio, r.date].filter(Boolean).join(" · ");
-  $("#rv-pos").textContent = `${rv.label} · ${rv.i + 1} of ${rv.items.length}`;
+  const total = rv.source === "catalogue" ? Math.max(cat.total || 0, rv.items.length) : rv.items.length;
+  $("#rv-pos").textContent = `${rv.label} · ${rv.i + 1} of ${total.toLocaleString()}`;
   // player: start at the best moment, peaks marked on the timeline
   rv.peaks = (r.moments || []).map((m) => m.t).sort((a, b) => a - b);
-  const start = (r.moments && r.moments.length) ? r.moments.reduce((a, b) => ((b.score || 0) > (a.score || 0) ? b : a)).t : 0;
+  let start = (r.moments && r.moments.length) ? r.moments.reduce((a, b) => ((b.score || 0) > (a.score || 0) ? b : a)).t : 0;
+  if (rv.startAt && rv.startAt.sid === r.scene_id) {
+    start = rv.startAt.t; rv.startAt = null;
+    if (v.dataset.sid === r.scene_id) { v.currentTime = start; v.play().catch(() => {}); }
+  }
   if (v.dataset.sid !== r.scene_id) {
     v.dataset.sid = r.scene_id;
     v.src = r.stream;
@@ -3209,7 +3212,11 @@ async function rvGrade(grade) {
     const fresh = await applyGrade(r.scene_id, grade);
     rv.graded.add(r.scene_id);
     rv.items[rv.i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred };
-    cat.loaded = false;                 // the Catalogue re-reads when you go back
+    const ci = rv.source === "catalogue" ? cat.items.findIndex((x) => x.scene_id === r.scene_id) : -1;
+    if (ci >= 0) {                      // same list: mark it graded there, keep your place
+      catBumpCounts(cat.items[ci].tier, fresh.tier);
+      cat.items[ci] = { ...cat.items[ci], ...fresh, _graded: true };
+    } else cat.loaded = false;          // the Catalogue re-reads when you go back
     rvMove(1);
   } catch (e) { toast(e.message, true); }
 }
@@ -3218,6 +3225,28 @@ function rvMove(d) {
   if (n < 0) return;
   rv.i = Math.min(n, rv.items.length);
   renderReview();
+  if (rv.source === "catalogue" && rv.i >= rv.items.length - 3 && cat.items.length < cat.total) rvMoreFromCatalogue();
+}
+async function rvMoreFromCatalogue() {
+  if (rv.loadingMore) return;
+  rv.loadingMore = true;
+  try {
+    await openCatalogue({ append: true });
+    const have = new Set(rv.items.map((x) => x.scene_id));
+    cat.items.forEach((x) => { if (!have.has(x.scene_id)) rv.items.push(x); });
+    if (rv.i >= rv.items.length - 1 || !$("#rv").hidden) renderReview();
+  } finally { rv.loadingMore = false; }
+}
+// leave Review: back to the list you came from, on the scene you were at
+function rvExit() {
+  $("#rv-v").pause();
+  if (rv.source === "catalogue" && cat.loaded) {
+    const cur = rv.items[Math.min(rv.i, rv.items.length - 1)];
+    const ci = cur ? cat.items.findIndex((x) => x.scene_id === cur.scene_id) : -1;
+    showView("catalogue");
+    renderCatChips(); renderCatList();
+    if (ci >= 0) focusCat(ci);
+  } else go("catalogue");
 }
 function rvJump(dir) {
   const v = $("#rv-v"), t = v.currentTime;
@@ -3274,7 +3303,7 @@ $("#rv-volume")?.addEventListener("input", (e) => {
   rvAudio.vol = +e.target.value; rvAudio.muted = rvAudio.vol === 0; rvApplyAudio();
 });
 rvApplyAudio(false);
-$("#rv-exit")?.addEventListener("click", () => { $("#rv-v").pause(); go("catalogue"); });
+$("#rv-exit")?.addEventListener("click", rvExit);
 // theater mode: the biggest 16:9 player that fits the window (default on — big screens)
 function setTheater(on) {
   $("#rv")?.classList.toggle("theater", on);
@@ -3314,7 +3343,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "escape") {
     e.preventDefault();
     if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
-    v.pause(); go("catalogue");
+    rvExit();
   }
 });
 
