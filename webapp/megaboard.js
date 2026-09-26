@@ -29,6 +29,11 @@ const State = {
   muted: false, // master mute; when off, hover-to-hear plays the tile under the cursor
   volume: 1, // volume for whichever single tile is audible
   profile: "", // active taste profile (from ?profile=…) — scopes the For You board + saves
+  base: [], // the channel's full moment list; the taste floor filters it into `apexes`
+  floorNote: "", // "212 of 540 moments" — what the floor kept on a filtered channel
+  history: [], // boards you pivoted away from (← Back steps through them)
+  tierOf: {}, // scene_id -> tier key, for tile badges and the grade chips
+  lastGrade: null, // {sid, previous, grade} — U undoes it
 };
 try { State.profile = new URLSearchParams(location.search).get("profile") || ""; } catch { /* ignore */ }
 // query fragment for the active profile (empty = server default)
@@ -118,7 +123,9 @@ function loadApex(tile) {
   tile.el.classList.remove("extended");
   tile.apex = apex;
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
-  tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`;
+  tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`
+    + (apex.taste != null ? ` · ${Math.round(apex.taste * 100)}%` : "");
+  paintBadge(tile); wantTier(apex.scene_id);
   v.loop = false;
   v.src = apex.url;
   v.muted = true;
@@ -170,9 +177,11 @@ function makeTile(index) {
 
   const label = document.createElement("span");
   label.className = "label";
+  const badge = document.createElement("span");
+  badge.className = "tile-tier";
 
-  el.append(video, label);
-  const tile = { el, video, label, index, apex: null, mode: "offset", lastAdvance: 0, extended: false };
+  el.append(video, label, badge);
+  const tile = { el, video, label, badge, index, apex: null, mode: "offset", lastAdvance: 0, extended: false };
 
   video.addEventListener("loadedmetadata", () => {
     if (!tile.apex || State.big === tile) return; // big mode drives seeking itself
@@ -252,6 +261,7 @@ function sceneStreamUrl(apexUrl) {
 
 function expand(tile) {
   State.big = tile;
+  document.body.classList.add("has-big");
   tile.el.classList.add("big");
   layoutBig(tile, true);
   applyGridAudio();   // enlarged tile owns audio now — silence the rest of the grid
@@ -283,6 +293,7 @@ function collapse(tile) {
   layoutBig(tile, false);
   teardownBigUI(tile);
   State.big = null;
+  document.body.classList.remove("has-big");
   tile.video.muted = true;
   loadApex(tile); // resume cycling with a fresh apex
   applyGridAudio(); // hover-to-hear resumes on the grid
@@ -370,15 +381,7 @@ function setupScrubber(tile) {
   fmtTime();
 }
 
-// --- editable Stash stats (rating / O-count / organized) -------------------
-
-function starsHTML(r) {
-  const filled = Math.round((r || 0) / 20);
-  let s = "";
-  for (let i = 1; i <= 5; i++)
-    s += `<span class="mb-star ${i <= filled ? "on" : ""}" data-r="${i * 20}">★</span>`;
-  return s;
-}
+// --- the enlarged tile's stats: grade chips + organized ------------------------
 
 async function loadMeta(tile) {
   const sid = tile.apex.scene_id;
@@ -398,10 +401,10 @@ async function loadMeta(tile) {
   meta.querySelector(".mb-sub").textContent =
     [sub, m.date, (m.tags || []).slice(0, 4).join(", ")].filter(Boolean).join("  ·  ");
   const edit = meta.querySelector(".mb-edit");
-  edit.innerHTML = `
-    <span class="mb-rating">${starsHTML(m.rating100)}</span>
-    ${mbTierBadge(m.rating100, m.o_counter)}
+  State.tierOf[String(sid)] = tierKey(m.rating100, m.o_counter);
+  edit.innerHTML = `<div class="mb-grades"></div>
     <button class="mb-org ${m.organized ? "on" : ""}" title="organized">✓ organized</button>`;
+  renderGradeChips(tile);
   wireStatEdits(tile, edit);
 }
 
@@ -413,18 +416,9 @@ async function patchScene(sid, body) {
   });
 }
 
+// grades go through the grade chips (your tier scheme); organized stays a toggle
 function wireStatEdits(tile, edit) {
   const sid = tile.apex.scene_id;
-  edit.querySelectorAll(".mb-star").forEach((s) =>
-    s.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      try {
-        const m = await patchScene(sid, { rating100: +s.dataset.r });
-        edit.querySelector(".mb-rating").innerHTML = starsHTML(m.rating100);
-        wireStatEdits(tile, edit);
-      } catch {}
-    })
-  );
   const org = edit.querySelector(".mb-org");
   org.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -477,33 +471,30 @@ function reshuffle() {
   State.tiles.forEach((t, i) => setTimeout(() => loadApex(t), i * STAGGER_MS));
 }
 
-const STEER = "right-click, or hover + ↑/↓ to rate · S save · Space/M/R";
+const STEER = "right-click, or hover + 1–5 grade · ↑/↓ taste · S save · ⌫ back · U undo";
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
   if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
     // the label already carries any ≥NN% floor; only add the "widens/tightens" hint
     // where the floor actually applies (moment pivot or a floor-aware pivot).
     const hint = (State.pivotSeed || State.pivotApplyFloor) ? " · floor widens/tightens" : "";
-    document.getElementById("status").textContent =
-      `${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles${hint} · ${STEER}`;
+    setStatus(`${pivot}${State.apexes.length} moments · ${State.tiles.length} tiles${hint} · ${STEER}`);
     return;
   }
-  if (State.source === "foryou" && fyTotals) {
+  if ((State.source === "foryou" || (State.source === "shuffle" && fyMinScore > 0)) && fyTotals) {
     // separate "matches your taste" (the whole board) from "loaded so far".
     const by = fyTotals.scored_by === "classifier" ? "your trained model"
       : fyTotals.scored_by === "modes" ? "your taste modes (nearest of your interests)"
       : fyTotals.scored_by === "centroid" ? "taste centroid (no trained model yet)" : "your taste";
     const floor = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
-    document.getElementById("status").textContent =
-      `${pivot}Scored by ${by}${floor} · ≈${fmtN(fyTotals.scenes)} scenes / ${fmtN(fyTotals.moments)} moments match`
-      + ` · ${State.apexes.length} loaded · ${State.tiles.length} tiles · ${STEER}`;
+    setStatus(`${pivot}Scored by ${by}${floor} · ≈${fmtN(fyTotals.scenes)} scenes / ${fmtN(fyTotals.moments)} moments match`
+      + ` · ${State.apexes.length} loaded · ${State.tiles.length} tiles · ${STEER}`);
     return;
   }
   const label = State.shuffle
     ? `shuffle · ${(State.pool || []).length} scenes`
     : `${State.apexes.length} ${State.searchMode ? "moments" : "saved moments"}`;
-  document.getElementById("status").textContent =
-    `${pivot}${label} · ${State.tiles.length} tiles · ${STEER}`;
+  setStatus(`${pivot}${label} · ${State.tiles.length} tiles · ${STEER}`);
 }
 function fmtN(n) { return (n ?? 0).toLocaleString(); }
 
@@ -532,15 +523,11 @@ function wireControls() {
       applyFloor();
     });
   }
-  document.getElementById("refresh-lib").addEventListener("click", () => {
-    const src = State.source || document.getElementById("source").value;
-    // From a pivot, Refresh returns to the board you entered with — restore the
-    // entry-time floor too, then rebuild that source (also picks up new scenes).
-    if ((State.pivot || State.pivotSeed) && State.entryFloor != null && State.entryFloor !== fyMinScore) {
-      fyMinScore = State.entryFloor;
-      syncFloorUI(); persistFloor(fyMinScore);
-    }
-    loadSource(src, { refresh: true });   // exits any pivot → rebuild the entering source
+  document.getElementById("refresh-lib").addEventListener("click", refreshChannel);
+  document.getElementById("back")?.addEventListener("click", goBack);
+  document.getElementById("crumbs")?.addEventListener("click", (e) => {
+    const c = e.target.closest("[data-crumb]");
+    if (c) jumpBack(+c.dataset.crumb);
   });
   document.getElementById("save-board")?.addEventListener("click", saveCurrentBoard);
   document.getElementById("mute").addEventListener("click", toggleMute);
@@ -585,6 +572,10 @@ function onKey(e) {
     case "ArrowDown": if (ft) { e.preventDefault(); rateMoment(ft.apex.scene_id, tileTime(ft), 0); } break;
     case "[": nudgeFloor(-0.05); break;
     case "]": nudgeFloor(0.05); break;
+    case "Backspace": case "b": e.preventDefault(); goBack(); break;
+    case "u": undoGrade(); break;
+    case "1": case "2": case "3": case "4": case "5":
+      if (ft) gradeScene(ft.apex.scene_id, MB_GRADES[+e.key - 1]); break;
     default: break;
   }
 }
@@ -601,11 +592,85 @@ let MB_TIER_NAMES = { rejected: "Rejected", anomaly: "Anomaly", upscale: "Upscal
   merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire" };
 fetch("/api/catalogue/names").then((r) => (r.ok ? r.json() : null))
   .then((n) => { if (n) MB_TIER_NAMES = { ...MB_TIER_NAMES, ...n }; }).catch(() => {});
-function mbTierBadge(rating100, o) {
+// a scene's tier from its Stash rating (0–100) + O-count — mirrors peaks/tiers.py
+function tierKey(rating100, o) {
   const r = +rating100 || 0;
-  const t = r <= 0 || (r > 20 && r < 100) ? null : r <= 20 ? "rejected"
-    : ({ 0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
-  return t ? `<span class="mb-tier tier-${t}">${esc(MB_TIER_NAMES[t] || t)}</span>` : "";
+  if (r <= 0 || (r > 20 && r < 100)) return "unreviewed";
+  if (r <= 20) return "rejected";
+  return ({ 0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+}
+function tierBadge(t) {
+  return t && t !== "unreviewed" ? `<span class="mb-tier tier-${t}">${esc(MB_TIER_NAMES[t] || t)}</span>` : "";
+}
+
+// --- grade from the board: your tiers, same keys as the Review queue ------------
+const MB_GRADES = ["reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–5
+function gradeLabel(g) { return g === "reject" ? "Reject" : (MB_TIER_NAMES[g] || g); }
+async function gradeScene(sid, grade) {
+  sid = String(sid);
+  try {
+    const r = await api("/api/catalogue/grade", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scene_id: sid, grade }),
+    });
+    State.lastGrade = { sid, previous: r.previous || {}, grade };
+    setTier(sid, (r.scene && r.scene.tier) || (grade === "reject" ? "rejected" : grade));
+    flashStatus(`Graded ${gradeLabel(grade)} · #${sid} · U to undo`);
+  } catch (e) { flashStatus("grade failed — " + e.message); }
+}
+async function undoGrade() {
+  const g = State.lastGrade;
+  if (!g) return flashStatus("nothing to undo");
+  const p = g.previous;
+  try {
+    const r = await api("/api/catalogue/restore", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scene_id: g.sid, rating100: p.rating100 ?? null, o_counter: p.o_counter || 0,
+        tag_ids: p.tag_ids ?? null, organized: p.organized ?? null }),
+    });
+    setTier(g.sid, (r.scene && r.scene.tier) || tierKey(p.rating100, p.o_counter));
+    State.lastGrade = null;
+    flashStatus(`Undid the ${gradeLabel(g.grade)} grade on #${g.sid}`);
+  } catch (e) { flashStatus("undo failed — " + e.message); }
+}
+// remember a scene's tier and repaint its tile badges + the enlarged panel
+function setTier(sid, tier) {
+  State.tierOf[String(sid)] = tier;
+  for (const t of State.tiles) if (t.apex && String(t.apex.scene_id) === String(sid)) paintBadge(t);
+  if (State.big && String(State.big.apex?.scene_id) === String(sid)) renderGradeChips(State.big);
+}
+function renderGradeChips(tile) {
+  const box = tile.ui?.meta.querySelector(".mb-grades");
+  if (!box) return;
+  const tier = State.tierOf[String(tile.apex.scene_id)];
+  const cur = tier === "rejected" ? "reject" : tier;
+  box.innerHTML = MB_GRADES.map((g, i) =>
+    `<button class="mb-g g-${g} ${g === cur ? "cur" : ""}" data-g="${g}" title="Grade ${esc(gradeLabel(g))} (${i + 1})"><span class="k">${i + 1}</span>${esc(gradeLabel(g))}</button>`).join("");
+  box.querySelectorAll("[data-g]").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation(); gradeScene(tile.apex.scene_id, b.dataset.g);
+  }));
+}
+// tile badges: tiers for the scenes on screen, fetched in small batches
+const tierQueue = new Set();
+let tierTimer = null;
+function paintBadge(tile) {
+  const el = tile.badge;
+  if (!el || !tile.apex) return;
+  el.innerHTML = tierBadge(State.tierOf[String(tile.apex.scene_id)]);
+}
+function wantTier(sid) {
+  sid = String(sid);
+  if (sid in State.tierOf) return;
+  tierQueue.add(sid);
+  clearTimeout(tierTimer);
+  tierTimer = setTimeout(async () => {
+    const ids = [...tierQueue]; tierQueue.clear();
+    try {
+      const d = await api("/api/board/tiers?ids=" + encodeURIComponent(ids.join(",")));
+      for (const id of ids) State.tierOf[id] = (d.tiers || {})[id] || "unreviewed";
+      for (const t of State.tiles) paintBadge(t);
+    } catch { /* badges are a nicety */ }
+  }, 250);
 }
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -673,11 +738,58 @@ function persistFloor(v) { try { localStorage.setItem(FLOOR_KEY, String(v)); } c
 function readPersistedFloor() {
   try { const v = parseFloat(localStorage.getItem(FLOOR_KEY)); return isFinite(v) ? v : null; } catch { return null; }
 }
-// re-apply the current floor to whatever is driving the board: a moment pivot
-// re-filters that moment; For You rebuilds its pool; static sources ignore it.
+// --- the taste floor, on every channel -------------------------------------------
+// "server": the channel's own API filters by taste (For You, Performer, the moment
+// and actress pivots). "shuffle": the whole-library shuffle — with a floor it becomes
+// a uniform random draw above it. "filter": every other channel keeps its full list
+// (State.base) and plays only the moments whose taste score clears the floor —
+// scores fetched once, on the same scale For You uses.
+function floorMode() {
+  if (State.pivot) return (State.pivotSeed || State.pivotApplyFloor) ? "server" : "filter";
+  if (State.source === "foryou" || State.source === "performer") return "server";
+  if (State.source === "shuffle") return "shuffle";
+  return "filter";
+}
+async function ensureScores(list) {
+  const need = list.filter((a) => a.taste === undefined);
+  for (let i = 0; i < need.length; i += 5000) {
+    const part = need.slice(i, i + 5000);
+    let d = null;
+    try {
+      d = await api("/api/taste/scores", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ items: part.map((a) => [String(a.scene_id), +a.start || 0]) }),
+      });
+    } catch { d = null; }
+    part.forEach((a, k) => { a.taste = d && d.scores ? d.scores[k] : null; });
+  }
+}
+async function filterToFloor() {
+  const base = State.base || [];
+  if (fyMinScore > 0 && base.length) {
+    await ensureScores(base);
+    const kept = base.filter((a) => a.taste != null && a.taste >= fyMinScore);
+    if (kept.length) {
+      State.apexes = kept;
+      State.floorNote = `${kept.length.toLocaleString()} of ${base.length.toLocaleString()} moments`;
+    } else {   // nothing clears it: say so, keep playing the channel
+      State.apexes = base.slice();
+      State.floorNote = `none ≥ ${Math.round(fyMinScore * 100)}% here — playing all`;
+    }
+  } else {
+    State.apexes = base.slice();
+    State.floorNote = "";
+  }
+  pickApex = makeQueuePicker(State.apexes);
+  syncFloorVisibility();
+}
+// re-apply the current floor to whatever is driving the board
 function applyFloor() {
-  // a seeded moment pivot re-filters THAT moment
-  if (State.pivotSeed) { moreLikeThis(State.pivotSeed.scene_id, State.pivotSeed.t); return; }
+  const mode = floorMode();
+  if (mode === "filter") { filterToFloor().then(() => { reshuffle(); updateStatus(); }); return; }
+  if (mode === "shuffle") { loadSource("shuffle"); return; }
+  // a seeded moment pivot re-filters THAT moment (in place — not a new pivot)
+  if (State.pivotSeed) { moreLikeThis(State.pivotSeed.scene_id, State.pivotSeed.t, true); return; }
   // any other pivot re-runs only how it registered — NEVER fall through to a source
   // rebuild, which would swap the board out from under the pivot (the taste-floor bug).
   if (State.pivot) { if (State.pivotApplyFloor) State.pivotApplyFloor(); return; }
@@ -685,9 +797,7 @@ function applyFloor() {
   if (State.source === "foryou") {
     fyReset();
     fyRefetch(true).then(() => { updateStatus(); reshuffle(); });
-    return;
   }
-  // static sources (shuffle / collection / search / tag:apex): floor is a no-op (and hidden)
 }
 
 function fyHitToApex(h) {
@@ -813,12 +923,24 @@ function openTileMenu(tile, x, y) {
     ["💾 Save this board as a playlist", () => saveCurrentBoard()],
   );
   if (State.sourceSpec) items.push(["🔴 Save as LIVE playlist (re-derives each open)", () => saveLivePlaylist()]);
-  if (State.pivot) items.push(["← Back to my taste", () => backToTaste()]);
-  // always last: flag the whole scene for later cleanup by 1-starring it in Stash
-  items.push(["🗑 Mark for deletion (1★ in Stash)", () => markForDeletion(apex.scene_id)]);
+  if (State.history.length) items.push(["← Back (previous board)", () => goBack()]);
+  if (State.pivot) items.push([`↩ Back to ${channelName()}`, () => refreshChannel()]);
 
   const menu = document.createElement("div");
   menu.className = "mb-menu";
+  // grade the scene with your tiers — same keys as the Review queue (1 Reject … 5 Légendaire)
+  const grades = document.createElement("div");
+  grades.className = "mb-menu-grades";
+  const curTier = State.tierOf[String(apex.scene_id)];
+  MB_GRADES.forEach((g, i) => {
+    const b = document.createElement("button");
+    b.className = `g-${g}` + ((curTier === g || (g === "reject" && curTier === "rejected")) ? " cur" : "");
+    b.innerHTML = `<span class="k">${i + 1}</span>${esc(gradeLabel(g))}`;
+    b.title = `Grade this scene ${gradeLabel(g)} (${i + 1})`;
+    b.addEventListener("click", (e) => { e.stopPropagation(); closeTileMenu(); gradeScene(apex.scene_id, g); });
+    grades.appendChild(b);
+  });
+  menu.appendChild(grades);
   items.forEach(([label, fn, role]) => {
     const b = document.createElement("button");
     b.textContent = label;
@@ -848,22 +970,93 @@ function apexFromHit(h) {
     duration: Math.round(dur), url: h.stream, score: h.score ?? 1, title: h.title || "",
   };
 }
-// swap the whole board to a new pool live — no reload (mirrors fyRefetch)
-function pivotBoard(apexes, label) {
-  if (!apexes.length) { flashStatus("nothing to show"); return; }
-  if (State.big) collapse(State.big);
-  State.apexes = apexes; State.searchMode = true; State.pivot = label;
-  pickApex = makePicker(State.apexes);
-  reshuffle(); updateStatus();
+// --- pivots, with history: every pivot remembers the board it came from ----------
+function snapshotBoard() {
+  return { apexes: State.apexes, base: State.base, pivot: State.pivot, pivotSeed: State.pivotSeed,
+    pivotApplyFloor: State.pivotApplyFloor, sourceSpec: State.sourceSpec, pick: pickApex,
+    searchMode: State.searchMode, shuffle: State.shuffle, floorNote: State.floorNote };
 }
-async function moreLikeThis(scene_id, t) {
-  // remember the seed so the taste-floor slider and Refresh re-filter THIS moment,
-  // not the original board. With a floor set, return every match above it (the
-  // count grows/shrinks with the slider); with it off, a generous default.
-  State.pivotSeed = { scene_id, t };
-  State.sourceSpec = { kind: "similar", scene_id, t };
-  State.pivotApplyFloor = null;   // pivotSeed drives the re-run for this pivot
-  syncFloorVisibility();
+function pushHistory() {
+  State.history.push(snapshotBoard());
+  if (State.history.length > 30) State.history.shift();
+}
+// ← Back: the previous board exactly as it was (re-filtered if the floor moved)
+function goBack() {
+  if (!State.history.length) { if (State.pivot) refreshChannel(); return; }
+  if (State.big) collapse(State.big);
+  const b = State.history.pop();
+  Object.assign(State, { apexes: b.apexes, base: b.base, pivot: b.pivot, pivotSeed: b.pivotSeed,
+    pivotApplyFloor: b.pivotApplyFloor, sourceSpec: b.sourceSpec, searchMode: b.searchMode,
+    shuffle: b.shuffle, floorNote: b.floorNote });
+  pickApex = b.pick;
+  const done = () => { syncFloorVisibility(); syncNav(); reshuffle(); updateStatus(); };
+  if (floorMode() === "filter" && State.base && State.base.length) filterToFloor().then(done);
+  else done();
+}
+// breadcrumb click: back to that board, dropping everything after it
+function jumpBack(i) {
+  if (i < 0 || i >= State.history.length) return;
+  State.history.length = i + 1;
+  goBack();
+}
+// ↻ Refresh (or ↩ Back to <channel> mid-pivot): rebuild the channel you entered
+// with, restoring the floor you entered with
+function refreshChannel() {
+  const src = State.source || document.getElementById("source").value;
+  if ((State.pivot || State.pivotSeed) && State.entryFloor != null && State.entryFloor !== fyMinScore) {
+    fyMinScore = State.entryFloor;
+    syncFloorUI(); persistFloor(fyMinScore);
+  }
+  loadSource(src, { refresh: true });
+}
+function channelName() {
+  const sel = document.getElementById("source");
+  const o = sel && sel.options[sel.selectedIndex];
+  return o ? o.textContent.replace(/^(Tiers?|Playlist|Stat|Performer):\s*/, "").replace(/\s*\(\d+\)$/, "") : "channel";
+}
+function short(t, n = 24) { return t.length > n ? t.slice(0, n - 1) + "…" : t; }
+function syncNav() {
+  const back = document.getElementById("back");
+  if (back) back.hidden = !State.history.length;
+  const rf = document.getElementById("refresh-lib");
+  if (rf) {
+    const name = channelName();
+    rf.textContent = State.pivot ? `↩ Back to ${short(name)}` : "↻ Refresh";
+    rf.title = State.pivot ? `Leave the pivot and return to ${name} as you entered it`
+      : "Rebuild this channel from Stash — picks up new scenes and saved moments";
+    rf.classList.toggle("on", !!State.pivot);
+  }
+  const el = document.getElementById("crumbs");
+  if (el) {
+    if (!State.pivot && !State.history.length) el.innerHTML = "";
+    else {
+      const names = State.history.map((h) => h.pivot || channelName());
+      el.innerHTML = names.map((n, i) => `<a data-crumb="${i}" title="Back to this board">${esc(short(n, 32))}</a>`).join(" › ")
+        + ` › <b>${esc(short(State.pivot || channelName(), 40))}</b>`;
+    }
+  }
+}
+// swap the whole board to a new pool live — no reload. `rerun` re-applies the
+// current pivot (floor change) instead of stacking a new one.
+function pivotBoard(apexes, label, meta = {}, rerun = false) {
+  if (!apexes.length) { flashStatus("nothing to show"); return false; }
+  if (!rerun) pushHistory();
+  if (State.big) collapse(State.big);
+  State.pivot = label;
+  State.pivotSeed = meta.seed || null;
+  State.pivotApplyFloor = meta.applyFloor || null;
+  State.sourceSpec = meta.spec || null;
+  State.searchMode = true; State.shuffle = false;
+  State.base = apexes.slice(); State.apexes = apexes; State.floorNote = "";
+  pickApex = makePicker(State.apexes);
+  const done = () => { syncFloorVisibility(); syncNav(); reshuffle(); updateStatus(); };
+  if (floorMode() === "filter") filterToFloor().then(done);
+  else done();
+  return true;
+}
+async function moreLikeThis(scene_id, t, rerun = false) {
+  // with a floor set, every match above it (the count follows the slider);
+  // with it off, a generous default
   flashStatus("finding similar…");
   try {
     const qs = new URLSearchParams({ scene_id, t });
@@ -872,8 +1065,9 @@ async function moreLikeThis(scene_id, t) {
     const d = await api("/api/search/similar?" + qs.toString());
     const items = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
-    pivotBoard(items, `🔎 more like that moment${flr}`);
-    flashStatus(`🔎 ${items.length} moments like that${flr}`);
+    if (pivotBoard(items, `🔎 more like that moment${flr}`,
+      { seed: { scene_id, t }, spec: { kind: "similar", scene_id, t } }, rerun))
+      flashStatus(`🔎 ${items.length} moments like that${flr}`);
   } catch (e) { flashStatus(e.message); }
 }
 async function saveHerBest(scene_id) {
@@ -918,16 +1112,6 @@ async function removeApex(scene_id, t) {
     flashStatus("✖ unsaved moment @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
-// flag a scene for later cleanup: set its Stash rating to 1★ (rating100 = 20)
-async function markForDeletion(scene_id) {
-  try {
-    await api(`/api/scene/${encodeURIComponent(scene_id)}`, {
-      method: "PATCH", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ rating100: 20 }),
-    });
-    flashStatus("🗑 marked for deletion (1★) · #" + scene_id);
-  } catch (e) { flashStatus(e.message); }
-}
 // Save whatever is currently driving the board — a "more like this" rabbit hole,
 // a performer pivot, a search, For You, anything — as a collection you can replay.
 async function saveCurrentBoard() {
@@ -961,16 +1145,12 @@ async function saveLivePlaylist() {
   } catch (e) { flashStatus(e.message); }
 }
 // Broad by default: her FULL spread across every embedded scene, floor OFF —
-// pivoting shouldn't confine you to the curated taste feed. The floor slider stays
-// available as an optional tightener (tighten=true, via State.pivotApplyFloor).
+// pivoting shouldn't confine you to the curated taste feed. Moving the floor
+// re-runs it tightened (in place, via pivotApplyFloor).
 async function moreFromActress(scene_id, tighten = false) {
-  State.pivotSeed = null;   // performer pivot isn't seeded by a single moment
-  State.sourceSpec = { kind: "performer", scene_id };
-  State.pivotApplyFloor = () => moreFromActress(scene_id, true);
-  syncFloorVisibility();
   flashStatus("finding her scenes…");
   try {
-    const useFloor = tighten && fyMinScore > 0;   // only tighten when you nudge the slider
+    const useFloor = tighten && fyMinScore > 0;
     const qs = new URLSearchParams({ scene_id, count: PIVOT_COUNT, per_scene: PIVOT_PER_SCENE });
     if (useFloor) qs.set("min_score", fyMinScore);
     else qs.set("spread", "true");   // broad, unfiltered span of her scenes
@@ -978,55 +1158,44 @@ async function moreFromActress(scene_id, tighten = false) {
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer info for this scene");
     const tag = useFloor ? ` ≥ ${Math.round(fyMinScore * 100)}%` : " · full spread";
-    pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + tag);
-    flashStatus(`🎬 ${apexes.length} moments from ${d.performer || "her"}${useFloor ? ` ≥ ${Math.round(fyMinScore * 100)}%` : " · full spread"}`);
+    if (pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + tag,
+      { applyFloor: () => moreFromActress(scene_id, true), spec: { kind: "performer", scene_id } }, tighten))
+      flashStatus(`🎬 ${apexes.length} moments from ${d.performer || "her"}${tag}`);
   } catch (e) { flashStatus(e.message); }
 }
 // similar moments to THIS one, but only across this scene's performer
 async function moreMomentSameActress(scene_id, t) {
-  State.pivotSeed = null;
-  State.sourceSpec = { kind: "performer_moment", scene_id, t };
-  State.pivotApplyFloor = null;   // diverse coverage (score 0) — floor N/A, hidden
-  syncFloorVisibility();
   flashStatus("finding her moments like this…");
   try {
-    const qs = new URLSearchParams({ scene_id, t });
-    const d = await api("/api/board/performer_moment?" + qs.toString());
+    const d = await api("/api/board/performer_moment?" + new URLSearchParams({ scene_id, t }).toString());
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no similar moments for ${d.performer}` : "no performer info for this scene");
-    pivotBoard(apexes, "🎬 more like this · " + (d.performer || "same actress"));
+    pivotBoard(apexes, "🎬 more like this · " + (d.performer || "same actress"),
+      { spec: { kind: "performer_moment", scene_id, t } });
   } catch (e) { flashStatus(e.message); }
 }
 // stay in this scene: a diverse spread of its moments
 async function moreInThisScene(scene_id) {
-  State.pivotSeed = null;
-  State.sourceSpec = { kind: "scene", scene_id };
-  State.pivotApplyFloor = null;   // single-scene spread (score 0) — floor N/A, hidden
-  syncFloorVisibility();
   flashStatus("gathering this scene…");
   try {
     const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/moments`);
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus("no other embedded moments in this scene");
-    pivotBoard(apexes, "🎞 more in scene #" + scene_id);
+    pivotBoard(apexes, "🎞 more in scene #" + scene_id, { spec: { kind: "scene", scene_id } });
   } catch (e) { flashStatus(e.message); }
 }
-function backToTaste() { loadSource("foryou"); }
-function flashStatus(msg) {
-  const el = document.getElementById("status");
+function setStatus(msg) {
+  const el = document.getElementById("status-line");
   if (el) el.textContent = msg;
 }
+function flashStatus(msg) { setStatus(msg); }
 
+// the floor works on every channel now — always shown; the hint says what it kept
 function syncFloorVisibility() {
   const fw = document.getElementById("floor-wrap");
-  // Key on the PIVOT first — State.source is stale during a pivotBoard pivot. Show the
-  // floor only where it means something: a moment pivot (closeness), a floor-aware pivot
-  // (moreFromActress), or the taste sources For You / Performer. Hide it for the
-  // diverse-coverage pivots and all static sources.
-  const show = State.pivotSeed ? true
-    : State.pivot ? (State.pivotApplyFloor != null)
-    : (State.source === "foryou" || State.source === "performer");
-  if (fw) fw.hidden = !show;
+  if (fw) fw.hidden = false;
+  const h = document.getElementById("floor-hint");
+  if (h) h.textContent = floorMode() === "filter" ? (State.floorNote || "") : "";
 }
 // the re-derivable descriptor for a live playlist (null = this board can't go live)
 function specForSource(src) {
@@ -1042,11 +1211,21 @@ async function loadSource(src, opts = {}) {
   State.entryFloor = fyMinScore;   // remember the floor at entry; pivots never re-run this, so Refresh can restore it
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];
   State.pivot = null; State.pivotSeed = null; State.pivotApplyFloor = null;
+  State.history = []; State.base = []; State.floorNote = "";
+  syncNav();
   document.getElementById("error").hidden = true;
   syncFloorVisibility();
-  document.getElementById("status").textContent = "loading…";
+  setStatus("loading…");
   try {
-    if (src === "shuffle") {
+    if (src === "shuffle" && fyMinScore > 0) {
+      // shuffle within the taste floor: a uniform random draw of moments above it
+      State.searchMode = true;
+      fyReset();
+      await fyRefetch(true);
+      if (!State.apexes.length)
+        return showError(`Nothing scores ≥ ${Math.round(fyMinScore * 100)}% yet — lower the taste floor.`);
+      pickApex = fyPick;
+    } else if (src === "shuffle") {
       const d = await api("/api/board/scenes" + (opts.refresh ? "?refresh=true" : ""));
       State.pool = d.scenes || [];
       if (!State.pool.length) return showError("No scenes found in your library scope.");
@@ -1102,7 +1281,7 @@ async function loadSource(src, opts = {}) {
       State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
       if (!State.apexes.length) return showError("No embedded moments for this performer.");
       pickApex = makeQueuePicker(State.apexes);
-      document.getElementById("status").textContent = "🎬 " + (d.performer || "performer") + " · best of";
+      setStatus("🎬 " + (d.performer || "performer") + " · best of");
     } else if (src === "stat") {
       State.searchMode = true;
       const qs = new URLSearchParams({ metric: boardStat?.metric || "fresh" });
@@ -1113,7 +1292,7 @@ async function loadSource(src, opts = {}) {
       State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
       if (!State.apexes.length) return showError("No moments for this statistic yet.");
       pickApex = makeQueuePicker(State.apexes);
-      document.getElementById("status").textContent = "📈 " + (boardStat?.label || boardStat?.metric || "stat");
+      setStatus("📈 " + (boardStat?.label || boardStat?.metric || "stat"));
     } else if (src.startsWith("tier:")) {
       // the best moments of every scene in the chosen tiers (5★ + O-count grades)
       State.searchMode = true;
@@ -1125,7 +1304,7 @@ async function loadSource(src, opts = {}) {
       if (!State.apexes.length)
         return showError(`No embedded moments in ${d.label || "this tier"} yet.\n\nGrade some scenes in the Catalogue first.`);
       pickApex = makeQueuePicker(State.apexes);   // every clip before repeating
-      document.getElementById("status").textContent = `🏆 ${d.label} · ${d.scenes} scenes`;
+      setStatus(`🏆 ${d.label} · ${d.scenes} scenes`);
     } else if (src === "foryou") {
       State.searchMode = true;
       fyReset();
@@ -1154,6 +1333,11 @@ async function loadSource(src, opts = {}) {
   } catch (err) {
     return showError("Couldn't load this source.\n\n(" + err.message + ")");
   }
+  if (floorMode() === "filter") {   // this channel filters client-side by taste
+    State.base = State.apexes.slice();
+    await filterToFloor();
+  }
+  syncFloorVisibility(); syncNav();
   buildBoard(parseInt(document.getElementById("grid").value, 10));
 }
 
@@ -1166,7 +1350,7 @@ async function initSources(initial) {
     for (const c of s.collections || [])
       opts.push(`<option value="collection:${esc(c.safe)}">Playlist: ${esc(c.name)} (${c.count})</option>`);
     for (const t of s.tiers || [])
-      opts.push(`<option value="tier:${esc(t.key)}">Tier: ${esc(t.label)}</option>`);
+      opts.push(`<option value="tier:${esc(t.key)}">${t.key === "unreviewed" ? "" : "Tier: "}${esc(t.label)}</option>`);
     if (initial && initial.startsWith("tier:") && !(s.tiers || []).some((t) => "tier:" + t.key === initial)) {
       const label = initial.slice(5).split(",").map((k) => MB_TIER_NAMES[k] || k).join(" + ");
       opts.push(`<option value="${esc(initial)}">Tiers: ${esc(label)}</option>`);

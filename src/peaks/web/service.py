@@ -907,6 +907,9 @@ class Service(LibraryMixin):
         """Best-first moments across an arbitrary scene set — taste-ranked when a
         taste exists, else a time-spread sample (same rule as performer_best)."""
         model = self._model_name()
+        top = self._top_taste_moments_for_scenes(scene_ids, per_scene, model)
+        if top is not None:          # the trained model's picks (same scorer as For You)
+            return top[:count]
         try:
             qvec, _, _ = self._taste_centroid(model)
         except Exception:  # noqa: BLE001 — no taste / Stash markers unreachable
@@ -916,6 +919,61 @@ class Service(LibraryMixin):
         else:
             hits = self._ranked_moments_for_scenes(scene_ids, qvec, per_scene=per_scene, model=model)
         return hits[:count]
+
+    def _top_taste_moments_for_scenes(self, scene_ids, per_scene: int, model: str,
+                                      spacing: float = 10.0):
+        """Each scene's `per_scene` best moments by your trained taste model
+        (at least `spacing` s apart), best-first across all of them. None when
+        there's no trained model yet (callers fall back to the centroid)."""
+        from ..search import Hit
+
+        if self._taste_model(self.cfg.markers.tag_name, model) is None:
+            return None
+        scores, by = self._taste_scores(model)
+        if scores is None or by != "classifier":
+            return None
+        idx = self.index(model)
+        sid_key: dict[str, str] = {}
+        for k, m in idx.key_meta.items():
+            if m.get("scene_id") is not None:
+                sid_key.setdefault(str(m["scene_id"]), k)
+        hits: list = []
+        for sid in scene_ids:
+            span = idx._key_rows.get(sid_key.get(str(sid), ""))
+            if not span or span[1] <= span[0]:
+                continue
+            start, end = span
+            picked: list[int] = []
+            for j in np.argsort(-scores[start:end]):
+                i = start + int(j)
+                if all(abs(float(idx.times[i]) - float(idx.times[p])) >= spacing for p in picked):
+                    picked.append(i)
+                    if len(picked) >= per_scene:
+                        break
+            hits += [Hit(scene_id=idx.scene_ids[i], key=idx.keys[i],
+                         time=float(idx.times[i]), score=float(scores[i])) for i in picked]
+        hits.sort(key=lambda h: h.score, reverse=True)
+        return hits
+
+    def taste_scores_for(self, items) -> dict:
+        """Taste score per (scene_id, seconds): the nearest indexed frame's score
+        from the library-wide `_taste_scores` (cached — no model call per item).
+        None for a moment that isn't embedded."""
+        model = self._model_name()
+        scores, by = self._taste_scores(model)
+        if scores is None:
+            return {"scores": [None] * len(items), "scored_by": None}
+        idx = self.index(model)
+        sid_key: dict[str, str] = {}
+        for k, m in idx.key_meta.items():
+            if m.get("scene_id") is not None:
+                sid_key.setdefault(str(m["scene_id"]), k)
+        out = []
+        for sid, t in items:
+            key = sid_key.get(str(sid))
+            r = self._row_at(idx, key, float(t)) if key else None
+            out.append(None if r is None else round(float(scores[r]), 4))
+        return {"scores": out, "scored_by": by}
 
     @staticmethod
     def _parse_tiers(tiers) -> list[str]:
@@ -936,10 +994,17 @@ class Service(LibraryMixin):
         return [r["scene_id"] for r in self._catalogue_all() if r["tier"] in want]
 
     def tier_board(self, tiers, count: int = 3000, per_scene: int = 4) -> dict:
-        """Megaboard supply for chosen tiers: each tier scene's best moments."""
-        sids = self.tier_scene_ids(tiers)
+        """Megaboard supply for chosen tiers: each tier scene's best moments.
+        `tiers="unreviewed"` is the discovery channel — the best moments of the
+        scenes you haven't graded yet (not rejected, not graded)."""
+        if tiers == "unreviewed":
+            sids = [r["scene_id"] for r in self._catalogue_all() if r["tier"] == "unreviewed"]
+            label = "Unreviewed — best moments"
+        else:
+            sids = self.tier_scene_ids(tiers)
+            label = self.tier_label(tiers)
         return {"hits": self._moment_pool_for_scenes(sids, per_scene, count),
-                "scenes": len(sids), "label": self.tier_label(tiers)}
+                "scenes": len(sids), "label": label}
 
     def export_tiers(self, job=None, tiers="legendaire", count: int = 300) -> dict:
         """One reel of the best moments across every scene in the chosen tiers."""
@@ -1348,6 +1413,7 @@ class Service(LibraryMixin):
             {"key": "legendaire", "label": names["legendaire"]},
             {"key": "exceptionnelle,legendaire", "label": f"{names['exceptionnelle']} +"},
             {"key": "merveilleuse,exceptionnelle,legendaire", "label": f"{names['merveilleuse']} +"},
+            {"key": "unreviewed", "label": "Unreviewed — best moments"},
         ]
         return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections(),
                 "tiers": tiers}
@@ -2045,6 +2111,15 @@ class Service(LibraryMixin):
                     x.weight *= budget / tot
             return extra
 
+        # a big graded library can hold thousands of tier scenes; a sample of them
+        # teaches as much and keeps training fast
+        cap = max(300, 2 * sum(1 for lab in labs if lab.label == 1))
+        if len(tier_rows) > 3 * cap:
+            keep = rng.choice(len(tier_rows), 3 * cap, replace=False)
+            tier_rows = [tier_rows[i] for i in sorted(keep)]
+        if len(rej_rows) > 3 * cap:
+            keep = rng.choice(len(rej_rows), 3 * cap, replace=False)
+            rej_rows = [rej_rows[i] for i in sorted(keep)]
         pos_w = sum(1.0 for lab in labs if lab.label == 1) + sum(1.0 for x in weak if x.label == 1)
         neg_w = sum(1.0 for lab in labs if lab.label == 0)
         weak += _cap(tier_rows, max(pos_w, 50.0)) + _cap(rej_rows, max(neg_w, 50.0))
@@ -2091,6 +2166,8 @@ class Service(LibraryMixin):
 
         def say(stage: str, frac: float) -> None:
             if job is not None:
+                if job.cancelled:
+                    raise RuntimeError("cancelled — the previous taste model is unchanged")
                 job.progress = {"stage": stage, "pct": round(float(frac), 3)}
 
         say("Gathering what you've rated and graded", 0.0)

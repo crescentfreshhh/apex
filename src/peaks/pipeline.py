@@ -695,6 +695,9 @@ def gather_candidates(
 AUTO_MLP_MIN_SAMPLES = 200
 # ±frames of temporal context tried by `context="auto"`
 AUTO_CONTEXT = 2
+# background ("not my taste") frames are capped: past a few thousand they add
+# read time and fit time, not accuracy
+MAX_BACKGROUND = 6000
 # at most this many whole scenes are held for the jump-to-peak benchmark
 # (each is its full frame matrix — unbounded, a big taste set exhausted RAM)
 MAX_PEAK_SCENES = 120
@@ -831,7 +834,7 @@ def train_profile(
     n_neg = sum(1 for r in rows if r[3] == 0)
     if background_ratio > 0 and n_pos:
         pos_keys = {r[0] for r in rows if r[3] == 1} | set(exclude_bg_keys or ())
-        want = max(0, int(round(background_ratio * n_pos)) - n_neg)
+        want = min(MAX_BACKGROUND, max(0, int(round(background_ratio * n_pos)) - n_neg))
         if pu_filter:
             want = int(want * 1.4)   # the spy filter will drop some
         for k, fi in sample_background_frames(cache, model_name, want, exclude_keys=pos_keys, seed=seed):
@@ -929,11 +932,16 @@ def train_profile(
     if evaluate:
         for n_done, (k, c) in enumerate(candidates):
             label = f"{'non-linear' if k == 'mlp' else 'linear'} model" + (f", ±{c} frames" if c else "")
-            say(f"Measuring {n_done + 1} of {len(candidates)}: {label}",
-                0.4 + 0.55 * n_done / len(candidates))
+            span = 0.55 / len(candidates)
+
+            def on_fold(i, n, label=label, n_done=n_done, span=span):
+                say(f"Measuring {n_done + 1} of {len(candidates)}: {label} · test {i + 1}/{n}",
+                    0.4 + span * (n_done + i / max(1, n)))
+            say(f"Measuring {n_done + 1} of {len(candidates)}: {label}", 0.4 + span * n_done)
             try:
                 res = grouped_oof(_fitter(k, c), feats[c], y, w, groups, ev, bg,
-                                  scenes=scenes, featurize=_featurizer(c), folds=folds, seed=seed)
+                                  scenes=scenes, featurize=_featurizer(c), folds=folds, seed=seed,
+                                  on_fold=on_fold)
             except ValueError:
                 res = None
             results.append({"kind": k, "context": c, **(res or {})})

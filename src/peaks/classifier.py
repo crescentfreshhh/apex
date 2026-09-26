@@ -73,8 +73,11 @@ class TasteClassifier:
             from sklearn.neural_network import MLPClassifier
 
             # a touch of L2 (alpha) to keep the non-linear model honest
-            return MLPClassifier(hidden_layer_sizes=(128,), max_iter=500, alpha=1e-3,
-                                 random_state=0)
+            # early stopping: halts once a held-back 10% stops improving, which
+            # bounds the fit on big training sets (and curbs overfitting)
+            return MLPClassifier(hidden_layer_sizes=(128,), max_iter=200, alpha=1e-3,
+                                 early_stopping=True, validation_fraction=0.1,
+                                 n_iter_no_change=8, random_state=0)
         raise ValueError(f"unknown classifier kind: {self.kind!r}")
 
     def train(
@@ -91,6 +94,9 @@ class TasteClassifier:
                 f"got classes {sorted(classes)}"
             )
         self._clf = self._new_estimator()
+        if self.kind == "mlp" and X.shape[0] < 200:
+            # too few rows to hold a validation slice back — train on them all
+            self._clf.set_params(early_stopping=False)
         import warnings
 
         from sklearn.exceptions import ConvergenceWarning

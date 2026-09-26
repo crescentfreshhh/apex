@@ -2003,7 +2003,8 @@ function renderMeasureRun(job) {
   if (!job) return;
   const p = job.progress || {}, pct = Math.round(100 * (p.pct || 0));
   run.innerHTML = `<div class="row between small"><span>${esc(p.stage || "Starting…")}</span>
-    <span class="muted">${pct}% · ${Math.round(job.elapsed / 60)} min</span></div>
+    <span class="muted">${pct}% · ${Math.round(job.elapsed / 60)} min
+      <button class="btn ghost sm" data-cancel-job="${esc(job.id)}">Cancel</button></span></div>
     <div class="bar"><i style="width:${pct}%"></i></div>`;
 }
 function tqScheduleLine(sch) {
@@ -2058,7 +2059,15 @@ async function loadTasteQuality() {
     <div id="tq-run" class="tq-run" hidden></div>`;
   followMeasure();
 }
-document.addEventListener("click", (e) => { if (e.target.closest("#btn-tq-train")) startMeasure(); });
+document.addEventListener("click", async (e) => {
+  if (e.target.closest("#btn-tq-train")) startMeasure();
+  const c = e.target.closest("[data-cancel-job]");
+  if (c) {
+    c.disabled = true;
+    try { await api(`/api/jobs/${encodeURIComponent(c.dataset.cancelJob)}/cancel`, { method: "POST" }); toast("Cancelling after the current step…"); }
+    catch (err) { toast(err.message, true); }
+  }
+});
 wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); });
 wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); });
 

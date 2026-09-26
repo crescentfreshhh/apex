@@ -12,6 +12,15 @@
     <a class="brand" href="/" title="Back to Peaks"><i>▲</i>Peaks</a>
     <span class="sep"></span>
     <label class="grp-l">Channel <select id="source"></select></label>
+    <button id="back" hidden title="Step back one pivot (Backspace or B)">← Back</button>
+    <button id="refresh-lib" title="Rebuild this channel from Stash — picks up new scenes and saved moments">↻ Refresh</button>
+    <span class="sep"></span>
+    <label id="floor-wrap" class="grp-l floor" title="Only play moments at least this close to your taste — works on every channel. Off = everything. [ and ] nudge it.">Taste
+      <input type="range" id="floor" min="0" max="0.95" step="0.01" value="0" />
+      <span id="floor-val">off</span>
+      <span id="floor-hint" class="dim"></span>
+    </label>
+    <span class="sep"></span>
     <label class="grp-l">Grid
       <select id="grid">
         <option value="2" selected>2 × 2</option>
@@ -20,22 +29,16 @@
         <option value="5">5 × 5</option>
       </select>
     </label>
-    <label id="floor-wrap" class="grp-l" hidden title="Off = one peak from every scene. Raise it to keep only your strongest scenes.">Taste floor
-      <input type="range" id="floor" min="0" max="0.95" step="0.01" value="0" />
-      <span id="floor-val" class="dim">off</span>
-    </label>
-    <span class="sep"></span>
     <button id="toggle" class="pri" title="Play / pause all (Space)">Pause</button>
     <button id="reshuffle" title="Fresh mix (R)">⤮ Reshuffle</button>
     <button id="mute" title="Hover a tile to hear it — M to silence everything">🔊 Sound</button>
     <label id="vol-wrap" title="Volume for the enlarged tile">🔈
       <input type="range" id="volume" min="0" max="1" step="0.05" value="1" />
     </label>
-    <span id="status" class="dim"></span>
     <span class="grow"></span>
     <button id="save-board" title="Save whatever is currently driving the board as a playlist">＋ Save as playlist</button>
-    <button id="refresh-lib" class="icon" title="Rebuild from Stash — pick up newly-added scenes / saved moments">↻</button>
   </header>
+  <div id="status" class="dim"><span id="crumbs"></span><span id="status-line"></span></div>
 
   <main id="board"><!-- tiles injected here --></main>
 

@@ -185,7 +185,7 @@ def test_catalogue_api_grade_and_restore(svc, monkeypatch):
 
 
 def test_js_tier_rules_match_python():
-    """The browser copies of tier_of (app.js tierOf, megaboard.js mbTierBadge)
+    """The browser copies of tier_of (app.js tierOf, megaboard.js tierKey)
     must agree with peaks.tiers.tier_of on every boundary."""
     import json
     import pathlib
@@ -200,13 +200,13 @@ def test_js_tier_rules_match_python():
     app = (root / "src/peaks/web/static/app.js").read_text()
     mb = (root / "webapp/megaboard.js").read_text()
     tier_fn = re.search(r"function tierOf\(rating100, o\) \{.*?\n\}", app, re.S).group(0)
-    mb_fn = re.search(r"function mbTierBadge\(rating100, o\) \{.*?\n\}", mb, re.S).group(0)
+    mb_fn = re.search(r"function tierKey\(rating100, o\) \{.*?\n\}", mb, re.S).group(0)
     cases = [(r, o) for r in (None, 0, 20, 40, 60, 80, 100) for o in (0, 1, 7, 15, 16, 17, 18, 19)]
     script = (
         "const esc = (s) => s; let MB_TIER_NAMES = {};\n" + tier_fn + "\n" + mb_fn + "\n"
         f"const cases = {json.dumps(cases)};\n"
         "console.log(JSON.stringify(cases.map(([r, o]) => [tierOf(r, o),"
-        " (mbTierBadge(r, o).match(/tier-(\\w+)/) || [null, 'unreviewed'])[1]])));"
+        " tierKey(r, o)])));"
     )
     out = json.loads(subprocess.run([node, "-e", script], capture_output=True,
                                     text=True, check=True).stdout)

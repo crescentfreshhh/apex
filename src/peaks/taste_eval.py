@@ -31,7 +31,7 @@ def _auc(y: np.ndarray, s: np.ndarray) -> float | None:
 def grouped_oof(
     fit, X: np.ndarray, y: np.ndarray, w: np.ndarray, groups: np.ndarray,
     eval_mask: np.ndarray, bg_mask: np.ndarray, *, scenes: dict | None = None,
-    featurize=None, folds: int = 5, seed: int = 0,
+    featurize=None, folds: int = 5, seed: int = 0, on_fold=None,
 ) -> dict | None:
     """Out-of-fold evaluation. `fit(X, y, w)` returns a `predict(X)` callable.
 
@@ -55,7 +55,9 @@ def grouped_oof(
     splitter = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed)
     oof = np.full(y.shape[0], np.nan, dtype=np.float64)
     hits, tried = 0, 0
-    for tr_i, te_i in splitter.split(lab, y[lab], groups[lab]):
+    for fold_i, (tr_i, te_i) in enumerate(splitter.split(lab, y[lab], groups[lab])):
+        if on_fold:
+            on_fold(fold_i, k)          # progress / cancellation point
         test_groups = set(groups[lab[te_i]].tolist())
         train = np.concatenate([lab[tr_i], np.where(bg_mask & ~np.isin(groups, list(test_groups)))[0]])
         if len(set(y[train].tolist())) < 2:

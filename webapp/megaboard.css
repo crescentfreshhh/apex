@@ -45,8 +45,10 @@ html, body {
 #bar button.on { color: var(--accent); border-color: var(--accent); }
 
 /* Float the readout over the board's bottom-left so the full coverage/model
-   line is always visible — the toolbar is too cramped and clipped its right end. */
+   line is always visible — the toolbar is too cramped and clipped its right end.
+   Its first line is the pivot trail (click a step to go back to it). */
 #status {
+  display: flex; flex-direction: column; gap: 2px;
   position: fixed;
   left: 10px;
   bottom: 10px;
@@ -230,3 +232,42 @@ html, body { font: 14px/1.45 "Inter", system-ui, -apple-system, "Segoe UI", Robo
 #bar button.icon { width: 30px; padding: 0; }
 #bar input[type=range] { accent-color: var(--accent); }
 #status { font-size: 12px; white-space: nowrap; }
+
+/* --- navigation: Back / Refresh, breadcrumbs ----------------------------------- */
+#bar button#refresh-lib.on { color: var(--accent); border-color: var(--accent); }
+#crumbs:empty { display: none; }
+#crumbs { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#crumbs a { color: #cfcfd5; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+#crumbs a:hover { color: var(--accent); }
+#crumbs b { color: var(--accent); font-weight: 600; }
+
+/* taste floor: always there, with what it kept */
+#floor-wrap { gap: 7px; }
+#floor-wrap #floor-val { min-width: 30px; color: var(--fg); font-variant-numeric: tabular-nums; }
+#floor-hint { font-size: 11.5px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+
+/* grade chips (enlarged tile) and the menu's grade row — keys 1–5 */
+.mb-grades { display: flex; flex-wrap: wrap; gap: 5px; }
+.mb-g, .mb-menu-grades button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px;
+  border: 1px solid #33333c; background: rgba(26,26,31,.9); color: #d8d8de; font: inherit; font-size: 12px; cursor: pointer; }
+.mb-g .k, .mb-menu-grades .k { font-size: 10px; color: #7a7a82; border: 1px solid #3a3a44; border-radius: 4px; padding: 0 4px; }
+.mb-g:hover, .mb-menu-grades button:hover { border-color: currentColor; }
+.g-legendaire { color: #e6c15a; } .g-exceptionnelle { color: #b889ff; } .g-merveilleuse { color: #6ea8fe; }
+.g-upscale { color: #7fb3aa; } .g-reject { color: #e0604d; }
+.mb-g.cur, .mb-menu-grades button.cur { border-color: currentColor; background: rgba(255,255,255,.07); font-weight: 600; }
+.mb-menu-grades { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 4px 7px; margin-bottom: 3px; border-bottom: 1px solid #2c2c33; }
+.mb-menu .mb-menu-grades button { padding: 3px 8px; font-size: 12px; text-align: center; }
+
+/* tier badge on every graded tile */
+.tile-tier { position: absolute; top: 6px; left: 6px; pointer-events: none; }
+.tile-tier .mb-tier { background: rgba(0,0,0,.6); font-size: 10.5px; }
+.tile.big .tile-tier { display: none; }
+
+/* keep the toolbar on one line: long channel names truncate */
+#bar select#source { max-width: 250px; text-overflow: ellipsis; }
+#bar #refresh-lib { max-width: 230px; overflow: hidden; text-overflow: ellipsis; }
+/* an enlarged tile owns the bottom edge (its seek bar) — lift the readout above it */
+body.has-big #status { bottom: 58px; }
+#bar > * { flex: none; }
+#bar > .grow { flex: 1; }
+#vol-wrap input[type=range] { width: 80px; }

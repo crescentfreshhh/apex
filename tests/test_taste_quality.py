@@ -353,3 +353,67 @@ def test_measure_runs_as_a_job_with_progress(svc, monkeypatch):
     assert job["status"] == "done", job
     assert job["result"]["mode"] == "full" and job["progress"]["pct"] >= 0.9
     assert api.get("/api/taste/quality").json()["latest"] is not None
+
+
+# --- megaboard: taste scores, model-ranked tier boards, unreviewed channel, cancel --
+
+def _trained(svc):
+    for key in ("k0", "k15", "k18", "k21"):
+        svc.add_label(key, svc._peaks[key], 1, scene_id=key[1:])
+    for key in ("k2", "k4", "k5", "k7", "k8"):
+        svc.add_label(key, 5.0, 0, scene_id=key[1:])
+    svc.train_taste()
+    return svc
+
+
+def test_taste_scores_for_matches_the_library_scores(svc):
+    _trained(svc)
+    model = svc._model_name()
+    scores, by = svc._taste_scores(model)
+    idx = svc.index(model)
+    s, e = idx._key_rows["k3"]
+    i = s + 7
+    out = svc.taste_scores_for([("3", float(idx.times[i])), ("999", 1.0)])
+    assert by == "classifier" and out["scored_by"] == "classifier"
+    assert out["scores"][0] == pytest.approx(float(scores[i]), abs=1e-4)
+    assert out["scores"][1] is None                      # not embedded
+
+
+def test_tier_board_is_ranked_by_the_trained_model(svc):
+    _trained(svc)
+    r = svc.tier_board("legendaire", per_scene=3)
+    assert r["scenes"] == 3 and r["hits"]
+    got = [h.score for h in r["hits"]]
+    assert got == sorted(got, reverse=True)                # best-first across scenes
+    by_scene: dict = {}
+    for h in r["hits"]:
+        by_scene.setdefault(h.scene_id, []).append(h.time)
+    for times in by_scene.values():                        # ≥10 s apart within a scene
+        times.sort()
+        assert all(b - a >= 10 for a, b in zip(times, times[1:]))
+    scores, _ = svc._taste_scores(svc._model_name())
+    assert max(got) <= float(scores.max()) + 1e-6
+
+
+def test_unreviewed_channel_only_holds_ungraded_scenes(svc):
+    r = svc.tier_board("unreviewed", per_scene=2)
+    sids = {h.scene_id for h in r["hits"]}
+    assert r["label"].startswith("Unreviewed") and sids
+    assert not sids & {"1", "3", "6", "9"}                 # rejected / graded
+    assert any(t["key"] == "unreviewed" for t in svc.board_sources()["tiers"])
+    with pytest.raises(ValueError):
+        svc.tier_label("unreviewed")                       # exports stay keeper-only
+
+
+def test_cancelled_measure_leaves_the_model_alone(svc):
+    _trained(svc)
+    path = svc._taste_path(svc.cfg.markers.tag_name, svc._model_name())
+    before = path.read_bytes()
+
+    class _Job:
+        cancelled = True
+        progress: dict = {}
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        svc.train_taste(mode="full", job=_Job())
+    assert path.read_bytes() == before

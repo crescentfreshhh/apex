@@ -177,12 +177,16 @@ def _catalogue_models():
         name: str
         params: dict = {}
 
+    class TasteScoresIn(BaseModel):
+        items: list[tuple[str, float]] = []   # (scene_id, seconds)
+
     return (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
-            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn)
+            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn, TasteScoresIn)
 
 
 (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
- TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn) = _catalogue_models()
+ TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn,
+ TasteScoresIn) = _catalogue_models()
 
 
 def _login_model():
@@ -1307,11 +1311,28 @@ def create_app(cfg=None):
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
+    @app.get("/api/board/tiers")
+    def board_tiers(ids: str = ""):
+        """{scene_id: tier} for the megaboard's tile badges (from the cached catalogue)."""
+        want = {i for i in ids.split(",") if i}
+        try:
+            rows = service._catalogue_all()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+        return {"tiers": {r["scene_id"]: r["tier"] for r in rows if r["scene_id"] in want}}
+
+    @app.post("/api/taste/scores")
+    def taste_scores(body: TasteScoresIn):
+        """Your taste score for each (scene_id, seconds) — the same scores For You
+        ranks by, so the megaboard's taste floor means the same on every channel."""
+        return service.taste_scores_for(body.items[:20000])
+
     @app.get("/api/board/tier")
     def board_tier(tiers: str, count: int = Query(3000, ge=1, le=10000),
                    per_scene: int = Query(4, ge=1, le=50)):
         """Megaboard source: the best moments of every scene in the chosen tiers
-        (comma-separated keys, e.g. 'exceptionnelle,legendaire')."""
+        (comma-separated keys, e.g. 'exceptionnelle,legendaire'), or 'unreviewed'
+        for the scenes you haven't graded yet."""
         try:
             r = service.tier_board(tiers, count=count, per_scene=per_scene)
         except ValueError as exc:
