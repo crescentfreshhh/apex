@@ -127,6 +127,7 @@ async function refreshDashboard() {
   if (typeof refreshCollections === "function") refreshCollections();
   if (typeof loadSchedule === "function") loadSchedule();
   if (typeof loadHistory === "function") loadHistory();
+  if (typeof loadCrashReport === "function") loadCrashReport();
   if (typeof reattachJobs === "function") reattachJobs();
 }
 
@@ -3452,3 +3453,26 @@ window.addEventListener("hashchange", () => {
   const v = (location.hash.match(/^#\/(\w+)/) || [])[1];
   if (v && !$("#" + v)?.classList.contains("active")) go(v);
 });
+
+
+// --- crash forensics: if the previous run ended abruptly, say how -----------------
+async function loadCrashReport() {
+  const card = $("#crash-card"); if (!card) return;
+  let d;
+  try { d = await api("/api/crash-report"); } catch { return; }
+  card.hidden = !d.abrupt;
+  if (!d.abrupt) return;
+  card.innerHTML = `<div class="row between"><h3 class="warn">⚠ The previous run ended abruptly</h3>
+      <span class="row"><a class="btn sm ghost" href="/api/crashlog" download>⬇ crash.log</a>
+      <button class="btn sm ghost" id="btn-crash-dismiss">Dismiss</button></span></div>
+    <p class="cap">Started ${esc(d.started || "?")} · last sign of life ${esc(d.ended_after || "?")} · <b>${esc(d.kind)}</b>.
+      Run <code>docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' &lt;peaks&gt;</code> too
+      (true / 137 = out of memory · 139 = segfault).</p>
+    ${d.trace ? `<pre class="log">${esc(d.trace)}</pre>` : ""}
+    ${(d.last_health || []).length ? `<div class="small muted">Last health readings before it stopped:</div>
+      <pre class="log">${esc(d.last_health.join("\n"))}</pre>` : ""}`;
+  $("#btn-crash-dismiss").onclick = async () => {
+    try { await api("/api/crash-report/dismiss", { method: "POST" }); } catch {}
+    card.hidden = true;
+  };
+}

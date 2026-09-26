@@ -278,6 +278,23 @@ def create_app(cfg=None):
     jobs = JobManager()
     app = FastAPI(title="peaks", docs_url="/api/docs")
 
+    # crash forensics (diagnostics only): native crash traces, a health
+    # heartbeat and a clean-exit marker in crash.log next to settings.json
+    from . import forensics
+
+    forensics.enable(service._settings_path().parent)
+
+    @app.middleware("http")
+    async def _count_requests(request: Request, call_next):
+        p = request.url.path
+        if p.startswith("/api/"):
+            forensics.note_request(p if not p.startswith("/api/scene/") else "/api/scene/…")
+        return await call_next(request)
+
+    @app.on_event("shutdown")
+    def _clean_exit():
+        forensics.mark_clean_exit()
+
     # --- auth (optional password gate over the whole app) -------------------
     _auth_pw = service.cfg.auth.password
     _auth_on = bool(_auth_pw)
@@ -1428,10 +1445,48 @@ def create_app(cfg=None):
     _start_scheduler(app, service, jobs)  # always on; it reads the interval live
 
     _start_memwatch(app, service)
+    _start_heartbeat(app, jobs)
+
+    @app.get("/api/crash-report")
+    def crash_report():
+        """How the previous run ended, if it didn't shut down cleanly."""
+        return {**(forensics.report() or {"abrupt": False}),
+                "log": bool(forensics.log_path() and forensics.log_path().exists())}
+
+    @app.post("/api/crash-report/dismiss")
+    def crash_report_dismiss():
+        forensics._state["report"] = None
+        return {"ok": True}
+
+    @app.get("/api/crashlog")
+    def crashlog():
+        path = forensics.log_path()
+        if not path or not path.exists():
+            raise HTTPException(404, "no crash log yet")
+        return FileResponse(path, media_type="text/plain", filename="peaks-crash.log")
 
     app.state.service = service
     app.state.jobs = jobs
     return app
+
+
+_HEARTBEAT: dict = {}
+
+
+def _start_heartbeat(app, jobs) -> None:
+    """One [health] line every PEAKS_HEALTH_SEC seconds (default 30, 0 = off);
+    once per process, however many apps are created."""
+    import os
+
+    from . import forensics
+
+    try:
+        every = float(os.environ.get("PEAKS_HEALTH_SEC", "30"))
+    except ValueError:
+        every = 30.0
+    if every <= 0 or _HEARTBEAT:
+        return
+    _HEARTBEAT["stop"] = forensics.start_heartbeat(jobs, every=every)
 
 
 def _start_memwatch(app, service: Service) -> None:

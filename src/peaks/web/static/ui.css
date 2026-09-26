@@ -426,3 +426,6 @@ input[type=checkbox] { accent-color: var(--gold); }
 #btn-del-go.keep-files { color: var(--fg); border-color: var(--line2); }
 #btn-del-go.keep-files:hover { background: #202027; color: var(--fg); }
 #del-keep-note[hidden] { display: none; }
+
+.crash-card { border-color: #5a4217; background: rgba(232,161,77,.06); }
+.crash-card pre.log { max-height: 260px; overflow: auto; font-size: 11.5px; }
