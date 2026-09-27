@@ -693,6 +693,8 @@ def gather_candidates(
 # "auto" taste classifier switches to the non-linear MLP once there's enough
 # data for it not to overfit; below this it stays on the robust logreg.
 AUTO_MLP_MIN_SAMPLES = 200
+# a 👍 at a moment you also SAVED counts this many times a plain 👍
+SAVED_BOOST = 2.0
 # ±frames of temporal context tried by `context="auto"`
 AUTO_CONTEXT = 2
 # background ("not my taste") frames are capped: past a few thousand they add
@@ -795,12 +797,15 @@ def train_profile(
     weak: list | None = None, exclude_bg_keys: set | None = None,
     pu_filter: bool = False, context: int | str = 0, evaluate: bool = True,
     seed: int = 0, progress=None, folds: int | None = None,
+    boost: dict | None = None, boost_factor: float = SAVED_BOOST,
 ):
     """Build the training set and fit a TasteClassifier for `profile`.
 
     `progress(stage, fraction)` is called as it goes (for a job's progress bar).
     `evaluate=False` skips the benchmark entirely and fits `kind`/`context` as
-    given — the quick retrain.
+    given — the quick retrain. `boost` ({key: [seconds]}) marks moments you
+    *saved*: a 👍 within 2 s of one counts `boost_factor`× — a save is a
+    stronger statement than a thumbs-up.
 
     Rows: your label-store ratings (recency-weighted by `recency_halflife_days`),
     plus any `weak` rows (WeakLabel), plus — with `background_ratio`>0 — random
@@ -825,6 +830,8 @@ def train_profile(
     for i, lab in enumerate(labs):
         src = getattr(lab, "source", "explicit") or "explicit"
         wt = float(getattr(lab, "weight", 1.0) or 1.0) * (float(rec[i]) if rec is not None else 1.0)
+        if boost and int(lab.label) == 1 and any(abs(float(lab.time) - x) < 2.0 for x in boost.get(lab.key, ())):
+            wt *= boost_factor
         rows.append([lab.key, float(lab.time), None, int(lab.label), wt, src, src == "explicit"])
     for wl in weak or []:
         rows.append([wl.key, float(wl.time), None, int(wl.label), float(wl.weight), wl.source,

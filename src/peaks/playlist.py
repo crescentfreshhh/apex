@@ -30,18 +30,28 @@ def _title_score(title: str) -> float | None:
     return None
 
 
+def is_auto_marker(title: str, tag: str) -> bool:
+    """A marker the legacy scorer wrote ("apex 0.873": the tag + a peak score),
+    as opposed to a moment YOU saved ("apex (saved)", or anything you titled in
+    Stash). Both live under the same tag; only yours say anything about taste."""
+    title = (title or "").strip()
+    return _title_score(title) is not None and title.rsplit(" ", 1)[0] == tag
+
+
 def build_playlist(
     client,
     tags: str | Sequence[str],
     *,
     default_clip_seconds: float = DEFAULT_CLIP_SECONDS,
     limit: int | None = None,
+    saved_only: bool = False,
 ) -> dict:
     """Return a playlist dict: {tag, count, apexes:[{scene_id,start,end,
     duration,title,url}]}.
 
     `tags` may be one tag or several — pass every profile you want mixed into
     one megaboard. Markers carrying more than one requested tag are deduped.
+    `saved_only` leaves out the legacy scorer's auto-written markers.
     """
     if isinstance(tags, str):
         tags = [tags]
@@ -50,6 +60,8 @@ def build_playlist(
     for tag_name in tags:
         for m in client.iter_markers_by_tag(tag_name):
             if not m["scene_id"] or m["marker_id"] in seen_markers:
+                continue
+            if saved_only and is_auto_marker(m.get("title") or "", tag_name):
                 continue
             seen_markers.add(m["marker_id"])
             start = m["seconds"]

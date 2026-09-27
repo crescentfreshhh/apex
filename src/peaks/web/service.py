@@ -1405,7 +1405,8 @@ class Service(LibraryMixin):
         picker can load any tag on demand."""
         from ..playlist import build_playlist
 
-        return build_playlist(self.client(), [tag or self.cfg.markers.tag_name], limit=None)
+        return build_playlist(self.client(), [tag or self.cfg.markers.tag_name], limit=None,
+                              saved_only=True)
 
     def board_sources(self) -> dict:
         names = self.tier_display_names()
@@ -2091,9 +2092,12 @@ class Service(LibraryMixin):
         for lab in labs:
             near.setdefault(lab.key, []).append(float(lab.time))
         weak: list = []
+        saved_at: dict[str, list[float]] = {}   # your saves → their 👍 weigh double
         try:
-            # fast-fail client: training must not stall behind retry backoff
-            for mk in self._meta_client().iter_markers_by_tag(profile):
+            for mk in self._saved_markers(profile):
+                key = sid_key.get(str(mk.get("scene_id")))
+                if key:
+                    saved_at.setdefault(key, []).append(float(mk.get("seconds") or 0.0))
                 key = sid_key.get(str(mk.get("scene_id")))
                 t = float(mk.get("seconds") or 0.0)
                 if key and not any(abs(t - x) < 2.0 for x in near.get(key, [])):
@@ -2101,6 +2105,7 @@ class Service(LibraryMixin):
                     near.setdefault(key, []).append(t)
         except Exception:  # noqa: BLE001 — Stash down: your labels only
             return weak, set()
+        self._saved_at = saved_at   # train_taste boosts the 👍s you also saved
 
         in_taste: set[str] = set()
         if profile != self.cfg.markers.tag_name:
@@ -2203,6 +2208,7 @@ class Service(LibraryMixin):
 
         say("Gathering what you've rated and graded", 0.0)
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        self._saved_at = {}
         weak, in_taste = (self._weak_taste_rows(profile, model) if mc.taste_weak_labels
                           else ([], set()))
         if full:
@@ -2222,8 +2228,12 @@ class Service(LibraryMixin):
                 background_ratio=2.0 if mc.taste_pu_filter else 1.0,
                 weak=weak, exclude_bg_keys=in_taste if mc.taste_pu_filter else None,
                 pu_filter=mc.taste_pu_filter, context=context, evaluate=full,
-                progress=say,
+                progress=say, boost=self._saved_at,
             )
+        try:
+            stats["saved"] = self.saved_moments_audit(profile)
+        except Exception:  # noqa: BLE001 — Stash down: the card just omits it
+            pass
         say("Saving", 0.99)
         return self._finish_taste_training(clf, stats, profile, model, full=full)
 
@@ -2247,6 +2257,7 @@ class Service(LibraryMixin):
             return res
         entry = {"ts": _t.time(), "kind": stats["kind"], "context": stats.get("context", 0),
                  "samples": stats["samples"], "sources": stats.get("sources", {}),
+                 "saved": stats.get("saved"),
                  "pu_dropped": stats.get("pu_dropped", 0), **(stats.get("holdout") or {})}
         try:
             with open(self._taste_eval_path(profile, model), "a") as fh:
@@ -2473,7 +2484,7 @@ class Service(LibraryMixin):
 
         # apex markers — the moments you explicitly saved
         try:
-            for mk in self._taste_markers(profile):
+            for mk in self._saved_markers(profile):
                 sid = mk.get("scene_id")
                 if sid:
                     _add(sid_key.get(str(sid)), mk.get("seconds") or 0.0, str(sid), "apex")
@@ -2670,6 +2681,43 @@ class Service(LibraryMixin):
         markers = list(self.client().iter_markers_by_tag(profile))
         cache[profile] = (_t.monotonic(), markers)
         return markers
+
+    def _saved_markers(self, profile: str) -> list:
+        """The moments you saved — the tag's markers minus the ones the legacy
+        scorer wrote automatically ("apex 0.873"), which say nothing about you."""
+        from ..playlist import is_auto_marker
+
+        return [m for m in self._taste_markers(profile)
+                if not is_auto_marker(m.get("title") or "", profile)]
+
+    def saved_moments_audit(self, profile: str | None = None) -> dict:
+        """Where your saved moments stand, for the Taste card: how many there are,
+        how many already count as a 👍 (weighted ×2 in training), how many are
+        added from the marker alone, how many sit on scenes not embedded yet —
+        and how many auto-scored legacy markers are being ignored."""
+        profile = profile or self.cfg.markers.tag_name
+        allm = self._taste_markers(profile)
+        saved = self._saved_markers(profile)
+        idx = self.index(self._model_name())
+        sid_key: dict[str, str] = {}
+        for k, m in idx.key_meta.items():
+            if m.get("scene_id") is not None:
+                sid_key.setdefault(str(m["scene_id"]), k)
+        pos: dict[str, list[float]] = {}
+        for lab in self._label_store().for_profile(profile):
+            if lab.label == 1 and getattr(lab, "source", "explicit") == "explicit":
+                pos.setdefault(lab.key, []).append(float(lab.time))
+        rated = added = not_embedded = 0
+        for m in saved:
+            key = sid_key.get(str(m.get("scene_id")))
+            if not key:
+                not_embedded += 1
+            elif any(abs(t - float(m.get("seconds") or 0)) < 2.0 for t in pos.get(key, [])):
+                rated += 1
+            else:
+                added += 1
+        return {"tag": profile, "saved": len(saved), "rated": rated, "added": added,
+                "not_embedded": not_embedded, "auto_ignored": len(allm) - len(saved)}
 
     def _forget_markers(self, profile: str | None = None) -> None:
         cache = self.__dict__.setdefault("_marker_cache", {})

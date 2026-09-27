@@ -479,3 +479,61 @@ def test_slow_requests_are_logged(tmp_path):
     finally:
         forensics._write = orig
     assert len(lines) == 1 and "[slow] 12.3s GET /api/performer/best" in lines[0]
+
+
+# --- saved moments vs. the legacy scorer's auto markers ----------------------------
+
+def test_auto_marker_detection():
+    from peaks.playlist import is_auto_marker
+
+    assert is_auto_marker("apex 0.873", "apex")
+    assert is_auto_marker("apex 1", "apex")
+    assert not is_auto_marker("apex (saved)", "apex")
+    assert not is_auto_marker("my favourite bit", "apex")
+    assert not is_auto_marker("heels 0.5", "apex")          # another tag's score
+
+
+def test_only_your_saves_feed_taste_and_the_audit_counts_them(svc):
+    tag = svc.cfg.markers.tag_name
+    svc.client().markers = [
+        {"marker_id": "s1", "scene_id": "0", "seconds": svc._peaks["k0"], "title": f"{tag} (saved)"},
+        {"marker_id": "s2", "scene_id": "15", "seconds": svc._peaks["k15"], "title": f"{tag} (saved)"},
+        {"marker_id": "a1", "scene_id": "21", "seconds": 4.0, "title": f"{tag} 0.912"},     # auto
+        {"marker_id": "a2", "scene_id": "24", "seconds": 8.0, "title": f"{tag} 0.871"},     # auto
+        {"marker_id": "s3", "scene_id": "999", "seconds": 1.0, "title": f"{tag} (saved)"},  # not embedded
+    ]
+    for m in svc.client().markers:
+        m["end_seconds"] = None
+    svc._forget_markers()
+    svc.add_label("k0", svc._peaks["k0"], 1, scene_id="0")      # the 👍 the save made
+    _, sources = svc._taste_sources(svc._model_name())
+    apex_scenes = {s["scene_id"] for s in sources if s["kind"] == "apex"}
+    assert apex_scenes == {"0", "15"}                          # auto markers aren't "loved"
+    a = svc.saved_moments_audit()
+    assert a == {"tag": tag, "saved": 3, "rated": 1, "added": 1, "not_embedded": 1, "auto_ignored": 2}
+    weak, _ = svc._weak_taste_rows(tag, svc._model_name())
+    assert {w.key for w in weak if w.source == "marker"} == {"k15"}
+    assert "k0" in svc._saved_at and "k21" not in svc._saved_at
+    board = svc.board_apexes()
+    assert board["count"] == 3                                 # Saved moments channel: yours only
+
+
+def test_a_saved_moment_counts_double(tmp_path, monkeypatch):
+    import peaks.classifier as clf_mod
+
+    cache, peaks = _library(tmp_path)
+    store = _labels(tmp_path, peaks, n_pos=6, n_neg=6)
+    seen = {}
+    real = clf_mod.TasteClassifier.train
+
+    def spy(self, X, y, sample_weight=None):
+        seen["w"] = None if sample_weight is None else list(sample_weight)
+        return real(self, X, y, sample_weight=sample_weight)
+    monkeypatch.setattr(clf_mod.TasteClassifier, "train", spy)
+    first = list(peaks)[0]
+    train_profile(store, cache, "dinov2", "apex", evaluate=False, boost={first: [peaks[first]]})
+    w = seen["w"]
+    labs = list(store.for_profile("apex"))
+    i = next(j for j, lab in enumerate(labs) if lab.key == first)
+    others = [w[j] for j, lab in enumerate(labs) if lab.label == 1 and lab.key != first]
+    assert w[i] == pytest.approx(2 * others[0])

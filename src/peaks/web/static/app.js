@@ -1964,7 +1964,7 @@ function tqSpark(hist, key) {
   const xy = pts.map((p, i) => `${(i / (pts.length - 1) * W).toFixed(1)},${(H - 2 - (p - lo) / (hi - lo || 1) * (H - 4)).toFixed(1)}`);
   return `<svg class="tq-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${xy.join(" ")}" /></svg>`;
 }
-const TQ_SRC = [["explicit", "your ratings"], ["marker", "⭐ markers"], ["tier", "graded-scene moments"],
+const TQ_SRC = [["explicit", "your ratings"], ["marker", "saved moments with no 👍 yet"], ["tier", "graded-scene moments"],
   ["reject", "reject moments"], ["engage", "from watching"], ["background", "library background"]];
 // the full measure runs as a background job; the card follows it
 const tqJob = { id: null, timer: null };
@@ -2054,10 +2054,25 @@ async function loadTasteQuality() {
         ${tqSpark(hist, "auc") || '<span class="faint small">AUC · trend after 2 trainings</span>'}</div>
     </div>
     <div class="tq-src"><span class="faint">Learned from</span>${src}${L.pu_dropped ? `<span class="faint">· ${L.pu_dropped} look-alike background frames set aside</span>` : ""}</div>
+    <div class="tq-saved small" id="tq-saved"></div>
     <div class="faint small">${model}</div>
     <div class="faint small">${esc(tqScheduleLine(q.schedule))}</div>
     <div id="tq-run" class="tq-run" hidden></div>`;
   followMeasure();
+  loadSavedAudit();
+}
+// your saved moments: how they feed the taste model (live from Stash)
+async function loadSavedAudit() {
+  const el = $("#tq-saved"); if (!el) return;
+  let a;
+  try { a = await api("/api/taste/saved?" + new URLSearchParams(pparam())); } catch { return; }
+  const n = (x) => x.toLocaleString();
+  const parts = [`<b>${n(a.saved)}</b> saved moments`];
+  if (a.rated) parts.push(`${n(a.rated)} already count as a 👍 — weighted double`);
+  if (a.added) parts.push(`${n(a.added)} added from the save alone`);
+  if (a.not_embedded) parts.push(`${n(a.not_embedded)} on scenes not embedded yet`);
+  el.innerHTML = parts.join(" · ")
+    + (a.auto_ignored ? `<br><span class="faint">Ignoring ${n(a.auto_ignored)} auto-detected markers the old “Write markers” scorer left under “${esc(a.tag)}” — they aren't your picks.</span>` : "");
 }
 document.addEventListener("click", async (e) => {
   if (e.target.closest("#btn-tq-train")) startMeasure();

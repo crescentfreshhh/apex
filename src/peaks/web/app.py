@@ -786,6 +786,14 @@ def create_app(cfg=None):
         """The held-out benchmark history — one entry per training."""
         return service.taste_quality(profile=profile, last=last)
 
+    @app.get("/api/taste/saved")
+    def taste_saved(profile: str | None = None):
+        """Where your saved moments stand (for the Taste card)."""
+        try:
+            return service.saved_moments_audit(profile)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
     @app.post("/api/taste/engage")
     def taste_engage(scene_id: str, t: float, kind: str = "dwell"):
         """A soft positive: you sought to `t` in the Review player and stayed."""

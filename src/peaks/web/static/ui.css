@@ -449,3 +449,5 @@ input[type=checkbox] { accent-color: var(--gold); }
 .tq-run { display: flex; flex-direction: column; gap: 6px; }
 .tq-run .bar { height: 4px; background: var(--line); border-radius: 3px; overflow: hidden; }
 .tq-run .bar i { display: block; height: 100%; background: var(--gold); transition: width .4s; }
+.tq-saved { color: var(--dim); line-height: 1.6; }
+.tq-saved b { color: var(--fg); }
