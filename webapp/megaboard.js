@@ -123,6 +123,7 @@ function loadApex(tile) {
   tile.el.classList.remove("extended");
   tile.apex = apex;
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
+  tile.reqStart = apex.start;     // a transcoded clip's timeline begins AT the moment
   tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`
     + (apex.taste != null ? ` · ${Math.round(apex.taste * 100)}%` : "");
   paintBadge(tile); wantTier(apex.scene_id);
@@ -153,6 +154,7 @@ function extendTile(tile) {
     // offset = short-clip stream with nothing past the moment; reload the full scene
     // so it can play forward. The loadedmetadata handler seeks back to apex.start.
     v.src = sceneStreamUrl(tile.apex.url);
+    tile.reqStart = 0;
     v.load();
   }
   if (State.playing) v.play().catch(() => {});
@@ -272,6 +274,7 @@ function expand(tile) {
   v.loop = false;
   v.muted = State.muted; v.volume = State.volume;   // enlarged tile carries the global audio
   v.src = sceneStreamUrl(apex.url);
+  tile.reqStart = 0;
   v.load();
   const onMeta = () => {
     v.removeEventListener("loadedmetadata", onMeta);
@@ -579,8 +582,16 @@ function onKey(e) {
     default: break;
   }
 }
+// The moment on the SCENE's timeline. Stash direct-streams a file the browser can
+// play (start= is ignored → the video clock IS the scene clock, "absolute"), but
+// transcodes the rest — and a transcoded clip starts AT the moment, so its clock
+// reads 0 there ("offset"). Saving/rating the raw clock in that case filed the
+// moment near the start of the scene instead.
 function tileTime(t) {
-  return (t.video && isFinite(t.video.currentTime)) ? t.video.currentTime : (t.apex?.start || 0);
+  const v = t.video;
+  if (!v || !isFinite(v.currentTime)) return t.apex?.start || 0;
+  const origin = t.mode === "absolute" ? 0 : (t.reqStart || 0);
+  return origin + v.currentTime;
 }
 
 // --- sources: shuffle-all / apex tag / saved collection / search handoff ----
@@ -896,7 +907,7 @@ function openTileMenu(tile, x, y) {
   closeTileMenu();
   State.menuTile = tile;   // keep this tile audible while its menu is up
   const apex = tile.apex;
-  const t = (tile.video && isFinite(tile.video.currentTime)) ? tile.video.currentTime : apex.start;
+  const t = tileTime(tile);   // scene time, whichever way this tile is streamed
   // deep-link out to the real Stash scene page, seeked to this moment (?t=seconds)
   let stashHref = null;
   try { stashHref = new URL(apex.url, location.href).origin + "/scenes/" + apex.scene_id + "?t=" + Math.round(t); }
@@ -908,7 +919,7 @@ function openTileMenu(tile, x, y) {
     // taste actions
     ["👍 More of this (my taste)", () => rateMoment(apex.scene_id, t, 1)],
     ["👎 Less of this", () => rateMoment(apex.scene_id, t, 0)],
-    ["★ Save moment", () => apexState.is ? removeApex(apex.scene_id, apex.start) : saveApex(apex.scene_id, t), "apex"],
+    ["★ Save moment", () => apexState.is ? removeApex(apex.scene_id, apexState.marker) : saveApex(apex.scene_id, t), "apex"],
     // explore more — narrowest to broadest scope
     ["🎞 More moments in this scene", () => moreInThisScene(apex.scene_id)],
     ["🔎 More like this moment", () => moreLikeThis(apex.scene_id, t)],
@@ -955,9 +966,9 @@ function openTileMenu(tile, x, y) {
   applyGridAudio();   // keep this tile audible now, before mouseleave nulls overTile
   setTimeout(() => document.addEventListener("click", closeTileMenu, true), 0);
   // confirm apex status out-of-band; flip the toggle to "Remove" only if it is one
-  checkApex(apex.scene_id, apex.start).then((is) => {
-    if (!is || !menu.isConnected) return;
-    apexState.is = true;
+  checkApex(apex, t).then((m) => {
+    if (!m || !menu.isConnected) return;
+    apexState.is = true; apexState.marker = m;
     const b = menu.querySelector('[data-role="apex"]');
     if (b) b.textContent = "✖ Unsave moment";
   });
@@ -1099,17 +1110,22 @@ async function saveApex(scene_id, t) {
     flashStatus("★ saved moment @ " + fmt(t));
   } catch (e) { flashStatus(e.message); }
 }
-// does an apex marker sit at this moment? (drives the menu's Save/Remove toggle)
-async function checkApex(scene_id, t) {
+// is a saved moment on this clip? Looks across the clip's whole span (you may
+// have saved it a few seconds in) and around where it's playing now; returns
+// {marker_id, seconds} of the one nearest the playhead, or null.
+async function checkApex(apex, now) {
+  const lo = Math.min(apex.start, now) - 2, hi = Math.max(apex.end || apex.start, now) + 2;
+  const mid = (lo + hi) / 2;
   try {
-    const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam());
-    return !!(d && d.is_apex);
-  } catch { return false; }
+    const d = await api(`/api/scene/${encodeURIComponent(apex.scene_id)}/apex?t=${mid.toFixed(2)}&tol=${((hi - lo) / 2).toFixed(2)}` + tagParam());
+    return d && d.is_apex ? { marker_id: d.marker_id, seconds: d.seconds } : null;
+  } catch { return null; }
 }
-async function removeApex(scene_id, t) {
+async function removeApex(scene_id, marker) {
+  if (!marker) return;
   try {
-    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "DELETE" });
-    flashStatus("✖ unsaved moment @ " + fmt(t));
+    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+marker.seconds || 0).toFixed(2)}&marker_id=${encodeURIComponent(marker.marker_id)}` + tagParam(), { method: "DELETE" });
+    flashStatus("✖ unsaved moment @ " + fmt(+marker.seconds || 0));
   } catch (e) { flashStatus(e.message); }
 }
 // Save whatever is currently driving the board — a "more like this" rabbit hole,

@@ -1399,17 +1399,21 @@ def create_app(cfg=None):
             raise HTTPException(502, f"Stash marker create failed: {exc}")
 
     @app.get("/api/scene/{scene_id}/apex")
-    def check_apex(scene_id: str, t: float, tag: str | None = None):
-        """Is the moment at `t` an apex? Powers the board's conditional
-        'remove as apex' menu item."""
-        m = service.find_apex(scene_id, t, tag=tag)
+    def check_apex(scene_id: str, t: float, tag: str | None = None,
+                   tol: float = Query(2.0, ge=0, le=180)):
+        """Is there a saved moment within `tol` s of `t` (the board passes the
+        clip's span)? Powers the board's Save/Unsave toggle."""
+        m = service.find_apex(scene_id, t, tag=tag, tol=tol)
         return {"is_apex": bool(m), "marker_id": (m or {}).get("marker_id"),
                 "seconds": (m or {}).get("seconds")}
 
     @app.delete("/api/scene/{scene_id}/apex")
-    def remove_apex(scene_id: str, t: float, tag: str | None = None):
+    def remove_apex(scene_id: str, t: float, tag: str | None = None,
+                    marker_id: str | None = None):
+        """Delete the saved moment nearest `t` — or exactly `marker_id` (the one
+        the Save/Unsave check found), when given."""
         try:
-            return service.remove_apex(scene_id, t, tag=tag)
+            return service.remove_apex(scene_id, t, tag=tag, marker_id=marker_id)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash marker delete failed: {exc}")
 

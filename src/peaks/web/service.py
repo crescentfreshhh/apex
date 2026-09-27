@@ -1839,12 +1839,23 @@ class Service(LibraryMixin):
         return best
 
     def remove_apex(
-        self, scene_id: str, time: float, tag: str | None = None, tol: float = 2.0
+        self, scene_id: str, time: float, tag: str | None = None, tol: float = 2.0,
+        marker_id: str | None = None,
     ) -> dict:
-        """Delete the apex marker on `scene_id` nearest `time` — the inverse of
-        create_apex. Returns {removed, marker_id}. The taste 👍 that the original
-        save recorded is left in place (undo it with 👎 if you want)."""
-        m = self.find_apex(scene_id, time, tag=tag, tol=tol)
+        """Delete the apex marker on `scene_id` nearest `time` (or exactly
+        `marker_id`, if it's one of this scene's markers under the tag) — the
+        inverse of create_apex. Returns {removed, marker_id}. The taste 👍 that the
+        original save recorded is left in place (undo it with 👎 if you want)."""
+        if marker_id is not None:
+            tag = tag or self.cfg.markers.tag_name
+            try:
+                mine = self.client().markers_for_scene(str(scene_id))
+            except Exception:  # noqa: BLE001
+                mine = []
+            m = next((x for x in mine if str(x.get("marker_id")) == str(marker_id)
+                      and x.get("primary_tag") == tag), None)
+        else:
+            m = self.find_apex(scene_id, time, tag=tag, tol=tol)
         if not m:
             return {"removed": 0, "marker_id": None}
         self.client().destroy_scene_markers([m["marker_id"]])

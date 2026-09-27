@@ -935,3 +935,58 @@ def test_jobmanager_captures_errors():
             break
         time.sleep(0.02)
     assert job.status == "error" and "kaboom" in job.error
+
+
+def test_saved_check_spans_the_clip_and_unsave_removes_that_marker(client, monkeypatch):
+    """The board asks 'is anything saved on this clip?' across its span (a save
+    made a few seconds in must flip the menu to Unsave) and unsaves by id."""
+    from peaks.web import service as svc
+
+    markers = [{"marker_id": "m7", "seconds": 131.0, "primary_tag": "apex"},
+               {"marker_id": "m8", "seconds": 400.0, "primary_tag": "apex"}]
+    destroyed = []
+
+    class _C:
+        def markers_for_scene(self, sid):
+            return markers
+
+        def destroy_scene_markers(self, ids):
+            destroyed.extend(ids)
+            return len(ids)
+
+    monkeypatch.setattr(svc.Service, "client", lambda self: _C())
+    cfg_tag = {"tag": "apex"}
+    # saved 11 s into a clip that starts at 120: a ±2 s check at the start misses it…
+    assert client.get("/api/scene/5/apex", params={"t": 120, **cfg_tag}).json()["is_apex"] is False
+    # …the clip-wide check (centre 126, ±9) finds it
+    d = client.get("/api/scene/5/apex", params={"t": 126, "tol": 9, **cfg_tag}).json()
+    assert d["is_apex"] and d["marker_id"] == "m7"
+    r = client.delete("/api/scene/5/apex", params={"t": 131, "marker_id": "m7", **cfg_tag})
+    assert r.json() == {"removed": 1, "marker_id": "m7"} and destroyed == ["m7"]
+    # an id that isn't this scene's saved moment is refused
+    assert client.delete("/api/scene/5/apex", params={"t": 0, "marker_id": "nope", **cfg_tag}).json()["removed"] == 0
+
+
+def test_megaboard_saves_on_the_scene_timeline():
+    """A transcoded clip's clock starts at 0 AT the moment; a direct stream's is the
+    scene clock. Saves/ratings must land on the scene timeline either way."""
+    import pathlib
+    import re
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    js = (pathlib.Path(__file__).resolve().parents[1] / "webapp/megaboard.js").read_text()
+    fn = re.search(r"function tileTime\(t\) \{.*?\n\}", js, re.S).group(0)
+    script = fn + """
+const v = (ct) => ({ currentTime: ct });
+console.log(JSON.stringify([
+  tileTime({ video: v(7), mode: "offset", reqStart: 720, apex: { start: 720 } }),   // transcoded clip
+  tileTime({ video: v(727), mode: "absolute", reqStart: 720, apex: { start: 720 } }), // direct stream
+  tileTime({ video: v(727), mode: "offset", reqStart: 0, apex: { start: 720 } }),    // enlarged/extended: full scene
+  tileTime({ video: v(NaN), mode: "offset", reqStart: 720, apex: { start: 720 } }),  // not loaded yet
+]));"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "[727,727,727,720]"
