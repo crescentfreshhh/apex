@@ -104,6 +104,20 @@ function makePicker(apexes) {
 
 let pickApex = () => null;
 
+// --- navigation: the newest pivot / channel wins ----------------------------------
+// Pivots and channel loads are async, and a big one can take seconds. Without a
+// guard, a slow earlier request that finished AFTER a newer one swapped the board
+// back to the old pivot. Each navigation takes a ticket; starting a new one aborts
+// the previous request and anything that lands late is dropped.
+const Nav = { seq: 0, ctl: null };
+function beginNav() {
+  if (Nav.ctl) Nav.ctl.abort();
+  Nav.ctl = new AbortController();
+  return { seq: ++Nav.seq, signal: Nav.ctl.signal };
+}
+function isStale(tok) { return !!tok && tok.seq !== Nav.seq; }
+function navApi(tok, path, opts = {}) { return api(path, { ...opts, signal: tok.signal }); }
+
 // --- same-origin API (best-effort; the board works without it) -------------
 
 async function api(path, opts) {
@@ -994,6 +1008,7 @@ function pushHistory() {
 // ← Back: the previous board exactly as it was (re-filtered if the floor moved)
 function goBack() {
   if (!State.history.length) { if (State.pivot) refreshChannel(); return; }
+  beginNav();   // drop any pivot still loading — Back wins
   if (State.big) collapse(State.big);
   const b = State.history.pop();
   Object.assign(State, { apexes: b.apexes, base: b.base, pivot: b.pivot, pivotSeed: b.pivotSeed,
@@ -1049,7 +1064,8 @@ function syncNav() {
 }
 // swap the whole board to a new pool live — no reload. `rerun` re-applies the
 // current pivot (floor change) instead of stacking a new one.
-function pivotBoard(apexes, label, meta = {}, rerun = false) {
+function pivotBoard(apexes, label, meta = {}, rerun = false, tok = null) {
+  if (isStale(tok)) return false;
   if (!apexes.length) { flashStatus("nothing to show"); return false; }
   if (!rerun) pushHistory();
   if (State.big) collapse(State.big);
@@ -1060,7 +1076,7 @@ function pivotBoard(apexes, label, meta = {}, rerun = false) {
   State.searchMode = true; State.shuffle = false;
   State.base = apexes.slice(); State.apexes = apexes; State.floorNote = "";
   pickApex = makePicker(State.apexes);
-  const done = () => { syncFloorVisibility(); syncNav(); reshuffle(); updateStatus(); };
+  const done = () => { if (isStale(tok)) return; syncFloorVisibility(); syncNav(); reshuffle(); updateStatus(); };
   if (floorMode() === "filter") filterToFloor().then(done);
   else done();
   return true;
@@ -1068,18 +1084,20 @@ function pivotBoard(apexes, label, meta = {}, rerun = false) {
 async function moreLikeThis(scene_id, t, rerun = false) {
   // with a floor set, every match above it (the count follows the slider);
   // with it off, a generous default
+  const tok = beginNav();
   flashStatus("finding similar…");
   try {
     const qs = new URLSearchParams({ scene_id, t });
     if (fyMinScore > 0) qs.set("min_score", fyMinScore);
     else qs.set("top_k", 300);
-    const d = await api("/api/search/similar?" + qs.toString());
+    const d = await navApi(tok, "/api/search/similar?" + qs.toString());
+    if (isStale(tok)) return;
     const items = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
     if (pivotBoard(items, `🔎 more like that moment${flr}`,
-      { seed: { scene_id, t }, spec: { kind: "similar", scene_id, t } }, rerun))
+      { seed: { scene_id, t }, spec: { kind: "similar", scene_id, t } }, rerun, tok))
       flashStatus(`🔎 ${items.length} moments like that${flr}`);
-  } catch (e) { flashStatus(e.message); }
+  } catch (e) { if (!isStale(tok)) flashStatus(e.message); }
 }
 async function saveHerBest(scene_id) {
   flashStatus("finding her best…");
@@ -1164,41 +1182,47 @@ async function saveLivePlaylist() {
 // pivoting shouldn't confine you to the curated taste feed. Moving the floor
 // re-runs it tightened (in place, via pivotApplyFloor).
 async function moreFromActress(scene_id, tighten = false) {
+  const tok = beginNav();
   flashStatus("finding her scenes…");
   try {
     const useFloor = tighten && fyMinScore > 0;
     const qs = new URLSearchParams({ scene_id, count: PIVOT_COUNT, per_scene: PIVOT_PER_SCENE });
     if (useFloor) qs.set("min_score", fyMinScore);
     else qs.set("spread", "true");   // broad, unfiltered span of her scenes
-    const d = await api("/api/performer/best?" + qs.toString());
+    const d = await navApi(tok, "/api/performer/best?" + qs.toString());
+    if (isStale(tok)) return;
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer info for this scene");
     const tag = useFloor ? ` ≥ ${Math.round(fyMinScore * 100)}%` : " · full spread";
     if (pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + tag,
-      { applyFloor: () => moreFromActress(scene_id, true), spec: { kind: "performer", scene_id } }, tighten))
+      { applyFloor: () => moreFromActress(scene_id, true), spec: { kind: "performer", scene_id } }, tighten, tok))
       flashStatus(`🎬 ${apexes.length} moments from ${d.performer || "her"}${tag}`);
-  } catch (e) { flashStatus(e.message); }
+  } catch (e) { if (!isStale(tok)) flashStatus(e.message); }
 }
 // similar moments to THIS one, but only across this scene's performer
 async function moreMomentSameActress(scene_id, t) {
+  const tok = beginNav();
   flashStatus("finding her moments like this…");
   try {
-    const d = await api("/api/board/performer_moment?" + new URLSearchParams({ scene_id, t }).toString());
+    const d = await navApi(tok, "/api/board/performer_moment?" + new URLSearchParams({ scene_id, t }).toString());
+    if (isStale(tok)) return;
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no similar moments for ${d.performer}` : "no performer info for this scene");
     pivotBoard(apexes, "🎬 more like this · " + (d.performer || "same actress"),
-      { spec: { kind: "performer_moment", scene_id, t } });
-  } catch (e) { flashStatus(e.message); }
+      { spec: { kind: "performer_moment", scene_id, t } }, false, tok);
+  } catch (e) { if (!isStale(tok)) flashStatus(e.message); }
 }
 // stay in this scene: a diverse spread of its moments
 async function moreInThisScene(scene_id) {
+  const tok = beginNav();
   flashStatus("gathering this scene…");
   try {
-    const d = await api(`/api/scene/${encodeURIComponent(scene_id)}/moments`);
+    const d = await navApi(tok, `/api/scene/${encodeURIComponent(scene_id)}/moments`);
+    if (isStale(tok)) return;
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus("no other embedded moments in this scene");
-    pivotBoard(apexes, "🎞 more in scene #" + scene_id, { spec: { kind: "scene", scene_id } });
-  } catch (e) { flashStatus(e.message); }
+    pivotBoard(apexes, "🎞 more in scene #" + scene_id, { spec: { kind: "scene", scene_id } }, false, tok);
+  } catch (e) { if (!isStale(tok)) flashStatus(e.message); }
 }
 function setStatus(msg) {
   const el = document.getElementById("status-line");
@@ -1222,6 +1246,7 @@ function specForSource(src) {
   return null;  // shuffle / tag / collection — not live-derivable
 }
 async function loadSource(src, opts = {}) {
+  const tok = beginNav();
   State.source = src;
   State.sourceSpec = specForSource(src);   // pivots override this below
   State.entryFloor = fyMinScore;   // remember the floor at entry; pivots never re-run this, so Refresh can restore it
@@ -1239,12 +1264,12 @@ async function loadSource(src, opts = {}) {
       fyReset();
       await fyRefetch(true);
       if (!State.apexes.length)
-        return showError(`Nothing scores ≥ ${Math.round(fyMinScore * 100)}% yet — lower the taste floor.`);
+        return isStale(tok) ? undefined : showError(`Nothing scores ≥ ${Math.round(fyMinScore * 100)}% yet — lower the taste floor.`);
       pickApex = fyPick;
     } else if (src === "shuffle") {
       const d = await api("/api/board/scenes" + (opts.refresh ? "?refresh=true" : ""));
       State.pool = d.scenes || [];
-      if (!State.pool.length) return showError("No scenes found in your library scope.");
+      if (!State.pool.length) return isStale(tok) ? undefined : showError("No scenes found in your library scope.");
       State.shuffle = true;
       pickApex = randomMoment;
     } else if (src.startsWith("collection:")) {
@@ -1253,13 +1278,13 @@ async function loadSource(src, opts = {}) {
       let apexes = pl.apexes || [];
       if (pl.live) {   // re-derive from the saved source spec, not the frozen snapshot
         try {
-          const d = await api("/api/collection/derive?name=" + encodeURIComponent(safe));
+          const d = await navApi(tok, "/api/collection/derive?name=" + encodeURIComponent(safe));
           const fresh = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
           if (fresh.length) apexes = fresh;
         } catch (e) { /* fall back to the stored snapshot */ }
       }
       State.apexes = apexes; State.searchMode = true;
-      if (!State.apexes.length) return showError("This playlist has no moments.");
+      if (!State.apexes.length) return isStale(tok) ? undefined : showError("This playlist has no moments.");
       pickApex = makeQueuePicker(State.apexes);   // play every clip before repeating
     } else if (src === "search") {
       State.searchMode = true;
@@ -1272,14 +1297,14 @@ async function loadSource(src, opts = {}) {
         if (boardSearch.min > 0) qs.set("min_score", boardSearch.min);
         if (boardSearch.taste) qs.set("taste", "true");
         let d;
-        try { d = await api("/api/search/text?" + qs.toString()); }
-        catch (e) { return showError("Search failed.\n\n(" + e.message + ")"); }
+        try { d = await navApi(tok, "/api/search/text?" + qs.toString()); }
+        catch (e) { return isStale(tok) ? undefined : showError("Search failed.\n\n(" + e.message + ")"); }
         State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
-        if (!State.apexes.length) return showError("No matches at this match strength.");
+        if (!State.apexes.length) return isStale(tok) ? undefined : showError("No matches at this match strength.");
       } else {
         let pl = null; try { pl = JSON.parse(localStorage.getItem("mb_search") || "null"); } catch {}
         State.apexes = (pl && pl.apexes) || [];
-        if (!State.apexes.length) return showError("No search results to play. Run a search and hit 'Play on megaboard'.");
+        if (!State.apexes.length) return isStale(tok) ? undefined : showError("No search results to play. Run a search and hit 'Play on megaboard'.");
       }
       pickApex = makeQueuePicker(State.apexes);
     } else if (src === "performer") {
@@ -1292,10 +1317,10 @@ async function loadSource(src, opts = {}) {
       if (fyMinScore > 0) qs.set("min_score", fyMinScore);
       else qs.set("spread", "true");
       let d;
-      try { d = await api("/api/performer/best?" + qs.toString()); }
-      catch (e) { return showError("Couldn't load this performer.\n\n(" + e.message + ")"); }
+      try { d = await navApi(tok, "/api/performer/best?" + qs.toString()); }
+      catch (e) { return isStale(tok) ? undefined : showError("Couldn't load this performer.\n\n(" + e.message + ")"); }
       State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
-      if (!State.apexes.length) return showError("No embedded moments for this performer.");
+      if (!State.apexes.length) return isStale(tok) ? undefined : showError("No embedded moments for this performer.");
       pickApex = makeQueuePicker(State.apexes);
       setStatus("🎬 " + (d.performer || "performer") + " · best of");
     } else if (src === "stat") {
@@ -1303,10 +1328,10 @@ async function loadSource(src, opts = {}) {
       const qs = new URLSearchParams({ metric: boardStat?.metric || "fresh" });
       if (boardStat?.id) qs.set("id", boardStat.id);
       let d;
-      try { d = await api("/api/stats/board?" + qs.toString()); }
-      catch (e) { return showError("Couldn't load this statistic.\n\n(" + e.message + ")"); }
+      try { d = await navApi(tok, "/api/stats/board?" + qs.toString()); }
+      catch (e) { return isStale(tok) ? undefined : showError("Couldn't load this statistic.\n\n(" + e.message + ")"); }
       State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
-      if (!State.apexes.length) return showError("No moments for this statistic yet.");
+      if (!State.apexes.length) return isStale(tok) ? undefined : showError("No moments for this statistic yet.");
       pickApex = makeQueuePicker(State.apexes);
       setStatus("📈 " + (boardStat?.label || boardStat?.metric || "stat"));
     } else if (src.startsWith("tier:")) {
@@ -1314,11 +1339,11 @@ async function loadSource(src, opts = {}) {
       State.searchMode = true;
       const tiers = src.slice(5);
       let d;
-      try { d = await api("/api/board/tier?tiers=" + encodeURIComponent(tiers)); }
-      catch (e) { return showError("Couldn't load this tier.\n\n(" + e.message + ")"); }
+      try { d = await navApi(tok, "/api/board/tier?tiers=" + encodeURIComponent(tiers)); }
+      catch (e) { return isStale(tok) ? undefined : showError("Couldn't load this tier.\n\n(" + e.message + ")"); }
       State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
       if (!State.apexes.length)
-        return showError(`No embedded moments in ${d.label || "this tier"} yet.\n\nGrade some scenes in the Catalogue first.`);
+        return isStale(tok) ? undefined : showError(`No embedded moments in ${d.label || "this tier"} yet.\n\nGrade some scenes in the Catalogue first.`);
       pickApex = makeQueuePicker(State.apexes);   // every clip before repeating
       setStatus(`🏆 ${d.label} · ${d.scenes} scenes`);
     } else if (src === "foryou") {
@@ -1336,22 +1361,25 @@ async function loadSource(src, opts = {}) {
       // than replaying the stale on-screen seed's top moments first.
       fyState.exclude.clear();
       await fyRefetch(true);
-      if (!State.apexes.length) return showError("No For You taste yet. Thumb up moments or save apexes (⚑), then try again.");
+      if (!State.apexes.length) return isStale(tok) ? undefined : showError("No For You taste yet. Thumb up moments or save apexes (⚑), then try again.");
       pickApex = fyPick;
     } else {
       const tag = src.startsWith("tag:") ? src.slice(4) : src;
       const pl = await api("/api/board/apexes?tag=" + encodeURIComponent(tag));
       State.apexes = pl.apexes || [];
       if (!State.apexes.length)
-        return showError(`No saved moments for tag "${tag}".\n\nSave some with ★ in Explore — or pick "Shuffle" above to play everything.`);
+        return isStale(tok) ? undefined : showError(`No saved moments for tag "${tag}".\n\nSave some with ★ in Explore — or pick "Shuffle" above to play everything.`);
       pickApex = makePicker(State.apexes);
     }
   } catch (err) {
-    return showError("Couldn't load this source.\n\n(" + err.message + ")");
+    if (isStale(tok)) return;
+    return isStale(tok) ? undefined : showError("Couldn't load this source.\n\n(" + err.message + ")");
   }
+  if (isStale(tok)) return;          // you switched channel/pivoted while it loaded
   if (floorMode() === "filter") {   // this channel filters client-side by taste
     State.base = State.apexes.slice();
     await filterToFloor();
+    if (isStale(tok)) return;
   }
   syncFloorVisibility(); syncNav();
   buildBoard(parseInt(document.getElementById("grid").value, 10));

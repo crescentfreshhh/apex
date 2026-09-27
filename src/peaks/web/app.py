@@ -290,10 +290,17 @@ def create_app(cfg=None):
 
     @app.middleware("http")
     async def _count_requests(request: Request, call_next):
+        import time as _time
+
         p = request.url.path
-        if p.startswith("/api/"):
-            forensics.note_request(p if not p.startswith("/api/scene/") else "/api/scene/…")
-        return await call_next(request)
+        if not p.startswith("/api/"):
+            return await call_next(request)
+        forensics.note_request(p if not p.startswith("/api/scene/") else "/api/scene/…")
+        t0 = _time.monotonic()
+        resp = await call_next(request)
+        if not p.startswith("/api/jobs"):
+            forensics.note_duration(request.method, p, _time.monotonic() - t0)
+        return resp
 
     @app.on_event("shutdown")
     def _clean_exit():

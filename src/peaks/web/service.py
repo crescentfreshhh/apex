@@ -1804,8 +1804,21 @@ class Service(LibraryMixin):
             scene_id=str(scene_id), seconds=float(start), primary_tag_id=t.id,
             title=f"{tag} (saved)", end_seconds=float(end),
         )
+        self._note_marker(tag, {"marker_id": str((marker or {}).get("id", "")), "scene_id": str(scene_id),
+                                "seconds": float(start), "end_seconds": float(end),
+                                "title": f"{tag} (saved)"})
         self._label_apex_as_taste(scene_id, float(start), tag)
         return marker
+
+    def _note_marker(self, profile: str, mk: dict | None = None, remove_id: str | None = None) -> None:
+        """Keep the cached marker list in step with a save/unsave made here."""
+        hit = self.__dict__.setdefault("_marker_cache", {}).get(profile)
+        if hit is None:
+            return
+        if mk is not None:
+            hit[1].append(mk)
+        if remove_id is not None:
+            hit[1][:] = [m for m in hit[1] if str(m.get("marker_id")) != str(remove_id)]
 
     def _label_apex_as_taste(self, scene_id: str, time: float, profile: str) -> None:
         """Record a saved apex as a positive taste label (best-effort). Only
@@ -1859,6 +1872,9 @@ class Service(LibraryMixin):
         if not m:
             return {"removed": 0, "marker_id": None}
         self.client().destroy_scene_markers([m["marker_id"]])
+        self._note_marker(tag or self.cfg.markers.tag_name, remove_id=m["marker_id"])
+        self._taste_src_cache.clear()
+        self._taste_modes_cache.clear()
         return {"removed": 1, "marker_id": m["marker_id"]}
 
     def search_text(
@@ -1901,7 +1917,7 @@ class Service(LibraryMixin):
         # ratings) or a manual Train — so ratings appeared not to "take" and the
         # board kept scoring against an older taste. Caches rebuild lazily on the
         # next query (a cheap re-score for the modes/centroid scorer).
-        self._invalidate_taste_caches()
+        self._invalidate_after_rating()
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
 
@@ -1995,6 +2011,7 @@ class Service(LibraryMixin):
                 ]
                 self.client().destroy_scene_markers(ids)
                 out["apexes_removed"] = len(ids)
+                self._forget_markers(profile)
                 self._invalidate_taste_caches()  # centroid now rebuilds empty
             except Exception as e:  # noqa: BLE001 — labels/model are already gone
                 out["apexes_removed"] = 0
@@ -2222,6 +2239,7 @@ class Service(LibraryMixin):
         with self._taste_lock:
             self._taste.pop(str(out), None)
         self._invalidate_taste_caches()  # board must re-score with the new model
+        self._warm_taste_scores(model)   # …in the background, not on your next pivot
         res = {"model": model, "profile": profile, "mode": "full" if full else "quick", **stats}
         if not full:
             if prev:
@@ -2455,7 +2473,7 @@ class Service(LibraryMixin):
 
         # apex markers — the moments you explicitly saved
         try:
-            for mk in self.client().iter_markers_by_tag(profile):
+            for mk in self._taste_markers(profile):
                 sid = mk.get("scene_id")
                 if sid:
                     _add(sid_key.get(str(sid)), mk.get("seconds") or 0.0, str(sid), "apex")
@@ -2623,6 +2641,53 @@ class Service(LibraryMixin):
         order = rng.choice(n, size=n, replace=False, p=p)
         return [ranked[int(i)] for i in order]
 
+    def _invalidate_after_rating(self) -> None:
+        """A 👍/👎 changes the taste sources (centroid, modes) at once, but with a
+        trained model the per-moment scores only change at the next retrain — so
+        keep those (a library-wide re-score is the slow part of a pivot). The
+        Stash markers are cached separately and survive a rating too."""
+        self._taste_src_cache.clear()
+        self._taste_modes_cache.clear()
+        by_classifier = any(v[1] == "classifier" for v in self._board_score_cache.values() if v)
+        if not by_classifier:          # modes/centroid scoring depends on the ratings
+            self._board_score_cache.clear()
+            self._board_universe_cache.clear()
+            self._peak_index_cache = None
+            self._scene_seg_cache = None
+
+    _MARKER_TTL = 600.0
+
+    def _taste_markers(self, profile: str) -> list:
+        """Your saved (apex) markers for `profile`, cached for 10 minutes and
+        updated in place when you save/unsave from Peaks — so ratings and pivots
+        don't re-page every marker out of Stash each time."""
+        import time as _t
+
+        cache = self.__dict__.setdefault("_marker_cache", {})
+        hit = cache.get(profile)
+        if hit is not None and _t.monotonic() - hit[0] < self._MARKER_TTL:
+            return hit[1]
+        markers = list(self.client().iter_markers_by_tag(profile))
+        cache[profile] = (_t.monotonic(), markers)
+        return markers
+
+    def _forget_markers(self, profile: str | None = None) -> None:
+        cache = self.__dict__.setdefault("_marker_cache", {})
+        if profile is None:
+            cache.clear()
+        else:
+            cache.pop(profile, None)
+
+    def _warm_taste_scores(self, model: str) -> None:
+        """Re-score the library in the background right after a retrain, so the
+        next pivot/board doesn't pay for it while you wait."""
+        def run():
+            try:
+                self._taste_scores(model)
+            except Exception:  # noqa: BLE001 — best effort; it'll compute on demand
+                pass
+        threading.Thread(target=run, daemon=True, name="peaks-taste-warm").start()
+
     def _invalidate_taste_caches(self) -> None:
         """Drop the cached taste centroid, per-moment scores and board universe so
         the next feed/board reflects new ratings or a freshly trained model."""
@@ -2646,6 +2711,15 @@ class Service(LibraryMixin):
         cached = self._board_score_cache.get(ckey)
         if cached is not None:
             return cached
+        # one computation at a time: the post-train warm-up and a pivot asking at
+        # the same moment share a single library pass instead of doing it twice
+        with self.__dict__.setdefault("_score_lock", threading.Lock()):
+            cached = self._board_score_cache.get(ckey)
+            if cached is not None:
+                return cached
+            return self._compute_taste_scores(model, profile, ckey)
+
+    def _compute_taste_scores(self, model: str, profile: str, ckey):
         idx = self.index(model)
         if idx.size == 0:
             return None, None
@@ -4720,7 +4794,14 @@ class Service(LibraryMixin):
         return new
 
     def stream_url(self, scene_id: str, start: float | None = None) -> str:
-        return self.client().stream_url(scene_id, start=start)
+        # pure URL building — reuse one client rather than a new HTTP session per
+        # moment (a 6,000-moment pivot built 6,000 of them)
+        sig = (self.cfg.stash.url, self.cfg.stash.api_key)
+        c = self.__dict__.get("_url_client")
+        if c is None or c[0] != sig:
+            c = (sig, self.client())
+            self._url_client = c
+        return c[1].stream_url(scene_id, start=start)
 
 
 def _safe_reel_name(name: str) -> str:

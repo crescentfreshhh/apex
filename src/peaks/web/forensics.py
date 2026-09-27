@@ -112,6 +112,16 @@ def note_request(path: str) -> None:
     _state["routes"][path] += 1
 
 
+SLOW_SEC = 3.0
+
+
+def note_duration(method: str, path: str, secs: float) -> None:
+    """Log any request slower than SLOW_SEC — so 'the board hangs for 20 s'
+    shows up in docker logs / crash.log as the exact route and time."""
+    if secs >= SLOW_SEC:
+        _write(f"{_stamp()} [slow] {secs:.1f}s {method} {path}")
+
+
 class busy:
     """`with forensics.busy("tier-train"):` — heavy in-process work (not a
     job) that the heartbeat should name, so a crash log shows what ran."""

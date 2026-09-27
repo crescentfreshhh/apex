@@ -417,3 +417,65 @@ def test_cancelled_measure_leaves_the_model_alone(svc):
     with pytest.raises(RuntimeError, match="cancelled"):
         svc.train_taste(mode="full", job=_Job())
     assert path.read_bytes() == before
+
+
+# --- pivots stay fast: ratings don't re-page markers or re-score the library ------
+
+def test_rating_keeps_marker_cache_and_model_scores(svc, monkeypatch):
+    _trained(svc)
+    stash = svc.client()
+    pages = []
+    real = stash.iter_markers_by_tag
+    monkeypatch.setattr(stash, "iter_markers_by_tag", lambda tag: pages.append(tag) or real(tag))
+    model = svc._model_name()
+    svc._taste_centroid(model)
+    scores, by = svc._taste_scores(model)
+    assert by == "classifier"
+    n = len(pages)
+    for i in range(3):                                   # rate from the board
+        svc.add_label("k30", float(i), 1, scene_id="30")
+        svc._taste_centroid(model)
+    assert len(pages) == n                               # markers not re-fetched from Stash
+    assert svc._taste_scores(model)[0] is scores         # model scores kept (no retrain yet)
+
+
+def test_save_and_unsave_update_the_marker_cache(svc, monkeypatch):
+    stash = svc.client()
+    stash.markers = []
+    monkeypatch.setattr(stash, "find_or_create_tag", lambda name: type("T", (), {"id": "t1"})(), raising=False)
+    monkeypatch.setattr(stash, "create_scene_marker", lambda **kw: {"id": "m5"}, raising=False)
+    monkeypatch.setattr(stash, "markers_for_scene",
+                        lambda sid: [{"marker_id": "m5", "seconds": 40.0, "primary_tag": svc.cfg.markers.tag_name}],
+                        raising=False)
+    monkeypatch.setattr(stash, "destroy_scene_markers", lambda ids: len(ids), raising=False)
+    tag = svc.cfg.markers.tag_name
+    assert svc._taste_markers(tag) == []
+    svc.create_apex("30", 40.0)
+    assert [m["marker_id"] for m in svc._taste_markers(tag)] == ["m5"]
+    svc.remove_apex("30", 40.0, marker_id="m5")
+    assert svc._taste_markers(tag) == []
+
+
+def test_stream_urls_reuse_one_client(svc, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    made = []
+    real = svc_mod.Service.client
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: made.append(1) or real(self))
+    for i in range(50):
+        svc.stream_url(str(i), start=1.0)
+    assert len(made) == 1
+
+
+def test_slow_requests_are_logged(tmp_path):
+    from peaks.web import forensics
+
+    lines = []
+    orig = forensics._write
+    forensics._write = lambda line, echo=True: lines.append(line)
+    try:
+        forensics.note_duration("GET", "/api/performer/best", 0.4)
+        forensics.note_duration("GET", "/api/performer/best", 12.34)
+    finally:
+        forensics._write = orig
+    assert len(lines) == 1 and "[slow] 12.3s GET /api/performer/best" in lines[0]
