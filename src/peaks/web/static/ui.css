@@ -451,3 +451,14 @@ input[type=checkbox] { accent-color: var(--gold); }
 .tq-run .bar i { display: block; height: 100%; background: var(--gold); transition: width .4s; }
 .tq-saved { color: var(--dim); line-height: 1.6; }
 .tq-saved b { color: var(--fg); }
+
+/* the Taste page's primary action: big, gold, always at the top */
+.tq-train-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.btn.xl { height: 40px; padding: 0 18px; font-size: 15px; font-weight: 650; border-radius: 10px; }
+.btn.pri.xl { box-shadow: 0 0 0 1px rgba(212,174,85,.35), 0 6px 20px rgba(212,174,85,.18); }
+.btn.pri.xl:hover { box-shadow: 0 0 0 1px rgba(212,174,85,.55), 0 8px 26px rgba(212,174,85,.3); }
+.btn.tq-train.running { --fill: 0%; opacity: 1; cursor: default;
+  background: linear-gradient(90deg, var(--gold) var(--fill), #8a6a22 var(--fill)); }
+.tq-train-cap { font-size: 12px; color: var(--dim); max-width: 280px; text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 700px) { .tq-train-wrap { align-items: stretch; width: 100%; } .tq-train-cap { text-align: left; } }

@@ -89,7 +89,13 @@
 
   <!-- TASTE: teach · picker · labels · manage -->
   <section id="taste" class="view">
-    <div class="head"><h1>Taste</h1><span class="sub2">Everything that trains “For You”. It learns in the background every ~25 ratings.</span></div>
+    <div class="head"><h1>Taste</h1><span class="sub2">Everything that trains “For You”. It learns in the background every ~25 ratings.</span>
+      <span class="grow"></span>
+      <div class="tq-train-wrap">
+        <button class="btn pri xl tq-train" title="Retrain from everything you've rated, saved and graded — and measure how well it knows your taste on scenes it didn't learn from">⟳ Train &amp; measure</button>
+        <span class="tq-train-cap" id="tq-train-cap"></span>
+      </div>
+    </div>
     <div class="card pad tq" id="taste-quality"></div>
     <div class="seg tabs" id="taste-tabs">
       <span class="on" data-tab="teach">Teach</span><span data-tab="picker">Picker</span>

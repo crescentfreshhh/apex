@@ -1996,16 +1996,36 @@ async function followMeasure() {
   else if (job.status === "error") toast("Measure failed: " + (job.error || "unknown error"), true);
 }
 function renderMeasureRun(job) {
-  const run = $("#tq-run"), btn = $("#btn-tq-train");
-  if (btn) { btn.disabled = !!job; btn.textContent = job ? "Measuring…" : "Train & measure"; }
+  const run = $("#tq-run");
+  const p = (job && job.progress) || {}, pct = Math.round(100 * (p.pct || 0));
+  document.querySelectorAll(".tq-train").forEach((b) => {
+    b.disabled = !!job;
+    b.classList.toggle("running", !!job);
+    b.style.setProperty("--fill", job ? pct + "%" : "0%");
+    b.textContent = job ? `Measuring… ${pct}%` : "⟳ Train & measure";
+  });
+  if (job) { const cap = $("#tq-train-cap"); if (cap) cap.textContent = p.stage || "Starting…"; }
+  else tqCaption();
   if (!run) return;
   run.hidden = !job;
   if (!job) return;
-  const p = job.progress || {}, pct = Math.round(100 * (p.pct || 0));
   run.innerHTML = `<div class="row between small"><span>${esc(p.stage || "Starting…")}</span>
     <span class="muted">${pct}% · ${Math.round(job.elapsed / 60)} min
       <button class="btn ghost sm" data-cancel-job="${esc(job.id)}">Cancel</button></span></div>
     <div class="bar"><i style="width:${pct}%"></i></div>`;
+}
+// the header button's caption: when the last full measure ran
+let tqLast = null;
+function ago(ts) {
+  const m = Math.max(0, (Date.now() / 1000 - ts) / 60);
+  if (m < 1) return "just now";
+  if (m < 60) return `${Math.round(m)} min ago`;
+  if (m < 48 * 60) return `${Math.round(m / 60)} h ago`;
+  return `${Math.round(m / 1440)} days ago`;
+}
+function tqCaption() {
+  const cap = $("#tq-train-cap"); if (!cap) return;
+  cap.textContent = tqLast ? `Last measured ${ago(tqLast)}` : "Never measured";
 }
 function tqScheduleLine(sch) {
   if (!sch) return "";
@@ -2024,11 +2044,13 @@ async function loadTasteQuality() {
   const L = q.latest, hist = q.history || [];
   if (!L) {
     box.innerHTML = `<div class="tq-empty"><b>How well does Peaks know your taste?</b>
-      <span class="muted">Measure once and it tests itself on scenes it didn't learn from — a background job, it can take a while.</span>
-      <button class="btn pri sm" id="btn-tq-train">Train &amp; measure</button></div><div id="tq-run" class="tq-run" hidden></div>`;
+      <span class="muted">Click <b>Train &amp; measure</b> (top right) — it retrains and tests itself on scenes it didn't learn from. A background job; it can take a few minutes.</span>
+      </div><div id="tq-run" class="tq-run" hidden></div>`;
+    tqLast = null; tqCaption();
     followMeasure();
     return;
   }
+  tqLast = L.ts; tqCaption();
   const prev = hist.length > 1 ? hist[hist.length - 2] : null;
   const delta = (k) => {        // percentage points, or raw for AUC
     if (!prev || prev[k] == null || L[k] == null) return "";
@@ -2040,8 +2062,7 @@ async function loadTasteQuality() {
   const src = TQ_SRC.filter(([k]) => (L.sources || {})[k]).map(([k, n]) => `<span><b>${L.sources[k].toLocaleString()}</b> ${n}</span>`).join("");
   box.innerHTML = `
     <div class="tq-head"><b>How well Peaks knows your taste</b>
-      <span class="faint small">measured on scenes it didn't train on · ${new Date(L.ts * 1000).toLocaleString()}</span>
-      <button class="btn ghost sm" id="btn-tq-train">Train &amp; measure</button></div>
+      <span class="faint small">measured on scenes it didn't train on · ${new Date(L.ts * 1000).toLocaleString()}</span></div>
     <div class="tq-stats">
       <div class="tq-stat" title="For scenes holding a moment you loved: how often the model's single best moment lands within 10 s of it — i.e. how often 'jump to peak' lands on your moment.">
         <span class="tq-l">Jump-to-peak lands on your moment</span><span class="tq-v">${pct(L.peak_hit)}${delta("peak_hit")}</span>
@@ -2075,7 +2096,7 @@ async function loadSavedAudit() {
     + (a.auto_ignored ? `<br><span class="faint">Ignoring ${n(a.auto_ignored)} auto-detected markers the old “Write markers” scorer left under “${esc(a.tag)}” — they aren't your picks.</span>` : "");
 }
 document.addEventListener("click", async (e) => {
-  if (e.target.closest("#btn-tq-train")) startMeasure();
+  if (e.target.closest(".tq-train")) startMeasure();
   const c = e.target.closest("[data-cancel-job]");
   if (c) {
     c.disabled = true;
