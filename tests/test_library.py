@@ -287,3 +287,51 @@ def test_frame_heal_remembers_a_missing_scene(svc, stash, monkeypatch):
     n = len(calls)
     assert api.get("/api/frame", params={"key": "fp9", "t": 0}).status_code == 500
     assert len(calls) == n                           # no second Stash lookup within the window
+
+
+# --- start-up: the scene list from disk, and the warm-up job ------------------------
+
+def _wait(pred, timeout=5.0):
+    import time
+    t0 = time.time()
+    while not pred() and time.time() - t0 < timeout:
+        time.sleep(0.02)
+    return pred()
+
+
+def test_scene_list_survives_a_restart(svc, stash, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    rows = svc._catalogue_all()
+    assert _wait(lambda: svc._catalogue_disk_path().exists())
+    again = svc_mod.Service(svc.cfg)
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: stash)
+    monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: stash)
+    refreshes = []
+    monkeypatch.setattr(svc_mod.Service, "_refresh_catalogue_bg", lambda self, full=False: refreshes.append(full))
+    monkeypatch.setattr(svc_mod.Service, "scenes", lambda self, limit=0: (_ for _ in ()).throw(AssertionError("asked Stash")))
+    got = again._catalogue_all()
+    assert [r["scene_id"] for r in got] == [r["scene_id"] for r in rows]
+    assert {r["scene_id"]: r["tier"] for r in got} == {r["scene_id"]: r["tier"] for r in rows}
+    assert refreshes == [True]                      # a full re-read follows in the background
+
+
+def test_warm_up_loads_the_library(svc, tmp_path):
+    import numpy as np
+
+    from peaks.cache import EmbeddingCache
+
+    cache = EmbeddingCache(svc.cfg.embedding.cache_dir)
+    for i in range(3):
+        cache.save(f"k{i}", svc._model_name(), np.arange(4, dtype=np.float32),
+                   np.eye(4, 8, dtype=np.float32), meta={"scene_id": str(i + 1)})
+
+    class Job:
+        progress: dict = {}
+    job = Job()
+    out = svc.warm_up(job)
+    assert out["frames"] == 12 and out["scenes"] == 4
+    assert job.progress["pct"] >= 0.9
+    assert svc._model_name() in svc._index                  # the index is resident now
+    svc._ingest_stash_busy = True
+    assert svc.warm_up(Job())["skipped"]                     # never during an ingest

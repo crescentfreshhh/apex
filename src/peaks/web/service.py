@@ -1668,10 +1668,50 @@ class Service(LibraryMixin):
                 idx = None
                 cache = EmbeddingCache(self.cfg.embedding.cache_dir)
                 keys = cache.keys(model)
-                idx = SearchIndex(cache, model).build(keys)
+                idx = SearchIndex(cache, model).build(keys, on_progress=getattr(self, "_build_progress", None))
                 idx.source_key_count = len(keys)
                 self._index[model] = idx
             return idx
+
+    def warm_up(self, job=None) -> dict:
+        """Container start: load what the first page needs before anyone asks —
+        the scene list, the embeddings index (the ~10 GB, minute-long part), the
+        taste scores and the Review queue's predictions. Runs as a background
+        job so the tray shows its progress; skipped during a Stash ingest."""
+        import time as _t
+
+        t0 = _t.time()
+
+        def say(stage: str, frac: float) -> None:
+            if job is not None:
+                job.progress = {"stage": stage, "pct": round(frac, 3)}
+
+        if getattr(self, "_ingest_stash_busy", False):
+            return {"skipped": "ingest running"}
+        say("Loading your scene list", 0.02)
+        try:
+            rows = self._catalogue_all()
+        except Exception:  # noqa: BLE001 — Stash down: the rest still helps
+            rows = []
+        model = self._model_name()
+        self._build_progress = lambda done, n: say(
+            f"Loading embeddings · {done:,} / {n:,} scenes", 0.05 + 0.8 * done / max(1, n))
+        try:
+            idx = self.index(model)
+        finally:
+            self._build_progress = None
+        say("Loading taste scores", 0.88)
+        try:
+            self._taste_scores(model, wait=False)
+        except Exception:  # noqa: BLE001
+            pass
+        say("Preparing the Review queue", 0.94)
+        try:
+            if rows:
+                self._tier_predictions(rows)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"scenes": len(rows), "frames": idx.size, "seconds": round(_t.time() - t0, 1)}
 
     def invalidate_index(self, model: str | None = None) -> None:
         with self._index_lock:
@@ -4384,9 +4424,64 @@ class Service(LibraryMixin):
             if _t.monotonic() - cached[0] >= self._CAT_TTL:
                 self._refresh_catalogue_bg()
             return cached[1]
+        if not refresh:
+            # cold start: the list saved on disk bridges it at once, then a full
+            # re-read in the background picks up anything changed in Stash since
+            rows = self._load_catalogue_disk()
+            if rows is not None:
+                self._refresh_catalogue_bg(full=True)
+                return rows
         return self._catalogue_fetch(refresh=refresh)
 
-    def _refresh_catalogue_bg(self) -> None:
+    # --- the scene list, kept on disk so a restart doesn't wait on Stash -------------
+
+    def _catalogue_disk_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "catalogue_cache.json.gz"
+
+    def _save_catalogue_disk(self, ids: list[str]) -> None:
+        import gzip
+        import json
+        import time as _t
+
+        p = self._catalogue_disk_path()
+        with self._meta_lock:
+            meta = {sid: self._meta.get(sid, {}) for sid in ids}
+
+        def run():
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                tmp = p.with_name(p.name + ".tmp")
+                with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                    json.dump({"ts": _t.time(), "ids": ids, "meta": meta}, fh)
+                tmp.replace(p)
+            except (OSError, TypeError, ValueError):
+                pass
+        threading.Thread(target=run, daemon=True, name="peaks-catalogue-save").start()
+
+    def _load_catalogue_disk(self) -> list[dict] | None:
+        """The last scene list + details, as saved after the previous read from
+        Stash — served (marked stale) while a background re-read replaces it."""
+        import gzip
+        import json
+        import time as _t
+
+        try:
+            with gzip.open(self._catalogue_disk_path(), "rt", encoding="utf-8") as fh:
+                d = json.load(fh)
+            ids = [str(i) for i in d["ids"]]
+            meta = d.get("meta") or {}
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        with self._meta_lock:
+            for sid in ids:
+                self._meta.setdefault(sid, meta.get(sid) or {})
+        rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
+        self._cat_cache = (_t.monotonic() - self._CAT_TTL - 1, rows)   # stale: refresh soon
+        return rows
+
+    def _refresh_catalogue_bg(self, full: bool = False) -> None:
         with self.__dict__.setdefault("_cat_gate", threading.Lock()):
             if getattr(self, "_cat_refreshing", False):
                 return
@@ -4394,7 +4489,7 @@ class Service(LibraryMixin):
 
         def run():
             try:
-                self._catalogue_fetch()
+                self._catalogue_fetch(refresh=full)
             except Exception:  # noqa: BLE001 — Stash blip: keep serving the cache
                 pass
             finally:
@@ -4416,6 +4511,7 @@ class Service(LibraryMixin):
         self._sync_hidden_from_ratings(rows)
         self._cat_cache = (_t.monotonic(), rows)
         self._maybe_daily_backup(rows)
+        self._save_catalogue_disk(ids)
         return rows
 
     def _sync_hidden_from_ratings(self, rows: list[dict]) -> None:

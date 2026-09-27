@@ -1536,6 +1536,7 @@ def create_app(cfg=None):
 
     _start_memwatch(app, service)
     _start_heartbeat(app, jobs)
+    _start_warmup(service, jobs)
 
     @app.get("/api/crash-report")
     def crash_report():
@@ -1561,6 +1562,27 @@ def create_app(cfg=None):
 
 
 _HEARTBEAT: dict = {}
+
+
+def _start_warmup(service: Service, jobs: JobManager) -> None:
+    """Load the library into memory right after the container starts (a job, so
+    the tray shows it), instead of making the first page visit wait for it.
+    PEAKS_WARM_ON_START=0 turns it off."""
+    import os
+
+    if os.environ.get("PEAKS_WARM_ON_START", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+
+    def later():
+        import time as _t
+
+        _t.sleep(3)              # let the server finish starting first
+        try:
+            jobs.start("warmup", service.warm_up)
+        except RuntimeError:
+            pass
+
+    threading.Thread(target=later, daemon=True, name="peaks-warmup").start()
 
 
 def _start_heartbeat(app, jobs) -> None:

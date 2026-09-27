@@ -9,12 +9,14 @@ per-test temp dir for every test.
 """
 
 import pytest
+from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
 def _isolate_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
+    monkeypatch.setenv("PEAKS_WARM_ON_START", "0")   # no background start-up load in tests
 
 
 @pytest.fixture(autouse=True)
@@ -28,3 +30,8 @@ def _isolate_measure_state(tmp_path, monkeypatch):
         return
     monkeypatch.setattr(svc_mod.Service, "_measure_state_path",
                         lambda self: tmp_path / "taste-measure" / "measure_state.json")
+    # …and the on-disk scene list, when a test builds a default Config
+    real = svc_mod.Service._catalogue_disk_path
+    monkeypatch.setattr(svc_mod.Service, "_catalogue_disk_path",
+                        lambda self: real(self) if Path(self.cfg.modeling.dir).is_absolute()
+                        else tmp_path / "catalogue_cache.json.gz")

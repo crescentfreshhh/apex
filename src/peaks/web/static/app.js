@@ -3308,7 +3308,8 @@ refreshDashboard();  // conn status + job reattach (runs even though it's not th
 // --- live job tray (sidebar): whatever is running, from any page -------------------
 const JOB_LABEL = { embed: "Embedding", ingest: "Ingest", score: "Writing markers", sync: "Syncing",
   fix: "Retrying failed", reel: "Exporting video", playlist: "Building board", library: "Updating Stash",
-  dupes: "Finding duplicates", train: "Training taste", "taste-measure": "Measuring taste" };
+  dupes: "Finding duplicates", train: "Training taste", "taste-measure": "Measuring taste",
+  warmup: "Starting up" };
 async function pollJobTray() {
   const tray = $("#job-tray");
   if (!tray || document.hidden) return;
@@ -3316,7 +3317,7 @@ async function pollJobTray() {
   try { jobs = await api("/api/jobs"); } catch { return; }
   const running = jobs.filter((j) => j.status === "running");
   const kinds = new Set(running.map((j) => j.kind));
-  const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync"];
+  const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync", "warmup"];
   if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || kinds.has("ingest")) refreshSidebar();
   pollJobTray.prev = [...kinds];
   const badge = $("#nav-ct-jobs");

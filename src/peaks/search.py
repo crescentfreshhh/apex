@@ -146,7 +146,7 @@ class SearchIndex:
         q = np.asarray(q, dtype=np.float32)
         return self.apply(lambda b: b @ q).astype(np.float32, copy=False)
 
-    def build(self, keys: list[str] | None = None) -> "SearchIndex":
+    def build(self, keys: list[str] | None = None, on_progress=None) -> "SearchIndex":
         """Load every cached scene for this model into one matrix.
 
         Vectors are L2-normalized at write time, so cosine similarity is just a
@@ -191,7 +191,9 @@ class SearchIndex:
         all_keys: list[str] = []
         all_scenes: list[str | None] = []
         pos = 0
-        for key in kept:
+        for done, key in enumerate(kept):
+            if on_progress and done % 100 == 0:
+                on_progress(done, len(kept))
             try:
                 times, vecs, meta = self.cache.load(key, self.model_name)
             except Exception:
