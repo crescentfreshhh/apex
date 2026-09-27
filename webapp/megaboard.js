@@ -138,8 +138,8 @@ function loadApex(tile) {
   tile.apex = apex;
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
   tile.reqStart = apex.start;     // a transcoded clip's timeline begins AT the moment
-  tile.label.textContent = `#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`
-    + (apex.taste != null ? ` · ${Math.round(apex.taste * 100)}%` : "");
+  tile.label.innerHTML = esc(`#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`)
+    + (apex.taste != null ? ` · ${tasteHTML(apex.taste)}` : "");
   paintBadge(tile); wantTier(apex.scene_id);
   v.loop = false;
   v.src = apex.url;
@@ -503,7 +503,7 @@ function updateStatus() {
     const by = fyTotals.scored_by === "classifier" ? "your trained model"
       : fyTotals.scored_by === "modes" ? "your taste modes (nearest of your interests)"
       : fyTotals.scored_by === "centroid" ? "taste centroid (no trained model yet)" : "your taste";
-    const floor = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
+    const floor = fyMinScore > 0 ? ` · ${floorLabel()}` : "";
     setStatus(`${pivot}Scored by ${by}${floor} · ≈${fmtN(fyTotals.scenes)} scenes / ${fmtN(fyTotals.moments)} moments match`
       + ` · ${State.apexes.length} loaded · ${State.tiles.length} tiles · ${STEER}`);
     return;
@@ -533,7 +533,7 @@ function wireControls() {
     floor.addEventListener("input", () => {
       fyMinScore = parseFloat(floor.value) || 0;
       const v = document.getElementById("floor-val");
-      if (v) v.textContent = fyMinScore > 0 ? Math.round(fyMinScore * 100) + "%" : "off";
+      if (v) v.innerHTML = floorHTML();
     });
     floor.addEventListener("change", () => {   // commit → re-apply the floor to what's driving the board
       persistFloor(fyMinScore);
@@ -724,6 +724,27 @@ function wantTier(sid) {
     } catch { /* badges are a nicety */ }
   }, 250);
 }
+// --- plain words for taste (the app's static/words.js; numbers if it's absent) -----
+const MW = window.Words || null;
+let SCALE = null;          // your library's taste cutoffs (trained-model scores)
+if (MW) MW.tasteScale().then((x) => { SCALE = x; syncFloorUI(); updateStatus(); });
+const pctN = (v) => Math.round(v * 100) + "%";
+// "Strong and up" (+ "≥ 60%" when exact numbers are on) — for plain-text labels
+function floorLabel(v = fyMinScore) {
+  if (!(v > 0)) return "off";
+  if (!MW || !SCALE) return `≥ ${pctN(v)}`;
+  const w = MW.floorWord(v, SCALE.moment);
+  return MW.numbersShown() ? `${w} (≥ ${pctN(v)})` : w;
+}
+function floorHTML(v = fyMinScore) {
+  if (!(v > 0)) return "off";
+  if (!MW || !SCALE) return pctN(v);
+  return esc(MW.floorWord(v, SCALE.moment)) + MW.num(pctN(v));
+}
+function tasteHTML(score) {
+  if (score == null) return "";
+  return MW && SCALE ? MW.tasteHTML(score, SCALE.moment) : pctN(score);
+}
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
@@ -781,7 +802,7 @@ function fyBoardUrl(withExclude) {
 function syncFloorUI() {
   const s = document.getElementById("floor"), v = document.getElementById("floor-val");
   if (s) s.value = fyMinScore;
-  if (v) v.textContent = fyMinScore > 0 ? Math.round(fyMinScore * 100) + "%" : "off";
+  if (v) v.innerHTML = floorHTML();
 }
 // the taste floor is shared with the app (Taste Metrics slider) via localStorage,
 // so it stays in sync across the tab and the board.
@@ -840,7 +861,7 @@ async function filterToFloor() {
       State.floorNote = `${kept.length.toLocaleString()} of ${base.length.toLocaleString()} moments`;
     } else {   // nothing clears it: say so, keep playing the channel
       State.apexes = base.slice();
-      State.floorNote = `none ≥ ${Math.round(fyMinScore * 100)}% here — playing all`;
+      State.floorNote = `nothing ${floorLabel().toLowerCase()} here — playing all`;
     }
   } else {
     State.apexes = base.slice();
@@ -1134,7 +1155,7 @@ async function moreLikeThis(scene_id, t, rerun = false) {
     const d = await navApi(tok, "/api/search/similar?" + qs.toString());
     if (isStale(tok)) return;
     const items = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
-    const flr = fyMinScore > 0 ? ` ≥ ${Math.round(fyMinScore * 100)}%` : "";
+    const flr = fyMinScore > 0 ? ` · ${floorLabel()}` : "";
     if (pivotBoard(items, `🔎 more like that moment${flr}`,
       { seed: { scene_id, t }, spec: { kind: "similar", scene_id, t } }, rerun, tok))
       flashStatus(`🔎 ${items.length} moments like that${flr}`);
@@ -1235,7 +1256,7 @@ async function moreFromActress(scene_id, tighten = false) {
     if (isStale(tok)) return;
     const apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
     if (!apexes.length) return flashStatus(d.performer ? `no embedded moments for ${d.performer}` : "no performer info for this scene");
-    const tag = useFloor ? ` ≥ ${Math.round(fyMinScore * 100)}%` : " · full spread";
+    const tag = useFloor ? ` · ${floorLabel()}` : " · full spread";
     if (pivotBoard(apexes, "🎬 " + (d.performer || "this actress") + tag,
       { applyFloor: () => moreFromActress(scene_id, true), spec: { kind: "performer", scene_id } }, tighten, tok))
       flashStatus(`🎬 ${apexes.length} moments from ${d.performer || "her"}${tag}`);
@@ -1314,7 +1335,7 @@ async function loadSource(src, opts = {}) {
       fyReset();
       await fyRefetch(true);
       if (!State.apexes.length)
-        return isStale(tok) ? undefined : showError(`Nothing scores ≥ ${Math.round(fyMinScore * 100)}% yet — lower the taste floor.`);
+        return isStale(tok) ? undefined : showError(`Nothing is ${floorLabel().toLowerCase()} yet — lower the taste floor.`);
       pickApex = fyPick;
     } else if (src === "shuffle") {
       const d = await api("/api/board/scenes" + (opts.refresh ? "?refresh=true" : ""));

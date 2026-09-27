@@ -1,5 +1,10 @@
 /* Peaks control panel + explorer. Vanilla JS, no build step. */
 
+// plain words for numbers (static/words.js); fig(): an exact figure, shown small or hidden
+const W = window.Words, fig = W.num;
+// your library's taste cutoffs (the trained model's scores) — words for tiles and floors
+let SCALE = null;
+W.tasteScale().then((x) => { SCALE = x; });
 const $ = (s) => document.querySelector(s);
 // writes that change what the library-management counts show
 const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train)|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
@@ -327,6 +332,11 @@ async function loadCuration() {
   const cb = $("#cur-auto-leg"); if (!cb) return;
   try { cb.checked = !!(await api("/api/library/curation")).auto_legendaire_on_save; } catch {}
 }
+// Settings → Display: exact numbers beside the words (this browser; megaboard too)
+if ($("#set-show-nums")) {
+  $("#set-show-nums").checked = W.numbersShown();
+  $("#set-show-nums").addEventListener("change", (e) => W.setNumbersShown(e.target.checked));
+}
 $("#cur-auto-leg")?.addEventListener("change", async (e) => {
   try {
     const r = await api("/api/library/curation?auto_legendaire_on_save=" + e.target.checked, { method: "POST" });
@@ -426,7 +436,7 @@ async function loadClipSettings() {
   try {
     const c = await api("/api/clip-settings");
     if ($("#clip-sim")) { $("#clip-sim").value = c.similarity; }
-    if ($("#clip-sim-val")) $("#clip-sim-val").textContent = (+c.similarity).toFixed(2);
+    if ($("#clip-sim-val")) $("#clip-sim-val").innerHTML = esc(W.clipLength(+c.similarity)) + fig((+c.similarity).toFixed(2));
     if (c.min != null) document.querySelectorAll("#clip-min").forEach((e) => e.textContent = c.min);
     if (c.max != null) document.querySelectorAll("#clip-max, #clip-max2").forEach((e) => e.textContent = c.max);
   } catch {}
@@ -442,7 +452,7 @@ async function saveClipSettings() {
   } catch (err) { toast(err.message, true); }
 }
 $("#clip-sim")?.addEventListener("input", (e) => {
-  if ($("#clip-sim-val")) $("#clip-sim-val").textContent = (+e.target.value).toFixed(2);
+  if ($("#clip-sim-val")) $("#clip-sim-val").innerHTML = esc(W.clipLength(+e.target.value)) + fig((+e.target.value).toFixed(2));
 });
 $("#btn-clip-save")?.addEventListener("click", saveClipSettings);
 loadClipSettings();
@@ -747,7 +757,8 @@ function renderHits(hits, container, previewMax) {
     return `<div class="tile" data-sid="${sid}">
       <div class="thumbwrap">
         <img loading="lazy" src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
-        <span class="score ${g.id === "foryou-results" ? scoreBandClass(h.score) : ""}" data-score="${h.score}">${(h.score * 100).toFixed(0)}%</span>
+        ${g.id === "foryou-results" ? tasteChip(h.score)
+          : `<span class="score" data-score="${h.score}" title="How closely this frame matches">${(h.score * 100).toFixed(0)}%</span>`}
         <span class="t">${fmt(h.time)}</span>
       </div>
       <div class="meta">
@@ -1192,20 +1203,32 @@ function perfPhotoHTML(r) {
   const hover = stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : "";
   return `<div class="perf-photo">${img}${hover}</div>`;
 }
+// a performer's taste in words: where she ranks among all your performers
+let perfAffinities = [];     // every performer's mean taste, best first
+function perfTasteHTML(aff, { cls = "perf-taste" } = {}) {
+  if (aff == null) return "";
+  const p = Math.round(aff * 100) + "%";
+  if (!perfAffinities.length) return `<span class="${cls}" title="mean taste affinity">★ ${p}</span>`;
+  const at = perfAffinities.findIndex((a) => a <= aff);
+  const [k, w] = W.rank((at < 0 ? perfAffinities.length : at) / perfAffinities.length);
+  return `<span class="${cls} rk-${k}" title="Mean taste ${p} — ranked ${at + 1} of ${perfAffinities.length} performers">★ ${esc(w)}${fig(p)}</span>`;
+}
 function renderPerformers(rows) {
   const grid = $("#perf-grid");
+  perfAffinities = rows.map((r) => r.affinity).filter((a) => a != null).sort((a, b) => b - a);
   if (!rows.length) { grid.innerHTML = '<p class="dim">No performers found — embed some scenes with performers assigned in Stash.</p>'; return; }
   const maxMoments = Math.max(...rows.map((r) => r.moments)) || 1;
   grid.innerHTML = rows.map((r) => {
     const pct = Math.round((r.moments / maxMoments) * 100);
-    const taste = r.affinity != null ? `<span class="perf-taste" title="mean taste affinity">★ ${Math.round(r.affinity * 100)}%</span>` : "";
+    const taste = perfTasteHTML(r.affinity);
     const eng = tierTally(r.tiers, { compact: true }) ? ` · ${tierTally(r.tiers, { compact: true })}` : "";
     return `<div class="perf-card" data-id="${esc(r.id)}" data-name="${esc(r.name)}">
       ${perfPhotoHTML(r)}
       <div class="perf-body">
-        <div class="perf-name" title="${esc(r.name)}">${esc(r.name)} ${taste}</div>
+        <div class="perf-name" title="${esc(r.name)}">${esc(r.name)}</div>
         <div class="perf-bar"><span style="width:${pct}%"></span></div>
         <div class="dim perf-stats">${r.moments.toLocaleString()} moments · ${r.scenes} scenes${eng}</div>
+        ${taste ? `<div class="perf-tasteline">${taste}</div>` : ""}
         <div class="perf-actions">
           <button class="perf-detail-btn">Open</button>
           <button class="perf-best">⭐ Best of</button>
@@ -1348,7 +1371,7 @@ function renderPerfDetail(d) {
         <div class="pd-stats">
           ${stat("moments", (s.moments || 0).toLocaleString())}
           ${stat("scenes", s.scenes)}
-          ${stat("★ taste", s.affinity != null ? Math.round(s.affinity * 100) + "%" : null)}
+          ${s.affinity != null ? `<span class="pd-stat">taste <b>${perfTasteHTML(s.affinity, { cls: "" })}</b></span>` : ""}
           ${stat("🏆", tierTally(s.tiers) || null)}
           ${stat("✩", s.rating)}
         </div>
@@ -1413,7 +1436,7 @@ async function renderCompare() {
         <img src="${thumb}" onerror="this.style.opacity=.15"/>
         <h3>${esc(d.performer)}</h3>
         <div class="dim">${(s.moments || 0).toLocaleString()} moments · ${s.scenes || 0} scenes</div>
-        <div class="dim">★ ${s.affinity != null ? Math.round(s.affinity * 100) + "%" : "—"} · ${tierTally(s.tiers, { compact: true }) || "no tiered scenes"} · ✩ ${s.rating ?? "—"}</div>
+        <div class="dim">${s.affinity != null ? perfTasteHTML(s.affinity, { cls: "" }) : "★ —"} · ${tierTally(s.tiers, { compact: true }) || "no tiered scenes"} · ✩ ${s.rating ?? "—"}</div>
         <div class="fy-words" style="margin-top:8px">${fp}</div>
       </div>`;
     };
@@ -1507,7 +1530,7 @@ async function loadTasteVisual() {
         (${d.sources} loved moments). Hit ✕ on any that are <em>wrong</em> to correct it.</div>` +
       d.modes.map((m) => `<div class="taste-strip">` + m.frames.map((f) =>
         `<span class="taste-frame">
-           <img loading="lazy" src="${f.thumb}" title="${(f.score * 100).toFixed(0)}% match"
+           <img loading="lazy" src="${f.thumb}" title="${(f.score * 100).toFixed(0)}% like your taste"
              onerror="this.closest('.taste-frame').style.display='none'" />
            <button class="tf-x" title="Not my taste — down-vote this frame"
              data-key="${esc(f.key)}" data-t="${f.time}" data-sid="${esc(f.scene_id || "")}">✕</button>
@@ -1622,9 +1645,19 @@ tasteLabelsCollapse = wireCollapse("#toggle-taste-labels", "#taste-labels",
 // --- Taste bands: colour For You tiles by how on-taste each moment is --------
 let tasteBands = null;   // [{pct,cutoff}] high→low, for tile coloring
 let metricsCdf = null;   // {thresholds,moments_ge,scenes_ge} for the Statistics coverage slider
+let metricsCuts = null;  // that slider's own percentile cutoffs, for its words
 const pctText = (v) => `${(v * 100).toFixed(0)}%`;
 
+// a For You tile's score chip: the band word, the % small beside it
+function tasteChip(score) {
+  const b = W.tasteBand(score, SCALE && SCALE.moment);
+  const p = (score * 100).toFixed(0) + "%";
+  if (!b) return `<span class="score ${scoreBandClass(score)}" data-score="${score}">${p}</span>`;
+  return `<span class="score ${scoreBandClass(score)}" data-score="${score}" title="Taste ${p} — ${W.TASTE_HINT[b[0]]}">${b[1]}${fig(p)}</span>`;
+}
 function scoreBandClass(score) {
+  const b = W.tasteBand(score, SCALE && SCALE.moment);    // same scale as the words
+  if (b) return { standout: "band-top99", strong: "band-top95", good: "band-top90", decent: "band-top75" }[b[0]] || "band-low";
   if (!tasteBands) return "";
   for (const b of tasteBands) if (score >= b.cutoff) return "band-top" + b.pct;
   return "band-low";
@@ -1667,8 +1700,9 @@ function updateThreshOut() {
   const mo = metricsCdf.moments_ge[i], sc = metricsCdf.scenes_ge[i];
   const frames = metricsCdf.moments_ge[0] || 1;
   const pctile = Math.round((1 - mo / frames) * 100);
-  out.innerHTML = `≥ <b>${pctText(v)}</b> → <b>${mo.toLocaleString()}</b> moments ·
-    <b>${sc.toLocaleString()}</b> scenes · your <b>${pctile}th</b> percentile`;
+  const word = W.floorWord(v, metricsCuts);
+  out.innerHTML = `<b>${esc(word)}</b>${fig(`≥ ${pctText(v)} · your ${pctile}th percentile`)} → <b>${mo.toLocaleString()}</b> moments ·
+    <b>${sc.toLocaleString()}</b> scenes`;
 }
 
 // --- Statistics tab ---------------------------------------------------------
@@ -1719,7 +1753,7 @@ function renderStatistics(st, metrics, storage) {
     <div class="panel stat-card">
       <h3>Peaks build</h3>
       <div class="pd-stats">
-        ${statTile("scenes analyzed", num(b.embedded_scenes) + (cov != null ? ` <span class="dim">/ ${num(b.library_scenes)} · ${cov}%</span>` : ""))}
+        ${statTile("scenes analyzed", cov != null ? `${esc(cap(W.share(cov / 100)))} of your library${fig(`${num(b.embedded_scenes)} / ${num(b.library_scenes)} · ${cov}%`)}` : num(b.embedded_scenes))}
         ${b.backlog != null && b.backlog > 0 ? statTile("awaiting analysis", num(b.backlog)) : ""}
         ${statTile("total peaks", num(b.total_peaks))}
         ${statTile("frames indexed", num(b.frames))}
@@ -1748,10 +1782,17 @@ function renderStatistics(st, metrics, storage) {
 
   // performers by peaks
   const top = st.top_actress_by_peaks;
+  // taste in words: where each performer ranks among these for your taste
+  const tastes = (st.leaderboard || []).map((r) => r.taste).filter((t) => t != null).sort((a, b) => b - a);
+  const tasteWord = (t) => {
+    if (t == null || !tastes.length) return "";
+    const [k, w] = W.rank(tastes.indexOf(t) / tastes.length);
+    return `<span class="rk rk-${k}" title="Mean taste ${pctText(t)}">★ ${esc(w)}</span>${fig(pctText(t))}`;
+  };
   const rows = (st.leaderboard || []).map((r, i) =>
     `<tr><td class="dim">${i + 1}</td><td>${esc(r.name || "—")}</td>
       <td><b>${num(r.peaks)}</b> peaks</td><td class="dim">${num(r.scenes)} scenes</td>
-      <td>${r.taste != null ? "★ " + pctText(r.taste) : ""}</td>
+      <td>${tasteWord(r.taste)}</td>
       <td>${statBoardBtn("actress", r.id, "Play")}</td></tr>`).join("");
   const perfCard = `
     <div class="panel stat-card">
@@ -1759,7 +1800,7 @@ function renderStatistics(st, metrics, storage) {
       ${top ? `<p>Most peaks: <b>${esc(top.name)}</b> — <b>${num(top.peaks)}</b> peaks across
         ${num(top.scenes)} scenes ${statBoardBtn("most_peaks_actress", null, "Play her peaks")}</p>` : '<p class="dim">No peaks yet.</p>'}
       ${st.top_actress_by_taste ? `<p class="dim">Most on-taste: <b>${esc(st.top_actress_by_taste.name)}</b>
-        (★ ${pctText(st.top_actress_by_taste.taste)}) ${statBoardBtn("most_ontaste_actress", null, "Play")}</p>` : ""}
+        ${fig("★ " + pctText(st.top_actress_by_taste.taste))} ${statBoardBtn("most_ontaste_actress", null, "Play")}</p>` : ""}
       ${rows ? `<table class="m-bands stat-lb">${rows}</table>` : ""}
     </div>`;
 
@@ -1769,7 +1810,7 @@ function renderStatistics(st, metrics, storage) {
     <div class="panel stat-card">
       <h3>Most on-taste scene</h3>
       <p>Your library's single highest peak — <b>${esc(sc.title)}</b>${sc.performers ? " · " + esc(sc.performers) : ""}
-        ${sc.score != null ? `<span class="dim">(peak ${pctText(sc.score)})</span>` : ""}</p>
+        ${sc.score != null ? fig(`peak ${pctText(sc.score)}`) : ""}</p>
       <div class="perf-actions">${statBoardBtn("most_ontaste_scene", sc.scene_id, "Play its best moments")}</div>
     </div>` : "";
 
@@ -1778,12 +1819,13 @@ function renderStatistics(st, metrics, storage) {
   if (metrics && metrics.has_taste) {
     metricsCdf = metrics.cdf;
     const d = metrics.distribution;
+    metricsCuts = d;
     const v = Math.min(Math.max(readFloor() ?? d.p90, d.min), d.max);
     coverageCard = `
       <div class="panel stat-card">
         <h3>Taste coverage</h3>
         <p class="dim">How much of your library clears a taste bar — the same floor the megaboard uses.</p>
-        <div class="m-thresh"><label>Count moments at ≥
+        <div class="m-thresh"><label>Count moments that are
           <input type="range" id="stats-floor" min="${d.min}" max="${d.max}" step="0.005" value="${v}" /></label>
           <span id="stats-floor-out" class="dim"></span></div>
       </div>`;
@@ -1929,7 +1971,7 @@ function renderHero(h) {
   const title = h.title || `scene ${h.scene_id ?? "?"}`;
   const who = (h.performers || []).slice(0, 2).join(", ");
   el.innerHTML = `<img src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
-    <div class="ov"><div class="row">${tierBadge(h.rating100, h.o_counter)}<span class="muted">${Math.round(h.score * 100)}% match · ${fmt(h.time)}</span></div>
+    <div class="ov"><div class="row">${tierBadge(h.rating100, h.o_counter)}<span class="muted">${W.tasteBand(h.score, SCALE && SCALE.moment) ? esc(W.tasteBand(h.score, SCALE.moment)[1]) + " match" + fig(Math.round(h.score * 100) + "%") : Math.round(h.score * 100) + "% match"} · ${fmt(h.time)}</span></div>
       <h2>${esc(who ? who + " — " + title : title)}</h2>
       <div class="row"><button class="btn pri" data-hero="play">▶ Play</button><button class="btn" data-hero="similar">⟳ More like this</button>
         <button class="btn" data-hero="save">★ Save</button></div></div>`;
@@ -1965,8 +2007,8 @@ function trainSummary(s) {
     return `Retrained on ${s.samples.toLocaleString()} moments · ${s.kind === "mlp" ? "non-linear" : "linear"} model` +
       (s.context ? `, ±${s.context} frames` : "") + " (from the last measure)";
   const bits = [`Trained on ${s.samples.toLocaleString()} moments`];
-  if (h.peak_hit != null) bits.push(`jump-to-peak ${Math.round(h.peak_hit * 100)}%`);
-  if (h.auc != null) bits.push(`AUC ${h.auc}` + (s.auc_delta ? ` (${s.auc_delta > 0 ? "+" : ""}${s.auc_delta})` : ""));
+  if (h.peak_hit != null) bits.push(`jump-to-peak lands on your moment ${W.howOften(h.peak_hit)} (${Math.round(h.peak_hit * 100)}%)`);
+  if (h.auc != null) bits.push(`tells love from pass: ${W.auc(h.auc).toLowerCase()} (AUC ${h.auc}` + (s.auc_delta ? `, ${s.auc_delta > 0 ? "+" : ""}${s.auc_delta}` : "") + ")");
   return bits.join(" · ");
 }
 const pct = (x) => (x == null ? "—" : Math.round(x * 100) + "%");
@@ -2069,7 +2111,8 @@ async function loadTasteQuality() {
     if (!prev || prev[k] == null || L[k] == null) return "";
     const d = Math.round((L[k] - prev[k]) * 100);
     const txt = k === "auc" ? (Math.abs(d) / 100).toFixed(2) : `${Math.abs(d)} pts`;
-    return d ? `<span class="tq-d ${d > 0 ? "up" : "down"}" title="since the previous training">${d > 0 ? "▲" : "▼"} ${txt}</span>` : "";
+    const word = W.trend(L[k] - prev[k]);
+    return d ? `<span class="tq-d ${d > 0 ? "up" : "down"}" title="${d > 0 ? "▲" : "▼"} ${txt} since the previous training">${d > 0 ? "▲" : "▼"} ${esc(word)}${fig(txt)}</span>` : "";
   };
   const model = `${L.kind === "mlp" ? "Non-linear" : "Linear"} model` + (L.context ? ` · sees ±${L.context} frames of context` : " · single frames");
   const src = TQ_SRC.filter(([k]) => (L.sources || {})[k]).map(([k, n]) => `<span><b>${L.sources[k].toLocaleString()}</b> ${n}</span>`).join("");
@@ -2078,13 +2121,13 @@ async function loadTasteQuality() {
       <span class="faint small">measured on scenes it didn't train on · ${new Date(L.ts * 1000).toLocaleString()}</span></div>
     <div class="tq-stats">
       <div class="tq-stat" title="For scenes holding a moment you loved: how often the model's single best moment lands within 10 s of it — i.e. how often 'jump to peak' lands on your moment.">
-        <span class="tq-l">Jump-to-peak lands on your moment</span><span class="tq-v">${pct(L.peak_hit)}${delta("peak_hit")}</span>
+        <span class="tq-l">Jump-to-peak lands on your moment</span><span class="tq-v tq-words">${L.peak_hit != null ? esc(cap(W.howOften(L.peak_hit))) + fig(pct(L.peak_hit)) : "—"}${delta("peak_hit")}</span>
         <span class="faint small">${L.peak_scenes || 0} held-out scenes</span></div>
       <div class="tq-stat" title="Of the held-out moments it ranks highest, the share you actually loved.">
-        <span class="tq-l">Its top picks you love</span><span class="tq-v">${pct(L.p_at_50)}${delta("p_at_50")}</span>
-        <span class="faint small">vs ${pct(L.base_rate)} by chance</span></div>
+        <span class="tq-l">Its top picks you love</span><span class="tq-v tq-words">${L.p_at_50 != null ? esc(cap(W.lift(L.p_at_50, L.base_rate) || pct(L.p_at_50))) + fig(pct(L.p_at_50)) : "—"}${delta("p_at_50")}</span>
+        <span class="faint small">${L.p_at_50 != null ? `${esc(W.share(L.p_at_50))} of its top picks are moments you loved · ${pct(L.base_rate)} by chance` : ""}</span></div>
       <div class="tq-stat" title="ROC-AUC on your held-out ratings: 1.0 = always ranks a loved moment above a passed one, 0.5 = coin flip.">
-        <span class="tq-l">Tells love from pass</span><span class="tq-v">${L.auc != null ? L.auc.toFixed(2) : "—"}${delta("auc")}</span>
+        <span class="tq-l">Tells love from pass</span><span class="tq-v tq-words">${L.auc != null ? esc(W.auc(L.auc)) + fig(L.auc.toFixed(2)) : "—"}${delta("auc")}</span>
         ${tqSpark(hist, "auc") || '<span class="faint small">AUC · trend after 2 trainings</span>'}</div>
     </div>
     <div class="tq-src"><span class="faint">Learned from</span>${src}${L.pu_dropped ? `<span class="faint">· ${L.pu_dropped} look-alike background frames set aside</span>` : ""}</div>
@@ -2133,8 +2176,8 @@ async function openHealth() {
     const x = h.per_tier[t];
     const w = x.scenes ? 100 * x.with_saves / x.scenes : 0;
     return `<tr><td>${tierChip(t)}</td><td>${n(x.scenes)}</td>
-      <td><div class="hb"><i style="width:${w.toFixed(1)}%"></i></div><span>${pct(x.with_saves, x.scenes)}</span></td>
-      <td>${x.median_best != null ? Math.round(x.median_best * 100) + "%" : "—"}</td></tr>`;
+      <td><div class="hb"><i style="width:${w.toFixed(1)}%"></i></div><span>${esc(x.with_saves_words || "")}${fig(pct(x.with_saves, x.scenes))}</span></td>
+      <td>${x.median_best != null ? (x.median_word ? `<span class="tw tw-${x.median_band}">${esc(x.median_word)}</span>${fig(Math.round(x.median_best * 100) + "%")}` : Math.round(x.median_best * 100) + "%") : "—"}</td></tr>`;
   }).join("");
   const bk = h.save_buckets, bmax = Math.max(1, ...Object.values(bk));
   const bars = Object.entries(bk).map(([k, v]) =>
@@ -2143,7 +2186,7 @@ async function openHealth() {
   box.innerHTML = `
     <div class="hgrid">
       <div class="card pad hcard"><span class="tq-l">Scenes with saved moments</span>
-        <span class="tq-v">${pct(h.with_saves, h.scenes)}</span>
+        <span class="tq-v tq-words">${esc(cap(h.with_saves_words || ""))}${fig(pct(h.with_saves, h.scenes))}</span>
         <span class="faint small">${n(h.with_saves)} of ${n(h.scenes)} scenes · ${n(h.saves_total)} saves</span></div>
       <div class="card pad hcard hlink" data-open-view="saved"><span class="tq-l">Ready for ${esc(gradeName("legendaire"))}</span>
         <span class="tq-v">${n(h.legendaire_candidates)}</span>
@@ -2154,7 +2197,7 @@ async function openHealth() {
     </div>
     <div class="hgrid two">
       <div class="card pad"><h3>By tier</h3>
-        <table class="htab"><thead><tr><th>Tier</th><th>Scenes</th><th>With saved moments</th><th title="Median of each scene's best moment, per the taste model — do your grades and the model agree?">Model's median best</th></tr></thead>
+        <table class="htab"><thead><tr><th>Tier</th><th>Scenes</th><th>With saved moments</th><th title="How the taste model rates a typical scene in this tier (its median best moment, against all your scenes) — do your grades and the model agree?">Typical best moment</th></tr></thead>
         <tbody>${rows}</tbody></table>
         ${h.weak_legendaire ? `<p class="faint small">${n(h.weak_legendaire)} ${esc(gradeName("legendaire"))} scenes have a best moment in the library's bottom quarter — the model disagrees with you there (your grade wins; it's a hint for the model).</p>` : ""}</div>
       <div class="card pad"><h3>Saved moments per scene</h3><div class="hbars">${bars}</div>
@@ -2166,7 +2209,7 @@ async function openHealth() {
 function whoHealth(w) {
   if (!w) return "";
   const tab = (list, kind) => list.length ? `<table class="htab wtab"><thead><tr><th>${kind === "studio" ? "Studio" : "Performer"}</th><th title="Graded scenes (incl. deleted rejects)">Graded</th><th title="Share not rejected">Kept</th><th>${esc(className("exceptionnelle"))}+</th></tr></thead><tbody>${
-    list.map((x) => `<tr class="hlink" data-who-${kind}="${esc(x.name)}" title="Open in Catalogue"><td>${esc(x.name)}</td><td>${x.n}</td><td>${Math.round(x.keep * 100)}%</td><td>${Math.round(x.top * 100)}%</td></tr>`).join("")}</tbody></table>`
+    list.map((x) => `<tr class="hlink" data-who-${kind}="${esc(x.name)}" title="Open in Catalogue"><td>${esc(x.name)}<br><span class="wr-${x.tone} small">${esc(x.verdict || "")}</span></td><td>${x.n}</td><td>${esc(x.kept_words || "")}${fig(Math.round(x.keep * 100) + "%")}</td><td>${esc(x.top_words || "")}${fig(Math.round(x.top * 100) + "%")}</td></tr>`).join("")}</tbody></table>`
     : '<p class="faint small">None yet.</p>';
   const block = (d, kind, label) => `<div class="card pad"><h3>${label}</h3>
       <p class="faint small">${d.count.toLocaleString()} with ${w.min_graded}+ graded scenes · ranked against your library average</p>
@@ -2174,6 +2217,7 @@ function whoHealth(w) {
   return `<div class="hgrid two">${block(w.performers, "performer", "Performers")}${block(w.studios, "studio", "Studios")}</div>
     <p class="faint small">Records are smoothed: a handful of grades counts for little until there are more. Click a row to review them in Catalogue.</p>`;
 }
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 function tierChip(t) { return `<span class="tchip tc-${t}">${esc(TIER_NAMES[t] || t)}</span>`; }
 document.addEventListener("click", (e) => {
   const c = e.target.closest("[data-who-performer],[data-who-studio]"); if (!c) return;
@@ -2403,7 +2447,7 @@ document.addEventListener("keydown", (e) => {
 let expData = null;
 function updateExpFloorLabel() {
   const v = +$("#exp-floor").value;
-  $("#exp-floor-val").textContent = v > 0 ? Math.round(v * 100) + "%" : "off";
+  $("#exp-floor-val").innerHTML = v > 0 ? esc(W.floorWord(v, SCALE && SCALE.moment)) + fig(Math.round(v * 100) + "%") : "off";
 }
 async function openExperimental() {
   const body = $("#exp-body");
@@ -2413,6 +2457,7 @@ async function openExperimental() {
   body.innerHTML = '<p class="dim">Analyzing your taste coverage…</p>';
   $("#exp-status").textContent = "";
   try {
+    SCALE = (await W.tasteScale()) || SCALE;
     expData = await api("/api/experimental/taste" + (PROFILE.isDefault() ? "" : `?profile=${encodeURIComponent(PROFILE.name)}`));
   } catch (e) { body.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
   renderExperimental();
@@ -2456,15 +2501,20 @@ function renderExperimental() {
   const uncovered = total - covered;
   const pct = total ? Math.round((uncovered / total) * 100) : 0;
   const floorTxt = floor > 0 ? Math.round(floor * 100) + "%" : "0%";
+  const floorWords = W.floorWord(floor, SCALE && SCALE.moment).toLowerCase();
+  const headline = floor > 0
+    ? `${esc(cap(W.share(total ? covered / total : 0)))} of your scenes <span class="dim">have a moment that's ${esc(floorWords)}${fig(`${covered.toLocaleString()} of ${total.toLocaleString()} · ${100 - pct}% · ≥ ${floorTxt}`)}</span>`
+    : `Every scene counts <span class="dim">— raise the taste floor to see how much of your library clears it</span>`;
   const coverage = `<div class="panel">
-    <div class="exp-big">${uncovered.toLocaleString()} of ${total.toLocaleString()} scenes <span class="dim">have no moment above ${floorTxt} (${pct}%)</span></div>
-    <div class="dim">${covered.toLocaleString()} scene(s) are covered by your taste at this floor · scores span ${Math.round(expData.score_range[0] * 100)}%–${Math.round(expData.score_range[1] * 100)}%.</div></div>`;
+    <div class="exp-big">${headline}</div>
+    <div class="dim">${covered.toLocaleString()} scene(s) are covered by your taste at this floor${fig(`scores span ${Math.round(expData.score_range[0] * 100)}%–${Math.round(expData.score_range[1] * 100)}%`)}.</div></div>`;
 
   const dist = expData.distribution || [];
   const dmax = Math.max(1, ...dist.map((b) => b.n));
   const histBars = dist.map((b) => {
     const hh = Math.round((b.n / dmax) * 100);
-    return `<div class="exp-bar ${b.lo >= floor ? "" : "below"}" style="height:${hh}%" title="${Math.round(b.lo * 100)}%+ · ${b.n} scene(s)"></div>`;
+    const bw = W.tasteBand(b.lo, SCALE && SCALE.scene);
+    return `<div class="exp-bar ${b.lo >= floor ? "" : "below"}" style="height:${hh}%" title="${bw ? bw[1] + " · " : ""}${Math.round(b.lo * 100)}%+ · ${b.n} scene(s)"></div>`;
   }).join("");
   const histogram = `<div class="panel"><h3 class="exp-h">Per-scene best-score distribution</h3>
     <div class="exp-hist">${histBars}</div><div class="exp-axis"><span>0%</span><span>100%</span></div>
@@ -2473,7 +2523,7 @@ function renderExperimental() {
   const curve = expData.coverage_curve || [];
   const curveBars = curve.map((p) => {
     const hh = total ? Math.round((p.covered / total) * 100) : 0;
-    return `<div class="exp-bar" style="height:${hh}%" title="floor ${Math.round(p.floor * 100)}% · ${p.covered.toLocaleString()} covered (${hh}%)"></div>`;
+    return `<div class="exp-bar" style="height:${hh}%" title="floor ${W.floorWord(p.floor, SCALE && SCALE.moment)} (${Math.round(p.floor * 100)}%) · ${W.share(hh / 100)} covered (${p.covered.toLocaleString()} · ${hh}%)"></div>`;
   }).join("");
   const curvePanel = `<div class="panel"><h3 class="exp-h">Coverage vs. floor</h3>
     <div class="exp-hist">${curveBars}</div><div class="exp-axis"><span>floor 5%</span><span>95%</span></div>
@@ -2481,12 +2531,12 @@ function renderExperimental() {
 
   const de = expData.density || {};
   const density = `<div class="panel"><h3 class="exp-h">Sampling density</h3>
-    <p class="dim">Moments sampled per scene — min ${de.min}, median ${de.median}, max ${de.max}. ${de.sparse_scenes ? `⚠ ${de.sparse_scenes} scene(s) have fewer than 4 sampled moments (few chances to score — a denser embed interval would help).` : "Every scene has a healthy number of sampled moments."}</p></div>`;
+    <p class="dim">Moments sampled per scene — typically ${de.median}${fig(`min ${de.min} · max ${de.max}`)}. ${de.sparse_scenes ? `⚠ ${de.sparse_scenes} scene(s) have fewer than 4 sampled moments (few chances to score — a denser embed interval would help).` : "Every scene has a healthy number of sampled moments."}</p></div>`;
 
   const w = expData.wall || [];
   const tiles = w.map((it) => `<div class="exp-tile" data-stream="${esc(it.stream || "")}" data-key="${esc(it.key)}" data-t="${it.t}" data-sid="${esc(String(it.scene_id))}">
       <img loading="lazy" src="${it.thumb}" onerror="this.style.display='none'" />
-      <span class="exp-score">${Math.round(it.score * 100)}%</span></div>`).join("");
+      <span class="exp-score">${W.tasteHTML(it.score, SCALE && SCALE.scene)}</span></div>`).join("");
   const wall = w.length ? `<div class="panel"><h3 class="exp-h">Least on-taste scenes <span class="dim">(their own best moment)</span></h3>
     <p class="dim">The ${w.length} scenes your taste scores lowest. Do they genuinely look "not you"? If good scenes are here, your taste needs more examples — not a bug. Click a still to play it.</p>
     <div class="exp-wall">${tiles}</div></div>` : "";
@@ -2633,28 +2683,33 @@ function renderCatTriage() {
   btn.disabled = !!m.training;
   let txt = "";
   if (rep && rep.trained) {
+    // plain words first ("usually right, almost always within a tier"), the
+    // cross-validated figures small beside them
     const pct = (x) => Math.round(x * 100) + "%";
-    const gain = Math.round((rep.quality_gain || 0) * 100);
-    txt = `Trained on ${rep.n} scenes (${rep.trained_at}) · ${pct(rep.cv.exact)} exact · ${pct(rep.cv.within_one)} within one tier` +
-      ` · file quality ${gain >= 0 ? "+" : ""}${gain} pts` + whoGainText(rep) +
+    const pts = (g) => `${g >= 0 ? "+" : ""}${Math.round(g * 100)} pts`;
+    const qg = rep.quality_gain || 0;
+    txt = `Tier guesses are <b>${W.accuracy(rep.cv.exact)}</b>${fig(pct(rep.cv.exact) + " exact")} and ${W.withinOne(rep.cv.within_one)}${fig(pct(rep.cv.within_one))}` +
+      ` · file quality ${qg > 0 ? W.gain(qg) : "no clear help"}${fig(pts(qg))}` + whoGainText(rep) +
+      ` · learned from ${rep.n.toLocaleString()} graded scenes (${esc(rep.trained_at)})` +
       (m.grades_since_train ? ` · ${m.grades_since_train} grades since` : "") +
       (rep.remembered_rejects ? ` · incl. ${plural(rep.remembered_rejects, "deleted reject")} remembered` : "");
     const short = Object.entries(rep.short || {}).map(([c, n]) => `${className(c)} (${n})`);
-    if (short.length) txt += ` · too few to learn: ${short.join(", ")}`;
+    if (short.length) txt += ` · too few to learn: ${esc(short.join(", "))}`;
   } else if (rep && !rep.trained) {
-    txt = rep.reason;
+    txt = esc(rep.reason);
   } else {
     txt = "Not trained yet — learns your tiers from the scenes you've graded.";
   }
-  $("#cat-model").textContent = txt;
+  $("#cat-model").innerHTML = txt;
 }
 // did performer/studio history earn its place in the model (measured, not assumed)?
 function whoGainText(rep) {
   if (rep.who_gain == null) return "";
-  const g = Math.round(rep.who_gain * 100), sg = `${g >= 0 ? "+" : ""}${g} pts`;
-  let t = rep.use_who ? ` · performer/studio ${sg}` : ` · performer/studio not used (${sg} — no clear gain yet)`;
+  const g = rep.who_gain, sg = `${g >= 0 ? "+" : ""}${Math.round(g * 100)} pts`;
+  let t = rep.use_who ? ` · performer/studio history ${W.gain(g)}${fig(sg)}`
+    : ` · performer/studio history not used yet — no clear help${fig(sg)}`;
   const fb = rep.fallback || {};
-  if (fb.trained) t += ` · unembedded scenes judged by performer/studio (${Math.round(fb.cv.exact * 100)}% exact)`;
+  if (fb.trained) t += ` · scenes not embedded yet are judged by who's in them (${W.accuracy(fb.cv.exact)}${fig(Math.round(fb.cv.exact * 100) + "% exact")})`;
   return t;
 }
 function renderCatStorage(st) {
@@ -2752,17 +2807,46 @@ function sigLine(r) {
   const bits = [];
   if (s.saves) bits.push(`<span class="sg-saves" title="Moments you saved in this scene">★ ${s.saves} saved</span>`);
   else bits.push(`<span class="faint" title="You haven't saved a moment in this scene">no saved moments</span>`);
-  if (s.best != null) bits.push(`<span title="The taste model's best moment in this scene">best moment ${Math.round(s.best * 100)}%</span>`);
-  if (s.age_days != null) bits.push(s.new ? `<span class="sg-new" title="Inside the grace period — never suggested for trimming">new · ${s.age_days} d</span>`
-    : `<span class="faint">added ${ageText(s.age_days)} ago</span>`);
+  if (s.best != null) bits.push(`<span>best moment ${bestHTML(s)}</span>`);
+  if (s.age_days != null) bits.push(ageHTML(s));
   if (r.size && cat.view === "trim") bits.push(`<span class="faint">${fmtBytes(r.size)}</span>`);
   return `<div class="cat-sig">${bits.join(" · ")}</div>`;
 }
+// --- plain words for the model's opinions (static/words.js) ---------------------
+// the scene's best moment against every other scene's best: "Standout 97%"
+function bestHTML(s) {
+  if (s.best == null) return "";
+  const hint = W.TASTE_HINT[s.band] ? ` — ${W.TASTE_HINT[s.band].replace(" of your library", "")} of your scenes` : "";
+  return s.band_word ? `<b class="tw tw-${s.band}" title="The taste model's best moment here: ${W.pct(s.best)}${hint}">${s.band_word}</b>${fig(W.pct(s.best))}`
+    : W.pct(s.best);
+}
+function ageHTML(s) {
+  const a = W.age(s.age_days); if (!a) return "";
+  return s.new ? `<span class="sg-new" title="Inside the grace period — never suggested for trimming (${s.age_days} days)">new · ${a}</span>`
+    : `<span class="faint" title="${s.age_days} days">${a}</span>`;
+}
+// "Probably Légendaire, maybe Exceptionnelle 56%"
+function predHTML(p) {
+  const ranked = Object.entries(p.probs || {}).sort((a, b) => b[1] - a[1]);
+  const second = ranked[1];
+  const tc = (c) => `<span class="tc-${c === "reject" ? "rejected" : c}">${esc(className(c))}</span>`;
+  const conf = W.confidence(p.conf);
+  const lead = conf === "Hard to call" ? `Hard to call — ${tc(p.tier)}` : `${conf} ${tc(p.tier)}`;
+  const maybe = second && W.closeRunnerUp(p.conf, second[1]) ? `, maybe ${tc(second[0])}` : "";
+  const title = ranked.map(([c, v]) => `${className(c)} ${W.pct(v)}`).join(" · ");
+  return `<span title="${esc(title)}">${lead}${maybe}</span>${fig(W.pct(p.conf))}`;
+}
+function keeperHTML(p) {
+  if (!p || p.keeper == null || p.tier === "reject") return "";
+  const w = W.keeperWord(p.keeper); if (!w) return "";
+  return `<span title="Chance it's not a reject: ${W.pct(p.keeper)}">${w}</span>${fig(W.pct(p.keeper))}`;
+}
+function textNum(text, detail) { return esc(text) + fig(detail); }
 // performer / studio track records: how you've graded who's in this scene
 function whoLines(r, max = 3) {
   const ls = ((r.who || {}).lines || []).slice(0, max);
   if (!ls.length) return "";
-  return `<div class="cat-whorec">${ls.map((x) => `<span class="wr wr-${x.tone}" title="Your grades for ${x.kind === "studio" ? "this studio" : "this performer"} (Library health lists the best and worst)">${x.kind === "studio" ? "🏢" : "👤"} ${esc(x.text)}</span>`).join("")}</div>`;
+  return `<div class="cat-whorec">${ls.map((x) => `<span class="wr wr-${x.tone}" title="Your grades for ${x.kind === "studio" ? "this studio" : "this performer"} (Library health lists the best and worst)">${x.kind === "studio" ? "🏢" : "👤"} ${textNum(x.text, x.detail)}</span>`).join("")}</div>`;
 }
 function ageText(d) {
   if (d < 45) return `${d} days`;
@@ -2820,13 +2904,12 @@ function catCardHTML(r, i) {
   const grades = GRADES.map((g, k) =>
     `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
   const predLine = p
-    ? `<div class="cat-pred">Looks <span class="tc-${p.tier === "reject" ? "rejected" : p.tier}">${esc(className(p.tier))}</span> ${Math.round(p.conf * 100)}%` +
-      (p.keeper != null ? ` · keeper ${Math.round(p.keeper * 100)}%` : "") +
+    ? `<div class="cat-pred">${predHTML(p)}` + (keeperHTML(p) ? ` · ${keeperHTML(p)}` : "") +
       (p.from === "who" ? ` <span class="faint" title="Not embedded yet: this guess comes only from how you've graded these performers and this studio">(from performer/studio history — not seen yet)</span>` : "") + `</div>`
     : "";
-  const flag = (r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "") +
+  const flag = (r.flag ? `<div class="cat-flag">⚠ ${textNum(r.flag, r.flag_detail)}</div>` : "") +
     (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate</div>` : "");
-  const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${esc(r.suggest.why)}</div>` : "";
+  const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "";
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
@@ -2948,7 +3031,7 @@ $("#btn-cat-train")?.addEventListener("click", async () => {
   $("#cat-model").textContent = "learning your tiers from every graded scene — this can take a minute on a big library…";
   try {
     const r = await api("/api/catalogue/train", { method: "POST" });
-    toast(r.trained ? `Trained on ${r.n} scenes — ${Math.round(r.cv.exact * 100)}% exact` : r.reason, !r.trained);
+    toast(r.trained ? `Trained on ${r.n} scenes — tier guesses are ${W.accuracy(r.cv.exact)} (${Math.round(r.cv.exact * 100)}% exact)` : r.reason, !r.trained);
   } catch (err) { toast(err.message, true); }
   openCatalogue();
 });
@@ -3557,19 +3640,20 @@ function renderReview() {
   const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "reject"];
   $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
     const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
-    return `<div class="pb"><span>${esc(className(c))}</span><div class="b"><i class="tier-bg-${t}" style="width:${p}%"></i></div><span class="muted">${p}%</span></div>`;
+    return `<div class="pb" title="${esc(className(c))} ${p}%"><span>${esc(className(c))}</span><div class="b"><i class="tier-bg-${t}" style="width:${p}%"></i></div><span class="muted num">${p}%</span></div>`;
   }).join("") : (r.moments && r.moments.length
     ? '<span class="faint">The tier model isn\'t trained yet — Catalogue → ⋯ → Train.</span>'
     : '<span class="faint">Not embedded yet — the model\'s opinion appears once it is.</span>');
-  $("#rv-why").innerHTML = [r.pred && r.pred.keeper != null ? `Keeper ${Math.round(r.pred.keeper * 100)}%` : "",
+  $("#rv-why").innerHTML = [r.pred ? `<b class="rv-verdict">${predHTML(r.pred)}</b>` : "", keeperHTML(r.pred),
     r.pred && r.pred.from === "who" ? '<span class="faint">From performer/studio history — not seen yet</span>' : "",
-    r.flag ? `<span class="warn">⚠ ${esc(r.flag)}</span>` : "", r.suggest ? esc(r.suggest.why) : "",
+    r.flag ? `<span class="warn">⚠ ${textNum(r.flag, r.flag_detail)}</span>` : "",
+    r.suggest ? `Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}` : "",
     r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>") + whoLines(r, 6);
   const q = r.quality || {};
   const sg = r.signals;
   $("#rv-facts").innerHTML = (sg ? `<span>Saved</span><span>${sg.saves ? `★ ${sg.saves} moment${sg.saves === 1 ? "" : "s"}` : '<span class="faint">none yet</span>'}</span>
-    ${sg.best != null ? `<span>Best moment</span><span>${Math.round(sg.best * 100)}% <span class="faint">(taste model)</span></span>` : ""}
-    ${sg.age_days != null ? `<span>In library</span><span>${sg.new ? `<span class="sg-new">new · ${sg.age_days} days</span>` : ageText(sg.age_days)}</span>` : ""}` : "")
+    ${sg.best != null ? `<span>Best moment</span><span>${bestHTML(sg)} <span class="faint">(taste model)</span></span>` : ""}
+    ${sg.age_days != null ? `<span>In library</span><span>${ageHTML(sg)}</span>` : ""}` : "")
     + `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
     <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
     <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>
@@ -3577,7 +3661,7 @@ function renderReview() {
     <span>Path</span><span class="faint path" title="${esc(r.path)}">${esc(r.path)}</span>`;
   $("#rv-queue").innerHTML = rv.items.slice(rv.i + 1, rv.i + 7).map((x, k) => `<div class="qi" data-j="${rv.i + 1 + k}">
       <div class="pic"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.scene_id)}/cover" onerror="this.style.opacity=.1" /></div>
-      <div><b>${esc(x.title)}</b><span class="muted">${esc(x.performers.slice(0, 2).join(", "))}${x.pred ? " · looks " + esc(className(x.pred.tier)) : ""}</span></div></div>`).join("")
+      <div><b>${esc(x.title)}</b><span class="muted">${esc(x.performers.slice(0, 2).join(", "))}${x.pred ? " · " + esc(W.confidence(x.pred.conf).toLowerCase()) + " " + esc(className(x.pred.tier)) : ""}</span></div></div>`).join("")
     || '<span class="faint">Last one in this list.</span>';
 }
 async function rvGrade(grade) {

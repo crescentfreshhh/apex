@@ -271,3 +271,10 @@ body.has-big #status { bottom: 58px; }
 #bar > * { flex: none; }
 #bar > .grow { flex: 1; }
 #vol-wrap input[type=range] { width: 80px; }
+
+/* plain words for taste (static/words.js); exact figures small beside them */
+.num { font-size: .86em; opacity: .62; font-variant-numeric: tabular-nums; margin-left: 1px; font-weight: 400; }
+html.hide-nums .num { display: none; }
+.tw { font-weight: 600; }
+.tw-standout { color: var(--accent); } .tw-strong { color: #4ac888; } .tw-good { color: #8fd6ae; }
+.tw-decent { color: var(--fg); } .tw-soso { color: var(--dim); } .tw-weak { color: #e0604d; }

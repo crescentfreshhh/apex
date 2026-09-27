@@ -866,6 +866,12 @@ def create_app(cfg=None):
     def foryou_words(recent: int = 0, top_k: int = 8):
         return service.taste_words(top_k=top_k, recent=recent)
 
+    @app.get("/api/taste/scale")
+    def taste_scale():
+        """Your library's taste cutoffs for the plain-words scale (null until the
+        model's scores are ready — the UI then shows plain numbers)."""
+        return service.taste_scale()
+
     @app.get("/api/taste/metrics")
     def taste_metrics(threshold: float | None = None):
         """Taste-score distribution + how many moments/scenes meet your bar."""

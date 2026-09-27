@@ -382,15 +382,24 @@ def quality_floor(rows: list[dict], min_count: int = 5) -> dict:
 
 
 def quality_flag(q: dict, floor: dict) -> str | None:
-    """A one-line reason when a scene falls under the learned floor, else None."""
+    """A one-line, plain-words reason when a scene falls under the learned floor,
+    else None. `quality_flag_detail` gives the figures behind it."""
     res, mbps = q.get("res"), q.get("mbps")
     low = floor.get("lowest_res")
     if res and low and RES_CLASSES.index(res) < RES_CLASSES.index(low):
         return f"{res} — you've never tiered anything below {low}"
     f = floor.get("by_res", {}).get(res or "")
     if f and mbps and mbps < f["mbps"]:
-        return (f"{mbps:g} Mbps · {res} — below every {res} scene you've tiered "
-                f"(lowest {f['mbps']:g} Mbps of {f['n']})")
+        return f"lower quality than every {res} scene you've tiered"
+    return None
+
+
+def quality_flag_detail(q: dict, floor: dict) -> str | None:
+    """The numbers behind `quality_flag` (shown small beside the words)."""
+    res, mbps = q.get("res"), q.get("mbps")
+    f = floor.get("by_res", {}).get(res or "")
+    if f and mbps and mbps < f["mbps"] and quality_flag(q, floor):
+        return f"{mbps:g} Mbps · lowest you've tiered {f['mbps']:g} Mbps, of {f['n']}"
     return None
 
 

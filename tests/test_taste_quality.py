@@ -836,10 +836,13 @@ def test_catalogue_cards_carry_performer_and_studio_reasons(svc):
     _who_graded(svc)
     items = {i["scene_id"]: i for i in svc.catalogue(limit=500)["items"]}
     lines = [x["text"] for x in items["100"]["who"]["lines"]]
-    assert any(t.startswith("Ann: 30 graded · 30 ") and "(100%)" in t for t in lines)
+    assert "Ann — a favourite: all of 30 graded were Exceptionnelle+" in lines
+    ann = items["100"]["who"]["lines"][0]
+    assert ann["detail"] == "30 of 30 Exceptionnelle+ · 100%"
     bad = items["101"]["who"]["lines"]
     assert [x["tone"] for x in bad] == ["bad", "bad"]
-    assert any("Bad: keeps 0% of 30" in x["text"] for x in bad)
+    assert any(x["text"] == "Bad — usually a miss: you've kept none of 30, none Exceptionnelle+"
+               and x["detail"] == "keeps 0% · 0% Exceptionnelle+" for x in bad)
     new = [x["text"] for x in items["102"]["who"]["lines"]]
     assert new == ["New performer: Cy — no history", "New studio: Indie — no history"]
     assert items["100"]["performer_ids"] == ["1"]
@@ -853,6 +856,8 @@ def test_library_health_lists_best_and_worst_performers_and_studios(svc):
     assert h["studios"]["top"][0] == {**h["studios"]["top"][0], "name": "Good", "n": 30, "keep": 1.0}
     assert h["studios"]["bottom"][0]["name"] == "Bad" and h["studios"]["bottom"][0]["keep"] == 0.0
     assert h["performers"]["count"] == 2 and h["min_graded"] == 3
+    assert h["performers"]["top"][0]["verdict"] == "a favourite" and h["studios"]["top"][0]["kept_words"] == "all"
+    assert h["performers"]["bottom"][0]["verdict"] == "usually a miss"
 
 
 def test_new_scenes_are_never_pushed_to_reject_by_who(svc):
@@ -866,3 +871,23 @@ def test_new_scenes_are_never_pushed_to_reject_by_who(svc):
     item = next(i for i in svc.catalogue(limit=500)["items"] if i["scene_id"] == "101")
     assert item["pred"]["tier"] == "reject"                   # the forecast is honest…
     assert (item["suggest"] or {}).get("grade") != "reject"   # …but no Reject suggestion
+
+
+def test_taste_scale_and_best_moment_words(svc):
+    before = svc.taste_scale()                                 # saved moments alone: your taste modes
+    assert before is None or before["by"] == "modes"
+    _trained(svc)
+    _settle(svc)
+    sc = svc.taste_scale()
+    m = sc["moment"]
+    assert sc["by"] == "classifier" and m["p50"] <= m["p75"] <= m["p90"] <= m["p95"] <= m["p99"]
+    assert sc["scene"]["p50"] >= m["p50"]                      # a scene's BEST beats a typical moment
+    assert svc.taste_scale() is sc                             # cached per score array
+    rows = svc._catalogue_all()
+    sig = svc._scene_signals(rows)
+    words = {v["band_word"] for v in sig.values() if v["best"] is not None}
+    assert words and words <= {"Standout", "Strong", "Good", "Decent", "So-so", "Weak"}
+    top = max((v for v in sig.values() if v["best"] is not None), key=lambda v: v["best"])
+    assert top["band"] == "standout"
+    health = svc.library_health()
+    assert all("with_saves_words" in t for t in health["per_tier"].values())

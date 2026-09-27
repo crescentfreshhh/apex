@@ -10,7 +10,7 @@ pytest.importorskip("sklearn")
 
 from peaks.tier_model import (  # noqa: E402
     CLASSES, TierModel, cross_validate, fit_best, quality_features, quality_flag,
-    quality_floor, usable_classes, visual_features,
+    quality_flag_detail, quality_floor, usable_classes, visual_features,
 )
 
 D = 32
@@ -119,7 +119,9 @@ def test_quality_floor_and_flag():
     floor = quality_floor(rows)
     assert floor["by_res"]["4K"] == {"mbps": 22, "n": 5}
     assert floor["by_res"]["1080p"]["mbps"] == 8 and floor["lowest_res"] == "1080p"
-    assert "below every 4K scene" in quality_flag({"res": "4K", "mbps": 12}, floor)
+    assert quality_flag({"res": "4K", "mbps": 12}, floor) == "lower quality than every 4K scene you've tiered"
+    assert quality_flag_detail({"res": "4K", "mbps": 12}, floor).startswith("12 Mbps · lowest you've tiered ")
+    assert quality_flag_detail({"res": "720p", "mbps": 50}, floor) is None
     assert quality_flag({"res": "4K", "mbps": 30}, floor) is None
     assert "never tiered anything below 1080p" in quality_flag({"res": "720p", "mbps": 50}, floor)
     assert quality_flag({"res": "1440p", "mbps": 1}, floor) is None      # no floor for 1440p yet

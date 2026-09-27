@@ -4101,6 +4101,35 @@ class Service(LibraryMixin):
             "sources": n,
         }
 
+    def taste_scale(self) -> dict | None:
+        """Your library's taste cutoffs, for the plain-words scale (peaks.words):
+        percentiles of every moment's score (tiles, For You, megaboard) and of
+        every scene's best moment (cards). The same scores those screens show —
+        the trained model's — so "Strong" means top 5% of YOUR library. None until
+        the model's scores exist. Cached per score array."""
+        model = self._model_name()
+        try:
+            idx = self.index(model)
+            scores, by = self._taste_scores(model, wait=False)
+        except Exception:  # noqa: BLE001 — no index / model yet
+            return None
+        if scores is None or by not in ("classifier", "modes") or scores.shape[0] != idx.size or not idx.size:
+            return None
+        cached = getattr(self, "_scale_cache", None)
+        if cached is not None and cached[0] is scores:
+            return cached[1]
+        qs = (25, 50, 75, 90, 95, 99)
+        m = np.percentile(scores, qs)
+        spans = sorted((a, b) for a, b in idx._key_rows.values() if b > a)
+        scene = None
+        if spans:
+            best = np.maximum.reduceat(scores, np.array([a for a, _ in spans]))
+            scene = {f"p{q}": round(float(v), 4) for q, v in zip(qs, np.percentile(best, qs))}
+        out = {"by": by, "moment": {f"p{q}": round(float(v), 4) for q, v in zip(qs, m)},
+               "scene": scene}
+        self._scale_cache = (scores, out)
+        return out
+
     def taste_metrics(
         self, model: str | None = None, threshold: float | None = None
     ) -> dict:
@@ -4615,7 +4644,7 @@ class Service(LibraryMixin):
             counts[r["tier"]] += 1
 
         # keeper triage: model predictions + the learned quality floor
-        from ..tier_model import quality_flag, quality_floor
+        from ..tier_model import quality_flag, quality_flag_detail, quality_floor
 
         floor = quality_floor(rows)
         preds = self._tier_predictions(rows)
@@ -4661,6 +4690,7 @@ class Service(LibraryMixin):
                 "stream": self.stream_url(r["scene_id"], start=0),
                 "pred": pred,
                 "flag": quality_flag(r["quality"], floor),
+                "flag_detail": quality_flag_detail(r["quality"], floor),
                 "signals": signals.get(r["scene_id"]),
                 "suggest": self._recommend(r, pred, signals.get(r["scene_id"]), names),
                 "who": self._who_reasons(r, who_enc, names),
@@ -4707,6 +4737,7 @@ class Service(LibraryMixin):
         scenes a saves → Légendaire pass would promote."""
         from ..tier_model import quality_floor
         from ..tiers import TIERS
+        from ..words import share, taste_band
 
         rows = self._catalogue_all()
         sig = self._scene_signals(rows)
@@ -4718,9 +4749,14 @@ class Service(LibraryMixin):
             if not rs:
                 continue
             bests = [sig[r["scene_id"]]["best"] for r in rs if sig[r["scene_id"]]["best"] is not None]
-            per_tier[t] = {"scenes": len(rs),
-                           "with_saves": sum(1 for r in rs if sig[r["scene_id"]]["saves"]),
-                           "median_best": round(float(np.median(bests)), 4) if bests else None}
+            med = float(np.median(bests)) if bests else None
+            band = taste_band(med, getattr(self, "_scene_best_cuts", None))
+            with_saves = sum(1 for r in rs if sig[r["scene_id"]]["saves"])
+            per_tier[t] = {"scenes": len(rs), "with_saves": with_saves,
+                           "with_saves_words": share(with_saves / len(rs)),
+                           "median_best": round(med, 4) if med is not None else None,
+                           "median_band": band[0] if band else None,
+                           "median_word": band[1] if band else None}
         buckets = {"0": 0, "1": 0, "2-3": 0, "4-9": 0, "10+": 0}
         for v in sig.values():
             n = v["saves"]
@@ -4746,6 +4782,7 @@ class Service(LibraryMixin):
         return {
             "scenes": len(rows),
             "with_saves": sum(1 for v in sig.values() if v["saves"]),
+            "with_saves_words": share(sum(1 for v in sig.values() if v["saves"]) / max(1, len(sig))),
             "saves_total": sum(v["saves"] for v in sig.values()),
             "per_tier": per_tier, "save_buckets": buckets,
             "trim": {"count": len(trim), "bytes": sum(int(r.get("size") or 0) for r in trim),
@@ -5172,13 +5209,16 @@ class Service(LibraryMixin):
         return enc
 
     def _who_reasons(self, row: dict, enc, names: dict | None = None) -> dict:
-        """The performer/studio facts for one scene, as short reason lines:
-        "Jane Doe: 9 graded · 7 Exceptionnelle+ (78%)", "Vixen: keeps 64% of
-        42", "New performer — no history"."""
+        """The performer/studio facts for one scene, as plain-words reason lines
+        (peaks.words), each with its figures in `detail`: "Jane Doe — a
+        favourite: most of 9 graded were Exceptionnelle+" (7 of 9 · 78%),
+        "Vixen — a good bet: you've kept most of 42…", "New performer — no history"."""
         from ..tier_model import who_of
+        from ..words import share, verdict
 
         names = names or {}
         top = names.get("exceptionnelle", "Exceptionnelle")
+        base = enc.base[0]
         ex = enc.explain(who_of(row))
         lines, fresh = [], []
         pnames = dict(zip(row.get("performer_ids") or [], row.get("performers") or []))
@@ -5187,43 +5227,38 @@ class Service(LibraryMixin):
             if not p["n"]:
                 fresh.append(nm)
                 continue
-            tops = round(p["top"] * p["n"])
-            rej = p["n"] - round(p["keep"] * p["n"])
-            bits = [f"{p['n']} graded", f"{tops} {top}+ ({round(100 * p['top'])}%)"]
+            n = p["n"]
+            tops = round(p["top"] * n)
+            rej = n - round(p["keep"] * n)
+            word, tone = verdict(n, p.get("shrunk"), p["keep"], base)
+            txt = f"{nm} — {word}: {share(p['top'])} of {n} graded were {top}+"
             if rej:
-                bits.append(f"{rej} rejected")
-            lines.append({"kind": "performer", "name": nm, "text": f"{nm}: " + " · ".join(bits),
-                          "tone": self._who_tone(p, enc)})
+                txt += f", {share(rej / n)} rejected"
+            detail = f"{tops} of {n} {top}+ · {round(100 * p['top'])}%" + (f" · {rej} rejected" if rej else "")
+            lines.append({"kind": "performer", "name": nm, "text": txt, "detail": detail, "tone": tone})
         if fresh:
-            lines.append({"kind": "performer", "name": ", ".join(fresh), "tone": "new",
+            lines.append({"kind": "performer", "name": ", ".join(fresh), "tone": "new", "detail": "",
                           "text": f"New performer{'s' if len(fresh) > 1 else ''}: "
                                   f"{', '.join(fresh)} — no history"})
         st = ex["studio"]
         if st:
             if st["n"]:
-                txt = (f"{st['name']}: keeps {round(100 * st['keep'])}% of {st['n']}"
-                       f" · {round(100 * st['top'])}% {top}+")
-                lines.append({"kind": "studio", "name": st["name"], "text": txt,
-                              "tone": self._who_tone(st, enc)})
+                word, tone = verdict(st["n"], st.get("shrunk"), st["keep"], base)
+                txt = (f"{st['name']} — {word}: you've kept {share(st['keep'])} of {st['n']}, "
+                       f"{share(st['top'])} {top}+")
+                lines.append({"kind": "studio", "name": st["name"], "text": txt, "tone": tone,
+                              "detail": f"keeps {round(100 * st['keep'])}% · {round(100 * st['top'])}% {top}+"})
             else:
-                lines.append({"kind": "studio", "name": st["name"], "tone": "new",
+                lines.append({"kind": "studio", "name": st["name"], "tone": "new", "detail": "",
                               "text": f"New studio: {st['name']} — no history"})
         return {"lines": lines}
-
-    @staticmethod
-    def _who_tone(rec: dict, enc) -> str:
-        """good / bad / neutral: is this record clearly above or below your
-        library average (by its smoothed grade)?"""
-        g = rec.get("shrunk")
-        if g is None:
-            return "neutral"
-        base = enc.base[0]
-        return "good" if g >= base + 0.4 else "bad" if g <= base - 0.4 else "neutral"
 
     def _who_tables(self, rows: list[dict], enc, min_n: int = 3, k: int = 8) -> dict:
         """Performers and studios with at least `min_n` graded scenes, best and
         worst by smoothed average grade — "top" only those above your library
         average, "bottom" only those below it — for Library health."""
+        from ..words import share, verdict
+
         pname: dict[str, str] = {}
         for r in rows:
             for pid, nm in zip(r.get("performer_ids") or [], r.get("performers") or []):
@@ -5235,9 +5270,12 @@ class Service(LibraryMixin):
                 if t[0] < min_n:
                     continue
                 n, g, kp, tp = enc.record(t)
+                word, tone = verdict(n, g, t[2] / n, enc.base[0])
                 out.append({"id": key, "name": label(key), "n": int(n),
                             "grade": round(t[1] / n, 2), "keep": round(t[2] / n, 3),
-                            "top": round(t[3] / n, 3), "shrunk": round(g, 3)})
+                            "top": round(t[3] / n, 3), "shrunk": round(g, 3),
+                            "verdict": word, "tone": tone,
+                            "kept_words": share(t[2] / n), "top_words": share(t[3] / n)})
             base = enc.base[0]      # above / below your library's average grade
             top = sorted((x for x in out if x["shrunk"] > base), key=lambda x: (-x["shrunk"], -x["n"]))
             bottom = sorted((x for x in out if x["shrunk"] < base), key=lambda x: (x["shrunk"], -x["n"]))
@@ -5262,7 +5300,13 @@ class Service(LibraryMixin):
             return None
         g = max(keepers, key=keepers.get)
         label = (names or {}).get(g, g)
-        return {"grade": g, "why": f"looks {round(100 * keepers[g] / sum(keepers.values()))}% like your {label} scenes"}
+        share = keepers[g] / sum(keepers.values())
+        from ..words import confidence
+
+        why = (f"{confidence(share).lower()} one of your {label} scenes" if share >= 0.5
+               else f"closest to your {label} scenes")
+        return {"grade": g, "why": why,
+                "detail": f"{round(100 * share)}% {label}"}
 
     TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim")
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
@@ -5317,6 +5361,17 @@ class Service(LibraryMixin):
                         "age_days": age, "new": age is not None and age < grace}
         vals = [v["best"] for v in out.values() if v["best"] is not None]
         self._best_q25 = float(np.percentile(vals, 25)) if vals else None
+        # the best moment in plain words, against every scene's best (peaks.words)
+        from ..words import taste_band
+
+        cuts = ({f"p{q}": float(v) for q, v in zip((50, 75, 90, 95, 99),
+                                                   np.percentile(vals, (50, 75, 90, 95, 99)))}
+                if vals else None)
+        self._scene_best_cuts = cuts
+        for v in out.values():
+            b = taste_band(v["best"], cuts)
+            v["band"] = b[0] if b else None
+            v["band_word"] = b[1] if b else None
         return out
 
     def _recommend(self, row: dict, pred: dict | None, sig: dict | None,
@@ -5339,7 +5394,8 @@ class Service(LibraryMixin):
                 and b is not None and q25 is not None and b <= q25
                 and (keeper is None or keeper < 0.5)):
             return {"grade": "reject",
-                    "why": f"no saved moments · best moment {round(b * 100)}% (bottom quarter of the library)"}
+                    "why": "no saved moments, and even its best moment is among your library's weakest",
+                    "detail": f"best moment {round(b * 100)}% · bottom quarter"}
         return None
 
     def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict,

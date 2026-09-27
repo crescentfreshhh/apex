@@ -282,7 +282,8 @@ def test_triage_train_views_and_suggestions(tmp_path, monkeypatch):
 
     q = svc.catalogue(view="quality")
     assert [r["scene_id"] for r in q["items"]] == ["u3"]        # 4 Mbps 4K, below every tiered 4K
-    assert "below every 4K scene" in q["items"][0]["flag"]
+    assert "lower quality than every 4K scene" in q["items"][0]["flag"]
+    assert "Mbps" in q["items"][0]["flag_detail"]
 
     a = svc.catalogue(view="anomaly")
     assert a["items"][0]["suggest"]["grade"] == "legendaire"    # O=5 anomaly that looks legendary

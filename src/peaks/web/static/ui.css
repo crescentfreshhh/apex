@@ -492,7 +492,7 @@ input[type=checkbox] { accent-color: var(--gold); }
 
 /* performer / studio track records */
 .cat-whorec { display: flex; flex-direction: column; gap: 1px; font-size: 12px; margin-top: 3px; color: var(--dim); }
-.cat-whorec .wr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-whorec .wr { white-space: normal; }
 .wr-good { color: var(--ok); } .wr-bad { color: var(--rej); } .wr-new { font-style: italic; }
 #rv-why .cat-whorec { margin-top: 8px; font-size: 12.5px; }
 #rv-why .cat-whorec .wr { white-space: normal; }
@@ -500,3 +500,15 @@ input[type=checkbox] { accent-color: var(--gold); }
 .wtab tr.hlink:hover td { color: var(--gold); }
 .hgrid h4 { margin: 10px 0 0; font-size: 12px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
 .wtab { table-layout: fixed; } .wtab th:first-child { width: 46%; }
+
+/* plain words first; exact figures small beside them (Settings → Display) */
+.num { font-size: .86em; opacity: .62; font-variant-numeric: tabular-nums; margin-left: 1px; font-weight: 400; }
+html.hide-nums .num { display: none; }
+.tw { font-weight: 600; }
+.tw-standout { color: var(--leg); } .tw-strong { color: var(--ok); } .tw-good { color: #8fd6ae; }
+.tw-decent { color: var(--fg); } .tw-soso { color: var(--dim); } .tw-weak { color: var(--rej); }
+.rv-verdict { font-size: 14px; }
+.tq-v.tq-words { font-size: 20px; line-height: 1.25; }
+.rk-top { color: var(--leg); } .rk-strong { color: var(--ok); } .rk-mixed { color: var(--fg); } .rk-low { color: var(--dim); }
+.tq-v.tq-words .tq-d { display: block; font-size: 12px; margin-top: 3px; }
+.perf-tasteline { font-size: 12px; margin-top: 2px; }
