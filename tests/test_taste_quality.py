@@ -381,6 +381,7 @@ def test_taste_scores_for_matches_the_library_scores(svc):
 
 def test_tier_board_is_ranked_by_the_trained_model(svc):
     _trained(svc)
+    _settle(svc)       # a first-ever score pass doesn't block the board — wait for it here
     r = svc.tier_board("legendaire", per_scene=3)
     assert r["scenes"] == 3 and r["hits"]
     got = [h.score for h in r["hits"]]
@@ -537,3 +538,117 @@ def test_a_saved_moment_counts_double(tmp_path, monkeypatch):
     i = next(j for j, lab in enumerate(labs) if lab.key == first)
     others = [w[j] for j, lab in enumerate(labs) if lab.label == 1 and lab.key != first]
     assert w[i] == pytest.approx(2 * others[0])
+
+
+# --- channels never wait on a library re-score ------------------------------------
+
+def _settle(svc, timeout=20.0):
+    """Wait for any background re-score to finish."""
+    import time
+    t0 = time.time()
+    while svc.__dict__.get("_score_refreshing") and time.time() - t0 < timeout:
+        time.sleep(0.05)
+
+
+def test_retrain_serves_old_scores_until_the_rescore_lands(svc):
+    _trained(svc)
+    _settle(svc)
+    model = svc._model_name()
+    old, by = svc._taste_scores(model)
+    assert by == "classifier"
+    svc.add_label("k33", svc._peaks["k33"], 1, scene_id="33")
+    svc.train_taste()                                      # new model file
+    now, _ = svc._taste_scores(model)                      # immediately: no wait
+    assert now is old or now.shape == old.shape
+    _settle(svc)
+    fresh, _ = svc._taste_scores(model)
+    assert fresh is not old                                # swapped in by the background pass
+
+
+def test_scores_survive_a_restart(svc, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    _trained(svc)
+    _settle(svc)
+    model = svc._model_name()
+    before, _ = svc._taste_scores(model)
+    again = svc_mod.Service(svc.cfg)
+    monkeypatch.setattr(svc_mod.Service, "_taste_proba_all",
+                        lambda self, clf, idx: (_ for _ in ()).throw(AssertionError("recomputed")))
+    after, by = again._taste_scores(model)
+    assert by == "classifier" and np.allclose(after, before)
+
+
+def test_new_embeds_keep_scores_aligned(svc, tmp_path):
+    _trained(svc)
+    _settle(svc)
+    model = svc._model_name()
+    idx = svc.index(model)
+    before, _ = svc._taste_scores(model)
+    s0, e0 = idx._key_rows["k5"]
+    k5 = before[s0:e0].copy()
+    cache = EmbeddingCache(svc.cfg.embedding.cache_dir)
+    v = _unit(np.random.default_rng(9).normal(0, 1, (FRAMES, DIM)))
+    cache.save("a_new", model, np.arange(FRAMES, dtype=np.float32), v, meta={"scene_id": "777"})
+    svc.invalidate_index(model)
+    import peaks.web.service as svc_mod
+    orig = svc_mod.Service._refresh_scores_bg
+    svc_mod.Service._refresh_scores_bg = lambda self, m, p: None     # observe the served (re-aligned) copy
+    try:
+        idx2 = svc.index(model)
+        now, _ = svc._taste_scores(model)
+    finally:
+        svc_mod.Service._refresh_scores_bg = orig
+    s1, e1 = idx2._key_rows["k5"]
+    assert now.shape[0] == idx2.size and np.allclose(now[s1:e1], k5)
+    a, b = idx2._key_rows["a_new"]
+    assert (now[a:b] == 0).all()                            # unknown until the refresh reaches it
+
+
+def test_tier_board_does_not_wait_for_a_first_score(svc, monkeypatch):
+    import time
+
+    import peaks.web.service as svc_mod
+
+    _trained(svc)
+    _settle(svc)
+    fresh = svc_mod.Service(svc.cfg)
+    from pathlib import Path
+
+    for f in Path(svc.cfg.modeling.dir).rglob("*.scores.*"):   # nothing saved to fall back on
+        f.unlink()
+    monkeypatch.setattr(svc_mod.Service, "_refresh_scores_bg", lambda self, m, p: None)
+    monkeypatch.setattr(svc_mod.Service, "_taste_proba_all",
+                        lambda self, clf, idx: (time.sleep(30), None)[1])
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: svc.client())
+    monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: svc.client())
+    t0 = time.time()
+    assert fresh._top_taste_moments_for_scenes(["3", "6"], 2, fresh._model_name()) is None
+    assert fresh.taste_scores_for([("3", 1.0)])["scored_by"] == "pending"
+    assert time.time() - t0 < 5
+
+
+def test_catalogue_serves_stale_rows_while_refreshing(svc, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    rows = svc._catalogue_all()
+    svc._cat_cache = (svc._cat_cache[0] - 10_000, rows)      # well past its freshness
+    started = []
+    monkeypatch.setattr(svc_mod.Service, "_refresh_catalogue_bg", lambda self: started.append(1))
+    assert svc._catalogue_all() is rows and started == [1]
+
+
+def test_fast_context_matches_the_running_sum():
+    rng = np.random.default_rng(0)
+
+    def ref(v, w):
+        n = v.shape[0]
+        c = np.vstack([np.zeros((1, v.shape[1])), np.cumsum(v, axis=0, dtype=np.float64)])
+        i = np.arange(n)
+        lo, hi = np.clip(i - w, 0, n), np.clip(i + w + 1, 0, n)
+        return np.hstack([v, ((c[hi] - c[lo]) / (hi - lo)[:, None]).astype(np.float32)])
+
+    for n in (1, 2, 3, 4, 7, 60):
+        v = rng.normal(0, 1, (n, 16)).astype(np.float32)
+        for w in (1, 2, 3):
+            assert np.allclose(with_context(v, w), ref(v, w), atol=1e-5)

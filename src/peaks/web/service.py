@@ -929,7 +929,7 @@ class Service(LibraryMixin):
 
         if self._taste_model(self.cfg.markers.tag_name, model) is None:
             return None
-        scores, by = self._taste_scores(model)
+        scores, by = self._taste_scores(model, wait=False)   # never hold a channel hostage
         if scores is None or by != "classifier":
             return None
         idx = self.index(model)
@@ -960,9 +960,9 @@ class Service(LibraryMixin):
         from the library-wide `_taste_scores` (cached — no model call per item).
         None for a moment that isn't embedded."""
         model = self._model_name()
-        scores, by = self._taste_scores(model)
+        scores, by = self._taste_scores(model, wait=False)
         if scores is None:
-            return {"scores": [None] * len(items), "scored_by": None}
+            return {"scores": [None] * len(items), "scored_by": by}
         idx = self.index(model)
         sid_key: dict[str, str] = {}
         for k, m in idx.key_meta.items():
@@ -2362,41 +2362,48 @@ class Service(LibraryMixin):
         return np.asarray(clf.predict_proba(feats), dtype=np.float32).reshape(-1)
 
     def _taste_proba_all(self, clf, idx) -> np.ndarray:
-        """Taste probability for every indexed row, in bounded chunks."""
+        """Taste probability for every indexed row, in bounded chunks spread over
+        a few worker threads (numpy releases the GIL, so a library pass isn't
+        pinned to one core by single-threaded BLAS)."""
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
         from ..classifier import with_context
 
         w = int(getattr(clf, "context", 0) or 0)
         out = np.zeros(idx.size, dtype=np.float32)
+        # work units: contiguous row ranges (≈8k rows), whole scenes when context
+        # is on (a frame's window must not reach into the next scene)
+        units: list[list[tuple[int, int]]] = []
         if not w:
-            # always chunked, whatever the index storage: a whole-matrix call
-            # would allocate model activations for millions of rows at once
-            # (the MLP's hidden layer alone is rows × 128)
-            for s in range(0, idx.size, 8192):
-                e = min(idx.size, s + 8192)
-                out[s:e] = np.asarray(clf.predict_proba(idx.rows(s, e)), dtype=np.float32).reshape(-1)
-            return out
-        spans = sorted(idx._key_rows.values())
-        batch, spans_in = [], []
-        n = 0
+            units = [[(s, min(idx.size, s + 8192))] for s in range(0, idx.size, 8192)]
+        else:
+            cur, n = [], 0
+            for s, e in sorted(idx._key_rows.values()):
+                cur.append((s, e))
+                n += e - s
+                if n >= 8192:
+                    units.append(cur)
+                    cur, n = [], 0
+            if cur:
+                units.append(cur)
 
-        def _flush():
-            if batch:
-                p = np.asarray(clf.predict_proba(np.vstack(batch)), dtype=np.float32).reshape(-1)
-                o = 0
-                for s, e in spans_in:
-                    out[s:e] = p[o:o + (e - s)]
-                    o += e - s
-                batch.clear()
-                spans_in.clear()
+        def score(unit):
+            feats = [with_context(idx.rows(s, e), w) if w else idx.rows(s, e) for s, e in unit]
+            p = np.asarray(clf.predict_proba(np.vstack(feats) if len(feats) > 1 else feats[0]),
+                           dtype=np.float32).reshape(-1)
+            o = 0
+            for s, e in unit:
+                out[s:e] = p[o:o + (e - s)]
+                o += e - s
 
-        for s, e in spans:
-            batch.append(with_context(idx.rows(s, e), w))
-            spans_in.append((s, e))
-            n += e - s
-            if n >= 8192:
-                _flush()
-                n = 0
-        _flush()
+        workers = max(1, min(4, os.cpu_count() or 1))
+        if workers == 1 or len(units) < 4:
+            for u in units:
+                score(u)
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="peaks-score") as ex:
+                list(ex.map(score, units))
         return out
 
     def _row_at(self, idx, key: str, t: float) -> int | None:
@@ -2726,40 +2733,75 @@ class Service(LibraryMixin):
         else:
             cache.pop(profile, None)
 
-    def _warm_taste_scores(self, model: str) -> None:
-        """Re-score the library in the background right after a retrain, so the
-        next pivot/board doesn't pay for it while you wait."""
-        def run():
-            try:
-                self._taste_scores(model)
-            except Exception:  # noqa: BLE001 — best effort; it'll compute on demand
-                pass
-        threading.Thread(target=run, daemon=True, name="peaks-taste-warm").start()
+    def _warm_taste_scores(self, model: str, profile: str | None = None) -> None:
+        """Re-score the library in the background right after a retrain; until it
+        finishes, boards keep using the previous scores (never a blank wait)."""
+        self._refresh_scores_bg(model, profile or self.cfg.markers.tag_name)
 
     def _invalidate_taste_caches(self) -> None:
         """Drop the cached taste centroid, per-moment scores and board universe so
-        the next feed/board reflects new ratings or a freshly trained model."""
+        the next feed/board reflects new ratings or a freshly trained model.
+        Trained-model scores are kept: they carry the model's signature, so a
+        new model marks them stale and they're re-scored in the background
+        while boards keep using them (a library pass takes minutes)."""
         self._taste_src_cache.clear()
         self._taste_modes_cache.clear()
-        self._board_score_cache.clear()
+        meta = self.__dict__.setdefault("_score_meta", {})
+        for k in [k for k in self._board_score_cache if k not in meta]:
+            del self._board_score_cache[k]
         self._board_universe_cache.clear()
         self._peak_index_cache = None   # peaks depend on the taste scorer
         self._scene_seg_cache = None    # so do the per-scene segment spans
 
-    def _taste_scores(self, model: str, profile: str | None = None):
+    def _taste_scores(self, model: str, profile: str | None = None, wait: bool = True):
         """One taste score per indexed moment, for the whole library. Uses your
         trained classifier's probability when a model exists (a learned,
         multi-modal boundary that recognises your *diverse* taste), otherwise
         scores each moment by its similarity to your *nearest loved mode* — so a
         moment close to any of your distinct interests scores high, not just those
         near the average of everything. Returns (scores[idx.size], scored_by) or
-        (None, None) with no taste yet. Cached per (model, profile)."""
+        (None, None) with no taste yet.
+
+        Trained-model scores are expensive (a pass over every frame — minutes on
+        a big library), so they're stale-while-revalidate: after a retrain or new
+        embeds the previous scores keep serving (re-aligned to the index) while a
+        background pass replaces them, and they're saved to disk so a restart
+        doesn't start from nothing. With nothing to serve yet, `wait=False`
+        returns (None, "pending") at once instead of blocking a request."""
         profile = profile or self.cfg.markers.tag_name
         ckey = (model, profile)
+        meta_all = self.__dict__.setdefault("_score_meta", {})
+        idx = self.index(model)
+        msig = self._model_sig(profile, model)
         cached = self._board_score_cache.get(ckey)
+        meta = meta_all.get(ckey)
+        if cached is not None and meta is not None and msig is None:
+            # the trained model is gone: drop its scores, fall back to modes
+            self._board_score_cache.pop(ckey, None)
+            meta_all.pop(ckey, None)
+            cached = meta = None
+        if cached is None and msig is not None:
+            loaded = self._load_scores(profile, model)
+            if loaded is not None:
+                cached, meta = loaded
+                self._board_score_cache[ckey] = cached
+                meta_all[ckey] = meta
+        if cached is not None and meta is not None:
+            rsig = self._rows_sig(idx)
+            if meta["rows_sig"] != rsig:           # new embeds: re-align, refresh later
+                cached = (self._remap_scores(cached[0], meta["key_rows"], idx), cached[1])
+                meta = {**meta, "rows_sig": rsig, "key_rows": dict(idx._key_rows), "stale": True}
+                self._board_score_cache[ckey] = cached
+                meta_all[ckey] = meta
+            if meta.get("stale") or meta["model_sig"] != msig:
+                self._refresh_scores_bg(model, profile)
+            return cached
         if cached is not None:
             return cached
-        # one computation at a time: the post-train warm-up and a pivot asking at
+        if not wait and msig is not None:
+            self._refresh_scores_bg(model, profile)
+            return None, "pending"
+        # one computation at a time: the post-train warm-up and a request asking at
         # the same moment share a single library pass instead of doing it twice
         with self.__dict__.setdefault("_score_lock", threading.Lock()):
             cached = self._board_score_cache.get(ckey)
@@ -2771,6 +2813,7 @@ class Service(LibraryMixin):
         idx = self.index(model)
         if idx.size == 0:
             return None, None
+        msig = self._model_sig(profile, model)
         clf = self._taste_model(profile, model)
         if clf is not None:
             scores = self._taste_proba_all(clf, idx)
@@ -2785,7 +2828,106 @@ class Service(LibraryMixin):
             scored_by = "modes"
         out = (scores, scored_by)
         self._board_score_cache[ckey] = out
+        if clf is not None and msig is not None:
+            meta = {"model_sig": msig, "rows_sig": self._rows_sig(idx),
+                    "key_rows": dict(idx._key_rows), "stale": False}
+            self.__dict__.setdefault("_score_meta", {})[ckey] = meta
+            self._save_scores(profile, model, scores, meta)
         return out
+
+    # --- trained-score upkeep: signatures, re-alignment, disk, background refresh
+
+    def _model_sig(self, profile: str, model: str):
+        try:
+            st = self._taste_path(profile, model).stat()
+            return [st.st_mtime_ns, st.st_size]
+        except OSError:
+            return None
+
+    @staticmethod
+    def _rows_sig(idx) -> str:
+        cached = getattr(idx, "_peaks_rows_sig", None)
+        if cached is None:
+            import hashlib
+
+            h = hashlib.sha1()
+            for k, (a, b) in sorted(idx._key_rows.items()):
+                h.update(f"{k}:{a}:{b};".encode())
+            cached = h.hexdigest()
+            idx._peaks_rows_sig = cached
+        return cached
+
+    @staticmethod
+    def _remap_scores(old: np.ndarray, old_rows: dict, idx) -> np.ndarray:
+        """Carry scores over to a rebuilt index (rows move when scenes are added):
+        each scene's slice is copied to its new position; brand-new scenes score 0
+        until the background pass reaches them."""
+        out = np.zeros(idx.size, dtype=np.float32)
+        for key, (s, e) in idx._key_rows.items():
+            prev = old_rows.get(key)
+            if prev and (prev[1] - prev[0]) == (e - s) and prev[1] <= old.shape[0]:
+                out[s:e] = old[prev[0]:prev[1]]
+        return out
+
+    def _scores_path(self, profile: str, model: str):
+        return self._taste_path(profile, model).with_suffix(".scores.npy")
+
+    def _save_scores(self, profile: str, model: str, scores: np.ndarray, meta: dict) -> None:
+        import json
+
+        p = self._scores_path(profile, model)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_name(p.name + ".tmp.npy")
+            np.save(tmp, np.asarray(scores, dtype=np.float32))
+            tmp.replace(p)
+            p.with_suffix(".json").write_text(json.dumps(
+                {"model_sig": meta["model_sig"], "rows_sig": meta["rows_sig"],
+                 "key_rows": {k: list(v) for k, v in meta["key_rows"].items()}}))
+        except OSError:
+            pass
+
+    def _load_scores(self, profile: str, model: str):
+        """((scores, "classifier"), meta) from disk, or None. A different model
+        signature still loads — served as stale while the refresh runs."""
+        import json
+
+        p = self._scores_path(profile, model)
+        try:
+            meta = json.loads(p.with_suffix(".json").read_text())
+            scores = np.load(p).astype(np.float32, copy=False)
+        except (OSError, ValueError):
+            return None
+        meta["key_rows"] = {k: tuple(v) for k, v in meta.get("key_rows", {}).items()}
+        meta["stale"] = False
+        return (scores, "classifier"), meta
+
+    def _refresh_scores_bg(self, model: str, profile: str) -> None:
+        """Re-score the library for (model, profile) in a background thread and
+        swap the result in; single-flight."""
+        running = self.__dict__.setdefault("_score_refreshing", set())
+        ckey = (model, profile)
+        with self.__dict__.setdefault("_score_refresh_gate", threading.Lock()):
+            if ckey in running:
+                return
+            running.add(ckey)
+
+        def run():
+            from . import forensics
+
+            try:
+                with self.__dict__.setdefault("_score_lock", threading.Lock()), \
+                        forensics.busy("taste-rescore"):
+                    self._compute_taste_scores(model, profile, ckey)
+                self._board_universe_cache.clear()     # derived from the scores
+                self._peak_index_cache = None
+                self._scene_seg_cache = None
+            except Exception:  # noqa: BLE001 — keep serving what we have
+                pass
+            finally:
+                running.discard(ckey)
+
+        threading.Thread(target=run, daemon=True, name="peaks-taste-rescore").start()
 
     def _board_universe(self, model: str, per_scene: int, profile: str | None = None):
         """Every scene's best taste-moment (plus up to `per_scene-1` more), ordered
@@ -4221,12 +4363,40 @@ class Service(LibraryMixin):
 
     def _catalogue_all(self, refresh: bool = False) -> list[dict]:
         """Every scene in scope as a catalogue row. Raises if Stash is
-        unreachable (an empty listing would read as 'everything unreviewed')."""
+        unreachable (an empty listing would read as 'everything unreviewed').
+
+        Past its 5-minute freshness the cached list is still returned at once
+        while a background thread re-reads Stash (paging the whole library takes
+        seconds); only a cold start, or `refresh=True`, waits for Stash. Grades
+        made here update their rows in place, so nothing you just did is stale."""
         import time as _t
 
         cached = getattr(self, "_cat_cache", None)
-        if cached and not refresh and _t.monotonic() - cached[0] < self._CAT_TTL:
+        if cached and not refresh:
+            if _t.monotonic() - cached[0] >= self._CAT_TTL:
+                self._refresh_catalogue_bg()
             return cached[1]
+        return self._catalogue_fetch(refresh=refresh)
+
+    def _refresh_catalogue_bg(self) -> None:
+        with self.__dict__.setdefault("_cat_gate", threading.Lock()):
+            if getattr(self, "_cat_refreshing", False):
+                return
+            self._cat_refreshing = True
+
+        def run():
+            try:
+                self._catalogue_fetch()
+            except Exception:  # noqa: BLE001 — Stash blip: keep serving the cache
+                pass
+            finally:
+                self._cat_refreshing = False
+
+        threading.Thread(target=run, daemon=True, name="peaks-catalogue").start()
+
+    def _catalogue_fetch(self, refresh: bool = False) -> list[dict]:
+        import time as _t
+
         ids = [str(s.id) for s in self.scenes()]
         want = ids if refresh else [s for s in ids if s not in self._meta]
         if want:

@@ -775,6 +775,8 @@ function floorMode() {
   if (State.source === "shuffle") return "shuffle";
   return "filter";
 }
+// → false while the server is still preparing taste scores (fresh model, first
+// run after a restart with nothing saved): the channel then plays unfiltered
 async function ensureScores(list) {
   const need = list.filter((a) => a.taste === undefined);
   for (let i = 0; i < need.length; i += 5000) {
@@ -786,13 +788,25 @@ async function ensureScores(list) {
         body: JSON.stringify({ items: part.map((a) => [String(a.scene_id), +a.start || 0]) }),
       });
     } catch { d = null; }
+    if (d && d.scored_by === "pending") return false;   // leave them unscored — ask again soon
     part.forEach((a, k) => { a.taste = d && d.scores ? d.scores[k] : null; });
   }
+  return true;
 }
 async function filterToFloor() {
   const base = State.base || [];
+  if (fyMinScore > 0 && base.length && !(await ensureScores(base))) {
+    State.apexes = base.slice();
+    State.floorNote = "taste scores are being prepared — playing all for now";
+    pickApex = makeQueuePicker(State.apexes);
+    syncFloorVisibility();
+    setTimeout(() => {   // try again once they're ready
+      if (State.base === base && fyMinScore > 0 && floorMode() === "filter")
+        filterToFloor().then(() => { reshuffle(); updateStatus(); });
+    }, 15000);
+    return;
+  }
   if (fyMinScore > 0 && base.length) {
-    await ensureScores(base);
     const kept = base.filter((a) => a.taste != null && a.taste >= fyMinScore);
     if (kept.length) {
       State.apexes = kept;
@@ -1247,6 +1261,13 @@ function specForSource(src) {
 }
 async function loadSource(src, opts = {}) {
   const tok = beginNav();
+  const t0 = Date.now();
+  const tick = setInterval(() => {      // a long load shows it's still working
+    if (isStale(tok) || State.loadingTok !== tok) return clearInterval(tick);
+    const s = Math.round((Date.now() - t0) / 1000);
+    if (s >= 2) setStatus(`loading ${channelName()}… ${s}s`);
+  }, 1000);
+  State.loadingTok = tok;
   State.source = src;
   State.sourceSpec = specForSource(src);   // pivots override this below
   State.entryFloor = fyMinScore;   // remember the floor at entry; pivots never re-run this, so Refresh can restore it
@@ -1382,6 +1403,7 @@ async function loadSource(src, opts = {}) {
     if (isStale(tok)) return;
   }
   syncFloorVisibility(); syncNav();
+  State.loadingTok = null;
   buildBoard(parseInt(document.getElementById("grid").value, 10));
 }
 
@@ -1463,6 +1485,7 @@ async function main() {
 }
 
 function showError(msg) {
+  State.loadingTok = null;
   const el = document.getElementById("error");
   el.textContent = msg;
   el.hidden = false;

@@ -39,16 +39,22 @@ def with_context(vecs: np.ndarray, w: int) -> np.ndarray:
     """Temporal context for one scene's contiguous frame sequence: each frame's
     vector joined with the mean of its ±`w` neighbours (clipped at the scene's
     edges) → (n, 2·dim). A peak is a multi-second event, so the window mean lets
-    the model see "what's happening around this frame", not one still."""
+    the model see "what's happening around this frame", not one still.
+    Built from 2w shifted float32 adds — several times faster than a float64
+    running sum over the whole scene, which dominated a library re-score."""
     v = np.asarray(vecs, dtype=np.float32)
     if w <= 0 or v.shape[0] == 0:
         return v
     n = v.shape[0]
-    csum = np.vstack([np.zeros((1, v.shape[1]), dtype=np.float64), np.cumsum(v, axis=0, dtype=np.float64)])
-    i = np.arange(n)
-    lo, hi = np.clip(i - w, 0, n), np.clip(i + w + 1, 0, n)
-    mean = ((csum[hi] - csum[lo]) / (hi - lo)[:, None]).astype(np.float32)
-    return np.hstack([v, mean])
+    acc = v.copy()
+    cnt = np.ones(n, dtype=np.float32)
+    for d in range(1, min(w, n - 1) + 1):
+        acc[d:] += v[:-d]
+        cnt[d:] += 1
+        acc[:-d] += v[d:]
+        cnt[:-d] += 1
+    acc /= cnt[:, None]
+    return np.hstack([v, acc])
 
 
 class TasteClassifier:
