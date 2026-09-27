@@ -652,3 +652,122 @@ def test_fast_context_matches_the_running_sum():
         v = rng.normal(0, 1, (n, 16)).astype(np.float32)
         for w in (1, 2, 3):
             assert np.allclose(with_context(v, w), ref(v, w), atol=1e-5)
+
+
+# --- saves → Légendaire, the trim list, recommendations, library health ------------
+
+def _curated(svc):
+    """Ages + saves on the fixture library: scene 30 is new (added 5 days ago),
+    everything else was added in 2024; saves on 0 (unreviewed), 15 (upscale),
+    1 (rejected) and 3 (already Légendaire); an auto marker on 18."""
+    import datetime as dt
+
+    st = svc.client()
+    tag = svc.cfg.markers.tag_name
+    fresh = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=5)).isoformat()
+    for sid, v in st.s.items():
+        v["created_at"] = fresh if sid == "30" else "2024-03-01T10:00:00Z"
+    st.s["15"].update(rating100=100, o_counter=0)            # Upscale
+    st.markers = [
+        {"marker_id": "m0", "scene_id": "0", "seconds": 4.0, "end_seconds": None, "title": f"{tag} (saved)"},
+        {"marker_id": "m0b", "scene_id": "0", "seconds": 9.0, "end_seconds": None, "title": f"{tag} (saved)"},
+        {"marker_id": "m15", "scene_id": "15", "seconds": 3.0, "end_seconds": None, "title": f"{tag} (saved)"},
+        {"marker_id": "m1", "scene_id": "1", "seconds": 3.0, "end_seconds": None, "title": f"{tag} (saved)"},
+        {"marker_id": "m3", "scene_id": "3", "seconds": 3.0, "end_seconds": None, "title": f"{tag} (saved)"},
+        {"marker_id": "a18", "scene_id": "18", "seconds": 3.0, "end_seconds": None, "title": f"{tag} 0.91"},
+    ]
+    svc._forget_markers()
+    svc.invalidate_meta()
+    svc._cat_cache = None
+    _trained(svc)
+    _settle(svc)
+    return svc
+
+
+def test_scene_signals(svc):
+    _curated(svc)
+    rows = svc._catalogue_all()
+    sig = svc._scene_signals(rows)
+    assert sig["0"]["saves"] == 2 and sig["15"]["saves"] == 1
+    assert sig["18"]["saves"] == 0                            # the legacy auto marker isn't a save
+    assert sig["30"]["new"] and not sig["2"]["new"] and sig["2"]["age_days"] > 300
+    model = svc._model_name()
+    scores, _ = svc._taste_scores(model)
+    idx = svc.index(model)
+    a, b = idx._key_rows["k7"]
+    assert sig["7"]["best"] == pytest.approx(float(scores[a:b].max()), abs=1e-4)
+
+
+def test_saved_view_and_trim_view(svc):
+    _curated(svc)
+    d = svc.catalogue(view="saved", limit=100)
+    assert [r["scene_id"] for r in d["items"]] == ["0", "15"]   # rejected 1 and Légendaire 3 left out; most saves first
+    assert all(r["suggest"]["grade"] == "legendaire" for r in d["items"])
+    t = svc.catalogue(view="trim", limit=100)
+    ids = [r["scene_id"] for r in t["items"]]
+    assert ids and not {"0", "15", "1", "3", "6", "9", "30"} & set(ids)   # saves, rejects, Légendaire, new
+    bests = [r["signals"]["best"] for r in t["items"]]
+    assert bests == sorted(bests)                               # weakest first
+    assert t["grace"]["days"] == 30 and t["grace"]["new_excluded"] >= 1
+
+
+def test_new_scenes_are_never_pushed_toward_reject(svc):
+    _curated(svc)
+    rows = {r["scene_id"]: r for r in svc._catalogue_all()}
+    sig = svc._scene_signals(list(rows.values()))
+    weak = {**sig["30"], "best": -1.0}                          # weakest possible, but new
+    assert svc._recommend(rows["30"], {"keeper": 0.1}, weak) is None
+    old = {**sig["2"], "best": -1.0}
+    assert svc._recommend(rows["2"], {"keeper": 0.1}, old)["grade"] == "reject"
+    assert svc._recommend(rows["2"], {"keeper": 0.9}, old) is None   # the tier model still believes in it
+
+
+def test_saving_promotes_the_scene(svc, monkeypatch):
+    _curated(svc)
+    st = svc.client()
+    monkeypatch.setattr(st, "create_scene_marker", lambda **kw: {"id": "new"}, raising=False)
+    from peaks.web.app import create_app
+    from fastapi.testclient import TestClient
+    import peaks.web.app as app_mod
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(create_app(svc.cfg))
+    r = api.post("/api/scene/15/apex", params={"t": 12.0}).json()      # Upscale → Légendaire
+    assert r["promoted_from"] == "upscale"
+    assert st.s["15"]["rating100"] == 100 and st.s["15"]["o_counter"] == 18
+    r = api.post("/api/scene/1/apex", params={"t": 12.0}).json()       # a 1★ stays yours
+    assert r["promoted_from"] is None and st.s["1"]["rating100"] == 20
+    api.post("/api/library/curation", params={"auto_legendaire_on_save": False})
+    r = api.post("/api/scene/2/apex", params={"t": 12.0}).json()
+    assert r["promoted_from"] is None
+    assert any("auto: saved a moment" in (e.get("source") or "") for e in svc.action_log().tail(20))
+
+
+def test_library_health_adds_up(svc):
+    _curated(svc)
+    h = svc.library_health()
+    assert h["scenes"] == 60 and h["with_saves"] == 4 and h["saves_total"] == 5
+    assert sum(h["save_buckets"].values()) == 60
+    assert h["legendaire_candidates"] == 2
+    assert h["trim"]["count"] == len(svc.catalogue(view="trim", limit=500)["items"])
+    assert h["per_tier"]["legendaire"]["scenes"] == 3
+
+
+def test_score_threads_follow_the_env(svc, monkeypatch):
+    import concurrent.futures as cf
+
+    seen = []
+    real = cf.ThreadPoolExecutor
+
+    class Spy(real):
+        def __init__(self, max_workers=None, **kw):
+            seen.append(max_workers)
+            super().__init__(max_workers=max_workers, **kw)
+    monkeypatch.setattr(cf, "ThreadPoolExecutor", Spy)
+    monkeypatch.setenv("PEAKS_SCORE_THREADS", "7")
+    monkeypatch.setattr(type(svc), "_SCORE_CHUNK", 16)     # the fixture is tiny: split it up
+    _trained(svc)
+    _settle(svc)
+    model = svc._model_name()
+    clf = svc._taste_model(svc.cfg.markers.tag_name, model)
+    svc._taste_proba_all(clf, svc.index(model))
+    assert 7 in seen

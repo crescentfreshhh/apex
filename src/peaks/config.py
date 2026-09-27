@@ -141,6 +141,10 @@ class ModelingConfig:
     # (Env: PEAKS_TASTE_MEASURE_HOUR, PEAKS_TASTE_MEASURE_MIN_SIGNALS)
     taste_measure_hour: int = 3
     taste_measure_min_signals: int = 200
+    # New scenes (added to Stash fewer than this many days ago) are never
+    # suggested for trimming or rejecting — time to get around to them.
+    # (Env: PEAKS_TRIM_GRACE_DAYS)
+    trim_grace_days: int = 30
 
 
 @dataclass
@@ -343,6 +347,9 @@ class Config:
             taste_measure_min_signals=int(os.environ.get(
                 "PEAKS_TASTE_MEASURE_MIN_SIGNALS",
                 modeling_raw.get("taste_measure_min_signals", ModelingConfig.taste_measure_min_signals))),
+            trim_grace_days=int(os.environ.get(
+                "PEAKS_TRIM_GRACE_DAYS",
+                modeling_raw.get("trim_grace_days", ModelingConfig.trim_grace_days))),
             taste_engagement=_as_bool(os.environ.get("PEAKS_TASTE_ENGAGEMENT"),
                 modeling_raw.get("taste_engagement", ModelingConfig.taste_engagement)),
         )

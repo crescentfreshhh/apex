@@ -462,3 +462,30 @@ input[type=checkbox] { accent-color: var(--gold); }
 .tq-train-cap { font-size: 12px; color: var(--dim); max-width: 280px; text-align: right;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 700px) { .tq-train-wrap { align-items: stretch; width: 100%; } .tq-train-cap { text-align: left; } }
+
+/* saves / taste / age signals on catalogue cards + the saves-driven views */
+.cat-sig { font-size: 12px; color: var(--dim); margin-top: 3px; }
+.cat-sig .sg-saves { color: var(--gold); font-weight: 600; }
+.sg-new { color: var(--ok); font-weight: 600; }
+.cat-viewbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--dim); font-size: 13px; }
+.cat-viewbar span { flex: 1; min-width: 240px; }
+
+/* Insights → Library health */
+.hgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.hgrid.two { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.hcard { display: flex; flex-direction: column; gap: 3px; }
+.hlink { cursor: pointer; } .hlink:hover { border-color: var(--gold); }
+.htab { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+.htab th { text-align: left; color: var(--dim); font-weight: 500; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.htab td { padding: 6px; border-bottom: 1px solid var(--line); }
+.htab td:nth-child(3) { display: flex; align-items: center; gap: 8px; }
+.hb { flex: 1; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.hb i { display: block; height: 100%; background: var(--gold); }
+.tchip { font-size: 11.5px; font-weight: 600; }
+.tchip.tc-legendaire { color: var(--leg); } .tchip.tc-exceptionnelle { color: var(--exc); } .tchip.tc-merveilleuse { color: var(--mer); }
+.tchip.tc-upscale { color: var(--ups); } .tchip.tc-anomaly { color: var(--ano); } .tchip.tc-rejected { color: var(--rej); } .tchip.tc-unreviewed { color: var(--unr); }
+.hbars { display: flex; align-items: flex-end; gap: 10px; height: 120px; margin-top: 8px; }
+.hbk { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 3px; font-size: 11.5px; }
+.hbk i { width: 100%; background: linear-gradient(180deg, var(--gold), #8a6a22); border-radius: 4px 4px 0 0; min-height: 2px; }
+.hbk b { color: var(--fg); font-weight: 600; } .hbk span { color: var(--dim); }

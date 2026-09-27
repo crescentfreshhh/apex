@@ -225,6 +225,7 @@
       <button id="btn-cat-review" class="btn pri" title="Grade this list one scene at a time (Review queue)">▶ Review</button>
     </div>
     <div id="cat-chips" class="seg tiers"></div>
+    <div id="cat-viewbar" class="cat-viewbar" hidden></div>
     <div class="toolbar">
       <input id="cat-q" class="search" placeholder="Filter by title, performer, studio, path…" />
       <select id="cat-res" title="Resolution">
@@ -327,8 +328,9 @@
   <section id="statistics" class="view">
     <div class="head"><h1>Insights</h1><span id="stats-status" class="sub2"></span><span class="grow"></span>
       <button id="btn-stats-refresh" class="btn ghost" title="Recompute">↻ Refresh</button></div>
-    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="coverage">Taste coverage</span></div>
+    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="health">Library health</span><span data-tab="coverage">Taste coverage</span></div>
     <div id="stats-body" class="dim" data-pane="overview">Crunching your library…</div>
+    <div id="health-body" data-pane="health" hidden><p class="dim">Reading your library…</p></div>
     <div id="experimental" data-pane="coverage" hidden>
       <div class="toolbar">
         <label id="exp-floor-wrap" class="muted" title="A scene counts as 'covered' if its best moment scores at or above this. Shared with the board + Statistics.">Taste floor
@@ -526,6 +528,10 @@
             <div><div id="tier-tags" class="row"></div>
               <div class="row"><button id="btn-tier-tags-save" class="btn sm ghost">Save tags</button><span id="tier-tags-status" class="dim"></span></div></div></div>
           <div class="field"><div class="l"><b>Rejects</b><span>1★</span></div><div class="muted">Rating only — tags and organized are left alone.</div></div>
+          <div class="field"><div class="l"><b>Saved moments</b><span>your picks → your top tier</span></div>
+            <div><label class="check"><input type="checkbox" id="cur-auto-leg" /> Saving a moment makes its scene Légendaire</label>
+              <div class="muted small">Applies to Unreviewed, Upscale, Merveilleuse, Exceptionnelle and anomaly scenes (never a 1★). Logged in Activity, undoable there. Scenes you saved from before this was on: Catalogue → “Saved → Légendaire”.</div>
+              <span id="cur-status" class="dim"></span></div></div>
           <div class="field"><div class="l"><b>Out-of-sync scenes</b><span>graded in Stash directly</span></div>
             <div><button id="btn-tag-sync" class="btn sm">Check &amp; sync…</button><div id="tag-sync-box" hidden></div></div></div>
         </div>

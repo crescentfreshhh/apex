@@ -1018,14 +1018,14 @@ def create_app(cfg=None):
         view: str | None = None, new: bool = False,
         performer: str | None = None, studio: str | None = None, tag: str | None = None,
         date_from: str | None = None, date_to: str | None = None,
-        dur_min: float | None = None, dur_max: float | None = None,
+        dur_min: float | None = None, dur_max: float | None = None, ids_only: bool = False,
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
                                      view=view, new=new, performer=performer, studio=studio,
                                      tag=tag, date_from=date_from, date_to=date_to,
-                                     dur_min=dur_min, dur_max=dur_max)
+                                     dur_min=dur_min, dur_max=dur_max, ids_only=ids_only)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, f"Stash unreachable: {exc}")
 
@@ -1409,9 +1409,29 @@ def create_app(cfg=None):
     @app.post("/api/scene/{scene_id}/apex")
     def save_apex(scene_id: str, t: float, end: float | None = None, tag: str | None = None):
         try:
-            return {"marker": service.create_apex(scene_id, t, end=end, tag=tag)}
+            marker = service.create_apex(scene_id, t, end=end, tag=tag)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash marker create failed: {exc}")
+        try:   # saving a moment makes the scene Légendaire (setting; promotable tiers only)
+            promoted = service.promote_on_save(scene_id, tag=tag)
+        except Exception:  # noqa: BLE001 — the save itself succeeded
+            promoted = None
+        return {"marker": marker, "promoted_from": promoted}
+
+    @app.get("/api/library/health")
+    def library_health():
+        try:
+            return service.library_health()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
+    @app.get("/api/library/curation")
+    def curation_settings():
+        return service.curation_settings()
+
+    @app.post("/api/library/curation")
+    def save_curation_settings(auto_legendaire_on_save: bool):
+        return service.save_curation_settings(auto_legendaire_on_save)
 
     @app.get("/api/scene/{scene_id}/apex")
     def check_apex(scene_id: str, t: float, tag: str | None = None,

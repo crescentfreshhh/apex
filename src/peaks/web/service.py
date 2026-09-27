@@ -2361,6 +2361,8 @@ class Service(LibraryMixin):
         feats = np.hstack([base, acc / np.maximum(cnt, 1)])
         return np.asarray(clf.predict_proba(feats), dtype=np.float32).reshape(-1)
 
+    _SCORE_CHUNK = 8192   # rows per scoring work unit
+
     def _taste_proba_all(self, clf, idx) -> np.ndarray:
         """Taste probability for every indexed row, in bounded chunks spread over
         a few worker threads (numpy releases the GIL, so a library pass isn't
@@ -2375,14 +2377,15 @@ class Service(LibraryMixin):
         # work units: contiguous row ranges (≈8k rows), whole scenes when context
         # is on (a frame's window must not reach into the next scene)
         units: list[list[tuple[int, int]]] = []
+        step = self._SCORE_CHUNK
         if not w:
-            units = [[(s, min(idx.size, s + 8192))] for s in range(0, idx.size, 8192)]
+            units = [[(s, min(idx.size, s + step))] for s in range(0, idx.size, step)]
         else:
             cur, n = [], 0
             for s, e in sorted(idx._key_rows.values()):
                 cur.append((s, e))
                 n += e - s
-                if n >= 8192:
+                if n >= step:
                     units.append(cur)
                     cur, n = [], 0
             if cur:
@@ -2397,7 +2400,12 @@ class Service(LibraryMixin):
                 out[s:e] = p[o:o + (e - s)]
                 o += e - s
 
-        workers = max(1, min(4, os.cpu_count() or 1))
+        try:   # read-only scoring may use most cores (leave two for web requests)
+            workers = int(os.environ.get("PEAKS_SCORE_THREADS", "0"))
+        except ValueError:
+            workers = 0
+        if workers <= 0:
+            workers = max(1, min(16, (os.cpu_count() or 1) - 2))
         if workers == 1 or len(units) < 4:
             for u in units:
                 score(u)
@@ -4456,7 +4464,7 @@ class Service(LibraryMixin):
                   performer: str | None = None, studio: str | None = None,
                   tag: str | None = None, date_from: str | None = None,
                   date_to: str | None = None, dur_min: float | None = None,
-                  dur_max: float | None = None) -> dict:
+                  dur_max: float | None = None, ids_only: bool = False) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -4517,10 +4525,11 @@ class Service(LibraryMixin):
                 self._remember_rejects([r for r in rows if r["tier"] == "rejected"])
             except Exception:  # noqa: BLE001 — memory is best-effort
                 pass
-        views = {v: len(self._triage(v, pool, preds, floor)) for v in self.TRIAGE_VIEWS}
+        signals = self._scene_signals(rows)
+        views = {v: len(self._triage(v, pool, preds, floor, signals)) for v in self.TRIAGE_VIEWS}
         in_view = view in self.TRIAGE_VIEWS
         if in_view:
-            pool = self._triage(view, pool, preds, floor)      # the view's own order
+            pool = self._triage(view, pool, preds, floor, signals)      # the view's own order
         elif tiers:
             pool = [r for r in pool if r["tier"] in tiers]
 
@@ -4539,7 +4548,10 @@ class Service(LibraryMixin):
         if not in_view:
             fn, rev = keyfns.get(sort, keyfns["date"])
             pool.sort(key=fn, reverse=rev)
+        if ids_only:        # a bulk action over the whole list (no cards, no thumbnails)
+            return {"ids": [r["scene_id"] for r in pool], "total": len(pool)}
         page = pool[offset: offset + limit]
+        names = self.tier_display_names()
         moments = self._scene_moment_strips([r["scene_id"] for r in page])
         items = []
         for r in page:
@@ -4549,12 +4561,16 @@ class Service(LibraryMixin):
                 "stream": self.stream_url(r["scene_id"], start=0),
                 "pred": pred,
                 "flag": quality_flag(r["quality"], floor),
-                "suggest": (self._suggest_for_anomaly(r, pred, self.tier_display_names())
-                            if r["tier"] == "anomaly" else None),
+                "signals": signals.get(r["scene_id"]),
+                "suggest": self._recommend(r, pred, signals.get(r["scene_id"]), names),
                 "dupe": r["scene_id"] in dupe_ids,
             })
+        grace_new = sum(1 for r in pool_all if (signals.get(r["scene_id"]) or {}).get("new")
+                        and r["tier"] not in ("legendaire", "rejected")
+                        and not (signals.get(r["scene_id"]) or {}).get("saves"))
         return {
             "items": items, "total": len(pool), "counts": counts, "views": views,
+            "grace": {"days": self.cfg.modeling.trim_grace_days, "new_excluded": grace_new},
             "names": self.tier_display_names(), "offset": offset, "limit": limit,
             "model": self.tier_model_status(), "floor": floor,
             "ingest": {"finished": ingest.get("finished"), "new": len(ingest.get("new") or [])},
@@ -4574,13 +4590,110 @@ class Service(LibraryMixin):
             counts[r["tier"]] += 1
         preds = self._tier_predictions(rows)
         floor = quality_floor(rows)
-        views = {v: len(self._triage(v, rows, preds, floor)) for v in self.TRIAGE_VIEWS}
+        signals = self._scene_signals(rows)
+        views = {v: len(self._triage(v, rows, preds, floor, signals)) for v in self.TRIAGE_VIEWS}
         fresh = set(self.last_ingest().get("new") or [])
         new = sum(1 for r in rows if r["scene_id"] in fresh and r["tier"] == "unreviewed")
         dupes = self.cached_duplicates()
         return {"total": len(rows), "counts": counts, "views": views, "new": new,
                 "dupes": len(dupes["groups"]) if dupes else None,
                 "model": self.tier_model_status()}
+
+    def library_health(self) -> dict:
+        """Library-health figures for Insights: how many scenes carry saves (per
+        tier), how saves spread across scenes, how the taste model rates each tier
+        (median best moment), the trim pool (count, size, age) and how many
+        scenes a saves → Légendaire pass would promote."""
+        from ..tier_model import quality_floor
+        from ..tiers import TIERS
+
+        rows = self._catalogue_all()
+        sig = self._scene_signals(rows)
+        preds = self._tier_predictions(rows)
+        floor = quality_floor(rows)
+        per_tier = {}
+        for t in TIERS:
+            rs = [r for r in rows if r["tier"] == t]
+            if not rs:
+                continue
+            bests = [sig[r["scene_id"]]["best"] for r in rs if sig[r["scene_id"]]["best"] is not None]
+            per_tier[t] = {"scenes": len(rs),
+                           "with_saves": sum(1 for r in rs if sig[r["scene_id"]]["saves"]),
+                           "median_best": round(float(np.median(bests)), 4) if bests else None}
+        buckets = {"0": 0, "1": 0, "2-3": 0, "4-9": 0, "10+": 0}
+        for v in sig.values():
+            n = v["saves"]
+            k = "0" if n == 0 else "1" if n == 1 else "2-3" if n <= 3 else "4-9" if n <= 9 else "10+"
+            buckets[k] += 1
+        trim = self._triage("trim", rows, preds, floor, sig)
+        # everything that would be in the trim pool but for age / embedding
+        base = [r for r in rows if r["tier"] not in ("legendaire", "rejected")
+                and not sig[r["scene_id"]]["saves"]]
+        ages = {"new": 0, "30d-6mo": 0, "6mo+": 0, "unknown": 0}
+        for r in base:
+            a = sig[r["scene_id"]]["age_days"]
+            if a is None:
+                ages["unknown"] += 1
+            elif sig[r["scene_id"]]["new"]:
+                ages["new"] += 1
+            elif a < 183:
+                ages["30d-6mo"] += 1
+            else:
+                ages["6mo+"] += 1
+        q25 = getattr(self, "_best_q25", None)
+        leg = [r for r in rows if r["tier"] == "legendaire"]
+        return {
+            "scenes": len(rows),
+            "with_saves": sum(1 for v in sig.values() if v["saves"]),
+            "saves_total": sum(v["saves"] for v in sig.values()),
+            "per_tier": per_tier, "save_buckets": buckets,
+            "trim": {"count": len(trim), "bytes": sum(int(r.get("size") or 0) for r in trim),
+                     "suggest_reject": sum(1 for r in trim if (self._recommend(
+                         r, preds.get(r["scene_id"]), sig[r["scene_id"]]) or {}).get("grade") == "reject"),
+                     "ages": ages,
+                     "unembedded": sum(1 for r in base if sig[r["scene_id"]]["best"] is None
+                                       and not sig[r["scene_id"]]["new"])},
+            "legendaire_candidates": len(self._triage("saved", rows, preds, floor, sig)),
+            "weak_legendaire": sum(1 for r in leg if q25 is not None and sig[r["scene_id"]]["best"] is not None
+                                   and sig[r["scene_id"]]["best"] <= q25),
+            "grace_days": self.cfg.modeling.trim_grace_days,
+            "q25": None if q25 is None else round(q25, 4),
+        }
+
+    def curation_settings(self) -> dict:
+        return {"auto_legendaire_on_save": bool(self._settings().get("auto_legendaire_on_save", True))}
+
+    def save_curation_settings(self, auto_legendaire_on_save: bool) -> dict:
+        import json
+
+        s = dict(self._settings())
+        s["auto_legendaire_on_save"] = bool(auto_legendaire_on_save)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.curation_settings()
+
+    def promote_on_save(self, scene_id: str, tag: str | None = None) -> str | None:
+        """After you save a moment: grade the scene Légendaire when it sits in a
+        promotable tier (setting on by default; your main taste only). Returns the
+        tier it was promoted from, or None."""
+        from ..tiers import tier_of
+
+        if tag and tag != self.cfg.markers.tag_name:
+            return None
+        if not self.curation_settings()["auto_legendaire_on_save"]:
+            return None
+        sid = str(scene_id)
+        try:
+            cur = self._meta_client().scene_details([sid]).get(sid) or {}
+        except Exception:  # noqa: BLE001 — Stash down: the saved view catches it later
+            return None
+        tier = tier_of(cur.get("rating100"), cur.get("o_counter"))
+        if tier not in self.PROMOTABLE:
+            return None
+        self.grade_scene(sid, "legendaire", source="auto: saved a moment")
+        return tier
 
     def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,
                              min_gap: float = 20.0) -> dict[str, list[dict]]:
@@ -4911,10 +5024,101 @@ class Service(LibraryMixin):
         label = (names or {}).get(g, g)
         return {"grade": g, "why": f"looks {round(100 * keepers[g] / sum(keepers.values()))}% like your {label} scenes"}
 
-    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict")
+    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim")
+    # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
+    PROMOTABLE = ("unreviewed", "upscale", "merveilleuse", "exceptionnelle", "anomaly")
 
-    def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict) -> list[dict]:
+    def _scene_signals(self, rows: list[dict]) -> dict:
+        """Per scene: {saves, best, age_days, new} — your saved moments (legacy
+        auto-markers excluded), the taste model's best moment in the scene, and
+        how long ago it was added to Stash (`new` = inside the grace period).
+        `best` is None when the scene isn't embedded or scores aren't ready.
+        Also records the library's bottom-quarter `best` as self._best_q25."""
+        import datetime as _dt
+        from collections import Counter
+
+        grace = float(getattr(self.cfg.modeling, "trim_grace_days", 30) or 0)
+        saves: Counter = Counter()
+        try:
+            for m in self._saved_markers(self.cfg.markers.tag_name):
+                if m.get("scene_id"):
+                    saves[str(m["scene_id"])] += 1
+        except Exception:  # noqa: BLE001 — Stash down: no save counts this time
+            pass
+        best: dict[str, float] = {}
+        try:
+            model = self._model_name()
+            idx = self.index(model)
+            scores, by = self._taste_scores(model, wait=False)
+            if scores is not None and by in ("classifier", "modes") and scores.shape[0] == idx.size:
+                spans = sorted((a, b, k) for k, (a, b) in idx._key_rows.items() if b > a)
+                if spans:
+                    maxes = np.maximum.reduceat(scores, np.array([a for a, _, _ in spans]))
+                    for (a, b, k), v in zip(spans, maxes):
+                        sid = (idx.key_meta.get(k) or {}).get("scene_id")
+                        if sid is not None:
+                            best[str(sid)] = max(best.get(str(sid), -1.0), float(v))
+        except Exception:  # noqa: BLE001 — no index/scores yet
+            pass
+        now = _dt.datetime.now(_dt.timezone.utc)
+        out: dict[str, dict] = {}
+        for r in rows:
+            sid = r["scene_id"]
+            age = None
+            try:
+                t = _dt.datetime.fromisoformat((r.get("created_at") or "").replace("Z", "+00:00"))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=_dt.timezone.utc)
+                age = max(0, (now - t).days)
+            except ValueError:
+                pass
+            b = best.get(sid)
+            out[sid] = {"saves": saves.get(sid, 0), "best": None if b is None else round(b, 4),
+                        "age_days": age, "new": age is not None and age < grace}
+        vals = [v["best"] for v in out.values() if v["best"] is not None]
+        self._best_q25 = float(np.percentile(vals, 25)) if vals else None
+        return out
+
+    def _recommend(self, row: dict, pred: dict | None, sig: dict | None,
+                   names: dict | None = None) -> dict | None:
+        """The Review queue's suggestion for a scene, from everything Peaks knows:
+        your saves (→ Légendaire), the anomaly rules, and — for scenes past their
+        grace period with no saves and a weak best moment the tier model doesn't
+        rate as a keeper — Reject. New scenes are never pushed toward Reject."""
+        sig = sig or {}
+        n = sig.get("saves", 0)
+        tier = row["tier"]
+        if n and tier in self.PROMOTABLE:
+            return {"grade": "legendaire",
+                    "why": f"{n} saved moment{'s' if n != 1 else ''} — scenes you save from are Légendaire"}
+        if tier == "anomaly":
+            return self._suggest_for_anomaly(row, pred, names)
+        q25, b = getattr(self, "_best_q25", None), sig.get("best")
+        keeper = (pred or {}).get("keeper")
+        if (tier not in ("legendaire", "rejected") and not n and not sig.get("new")
+                and b is not None and q25 is not None and b <= q25
+                and (keeper is None or keeper < 0.5)):
+            return {"grade": "reject",
+                    "why": f"no saved moments · best moment {round(b * 100)}% (bottom quarter of the library)"}
+        return None
+
+    def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict,
+                signals: dict | None = None) -> list[dict]:
         from ..tier_model import ORDINAL, quality_flag
+
+        signals = signals or {}
+        if view == "saved":
+            # scenes you've saved moments in that aren't Légendaire yet — most saves first
+            out = [r for r in pool if r["tier"] in self.PROMOTABLE
+                   and (signals.get(r["scene_id"]) or {}).get("saves", 0) > 0]
+            return sorted(out, key=lambda r: -signals[r["scene_id"]]["saves"])
+        if view == "trim":
+            # no saved moments, past the grace period, judged by the model: weakest first
+            def ok(r):
+                sg = signals.get(r["scene_id"]) or {}
+                return (r["tier"] not in ("legendaire", "rejected") and sg.get("saves", 0) == 0
+                        and not sg.get("new") and sg.get("best") is not None)
+            return sorted([r for r in pool if ok(r)], key=lambda r: signals[r["scene_id"]]["best"])
 
         if view == "likely":
             # scenes under the learned quality floor sink to the bottom: they rarely

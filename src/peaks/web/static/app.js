@@ -323,7 +323,18 @@ loadExportSettings();
 // --- tier display names (Settings) --------------------------------------------
 const TIER_NAME_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["merveilleuse", "16"],
   ["upscale", "0"], ["anomaly", "other O"], ["unreviewed", "unrated"], ["rejected", "1★"]];
+async function loadCuration() {
+  const cb = $("#cur-auto-leg"); if (!cb) return;
+  try { cb.checked = !!(await api("/api/library/curation")).auto_legendaire_on_save; } catch {}
+}
+$("#cur-auto-leg")?.addEventListener("change", async (e) => {
+  try {
+    const r = await api("/api/library/curation?auto_legendaire_on_save=" + e.target.checked, { method: "POST" });
+    $("#cur-status").textContent = r.auto_legendaire_on_save ? "On — saving promotes the scene" : "Off";
+  } catch (err) { toast(err.message, true); }
+});
 async function loadTierNames() {
+  loadCuration();
   const box = $("#tier-names"); if (!box) return;
   try { TIER_NAMES = { ...TIER_NAMES, ...(await api("/api/catalogue/names")) }; } catch {}
   box.innerHTML = TIER_NAME_KEYS.map(([k, hint]) =>
@@ -997,8 +1008,10 @@ async function saveMoment(sid, t) {
   try {
     const p = { t: (t || 0).toFixed(2) };
     if (ptag()) p.tag = ptag();   // file the moment under the active profile's tag
-    await api(`/api/scene/${sid}/apex?` + new URLSearchParams(p), { method: "POST" });
-    toast("Saved moment + added to taste @ " + fmt(t) + (PROFILE.isDefault() ? "" : ` · ${PROFILE.name}`));
+    const r = await api(`/api/scene/${sid}/apex?` + new URLSearchParams(p), { method: "POST" });
+    toast("Saved moment + added to taste @ " + fmt(t) + (PROFILE.isDefault() ? "" : ` · ${PROFILE.name}`)
+      + (r && r.promoted_from ? ` · scene promoted to ${gradeName("legendaire")}` : ""));
+    if (r && r.promoted_from) refreshSidebar();
   } catch (e) { toast(e.message, true); }
 }
 let viewerIndex = -1;
@@ -2105,7 +2118,56 @@ document.addEventListener("click", async (e) => {
   }
 });
 wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); });
-wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); });
+wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); if (t === "health") openHealth(); });
+
+// --- Library health: saves, the model's view of each tier, the trim pool -------------
+async function openHealth() {
+  const box = $("#health-body"); if (!box) return;
+  box.innerHTML = '<p class="dim">Reading your library…</p>';
+  let h;
+  try { h = await api("/api/library/health"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  const n = (x) => (x ?? 0).toLocaleString();
+  const pct = (a, b) => (b ? Math.round(100 * a / b) + "%" : "—");
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];
+  const rows = order.filter((t) => h.per_tier[t]).map((t) => {
+    const x = h.per_tier[t];
+    const w = x.scenes ? 100 * x.with_saves / x.scenes : 0;
+    return `<tr><td>${tierChip(t)}</td><td>${n(x.scenes)}</td>
+      <td><div class="hb"><i style="width:${w.toFixed(1)}%"></i></div><span>${pct(x.with_saves, x.scenes)}</span></td>
+      <td>${x.median_best != null ? Math.round(x.median_best * 100) + "%" : "—"}</td></tr>`;
+  }).join("");
+  const bk = h.save_buckets, bmax = Math.max(1, ...Object.values(bk));
+  const bars = Object.entries(bk).map(([k, v]) =>
+    `<div class="hbk"><i style="height:${(100 * v / bmax).toFixed(1)}%"></i><b>${n(v)}</b><span>${k}</span></div>`).join("");
+  const t = h.trim, a = t.ages;
+  box.innerHTML = `
+    <div class="hgrid">
+      <div class="card pad hcard"><span class="tq-l">Scenes with saved moments</span>
+        <span class="tq-v">${pct(h.with_saves, h.scenes)}</span>
+        <span class="faint small">${n(h.with_saves)} of ${n(h.scenes)} scenes · ${n(h.saves_total)} saves</span></div>
+      <div class="card pad hcard hlink" data-open-view="saved"><span class="tq-l">Ready for ${esc(gradeName("legendaire"))}</span>
+        <span class="tq-v">${n(h.legendaire_candidates)}</span>
+        <span class="faint small">scenes with saves that aren't ${esc(gradeName("legendaire"))} yet → review</span></div>
+      <div class="card pad hcard hlink" data-open-view="trim"><span class="tq-l">Trim pool</span>
+        <span class="tq-v">${n(t.count)}</span>
+        <span class="faint small">no saves, past ${h.grace_days} days · ${fmtBytes(t.bytes)} · ${n(t.suggest_reject)} suggested to reject → review</span></div>
+    </div>
+    <div class="hgrid two">
+      <div class="card pad"><h3>By tier</h3>
+        <table class="htab"><thead><tr><th>Tier</th><th>Scenes</th><th>With saved moments</th><th title="Median of each scene's best moment, per the taste model — do your grades and the model agree?">Model's median best</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+        ${h.weak_legendaire ? `<p class="faint small">${n(h.weak_legendaire)} ${esc(gradeName("legendaire"))} scenes have a best moment in the library's bottom quarter — the model disagrees with you there (your grade wins; it's a hint for the model).</p>` : ""}</div>
+      <div class="card pad"><h3>Saved moments per scene</h3><div class="hbars">${bars}</div>
+        <h3 style="margin-top:14px">Scenes without saves, by age</h3>
+        <p class="small">${n(a.new)} new (under ${h.grace_days} days, protected) · ${n(a["30d-6mo"])} 30 days–6 months · ${n(a["6mo+"])} over 6 months${a.unknown ? ` · ${n(a.unknown)} unknown age` : ""}${t.unembedded ? ` · ${n(t.unembedded)} not embedded yet (can't be judged)` : ""}</p></div>
+    </div>`;
+}
+function tierChip(t) { return `<span class="tchip tc-${t}">${esc(TIER_NAMES[t] || t)}</span>`; }
+document.addEventListener("click", (e) => {
+  const c = e.target.closest("[data-open-view]"); if (!c) return;
+  cat.view = c.dataset.openView; cat.tier = ""; cat.isNew = false;
+  go("catalogue"); openCatalogue();
+});
 
 async function openForYou() {
   if (!profilesLoaded) await loadProfiles();
@@ -2435,8 +2497,10 @@ const CAT_VIEWS = [
   ["second", "Second look", "Exceptionnelle/Légendaire scenes that look more like Merveilleuse or below"],
   ["anomaly", "Anomaly suggestions", "5★ scenes with an O-count outside your scheme, with a suggested tier"],
   ["conflict", "Tag conflicts", "Scenes carrying two tier tags, or a tier tag that disagrees with their grade — the renamer can't file these. Re-grade to fix."],
+  ["saved", "Saved → Légendaire", "Scenes you've saved moments in that aren't Légendaire yet — most saves first. One click grades them all."],
+  ["trim", "No saved moments", "Scenes past their grace period with no saved moments, weakest best moment first — trim candidates. Légendaire and rejects are left out."],
 ];
-const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict"]);
+const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict", "saved", "trim"]);
 const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
 const CAT_FILTERS = [["performer", "#cat-perf"], ["studio", "#cat-studio"], ["tag", "#cat-tag"],
@@ -2464,6 +2528,8 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     cat.items = append ? cat.items.concat(d.items) : d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
+    cat.grace = d.grace || cat.grace;
+    renderCatViewbar();
     setNavCounts(d);
     const nb = $("#btn-cat-new"), ing = d.ingest || {};
     if (nb) {
@@ -2654,6 +2720,63 @@ function qualityChips(r) {
     chip((q.codec || "").toUpperCase()) + chip(q.fps ? `${Math.round(q.fps)}fps` : "") +
     chip(r.size ? fmtBytes(r.size) : "");
 }
+// saved moments · the model's best moment · how long it's been in the library
+function sigLine(r) {
+  const s = r.signals; if (!s) return "";
+  const bits = [];
+  if (s.saves) bits.push(`<span class="sg-saves" title="Moments you saved in this scene">★ ${s.saves} saved</span>`);
+  else bits.push(`<span class="faint" title="You haven't saved a moment in this scene">no saved moments</span>`);
+  if (s.best != null) bits.push(`<span title="The taste model's best moment in this scene">best moment ${Math.round(s.best * 100)}%</span>`);
+  if (s.age_days != null) bits.push(s.new ? `<span class="sg-new" title="Inside the grace period — never suggested for trimming">new · ${s.age_days} d</span>`
+    : `<span class="faint">added ${ageText(s.age_days)} ago</span>`);
+  if (r.size && cat.view === "trim") bits.push(`<span class="faint">${fmtBytes(r.size)}</span>`);
+  return `<div class="cat-sig">${bits.join(" · ")}</div>`;
+}
+function ageText(d) {
+  if (d < 45) return `${d} days`;
+  if (d < 540) return `${Math.round(d / 30)} months`;
+  return `${(d / 365).toFixed(1)} years`;
+}
+// a line under the tier chips for the saves-driven views: what it is + its action
+function renderCatViewbar() {
+  const bar = $("#cat-viewbar"); if (!bar) return;
+  const n = (cat.views || {})[cat.view] || 0;
+  if (cat.view === "saved") {
+    bar.hidden = false;
+    bar.innerHTML = `<span>Scenes with saved moments that aren't Légendaire yet. From now on, saving a moment promotes its scene automatically (Settings → Tiers).</span>
+      <button class="btn pri sm" id="btn-saved-all" ${n ? "" : "disabled"}>★ Grade all ${n.toLocaleString()} as ${esc(gradeName("legendaire"))}</button>`;
+  } else if (cat.view === "trim") {
+    const g = cat.grace || {};
+    bar.hidden = false;
+    bar.innerHTML = `<span>No saved moments, weakest best moment first. New scenes (under ${g.days ?? 30} days) are left out${g.new_excluded ? ` — ${g.new_excluded.toLocaleString()} right now` : ""}. Select the ones to let go and press 1 (Reject), then “Delete all rejected” when you're ready.</span>`;
+  } else { bar.hidden = true; bar.innerHTML = ""; }
+}
+async function gradeAllSaved() {
+  let d;
+  try { d = await api("/api/catalogue?" + new URLSearchParams({ view: "saved", ids_only: "true", limit: 500 })); }
+  catch (e) { return toast(e.message, true); }
+  const ids = d.ids || [];
+  if (!ids.length) return toast("Nothing to promote");
+  if (!confirm(`Grade ${plural(ids.length, "scene")} with saved moments as ${gradeName("legendaire")}?\n\nEach gets the "${TIER_TAGS.legendaire || "legendaire"}" tag (other tier tags removed) and is marked organized — your renamer will move the files.\n\nZ undoes the whole batch.`)) return;
+  const btn = $("#btn-saved-all"); if (btn) btn.disabled = true;
+  try {
+    const job = await api("/api/catalogue/grade-bulk", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_ids: ids, grade: "legendaire" }),
+    });
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {};
+      if (btn) btn.textContent = `Grading ${p.done ?? 0}/${p.total ?? ids.length}…`;
+    });
+    if (j.status === "error") throw new Error(j.error);
+    const r = j.result;
+    if (r.previous.length) gradeUndo.push({ bulk: true, items: r.previous, grade: "legendaire" });
+    toast(`${plural(r.graded, "scene")} → ${gradeName("legendaire")}${r.failed.length ? ` · ${r.failed.length} failed` : ""} — Z to undo`, !!r.failed.length);
+  } catch (e) { toast(e.message, true); }
+  openCatalogue();
+}
+document.addEventListener("click", (e) => { if (e.target.closest("#btn-saved-all")) gradeAllSaved(); });
+
 function catCardHTML(r, i) {
   const who = [r.performers.slice(0, 3).join(", "), r.studio, (r.date || "").slice(0, 4)].filter(Boolean).join(" · ");
   const moments = (r.moments || []).slice(0, 3).map((m, j) =>
@@ -2680,7 +2803,7 @@ function catCardHTML(r, i) {
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="cat-who">${esc(who)}</div>
       <div class="qual">${qualityChips(r)}</div>
-      ${predLine}${flag}${suggest}${tagLine(r)}
+      ${sigLine(r)}${predLine}${flag}${suggest}${tagLine(r)}
     </div>
     <div class="cat-moments">${moments || '<span class="faint small">moments appear once embedded</span>'}</div>
     <div class="cat-grades">${grades}</div>
@@ -3407,7 +3530,11 @@ function renderReview() {
     r.flag ? `<span class="warn">⚠ ${esc(r.flag)}</span>` : "", r.suggest ? esc(r.suggest.why) : "",
     r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>");
   const q = r.quality || {};
-  $("#rv-facts").innerHTML = `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
+  const sg = r.signals;
+  $("#rv-facts").innerHTML = (sg ? `<span>Saved</span><span>${sg.saves ? `★ ${sg.saves} moment${sg.saves === 1 ? "" : "s"}` : '<span class="faint">none yet</span>'}</span>
+    ${sg.best != null ? `<span>Best moment</span><span>${Math.round(sg.best * 100)}% <span class="faint">(taste model)</span></span>` : ""}
+    ${sg.age_days != null ? `<span>In library</span><span>${sg.new ? `<span class="sg-new">new · ${sg.age_days} days</span>` : ageText(sg.age_days)}</span>` : ""}` : "")
+    + `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
     <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
     <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>
     ${r.tags && r.tags.length ? `<span>Tags</span><span>${esc(r.tags.slice(0, 8).join(", "))}</span>` : ""}

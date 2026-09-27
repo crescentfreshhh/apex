@@ -1138,8 +1138,9 @@ async function rateMoment(scene_id, t, label) {
 }
 async function saveApex(scene_id, t) {
   try {
-    await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "POST" });
-    flashStatus("★ saved moment @ " + fmt(t));
+    const r = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "POST" });
+    if (r && r.promoted_from) setTier(scene_id, "legendaire");   // saving promotes the scene
+    flashStatus("★ saved moment @ " + fmt(t) + (r && r.promoted_from ? ` · scene now ${gradeLabel("legendaire")}` : ""));
   } catch (e) { flashStatus(e.message); }
 }
 // is a saved moment on this clip? Looks across the clip's whole span (you may
