@@ -1484,6 +1484,9 @@ class Service(LibraryMixin):
             self.invalidate_index(model)
         self.invalidate_meta()
         total["models"] = len(models)
+        if total["moved"]:
+            log("moved = files renamed or moved since they were embedded (e.g. by your renamer "
+                "after grading) — stored paths updated, nothing re-embedded")
         return total
 
     def prune_dead_failures(self) -> int:
@@ -4659,6 +4662,51 @@ class Service(LibraryMixin):
     def path_for_key(self, key: str) -> str | None:
         meta = self.index().key_meta.get(key)
         return meta.get("path") if meta else None
+
+    _HEAL_MISS_SEC = 600.0
+
+    def refresh_path(self, key: str) -> str | None:
+        """Self-heal a moved file: grading makes your renamer rename/move it, so
+        the path stored with its cached embeddings goes stale (the fingerprint
+        key doesn't change). Ask Stash where the scene lives now and update the
+        stored path in every model's cache entry + any loaded index — the same
+        in-place fix a Sync makes, for one scene, nothing re-embedded. Returns
+        the current path, or None (scene/file gone — remembered for 10 min so a
+        broken thumbnail doesn't query Stash on every request)."""
+        import time as _t
+
+        misses = self.__dict__.setdefault("_heal_misses", {})
+        if _t.monotonic() - misses.get(key, -1e9) < self._HEAL_MISS_SEC:
+            return None
+        meta = self.index().key_meta.get(key) or {}
+        sid = meta.get("scene_id")
+        new = None
+        if sid is not None:
+            try:
+                new = (self._meta_client().scene_details([str(sid)]).get(str(sid)) or {}).get("path")
+            except Exception:  # noqa: BLE001 — Stash down: try again later
+                new = None
+        if not new:
+            misses[key] = _t.monotonic()
+            return None
+        if new != meta.get("path"):
+            cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+            for model in cache.models():
+                if not model or not cache.has(key, model):
+                    continue
+                try:
+                    times, vecs, m = cache.load(key, model)
+                    m["path"] = new
+                    cache.save(key, model, times, vecs, meta=m)
+                except Exception:  # noqa: BLE001 — leave that entry for a Sync
+                    continue
+            with self._index_lock:
+                for idx in self._index.values():
+                    km = idx.key_meta.get(key)
+                    if km is not None:
+                        km["path"] = new
+        misses.pop(key, None)
+        return new
 
     def stream_url(self, scene_id: str, start: float | None = None) -> str:
         return self.client().stream_url(scene_id, start=start)

@@ -1434,10 +1434,18 @@ def create_app(cfg=None):
         path = service.path_for_key(key)
         if not path:
             raise HTTPException(404, "unknown scene key")
+        if not Path(path).exists():          # renamed/moved (e.g. by the renamer after a grade)
+            path = service.refresh_path(key) or path
         try:
             data = service.frame_jpeg(path, t, size=size)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(500, f"could not decode frame: {exc}")
+            healed = service.refresh_path(key)   # moved between the check and the decode
+            if not healed or healed == path:
+                raise HTTPException(500, f"could not decode frame: {exc}")
+            try:
+                data = service.frame_jpeg(healed, t, size=size)
+            except Exception as exc2:  # noqa: BLE001
+                raise HTTPException(500, f"could not decode frame: {exc2}")
         return Response(content=data, media_type="image/jpeg")
 
     # --- frontend -----------------------------------------------------------

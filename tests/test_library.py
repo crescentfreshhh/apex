@@ -241,3 +241,49 @@ def test_library_summary_follows_every_grade(svc, stash, monkeypatch):
     client.post("/api/catalogue/grade", json={"scene_id": "1", "grade": "legendaire"})
     s2 = client.get("/api/catalogue/summary").json()        # no refresh needed: updated in place
     assert s2["counts"]["unreviewed"] == 0 and s2["counts"]["legendaire"] == 2
+
+
+# --- moved files: thumbnails heal their own stale paths ---------------------------
+
+def test_frame_heals_a_path_the_renamer_moved(svc, stash, monkeypatch, tmp_path):
+    import numpy as np
+
+    from peaks.cache import EmbeddingCache
+
+    new = tmp_path / "graded" / "Scene 2 [Merveilleuse].mp4"
+    new.parent.mkdir(parents=True)
+    new.write_bytes(b"x")
+    stash.s["2"]["path"] = str(new)                  # where Stash says it lives now
+    cache = EmbeddingCache(svc.cfg.embedding.cache_dir)
+    model = svc._model_name()
+    cache.save("fp2", model, np.array([0.0, 2.0], dtype=np.float32),
+               np.eye(2, 4, dtype=np.float32), meta={"scene_id": "2", "path": "/gone/old.mp4"})
+    seen = []
+    monkeypatch.setattr(type(svc), "frame_jpeg", lambda self, path, t, size=320: seen.append(path) or b"jpg")
+    api = _api(svc, monkeypatch)
+    r = api.get("/api/frame", params={"key": "fp2", "t": 1.0})
+    assert r.status_code == 200 and seen == [str(new)]
+    assert cache.load("fp2", model)[2]["path"] == str(new)          # stored path fixed
+    assert svc.index(model).key_meta["fp2"]["path"] == str(new)     # and the live index
+
+
+def test_frame_heal_remembers_a_missing_scene(svc, stash, monkeypatch):
+    import numpy as np
+
+    from peaks.cache import EmbeddingCache
+
+    cache = EmbeddingCache(svc.cfg.embedding.cache_dir)
+    cache.save("fp9", svc._model_name(), np.array([0.0], dtype=np.float32),
+               np.eye(1, 4, dtype=np.float32), meta={"scene_id": "9", "path": "/gone/x.mp4"})
+    calls = []
+    real = stash.scene_details
+    monkeypatch.setattr(stash, "scene_details", lambda ids: calls.append(ids) or real(ids))
+
+    def boom(self, path, t, size=320):
+        raise FileNotFoundError(path)
+    monkeypatch.setattr(type(svc), "frame_jpeg", boom)
+    api = _api(svc, monkeypatch)
+    assert api.get("/api/frame", params={"key": "fp9", "t": 0}).status_code == 500
+    n = len(calls)
+    assert api.get("/api/frame", params={"key": "fp9", "t": 0}).status_code == 500
+    assert len(calls) == n                           # no second Stash lookup within the window
