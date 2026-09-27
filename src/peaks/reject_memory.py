@@ -5,7 +5,9 @@ Rejects are rated 1★ and then deleted with their files, so without this the
 reject class would only ever hold the few scenes waiting to be deleted. Before
 Peaks deletes a reject (and whenever it sees a 1★ scene that's embedded) it
 stores that scene's triage features — visual summary + file quality, a few KB —
-keyed by file fingerprint.
+keyed by file fingerprint, plus who was in it (performer ids, studio) so a
+deleted reject still counts against those track records. Entries stored before
+that was kept have no performers/studio (None) and simply don't count there.
 
 One file per embedding model (``reject_memory-<model>.npz``): features from a
 different backbone aren't comparable, so switching models simply starts a new
@@ -14,6 +16,7 @@ memory instead of mixing the two.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -35,12 +38,15 @@ class RejectMemory:
             mtime = None
         if self._data is not None and mtime == self._mtime:
             return self._data
-        data = {"fp": [], "vis": None, "qual": None, "ts": []}
+        data = {"fp": [], "vis": None, "qual": None, "ts": [], "who": []}
         if mtime is not None:
             try:
                 with np.load(self.path, allow_pickle=False) as z:
-                    data = {"fp": [str(x) for x in z["fp"]], "vis": z["vis"], "qual": z["qual"],
-                            "ts": [float(x) for x in z["ts"]]}
+                    fps = [str(x) for x in z["fp"]]
+                    who = ([json.loads(x) if x else None for x in (str(v) for v in z["who"])]
+                           if "who" in z.files else [None] * len(fps))
+                    data = {"fp": fps, "vis": z["vis"], "qual": z["qual"],
+                            "ts": [float(x) for x in z["ts"]], "who": who}
             except (OSError, ValueError, KeyError):
                 pass            # unreadable → start over rather than break triage
         self._data, self._mtime = data, mtime
@@ -52,27 +58,30 @@ class RejectMemory:
     def __len__(self) -> int:
         return len(self._load()["fp"])
 
-    def add(self, items: dict[str, tuple[np.ndarray, np.ndarray]]) -> int:
-        """Remember {fingerprint: (visual, quality)} for scenes not already
-        stored. Feature sizes must match what's stored (same model). Returns how
-        many were added."""
+    def add(self, items: dict[str, tuple]) -> int:
+        """Remember {fingerprint: (visual, quality[, who])} for scenes not
+        already stored — `who` is {performers: [ids], studio}. Feature sizes
+        must match what's stored (same model). Returns how many were added."""
         data = self._load()
         have = set(data["fp"])
-        new = [(fp, v, q) for fp, (v, q) in items.items() if fp and fp not in have]
+        new = [(fp, it[0], it[1], it[2] if len(it) > 2 else None)
+               for fp, it in items.items() if fp and fp not in have]
         if not new:
             return 0
-        vis = np.stack([np.asarray(v, np.float32) for _, v, _ in new])
-        qual = np.stack([np.asarray(q, np.float32) for _, _, q in new])
+        vis = np.stack([np.asarray(n[1], np.float32) for n in new])
+        qual = np.stack([np.asarray(n[2], np.float32) for n in new])
         if data["vis"] is not None and len(data["fp"]):
             if data["vis"].shape[1] != vis.shape[1] or data["qual"].shape[1] != qual.shape[1]:
                 raise ValueError("reject memory feature size changed — different model?")
             vis = np.concatenate([data["vis"], vis])
             qual = np.concatenate([data["qual"], qual])
-        fps = data["fp"] + [fp for fp, _, _ in new]
+        fps = data["fp"] + [n[0] for n in new]
         ts = data["ts"] + [time.time()] * len(new)
+        who = data["who"] + [n[3] for n in new]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp.npz")
-        np.savez(tmp, fp=np.array(fps), vis=vis, qual=qual, ts=np.array(ts))
+        np.savez(tmp, fp=np.array(fps), vis=vis, qual=qual, ts=np.array(ts),
+                 who=np.array([json.dumps(w) if w is not None else "" for w in who]))
         os.replace(tmp, self.path)
         self._data = None
         return len(new)
@@ -87,3 +96,28 @@ class RejectMemory:
         if not keep:
             return [], None, None
         return [data["fp"][i] for i in keep], data["vis"][keep], data["qual"][keep]
+
+    def fill_who(self, items: dict[str, dict]) -> int:
+        """Add performers/studio to remembered rejects stored without them
+        (still in the library, so still knowable). Returns how many changed."""
+        data = self._load()
+        who = list(data["who"])
+        n = 0
+        for i, fp in enumerate(data["fp"]):
+            if who[i] is None and items.get(fp) is not None:
+                who[i] = items[fp]
+                n += 1
+        if n:
+            tmp = self.path.with_name(self.path.name + ".tmp.npz")
+            np.savez(tmp, fp=np.array(data["fp"]), vis=data["vis"], qual=data["qual"],
+                     ts=np.array(data["ts"]),
+                     who=np.array([json.dumps(w) if w is not None else "" for w in who]))
+            os.replace(tmp, self.path)
+            self._data = None
+        return n
+
+    def who(self, fps: list[str]) -> list[dict | None]:
+        """Who was in each remembered reject (None when stored before that was kept)."""
+        data = self._load()
+        at = dict(zip(data["fp"], data["who"]))
+        return [at.get(fp) for fp in fps]

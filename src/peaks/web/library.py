@@ -279,16 +279,22 @@ class LibraryMixin:
         return RejectMemory(self.cfg.modeling.dir, self._model_name())
 
     def _remember_rejects(self, rows: list[dict], feats: dict | None = None) -> int:
-        """Store triage features of 1★ scenes that are embedded and not yet
-        remembered. Cheap when there's nothing new."""
+        """Store triage features (and performers/studio) of 1★ scenes that are
+        embedded and not yet remembered. Cheap when there's nothing new."""
+        from ..tier_model import who_of
+
         mem = self.reject_memory()
         have = mem.fingerprints()
-        todo = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint")
-                and r["fingerprint"] not in have]
+        rejects = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint")]
+        todo = [r for r in rejects if r["fingerprint"] not in have]
+        # remembered before performers/studio were kept: fill them in while knowable
+        stale = [r for r in rejects if r["fingerprint"] in have]
+        if stale and None in mem.who([r["fingerprint"] for r in stale]):
+            mem.fill_who({r["fingerprint"]: who_of(r) for r in stale})
         if not todo:
             return 0
         feats = self._scene_features(todo) if feats is None else feats
-        return mem.add({r["fingerprint"]: feats[r["scene_id"]] for r in todo
+        return mem.add({r["fingerprint"]: (*feats[r["scene_id"]][:2], who_of(r)) for r in todo
                         if r["scene_id"] in feats})
 
     def delete_preview(self, scene_ids: list[str] | None = None) -> dict:

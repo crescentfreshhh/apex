@@ -2160,9 +2160,26 @@ async function openHealth() {
       <div class="card pad"><h3>Saved moments per scene</h3><div class="hbars">${bars}</div>
         <h3 style="margin-top:14px">Scenes without saves, by age</h3>
         <p class="small">${n(a.new)} new (under ${h.grace_days} days, protected) · ${n(a["30d-6mo"])} 30 days–6 months · ${n(a["6mo+"])} over 6 months${a.unknown ? ` · ${n(a.unknown)} unknown age` : ""}${t.unembedded ? ` · ${n(t.unembedded)} not embedded yet (can't be judged)` : ""}</p></div>
-    </div>`;
+    </div>${whoHealth(h.who)}`;
+}
+// Library health: the performers and studios you grade best and worst
+function whoHealth(w) {
+  if (!w) return "";
+  const tab = (list, kind) => list.length ? `<table class="htab wtab"><thead><tr><th>${kind === "studio" ? "Studio" : "Performer"}</th><th title="Graded scenes (incl. deleted rejects)">Graded</th><th title="Share not rejected">Kept</th><th>${esc(className("exceptionnelle"))}+</th></tr></thead><tbody>${
+    list.map((x) => `<tr class="hlink" data-who-${kind}="${esc(x.name)}" title="Open in Catalogue"><td>${esc(x.name)}</td><td>${x.n}</td><td>${Math.round(x.keep * 100)}%</td><td>${Math.round(x.top * 100)}%</td></tr>`).join("")}</tbody></table>`
+    : '<p class="faint small">None yet.</p>';
+  const block = (d, kind, label) => `<div class="card pad"><h3>${label}</h3>
+      <p class="faint small">${d.count.toLocaleString()} with ${w.min_graded}+ graded scenes · ranked against your library average</p>
+      <h4>Best</h4>${tab(d.top, kind)}<h4>Worst</h4>${tab(d.bottom, kind)}</div>`;
+  return `<div class="hgrid two">${block(w.performers, "performer", "Performers")}${block(w.studios, "studio", "Studios")}</div>
+    <p class="faint small">Records are smoothed: a handful of grades counts for little until there are more. Click a row to review them in Catalogue.</p>`;
 }
 function tierChip(t) { return `<span class="tchip tc-${t}">${esc(TIER_NAMES[t] || t)}</span>`; }
+document.addEventListener("click", (e) => {
+  const c = e.target.closest("[data-who-performer],[data-who-studio]"); if (!c) return;
+  go("catalogue");
+  applyCatParams({ performer: c.dataset.whoPerformer || "", studio: c.dataset.whoStudio || "" });
+});
 document.addEventListener("click", (e) => {
   const c = e.target.closest("[data-open-view]"); if (!c) return;
   cat.view = c.dataset.openView; cat.tier = ""; cat.isNew = false;
@@ -2619,7 +2636,7 @@ function renderCatTriage() {
     const pct = (x) => Math.round(x * 100) + "%";
     const gain = Math.round((rep.quality_gain || 0) * 100);
     txt = `Trained on ${rep.n} scenes (${rep.trained_at}) · ${pct(rep.cv.exact)} exact · ${pct(rep.cv.within_one)} within one tier` +
-      ` · file quality ${gain >= 0 ? "+" : ""}${gain} pts` +
+      ` · file quality ${gain >= 0 ? "+" : ""}${gain} pts` + whoGainText(rep) +
       (m.grades_since_train ? ` · ${m.grades_since_train} grades since` : "") +
       (rep.remembered_rejects ? ` · incl. ${plural(rep.remembered_rejects, "deleted reject")} remembered` : "");
     const short = Object.entries(rep.short || {}).map(([c, n]) => `${className(c)} (${n})`);
@@ -2630,6 +2647,15 @@ function renderCatTriage() {
     txt = "Not trained yet — learns your tiers from the scenes you've graded.";
   }
   $("#cat-model").textContent = txt;
+}
+// did performer/studio history earn its place in the model (measured, not assumed)?
+function whoGainText(rep) {
+  if (rep.who_gain == null) return "";
+  const g = Math.round(rep.who_gain * 100), sg = `${g >= 0 ? "+" : ""}${g} pts`;
+  let t = rep.use_who ? ` · performer/studio ${sg}` : ` · performer/studio not used (${sg} — no clear gain yet)`;
+  const fb = rep.fallback || {};
+  if (fb.trained) t += ` · unembedded scenes judged by performer/studio (${Math.round(fb.cv.exact * 100)}% exact)`;
+  return t;
 }
 function renderCatStorage(st) {
   const el = $("#cat-storage"); if (!el || !st) return;
@@ -2732,6 +2758,12 @@ function sigLine(r) {
   if (r.size && cat.view === "trim") bits.push(`<span class="faint">${fmtBytes(r.size)}</span>`);
   return `<div class="cat-sig">${bits.join(" · ")}</div>`;
 }
+// performer / studio track records: how you've graded who's in this scene
+function whoLines(r, max = 3) {
+  const ls = ((r.who || {}).lines || []).slice(0, max);
+  if (!ls.length) return "";
+  return `<div class="cat-whorec">${ls.map((x) => `<span class="wr wr-${x.tone}" title="Your grades for ${x.kind === "studio" ? "this studio" : "this performer"} (Library health lists the best and worst)">${x.kind === "studio" ? "🏢" : "👤"} ${esc(x.text)}</span>`).join("")}</div>`;
+}
 function ageText(d) {
   if (d < 45) return `${d} days`;
   if (d < 540) return `${Math.round(d / 30)} months`;
@@ -2789,7 +2821,8 @@ function catCardHTML(r, i) {
     `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
   const predLine = p
     ? `<div class="cat-pred">Looks <span class="tc-${p.tier === "reject" ? "rejected" : p.tier}">${esc(className(p.tier))}</span> ${Math.round(p.conf * 100)}%` +
-      (p.keeper != null ? ` · keeper ${Math.round(p.keeper * 100)}%` : "") + `</div>`
+      (p.keeper != null ? ` · keeper ${Math.round(p.keeper * 100)}%` : "") +
+      (p.from === "who" ? ` <span class="faint" title="Not embedded yet: this guess comes only from how you've graded these performers and this studio">(from performer/studio history — not seen yet)</span>` : "") + `</div>`
     : "";
   const flag = (r.flag ? `<div class="cat-flag">⚠ ${esc(r.flag)}</div>` : "") +
     (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate</div>` : "");
@@ -2803,7 +2836,7 @@ function catCardHTML(r, i) {
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="cat-who">${esc(who)}</div>
       <div class="qual">${qualityChips(r)}</div>
-      ${sigLine(r)}${predLine}${flag}${suggest}${tagLine(r)}
+      ${sigLine(r)}${predLine}${whoLines(r)}${flag}${suggest}${tagLine(r)}
     </div>
     <div class="cat-moments">${moments || '<span class="faint small">moments appear once embedded</span>'}</div>
     <div class="cat-grades">${grades}</div>
@@ -3477,7 +3510,8 @@ async function rvMergeFresh() {
     const f = fresh.get(x.scene_id);
     if (!f || rv.graded.has(x.scene_id)) return x;
     return { ...x, title: f.title, performers: f.performers, studio: f.studio, tags: f.tags, date: f.date,
-      moments: f.moments, pred: f.pred, flag: f.flag, dupe: f.dupe, suggest: f.suggest, path: f.path, quality: f.quality };
+      moments: f.moments, pred: f.pred, flag: f.flag, dupe: f.dupe, suggest: f.suggest, path: f.path, quality: f.quality,
+      who: f.who, performer_ids: f.performer_ids, signals: f.signals };
   });
   d.items.filter((f) => !have.has(f.scene_id) && f.tier === "unreviewed")
     .sort((a, b) => (+a.scene_id || 0) - (+b.scene_id || 0)).forEach((f) => rv.items.push(f));
@@ -3528,8 +3562,9 @@ function renderReview() {
     ? '<span class="faint">The tier model isn\'t trained yet — Catalogue → ⋯ → Train.</span>'
     : '<span class="faint">Not embedded yet — the model\'s opinion appears once it is.</span>');
   $("#rv-why").innerHTML = [r.pred && r.pred.keeper != null ? `Keeper ${Math.round(r.pred.keeper * 100)}%` : "",
+    r.pred && r.pred.from === "who" ? '<span class="faint">From performer/studio history — not seen yet</span>' : "",
     r.flag ? `<span class="warn">⚠ ${esc(r.flag)}</span>` : "", r.suggest ? esc(r.suggest.why) : "",
-    r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>");
+    r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>") + whoLines(r, 6);
   const q = r.quality || {};
   const sg = r.signals;
   $("#rv-facts").innerHTML = (sg ? `<span>Saved</span><span>${sg.saves ? `★ ${sg.saves} moment${sg.saves === 1 ? "" : "s"}` : '<span class="faint">none yet</span>'}</span>

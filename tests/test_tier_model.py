@@ -123,3 +123,112 @@ def test_quality_floor_and_flag():
     assert quality_flag({"res": "4K", "mbps": 30}, floor) is None
     assert "never tiered anything below 1080p" in quality_flag({"res": "720p", "mbps": 50}, floor)
     assert quality_flag({"res": "1440p", "mbps": 1}, floor) is None      # no floor for 1440p yet
+
+
+# --- performer / studio track records ----------------------------------------
+
+from peaks.tier_model import (  # noqa: E402
+    WHO_FEATURES, WhoEncoder, _oof_who, fit_fallback, who_of,
+)
+
+
+def _feat(enc, who, own=None):
+    return dict(zip(WHO_FEATURES, enc.encode([who], None if own is None else [own])[0]))
+
+
+def test_records_are_smoothed_toward_the_library_mean():
+    # library of mid-grade scenes, then one performer with 1 vs 10 Légendaires
+    who = [{"performers": ["x"], "studio": "s"} for _ in range(40)]
+    y = ["merveilleuse"] * 40
+    one = WhoEncoder().fit(who + [{"performers": ["star"], "studio": ""}], y + ["legendaire"])
+    ten = WhoEncoder().fit(who + [{"performers": ["star"], "studio": ""}] * 10, y + ["legendaire"] * 10)
+    base1 = one.base[0] / 4
+    g1 = _feat(one, {"performers": ["star"], "studio": ""})["perf_grade_max"]
+    g10 = _feat(ten, {"performers": ["star"], "studio": ""})["perf_grade_max"]
+    assert g1 - base1 < 0.2                     # one grade barely moves the record
+    assert g10 > 0.85                           # ten grades make it (nearly) Légendaire
+    new = _feat(ten, {"performers": ["nobody"], "studio": ""})
+    assert new["perf_known_frac"] == 0 and new["perf_graded_log"] == 0
+    assert _feat(ten, {"performers": [], "studio": ""})["no_performers"] == 1
+    assert _feat(ten, None)["who_missing"] == 1
+
+
+def test_a_scenes_own_grade_never_feeds_its_record():
+    who = [{"performers": ["p"], "studio": "s"}]
+    enc = WhoEncoder().fit(who, ["legendaire"])
+    loo = _feat(enc, who[0], own="legendaire")
+    assert loo["perf_graded_log"] == 0 and loo["studio_graded_log"] == 0
+    assert loo["perf_grade_max"] == pytest.approx(enc.base[0] / 4)
+    # out-of-fold training encodings: a lone performer's only scene knows nothing of itself
+    oof = _oof_who(who * 1 + [{"performers": ["q"], "studio": "t"}] * 9, ["legendaire"] + ["reject"] * 9)
+    assert oof[0, WHO_FEATURES.index("perf_known_frac")] == 0
+    ex = enc.explain(who[0], own="legendaire")
+    assert ex["performers"][0]["n"] == 0 and ex["studio"]["n"] == 0
+    assert enc.explain(who[0])["performers"][0] == {
+        "id": "p", "n": 1, "grade": 4.0, "keep": 1.0, "top": 1.0,
+        "shrunk": pytest.approx((4 + 3 * enc.base[0]) / 4, abs=1e-3)}
+
+
+def _who_library(rng, who_matters=True, n=200):
+    """Picture and file quality carry nothing; with `who_matters`, performers
+    A/B only make Légendaire scenes and studio 'Bad' only rejects."""
+    Xv = np.stack([visual_features(np.stack([_unit(rng.standard_normal(D)) for _ in range(6)]))
+                   for _ in range(n)])
+    Xq = np.stack([quality_features({"mbps": 8, "res": "1080p", "fps": 30, "codec": "h264"})] * n)
+    y, who = [], []
+    others = [f"p{i}" for i in range(12)]
+    for i in range(n):
+        c = CLASSES[i % 5]
+        if who_matters and c == "legendaire":
+            w = {"performers": [["A", "B"][i % 2], str(rng.choice(others))], "studio": "Good"}
+        elif who_matters and c == "reject":
+            w = {"performers": [str(rng.choice(others))], "studio": "Bad"}
+        else:
+            w = {"performers": [str(rng.choice(others))], "studio": str(rng.choice(["Good", "Mid", "Bad"]))}
+        y.append(c)
+        who.append(w)
+    return Xv, Xq, y, who
+
+
+def test_who_is_kept_when_it_helps_and_predictions_follow():
+    Xv, Xq, y, who = _who_library(np.random.default_rng(3))
+    model, rep = fit_best(Xv, Xq, y, who=who)
+    assert rep["use_who"] and rep["who_gain"] > 0.1 and model.use_who
+    assert rep["cv"] == rep["cv_with_who"]
+    fresh = np.stack([visual_features(np.stack([_unit(np.ones(D))] * 3))] * 2)
+    s = model.summarize(model.predict_proba(fresh, Xq[:2], who=[
+        {"performers": ["A"], "studio": "Good"}, {"performers": ["p1"], "studio": "Bad"}]))
+    assert s[0]["expected"] > s[1]["expected"]
+    assert s[1]["probs"]["reject"] > s[0]["probs"]["reject"]
+
+
+def test_who_is_dropped_when_it_doesnt_help():
+    Xv, Xq, y, who = _who_library(np.random.default_rng(4), who_matters=False)
+    model, rep = fit_best(Xv, Xq, y, who=who)
+    assert rep["use_who"] is False and not model.use_who
+    assert "cv_without_who" not in rep
+    model.predict_proba(Xv[:2], Xq[:2])                    # no who needed
+
+
+def test_fallback_model_judges_unembedded_scenes_by_who():
+    _, Xq, y, who = _who_library(np.random.default_rng(5))
+    m, rep = fit_fallback(Xq, y, who)
+    assert rep["trained"] and rep["who_gain"] > 0.1
+    s = m.summarize(m.predict_proba(None, Xq[:2], who=[
+        {"performers": ["B"], "studio": "Good"}, {"performers": ["p2"], "studio": "Bad"}]))
+    assert s[0]["tier"] == "legendaire" and s[1]["tier"] == "reject"
+    _, Xq2, y2, who2 = _who_library(np.random.default_rng(6), who_matters=False)
+    m2, rep2 = fit_fallback(Xq2, y2, who2)
+    assert m2 is None and not rep2["trained"]
+
+
+def test_old_pickled_models_still_predict():
+    Xv, Xq, y = _library(np.random.default_rng(0))
+    m = TierModel(pca_dim=8).fit(Xv, Xq, y)
+    del m.__dict__["use_who"], m.__dict__["use_visual"], m.__dict__["who_enc"]   # a pre-who pickle
+    assert m.predict_proba(Xv[:3], Xq[:3]).shape == (3, len(m.classes_))
+
+
+def test_who_of_reads_catalogue_rows():
+    assert who_of({"performer_ids": ["7", None, 9], "studio": "S"}) == {"performers": ["7", "9"], "studio": "S"}
+    assert who_of({}) == {"performers": [], "studio": ""}

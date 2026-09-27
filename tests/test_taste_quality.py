@@ -771,3 +771,82 @@ def test_score_threads_follow_the_env(svc, monkeypatch):
     clf = svc._taste_model(svc.cfg.markers.tag_name, model)
     svc._taste_proba_all(clf, svc.index(model))
     assert 7 in seen
+
+
+# --- performer / studio track records ----------------------------------------
+
+def _who_graded(svc):
+    """Scenes 0–59 graded: evens Légendaire with performer Ann (id 1) at studio
+    Good, odds rejected with Bo (id 2) at studio Bad. Unembedded, unreviewed
+    scenes 100 (Ann) and 101 (Bo, Bad) and 102 (a newcomer) arrive."""
+    st = svc.client()
+    for sid, v in st.s.items():
+        i = int(sid)
+        good = i % 2 == 0
+        v.update(rating100=100 if good else 20, o_counter=18 if good else 0,
+                 studio="Good" if good else "Bad",
+                 performers=["Ann" if good else "Bo"],
+                 performers_detail=[{"id": "1" if good else "2", "name": "Ann" if good else "Bo"}])
+    st.s["100"] = {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False,
+                   "fingerprint": "fp100", "studio": "", "performers": ["Ann"],
+                   "performers_detail": [{"id": "1", "name": "Ann"}]}
+    st.s["101"] = {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False,
+                   "fingerprint": "fp101", "studio": "Bad", "performers": ["Bo"],
+                   "performers_detail": [{"id": "2", "name": "Bo"}]}
+    st.s["102"] = {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False,
+                   "fingerprint": "fp102", "studio": "Indie", "performers": ["Cy"],
+                   "performers_detail": [{"id": "3", "name": "Cy"}]}
+    svc.invalidate_meta()
+    svc._cat_cache = None
+    return svc
+
+
+def test_tier_model_uses_performer_and_studio_history(svc):
+    _who_graded(svc)
+    rep = svc.train_tier_model()
+    assert rep["trained"] and "who_gain" in rep and "use_who" in rep
+    assert rep["fallback"]["trained"] and rep["fallback"]["who_gain"] > 0.1
+    rows = svc._catalogue_all()
+    preds = svc._tier_predictions(rows)
+    assert preds["100"]["from"] == "who" and preds["100"]["tier"] == "legendaire"
+    assert preds["101"]["from"] == "who" and preds["101"]["tier"] == "reject"
+    assert "from" not in preds["0"]                          # embedded: the full model
+    # "Likely keepers" can rank the not-yet-embedded newcomer by who's in it
+    likely = [r["scene_id"] for r in svc.catalogue(view="likely")["items"]]
+    assert likely.index("100") < likely.index("101")
+
+
+def test_catalogue_cards_carry_performer_and_studio_reasons(svc):
+    _who_graded(svc)
+    items = {i["scene_id"]: i for i in svc.catalogue(limit=500)["items"]}
+    lines = [x["text"] for x in items["100"]["who"]["lines"]]
+    assert any(t.startswith("Ann: 30 graded · 30 ") and "(100%)" in t for t in lines)
+    bad = items["101"]["who"]["lines"]
+    assert [x["tone"] for x in bad] == ["bad", "bad"]
+    assert any("Bad: keeps 0% of 30" in x["text"] for x in bad)
+    new = [x["text"] for x in items["102"]["who"]["lines"]]
+    assert new == ["New performer: Cy — no history", "New studio: Indie — no history"]
+    assert items["100"]["performer_ids"] == ["1"]
+
+
+def test_library_health_lists_best_and_worst_performers_and_studios(svc):
+    _who_graded(svc)
+    h = svc.library_health()["who"]
+    assert [p["name"] for p in h["performers"]["top"]] == ["Ann"]
+    assert [p["name"] for p in h["performers"]["bottom"]] == ["Bo"]
+    assert h["studios"]["top"][0] == {**h["studios"]["top"][0], "name": "Good", "n": 30, "keep": 1.0}
+    assert h["studios"]["bottom"][0]["name"] == "Bad" and h["studios"]["bottom"][0]["keep"] == 0.0
+    assert h["performers"]["count"] == 2 and h["min_graded"] == 3
+
+
+def test_new_scenes_are_never_pushed_to_reject_by_who(svc):
+    _who_graded(svc)
+    svc.train_tier_model()
+    import datetime as dt
+    st = svc.client()
+    st.s["101"]["created_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat()
+    svc.invalidate_meta()
+    svc._cat_cache = None
+    item = next(i for i in svc.catalogue(limit=500)["items"] if i["scene_id"] == "101")
+    assert item["pred"]["tier"] == "reject"                   # the forecast is honest…
+    assert (item["suggest"] or {}).get("grade") != "reject"   # …but no Reject suggestion

@@ -4392,6 +4392,9 @@ class Service(LibraryMixin):
             "date": m.get("date") or "",
             "duration": m.get("duration"),
             "performers": m.get("performers") or [],
+            # parallel to `performers` (Stash ids: the performer/studio track records key on them)
+            "performer_ids": [str(p.get("id")) for p in (m.get("performers_detail") or [])
+                              if p.get("id") is not None],
             "studio": m.get("studio") or "",
             "tags": m.get("tags") or [],
             "rating100": m.get("rating100"),
@@ -4649,6 +4652,7 @@ class Service(LibraryMixin):
         page = pool[offset: offset + limit]
         names = self.tier_display_names()
         moments = self._scene_moment_strips([r["scene_id"] for r in page])
+        who_enc = self._who_records(rows)
         items = []
         for r in page:
             pred = preds.get(r["scene_id"])
@@ -4659,6 +4663,7 @@ class Service(LibraryMixin):
                 "flag": quality_flag(r["quality"], floor),
                 "signals": signals.get(r["scene_id"]),
                 "suggest": self._recommend(r, pred, signals.get(r["scene_id"]), names),
+                "who": self._who_reasons(r, who_enc, names),
                 "dupe": r["scene_id"] in dupe_ids,
             })
         grace_new = sum(1 for r in pool_all if (signals.get(r["scene_id"]) or {}).get("new")
@@ -4754,6 +4759,7 @@ class Service(LibraryMixin):
                                    and sig[r["scene_id"]]["best"] <= q25),
             "grace_days": self.cfg.modeling.trim_grace_days,
             "q25": None if q25 is None else round(q25, 4),
+            "who": self._who_tables(rows, self._who_records(rows)),
         }
 
     def curation_settings(self) -> dict:
@@ -5022,11 +5028,15 @@ class Service(LibraryMixin):
     def train_tier_model(self) -> dict:
         """Fit the triage model on every graded, embedded scene. Returns the
         report (per-class counts, CV accuracy with and without quality
-        features, chosen PCA size) or why it couldn't train."""
+        features, whether performer/studio records helped, chosen PCA size) or
+        why it couldn't train. Also fits the performer/studio fallback for
+        scenes that aren't embedded yet (kept only when it beats a guess)."""
         import json
         import time as _t
 
-        from ..tier_model import CLASSES, TIER_CLASS, fit_best, usable_classes
+        from ..tier_model import (
+            CLASSES, TIER_CLASS, fit_best, fit_fallback, quality_features, usable_classes, who_of,
+        )
         from . import forensics
 
         self._tier_training = True
@@ -5038,14 +5048,18 @@ class Service(LibraryMixin):
             train = [r for r in rows if r["scene_id"] in feats]
             vis = [feats[r["scene_id"]][0] for r in train]
             qual = [feats[r["scene_id"]][1] for r in train]
+            who = [who_of(r) for r in train]
             y = [TIER_CLASS[r["tier"]] for r in train]
             # rejects deleted from the library live on as remembered features
             live = {r["fingerprint"] for r in everything if r.get("fingerprint")}
-            _, mv, mq = self.reject_memory().rows(exclude=live)
+            mem = self.reject_memory()
+            mfps, mv, mq = mem.rows(exclude=live)
+            mwho = mem.who(mfps)
             remembered = 0 if mv is None else len(mv)
             if remembered:
                 vis += list(mv)
                 qual += list(mq)
+                who += mwho
                 y += ["reject"] * remembered
             counts = {c: y.count(c) for c in CLASSES}
             ok, short = usable_classes(y)
@@ -5057,11 +5071,24 @@ class Service(LibraryMixin):
             keep = [i for i, c in enumerate(y) if c in ok]
             Xv = np.stack([vis[i] for i in keep])
             Xq = np.stack([qual[i] for i in keep])
+            # the fallback learns from every graded scene, embedded or not
+            fb_q = [quality_features(r["quality"]) for r in rows]
+            fb_w = [who_of(r) for r in rows]
+            fb_y = [TIER_CLASS[r["tier"]] for r in rows]
+            for q, w in zip([] if mq is None else list(mq), mwho):
+                if w is not None:
+                    fb_q.append(q)
+                    fb_w.append(w)
+                    fb_y.append("reject")
             # one heavy fit at a time, process-wide (taste training shares it)
             with self._train_lock, forensics.busy("tier-train"):
-                model, rep = fit_best(Xv, Xq, [y[i] for i in keep])
+                model, rep = fit_best(Xv, Xq, [y[i] for i in keep], who=[who[i] for i in keep])
+                fallback, fb_rep = (fit_fallback(np.stack(fb_q), fb_y, fb_w) if fb_q
+                                    else (None, {"trained": False, "n": 0}))
+            model.fallback = fallback
             report = {"trained": True, **base, **rep, "classes": model.classes_,
-                      "n": len(keep), "trained_at": _t.strftime("%Y-%m-%d %H:%M")}
+                      "n": len(keep), "fallback": fb_rep,
+                      "trained_at": _t.strftime("%Y-%m-%d %H:%M")}
             path = model.save(self._tier_model_path())
             path.with_suffix(".json").write_text(json.dumps(report, indent=2))
             self._tier_state = {"model": model, "report": report}
@@ -5078,7 +5105,13 @@ class Service(LibraryMixin):
                 "training": getattr(self, "_tier_training", False)}
 
     def _tier_predictions(self, rows: list[dict]) -> dict[str, dict]:
-        """Model summary per embedded scene (cached per model + index build)."""
+        """Model summary per scene (cached per model + index build): embedded
+        scenes from the full model; scenes not embedded yet from the
+        performer/studio fallback when there is one (marked `"from": "who"`).
+        A graded scene's own grade is left out of its performers'/studio's
+        records, so a second opinion isn't just its grade echoed back."""
+        from ..tier_model import TIER_CLASS, quality_features, who_of
+
         st = self._tier_model_state()
         if st["model"] is None:
             return {}
@@ -5092,16 +5125,127 @@ class Service(LibraryMixin):
         if cached is not None and cached[0] == key:
             return cached[1]
         feats = self._scene_features(rows)
-        sids = list(feats)
+        by_id = {r["scene_id"]: r for r in rows}
+        m = st["model"]
         preds: dict[str, dict] = {}
-        if sids:
-            Xv = np.stack([feats[s][0] for s in sids])
-            Xq = np.stack([feats[s][1] for s in sids])
-            m = st["model"]
-            for s, summ in zip(sids, m.summarize(m.predict_proba(Xv, Xq))):
+
+        def run(model, sids, Xv, Xq, source=None):
+            rs = [by_id[s] for s in sids]
+            who = [who_of(r) for r in rs]
+            own = [TIER_CLASS.get(r["tier"]) for r in rs]
+            for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own))):
+                if source:
+                    summ["from"] = source
                 preds[s] = summ
+
+        sids = list(feats)
+        if sids:
+            run(m, sids, np.stack([feats[s][0] for s in sids]), np.stack([feats[s][1] for s in sids]))
+        fb = getattr(m, "fallback", None)
+        rest = [r["scene_id"] for r in rows if r["scene_id"] not in feats
+                and (r.get("performer_ids") or r.get("studio"))]
+        if fb is not None and rest:
+            run(fb, rest, None, np.stack([quality_features(by_id[s]["quality"]) for s in rest]), "who")
         self._tier_preds = (key, preds)
         return preds
+
+    def _who_records(self, rows: list[dict]):
+        """A WhoEncoder over every graded scene (plus remembered rejects that
+        kept their performers/studio) — the facts behind the "Performers: …"
+        reason lines and the Library health tables. Cached per grading state."""
+        from ..tier_model import TIER_CLASS, WhoEncoder, who_of
+
+        graded = [(who_of(r), TIER_CLASS[r["tier"]]) for r in rows if r["tier"] in TIER_CLASS]
+        try:
+            live = {r["fingerprint"] for r in rows if r.get("fingerprint")}
+            mem = self.reject_memory()
+            fps, _, _ = mem.rows(exclude=live)
+            graded += [(w, "reject") for w in mem.who(fps) if w is not None]
+        except Exception:  # noqa: BLE001 — no memory yet
+            pass
+        sig = hash(tuple((tuple(w["performers"]), w["studio"], c) for w, c in graded))
+        cached = getattr(self, "_who_cache", None)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        enc = WhoEncoder().fit([w for w, _ in graded], [c for _, c in graded])
+        self._who_cache = (sig, enc)
+        return enc
+
+    def _who_reasons(self, row: dict, enc, names: dict | None = None) -> dict:
+        """The performer/studio facts for one scene, as short reason lines:
+        "Jane Doe: 9 graded · 7 Exceptionnelle+ (78%)", "Vixen: keeps 64% of
+        42", "New performer — no history"."""
+        from ..tier_model import who_of
+
+        names = names or {}
+        top = names.get("exceptionnelle", "Exceptionnelle")
+        ex = enc.explain(who_of(row))
+        lines, fresh = [], []
+        pnames = dict(zip(row.get("performer_ids") or [], row.get("performers") or []))
+        for p in ex["performers"]:
+            nm = pnames.get(p["id"], "?")
+            if not p["n"]:
+                fresh.append(nm)
+                continue
+            tops = round(p["top"] * p["n"])
+            rej = p["n"] - round(p["keep"] * p["n"])
+            bits = [f"{p['n']} graded", f"{tops} {top}+ ({round(100 * p['top'])}%)"]
+            if rej:
+                bits.append(f"{rej} rejected")
+            lines.append({"kind": "performer", "name": nm, "text": f"{nm}: " + " · ".join(bits),
+                          "tone": self._who_tone(p, enc)})
+        if fresh:
+            lines.append({"kind": "performer", "name": ", ".join(fresh), "tone": "new",
+                          "text": f"New performer{'s' if len(fresh) > 1 else ''}: "
+                                  f"{', '.join(fresh)} — no history"})
+        st = ex["studio"]
+        if st:
+            if st["n"]:
+                txt = (f"{st['name']}: keeps {round(100 * st['keep'])}% of {st['n']}"
+                       f" · {round(100 * st['top'])}% {top}+")
+                lines.append({"kind": "studio", "name": st["name"], "text": txt,
+                              "tone": self._who_tone(st, enc)})
+            else:
+                lines.append({"kind": "studio", "name": st["name"], "tone": "new",
+                              "text": f"New studio: {st['name']} — no history"})
+        return {"lines": lines}
+
+    @staticmethod
+    def _who_tone(rec: dict, enc) -> str:
+        """good / bad / neutral: is this record clearly above or below your
+        library average (by its smoothed grade)?"""
+        g = rec.get("shrunk")
+        if g is None:
+            return "neutral"
+        base = enc.base[0]
+        return "good" if g >= base + 0.4 else "bad" if g <= base - 0.4 else "neutral"
+
+    def _who_tables(self, rows: list[dict], enc, min_n: int = 3, k: int = 8) -> dict:
+        """Performers and studios with at least `min_n` graded scenes, best and
+        worst by smoothed average grade — "top" only those above your library
+        average, "bottom" only those below it — for Library health."""
+        pname: dict[str, str] = {}
+        for r in rows:
+            for pid, nm in zip(r.get("performer_ids") or [], r.get("performers") or []):
+                pname.setdefault(pid, nm)
+
+        def table(store, label):
+            out = []
+            for key, t in store.items():
+                if t[0] < min_n:
+                    continue
+                n, g, kp, tp = enc.record(t)
+                out.append({"id": key, "name": label(key), "n": int(n),
+                            "grade": round(t[1] / n, 2), "keep": round(t[2] / n, 3),
+                            "top": round(t[3] / n, 3), "shrunk": round(g, 3)})
+            base = enc.base[0]      # above / below your library's average grade
+            top = sorted((x for x in out if x["shrunk"] > base), key=lambda x: (-x["shrunk"], -x["n"]))
+            bottom = sorted((x for x in out if x["shrunk"] < base), key=lambda x: (x["shrunk"], -x["n"]))
+            return {"top": top[:k], "bottom": bottom[:k], "count": len(out)}
+
+        return {"performers": table(enc.perf, lambda i: pname.get(i, f"#{i}")),
+                "studios": table(enc.studio, lambda s: s),
+                "min_graded": min_n, "base_grade": round(enc.base[0], 2)}
 
     @staticmethod
     def _suggest_for_anomaly(row: dict, pred: dict | None, names: dict | None = None) -> dict | None:

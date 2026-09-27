@@ -143,3 +143,19 @@ def test_delete_files_by_default_or_keep_them(lib, monkeypatch):
     assert r["deleted"] == 1 and r["freed_bytes"] == 0 and r["files_deleted"] is False
     kept = [e for e in svc.history() if e["action"] == "delete" and e["scene_id"] == "r1"]
     assert kept and "file kept" in kept[0]["detail"] and kept[0]["file_deleted"] is False
+
+
+def test_memory_keeps_who_and_reads_old_files(tmp_path):
+    mem = RejectMemory(tmp_path, "m")
+    # a file written before performers/studio were kept
+    np.savez(mem.path, fp=np.array(["old"]), vis=np.ones((1, 8), np.float32),
+             qual=np.ones((1, 3), np.float32), ts=np.array([1.0]))
+    assert mem.who(["old"]) == [None] and len(mem) == 1
+    who = {"performers": ["7"], "studio": "Bad"}
+    assert mem.add({"new": (np.ones(8), np.ones(3), who)}) == 1
+    fps, v, _ = RejectMemory(tmp_path, "m").rows()
+    assert fps == ["old", "new"] and v.shape == (2, 8)
+    assert RejectMemory(tmp_path, "m").who(fps) == [None, who]
+    # remembered without performers while still in the library → filled in later
+    assert mem.fill_who({"old": {"performers": [], "studio": "S"}, "new": {"performers": ["x"]}}) == 1
+    assert RejectMemory(tmp_path, "m").who(["old", "new"]) == [{"performers": [], "studio": "S"}, who]
