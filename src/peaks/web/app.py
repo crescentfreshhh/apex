@@ -180,13 +180,18 @@ def _catalogue_models():
     class TasteScoresIn(BaseModel):
         items: list[tuple[str, float]] = []   # (scene_id, seconds)
 
+    class ExposureIn(BaseModel):              # the megaboard's showings / responses
+        shows: dict[str, float] = {}
+        pos: dict[str, int] = {}
+        neg: dict[str, int] = {}
+
     return (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
-            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn, TasteScoresIn)
+            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn, TasteScoresIn, ExposureIn)
 
 
 (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
  TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn,
- TasteScoresIn) = _catalogue_models()
+ TasteScoresIn, ExposureIn) = _catalogue_models()
 
 
 def _login_model():
@@ -793,6 +798,13 @@ def create_app(cfg=None):
             return service.saved_moments_audit(profile)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, str(exc))
+
+    @app.post("/api/board/exposure")
+    def board_exposure(body: ExposureIn):
+        """The megaboard's batch of showings (weighted by grid size) and your
+        responses per scene — the evidence behind "often passed over"."""
+        return service.record_board_exposure(shows=dict(list(body.shows.items())[:2000]),
+                                             pos=body.pos, neg=body.neg)
 
     @app.post("/api/taste/engage")
     def taste_engage(scene_id: str, t: float, kind: str = "dwell"):

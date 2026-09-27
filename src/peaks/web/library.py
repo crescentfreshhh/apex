@@ -326,6 +326,10 @@ class LibraryMixin:
         for m in models:
             self.invalidate_index(m)
         gone = {r["scene_id"] for r in rows}
+        try:
+            self.exposure().drop(gone)              # the board's record of them, too
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
         cached = getattr(self, "_cat_cache", None)
         if cached:
             cached[1][:] = [r for r in cached[1] if r["scene_id"] not in gone]

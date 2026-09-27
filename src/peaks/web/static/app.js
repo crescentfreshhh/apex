@@ -2191,6 +2191,9 @@ async function openHealth() {
       <div class="card pad hcard hlink" data-open-view="saved"><span class="tq-l">Ready for ${esc(gradeName("legendaire"))}</span>
         <span class="tq-v">${n(h.legendaire_candidates)}</span>
         <span class="faint small">scenes with saves that aren't ${esc(gradeName("legendaire"))} yet → review</span></div>
+      <div class="card pad hcard hlink" data-open-view="passed"><span class="tq-l">Passed over on the megaboard</span>
+        <span class="tq-v">${n(h.passed_over)}</span>
+        <span class="faint small">shown often, never saved or explored → review</span></div>
       <div class="card pad hcard hlink" data-open-view="trim"><span class="tq-l">Trim pool</span>
         <span class="tq-v">${n(t.count)}</span>
         <span class="faint small">no saves, past ${h.grace_days} days · ${fmtBytes(t.bytes)} · ${n(t.suggest_reject)} suggested to reject → review</span></div>
@@ -2566,8 +2569,9 @@ const CAT_VIEWS = [
   ["conflict", "Tag conflicts", "Scenes carrying two tier tags, or a tier tag that disagrees with their grade — the renamer can't file these. Re-grade to fix."],
   ["saved", "Saved → Légendaire", "Scenes you've saved moments in that aren't Légendaire yet — most saves first. One click grades them all."],
   ["trim", "No saved moments", "Scenes past their grace period with no saved moments, weakest best moment first — trim candidates. Légendaire and rejects are left out."],
+  ["passed", "Passed over", "Scenes the megaboard keeps showing you that you never save, 👍, explore, pin or enlarge — most-shown first. Légendaire, rejects and new scenes are left out."],
 ];
-const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict", "saved", "trim"]);
+const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict", "saved", "trim", "passed"]);
 const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
 const CAT_FILTERS = [["performer", "#cat-perf"], ["studio", "#cat-studio"], ["tag", "#cat-tag"],
@@ -2809,6 +2813,7 @@ function sigLine(r) {
   else bits.push(`<span class="faint" title="You haven't saved a moment in this scene">no saved moments</span>`);
   if (s.best != null) bits.push(`<span>best moment ${bestHTML(s)}</span>`);
   if (s.age_days != null) bits.push(ageHTML(s));
+  if (s.passed) bits.push(passedHTML(s));
   if (r.size && cat.view === "trim") bits.push(`<span class="faint">${fmtBytes(r.size)}</span>`);
   return `<div class="cat-sig">${bits.join(" · ")}</div>`;
 }
@@ -2819,6 +2824,10 @@ function bestHTML(s) {
   const hint = W.TASTE_HINT[s.band] ? ` — ${W.TASTE_HINT[s.band].replace(" of your library", "")} of your scenes` : "";
   return s.band_word ? `<b class="tw tw-${s.band}" title="The taste model's best moment here: ${W.pct(s.best)}${hint}">${s.band_word}</b>${fig(W.pct(s.best))}`
     : W.pct(s.best);
+}
+// shown a lot on the megaboard, never responded to
+function passedHTML(s) {
+  return `<span class="sg-passed" title="The megaboard keeps showing it and you never save, 👍, explore, pin or enlarge it">often passed over on the megaboard</span>${fig(`shown ${Math.round(s.showings)}× on ${s.shown_days} days`)}`;
 }
 function ageHTML(s) {
   const a = W.age(s.age_days); if (!a) return "";
@@ -2864,7 +2873,10 @@ function renderCatViewbar() {
   } else if (cat.view === "trim") {
     const g = cat.grace || {};
     bar.hidden = false;
-    bar.innerHTML = `<span>No saved moments, weakest best moment first. New scenes (under ${g.days ?? 30} days) are left out${g.new_excluded ? ` — ${g.new_excluded.toLocaleString()} right now` : ""}. Select the ones to let go and press 1 (Reject), then “Delete all rejected” when you're ready.</span>`;
+    bar.innerHTML = `<span>No saved moments — ones you keep passing over on the megaboard first, then weakest best moment. New scenes (under ${g.days ?? 30} days) are left out${g.new_excluded ? ` — ${g.new_excluded.toLocaleString()} right now` : ""}. Select the ones to let go and press 1 (Reject), then “Delete all rejected” when you're ready.</span>`;
+  } else if (cat.view === "passed") {
+    bar.hidden = false;
+    bar.innerHTML = `<span>The megaboard keeps showing you these and you never save, 👍, explore, pin or enlarge them — most-shown first. Grading a scene starts its record over. Select the ones to let go and press 1 (Reject).</span>`;
   } else { bar.hidden = true; bar.innerHTML = ""; }
 }
 async function gradeAllSaved() {
@@ -3653,7 +3665,9 @@ function renderReview() {
   const sg = r.signals;
   $("#rv-facts").innerHTML = (sg ? `<span>Saved</span><span>${sg.saves ? `★ ${sg.saves} moment${sg.saves === 1 ? "" : "s"}` : '<span class="faint">none yet</span>'}</span>
     ${sg.best != null ? `<span>Best moment</span><span>${bestHTML(sg)} <span class="faint">(taste model)</span></span>` : ""}
-    ${sg.age_days != null ? `<span>In library</span><span>${ageHTML(sg)}</span>` : ""}` : "")
+    ${sg.age_days != null ? `<span>In library</span><span>${ageHTML(sg)}</span>` : ""}
+    ${sg.showings ? `<span>Megaboard</span><span>${sg.passed ? `shown often — you never saved or explored it${fig(`${Math.round(sg.showings)}× on ${sg.shown_days} days`)}`
+      : `shown${fig(`${Math.round(sg.showings)}× on ${sg.shown_days} day${sg.shown_days === 1 ? "" : "s"}`)}`}</span>` : ""}` : "")
     + `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
     <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
     <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>

@@ -1962,6 +1962,24 @@ class Service(LibraryMixin):
         pos, neg = store.counts(profile)
         return {"profile": profile, "positive": pos, "negative": neg}
 
+    def exposure(self):
+        """The megaboard's showings / responses per scene (peaks.exposure)."""
+        from pathlib import Path
+
+        from ..exposure import ExposureStore
+
+        path = Path(self.cfg.modeling.dir) / "board_exposure.json"
+        st = self.__dict__.get("_exposure")
+        if st is None or st.path != path:
+            st = self._exposure = ExposureStore(path)
+        return st
+
+    def record_board_exposure(self, shows: dict | None = None, pos: dict | None = None,
+                              neg: dict | None = None) -> dict:
+        """A batch from the megaboard: weighted showings and responses per scene."""
+        n = self.exposure().record(shows=shows, pos=pos, neg=neg)
+        return {"scenes": n}
+
     ENGAGE_WEIGHT = 0.3
 
     def record_engagement(self, scene_id: str, t: float, kind: str = "dwell") -> dict:
@@ -4792,6 +4810,7 @@ class Service(LibraryMixin):
                      "unembedded": sum(1 for r in base if sig[r["scene_id"]]["best"] is None
                                        and not sig[r["scene_id"]]["new"])},
             "legendaire_candidates": len(self._triage("saved", rows, preds, floor, sig)),
+            "passed_over": len(self._triage("passed", rows, preds, floor, sig)),
             "weak_legendaire": sum(1 for r in leg if q25 is not None and sig[r["scene_id"]]["best"] is not None
                                    and sig[r["scene_id"]]["best"] <= q25),
             "grace_days": self.cfg.modeling.trim_grace_days,
@@ -4940,6 +4959,9 @@ class Service(LibraryMixin):
             self.client().update_scene(sid, rating100=rating, tag_ids=tag_ids, organized=True)
             self.invalidate_meta(sid)
             self.set_scene_hidden(sid, False)
+        # your verdict is newer than the megaboard's evidence: start its record over
+        # (kept for an undo)
+        self.__dict__.setdefault("_expo_undo", {})[sid] = self.exposure().reset(sid)
         row = self._cat_update_row(sid)
         self._log_scene("grade", row, grade=grade, source=source,
                         before={"rating100": prev["rating100"], "o_counter": prev["o_counter"],
@@ -4965,6 +4987,9 @@ class Service(LibraryMixin):
             tag_ids=tag_ids, organized=organized)
         self.invalidate_meta(sid)
         self.set_scene_hidden(sid, not unrated and int(rating100) <= 20)
+        old = self.__dict__.get("_expo_undo", {}).pop(sid, None)
+        if old is not None:                    # an undo puts the board's record back too
+            self.exposure().restore(sid, old)
         row = self._cat_update_row(sid)
         self._log_scene("restore", row, source=source,
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
@@ -5308,7 +5333,8 @@ class Service(LibraryMixin):
         return {"grade": g, "why": why,
                 "detail": f"{round(100 * share)}% {label}"}
 
-    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim")
+    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim",
+                    "passed")
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
     PROMOTABLE = ("unreviewed", "upscale", "merveilleuse", "exceptionnelle", "anomaly")
 
@@ -5344,6 +5370,10 @@ class Service(LibraryMixin):
                             best[str(sid)] = max(best.get(str(sid), -1.0), float(v))
         except Exception:  # noqa: BLE001 — no index/scores yet
             pass
+        try:
+            expo = self.exposure().all()
+        except Exception:  # noqa: BLE001 — unreadable record: no board evidence
+            expo = {}
         now = _dt.datetime.now(_dt.timezone.utc)
         out: dict[str, dict] = {}
         for r in rows:
@@ -5357,10 +5387,15 @@ class Service(LibraryMixin):
             except ValueError:
                 pass
             b = best.get(sid)
+            ex = expo.get(sid)
             out[sid] = {"saves": saves.get(sid, 0), "best": None if b is None else round(b, 4),
-                        "age_days": age, "new": age is not None and age < grace}
+                        "age_days": age, "new": age is not None and age < grace,
+                        # the megaboard: shown a lot, never responded to (and no saves)
+                        "passed": bool(ex and ex["passed"] and not saves.get(sid, 0)),
+                        "showings": ex["showings"] if ex else 0, "shown_days": ex["days"] if ex else 0}
         vals = [v["best"] for v in out.values() if v["best"] is not None]
         self._best_q25 = float(np.percentile(vals, 25)) if vals else None
+        self._best_q50 = float(np.percentile(vals, 50)) if vals else None
         # the best moment in plain words, against every scene's best (peaks.words)
         from ..words import taste_band
 
@@ -5390,9 +5425,24 @@ class Service(LibraryMixin):
             return self._suggest_for_anomaly(row, pred, names)
         q25, b = getattr(self, "_best_q25", None), sig.get("best")
         keeper = (pred or {}).get("keeper")
-        if (tier not in ("legendaire", "rejected") and not n and not sig.get("new")
-                and b is not None and q25 is not None and b <= q25
-                and (keeper is None or keeper < 0.5)):
+        eligible = tier not in ("legendaire", "rejected") and not n and not sig.get("new")
+        weak = (b is not None and q25 is not None and b <= q25 and (keeper is None or keeper < 0.5))
+        if eligible and sig.get("passed"):
+            # the megaboard keeps showing it and you never bite — with a so-so
+            # picture or an unconvinced tier model, that's worth a Reject suggestion
+            q50 = getattr(self, "_best_q50", None)
+            shown = f"shown {sig.get('showings', 0):g}× on {sig.get('shown_days', 0)} days"
+            if weak:
+                return {"grade": "reject",
+                        "why": "no saved moments, its best moment is among your library's weakest, "
+                               "and you keep passing it over on the megaboard",
+                        "detail": f"best moment {round(b * 100)}% · {shown}"}
+            if (b is not None and q50 is not None and b <= q50) or (keeper is not None and keeper < 0.5):
+                return {"grade": "reject",
+                        "why": "you keep passing it over on the megaboard — never saved or explored",
+                        "detail": shown}
+            # a strong picture the model rates a keeper: the card just notes it
+        if eligible and weak:
             return {"grade": "reject",
                     "why": "no saved moments, and even its best moment is among your library's weakest",
                     "detail": f"best moment {round(b * 100)}% · bottom quarter"}
@@ -5414,7 +5464,15 @@ class Service(LibraryMixin):
                 sg = signals.get(r["scene_id"]) or {}
                 return (r["tier"] not in ("legendaire", "rejected") and sg.get("saves", 0) == 0
                         and not sg.get("new") and sg.get("best") is not None)
-            return sorted([r for r in pool if ok(r)], key=lambda r: signals[r["scene_id"]]["best"])
+            # scenes the megaboard keeps showing you without a response come first
+            return sorted([r for r in pool if ok(r)],
+                          key=lambda r: (not signals[r["scene_id"]].get("passed"), signals[r["scene_id"]]["best"]))
+        if view == "passed":
+            # often passed over on the megaboard: same scope as the trim list, most-ignored first
+            out = [r for r in pool if r["tier"] not in ("legendaire", "rejected")
+                   and (signals.get(r["scene_id"]) or {}).get("passed")
+                   and not (signals.get(r["scene_id"]) or {}).get("new")]
+            return sorted(out, key=lambda r: -signals[r["scene_id"]].get("showings", 0))
 
         if view == "likely":
             # scenes under the learned quality floor sink to the bottom: they rarely

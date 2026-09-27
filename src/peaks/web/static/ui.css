@@ -512,3 +512,4 @@ html.hide-nums .num { display: none; }
 .rk-top { color: var(--leg); } .rk-strong { color: var(--ok); } .rk-mixed { color: var(--fg); } .rk-low { color: var(--dim); }
 .tq-v.tq-words .tq-d { display: block; font-size: 12px; margin-top: 3px; }
 .perf-tasteline { font-size: 12px; margin-top: 2px; }
+.sg-passed { color: var(--ano); font-weight: 600; }

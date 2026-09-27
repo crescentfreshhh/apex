@@ -126,6 +126,50 @@ async function api(path, opts) {
   return r.headers.get("content-type")?.includes("json") ? r.json() : r;
 }
 
+// --- exposure: what the board shows you, and whether you respond -------------
+// A showing = a clip that played ~5 s with the board running and the tab visible,
+// weighted by grid size (you can't answer 16 tiles at once; an enlarged tile
+// counts in full). A response = save, 👍, a "more…" pivot, pin, enlarge or a
+// keeper grade; 👎 / Reject are negative. Batched to the server every 30 s and
+// on leaving, so Peaks can tell "shown a lot, never wanted" (→ a trim hint).
+const Expo = { shows: {}, pos: {}, neg: {} };
+const EXPO_MIN_MS = 5000;
+function expoStart(tile) {
+  tile.expo = tile.apex ? { sid: String(tile.apex.scene_id), ms: 0 } : null;
+}
+function expoEnd(tile) {
+  const e = tile.expo; tile.expo = null;
+  if (!e || e.ms < EXPO_MIN_MS) return;
+  const w = State.big === tile ? 1 : Math.min(1, 4 / Math.max(1, State.tiles.length));
+  Expo.shows[e.sid] = +((Expo.shows[e.sid] || 0) + w).toFixed(3);
+}
+function expoRespond(sid, positive = true) {
+  if (sid == null) return;
+  const m = positive ? Expo.pos : Expo.neg;
+  m[String(sid)] = (m[String(sid)] || 0) + 1;
+}
+setInterval(() => {          // count play time only while it's really being shown
+  if (!State.playing || document.hidden) return;
+  for (const t of State.tiles) if (t.expo && t.video && !t.video.paused) t.expo.ms += 1000;
+}, 1000);
+function expoFlush(beacon = false) {
+  if (!Object.keys(Expo.shows).length && !Object.keys(Expo.pos).length && !Object.keys(Expo.neg).length) return;
+  const body = JSON.stringify(Expo);
+  Expo.shows = {}; Expo.pos = {}; Expo.neg = {};
+  if (beacon && navigator.sendBeacon) {
+    navigator.sendBeacon("/api/board/exposure", new Blob([body], { type: "application/json" }));
+    return;
+  }
+  fetch("/api/board/exposure", { method: "POST", headers: { "content-type": "application/json" }, body, keepalive: true })
+    .catch(() => {});
+}
+setInterval(() => expoFlush(false), 30000);
+function expoCloseAll() {                  // leaving / hiding: bank what's been shown so far
+  for (const t of State.tiles) { expoEnd(t); expoStart(t); }
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) { expoCloseAll(); expoFlush(true); } });
+window.addEventListener("pagehide", () => { expoCloseAll(); expoFlush(true); });
+
 // --- tiles ----------------------------------------------------------------
 
 function loadApex(tile) {
@@ -135,7 +179,9 @@ function loadApex(tile) {
   tile.extended = false;          // a fresh cycling clip is never pinned
   v.loop = false;
   tile.el.classList.remove("extended");
+  expoEnd(tile);                  // the clip it replaces was a showing (if it played)
   tile.apex = apex;
+  expoStart(tile);
   tile.mode = "offset"; // re-detected per stream on loadedmetadata
   tile.reqStart = apex.start;     // a transcoded clip's timeline begins AT the moment
   tile.label.innerHTML = esc(`#${apex.scene_id} · ${fmt(apex.start)} (${apex.duration.toFixed(0)}s)`)
@@ -160,6 +206,7 @@ function advance(tile) {
 // pin a good clip: stop cycling and let the scene play out (looping indefinitely)
 function extendTile(tile) {
   if (!tile.apex) return;
+  expoRespond(tile.apex.scene_id);
   const v = tile.video;
   tile.extended = true;
   tile.el.classList.add("extended");
@@ -276,6 +323,7 @@ function sceneStreamUrl(apexUrl) {
 }
 
 function expand(tile) {
+  if (tile.apex) expoRespond(tile.apex.scene_id);
   State.big = tile;
   document.body.classList.add("has-big");
   tile.el.classList.add("big");
@@ -452,6 +500,7 @@ const STAGGER_MS = 250;
 
 function buildBoard(n) {
   if (State.big) collapse(State.big);
+  for (const t of State.tiles) expoEnd(t);   // bank the old board's showings
   const board = document.getElementById("board");
   board.innerHTML = "";
   board.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
@@ -633,6 +682,7 @@ const MB_GRADES = ["reject", "upscale", "merveilleuse", "exceptionnelle", "legen
 function gradeLabel(g) { return g === "reject" ? "Reject" : (MB_TIER_NAMES[g] || g); }
 async function gradeScene(sid, grade) {
   sid = String(sid);
+  expoRespond(sid, grade !== "reject");
   try {
     const r = await api("/api/catalogue/grade", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -1144,6 +1194,7 @@ function pivotBoard(apexes, label, meta = {}, rerun = false, tok = null) {
   return true;
 }
 async function moreLikeThis(scene_id, t, rerun = false) {
+  if (!rerun) expoRespond(scene_id);
   // with a floor set, every match above it (the count follows the slider);
   // with it off, a generous default
   const tok = beginNav();
@@ -1162,6 +1213,7 @@ async function moreLikeThis(scene_id, t, rerun = false) {
   } catch (e) { if (!isStale(tok)) flashStatus(e.message); }
 }
 async function saveHerBest(scene_id) {
+  expoRespond(scene_id);
   flashStatus("finding her best…");
   let d;
   try { d = await api(`/api/performer/best?scene_id=${encodeURIComponent(scene_id)}&count=500`); }
@@ -1178,6 +1230,7 @@ async function saveHerBest(scene_id) {
 // Train from the board: shape your taste (👍/👎) or bank a moment (★ apex) right
 // where you're watching, using the same endpoints Explore/the viewer use.
 async function rateMoment(scene_id, t, label) {
+  expoRespond(scene_id, !!label);
   try {
     await api(`/api/label?scene_id=${encodeURIComponent(scene_id)}&t=${(+t || 0).toFixed(2)}&label=${label}` + profileParam(),
       { method: "POST" });
@@ -1185,6 +1238,7 @@ async function rateMoment(scene_id, t, label) {
   } catch (e) { flashStatus(e.message); }
 }
 async function saveApex(scene_id, t) {
+  expoRespond(scene_id);
   try {
     const r = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "POST" });
     if (r && r.promoted_from) setTier(scene_id, "legendaire");   // saving promotes the scene
@@ -1245,6 +1299,7 @@ async function saveLivePlaylist() {
 // pivoting shouldn't confine you to the curated taste feed. Moving the floor
 // re-runs it tightened (in place, via pivotApplyFloor).
 async function moreFromActress(scene_id, tighten = false) {
+  if (!tighten) expoRespond(scene_id);
   const tok = beginNav();
   flashStatus("finding her scenes…");
   try {
@@ -1264,6 +1319,7 @@ async function moreFromActress(scene_id, tighten = false) {
 }
 // similar moments to THIS one, but only across this scene's performer
 async function moreMomentSameActress(scene_id, t) {
+  expoRespond(scene_id);
   const tok = beginNav();
   flashStatus("finding her moments like this…");
   try {
@@ -1277,6 +1333,7 @@ async function moreMomentSameActress(scene_id, t) {
 }
 // stay in this scene: a diverse spread of its moments
 async function moreInThisScene(scene_id) {
+  expoRespond(scene_id);
   const tok = beginNav();
   flashStatus("gathering this scene…");
   try {

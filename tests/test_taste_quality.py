@@ -891,3 +891,69 @@ def test_taste_scale_and_best_moment_words(svc):
     assert top["band"] == "standout"
     health = svc.library_health()
     assert all("with_saves_words" in t for t in health["per_tier"].values())
+
+
+# --- megaboard: often passed over ---------------------------------------------------
+
+def _shown(svc, sids, days=3, per_day=3.0):
+    t0 = 1_760_000_000.0
+    for d in range(days):
+        svc.exposure().record({s: per_day for s in sids}, now=t0 + d * 86400)
+
+
+def test_passed_over_scenes_are_suggested_for_reject_with_reasons(svc):
+    _trained(svc)
+    _settle(svc)
+    rows = svc._catalogue_all()
+    sig = svc._scene_signals(rows)
+    unrev = sorted((s for s, v in sig.items() if v["best"] is not None
+                    and next(r for r in rows if r["scene_id"] == s)["tier"] == "unreviewed"),
+                   key=lambda s: sig[s]["best"])
+    low, mid, high = unrev[0], unrev[len(unrev) // 2 - 1], unrev[-1]
+    _shown(svc, [low, mid, high, "3"])                          # 3 is Légendaire
+    sig = svc._scene_signals(rows)
+    assert sig[low]["passed"] and sig[high]["passed"] and sig[low]["showings"] == 9
+    by = {r["scene_id"]: r for r in rows}
+    rec = lambda s: svc._recommend(by[s], None, sig[s])        # noqa: E731
+    assert rec(low)["grade"] == "reject" and "passing it over" in rec(low)["why"]
+    assert "weakest" in rec(low)["why"] and "9× on 3 days" in rec(low)["detail"]
+    assert rec(mid)["why"] == "you keep passing it over on the megaboard — never saved or explored"
+    assert rec(high) is None                                    # strong picture: just a note on the card
+    assert rec("3") is None                                     # Légendaire: never
+    passed = [r["scene_id"] for r in svc._triage("passed", rows, {}, {}, sig)]
+    assert set(passed) == {low, mid, high} and "3" not in passed
+    assert svc._triage("trim", rows, {}, {}, sig)[0]["scene_id"] in passed
+    assert svc.library_health()["passed_over"] == 3
+    svc.exposure().record(pos={mid: 1})                          # you saved / explored it
+    assert not svc._scene_signals(rows)[mid]["passed"]
+
+
+def test_new_scenes_and_grades_start_the_record_over(svc):
+    import datetime as dt
+
+    st = svc.client()
+    st.s["20"]["created_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)).isoformat()
+    svc.invalidate_meta()
+    svc._cat_cache = None
+    _shown(svc, ["20", "21"])
+    rows = svc._catalogue_all()
+    sig = svc._scene_signals(rows)
+    assert svc._recommend(next(r for r in rows if r["scene_id"] == "20"), None, sig["20"]) is None  # grace
+    r = svc.grade_scene("21", "merveilleuse")
+    assert svc.exposure().summary("21")["showings"] == 0         # your verdict is newer
+    p = r["previous"]
+    svc.restore_scene_grade("21", p["rating100"], p["o_counter"], tag_ids=p["tag_ids"], organized=p["organized"])
+    assert svc.exposure().summary("21")["passed"]                # undo puts it back
+
+
+def test_board_exposure_api(svc):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+    from peaks.exposure import ExposureStore
+
+    client = TestClient(app_mod.create_app(svc.cfg))
+    r = client.post("/api/board/exposure", json={"shows": {"5": 1.0}, "pos": {"6": 1}})
+    assert r.status_code == 200 and r.json()["scenes"] == 2
+    st = ExposureStore(svc.exposure().path)
+    assert st.summary("5")["showings"] == 1.0 and st.summary("6")["pos"] == 1
