@@ -1410,12 +1410,12 @@ class Service(LibraryMixin):
 
     def board_sources(self) -> dict:
         names = self.tier_display_names()
-        tiers = [   # always offered (no Stash call); the board loads the scenes on pick
-            {"key": "legendaire", "label": names["legendaire"]},
-            {"key": "exceptionnelle,legendaire", "label": f"{names['exceptionnelle']} +"},
-            {"key": "merveilleuse,exceptionnelle,legendaire", "label": f"{names['merveilleuse']} +"},
-            {"key": "unreviewed", "label": "Unreviewed — best moments"},
-        ]
+        # one channel per tier — each plays only that tier's scenes (always offered,
+        # no Stash call; the board loads the scenes on pick). A combined key
+        # ("exceptionnelle,legendaire") still works from a link.
+        tiers = [{"key": t, "label": names[t]}
+                 for t in ("legendaire", "exceptionnelle", "merveilleuse", "upscale")]
+        tiers.append({"key": "unreviewed", "label": "Unreviewed — best moments"})
         return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections(),
                 "tiers": tiers}
 

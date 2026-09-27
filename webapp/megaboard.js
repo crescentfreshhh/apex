@@ -663,6 +663,33 @@ function setTier(sid, tier) {
   State.tierOf[String(sid)] = tier;
   for (const t of State.tiles) if (t.apex && String(t.apex.scene_id) === String(sid)) paintBadge(t);
   if (State.big && String(State.big.apex?.scene_id) === String(sid)) renderGradeChips(State.big);
+  keepTierChannelPure(String(sid), tier);
+}
+// a tier channel plays only its own tier: grade a scene out of it and its moments
+// leave the rotation (the tile on screen stays until it rotates); grade it back
+// in — or undo — and they return. Pivots are "more like this" and aren't touched.
+const tierPruned = new Map();   // scene_id -> {apexes, base} taken out of the channel
+function keepTierChannelPure(sid, tier) {
+  if (!(State.source || "").startsWith("tier:") || State.pivot) return;
+  const keys = State.source.slice(5).split(",");
+  const inChannel = keys.includes(tier);
+  const mine = (a) => String(a.scene_id) === sid;
+  if (!inChannel) {
+    if (tierPruned.has(sid)) return;
+    const out = { apexes: State.apexes.filter(mine), base: (State.base || []).filter(mine) };
+    if (!out.apexes.length && !out.base.length) return;
+    if (out.apexes.length === State.apexes.length) return;   // never empty the board
+    tierPruned.set(sid, out);
+    State.apexes = State.apexes.filter((a) => !mine(a));
+    if (State.base) State.base = State.base.filter((a) => !mine(a));
+  } else {
+    const back = tierPruned.get(sid);
+    if (!back) return;
+    tierPruned.delete(sid);
+    State.apexes = State.apexes.concat(back.apexes);
+    if (State.base) State.base = State.base.concat(back.base);
+  }
+  pickApex = makeQueuePicker(State.apexes);
 }
 function renderGradeChips(tile) {
   const box = tile.ui?.meta.querySelector(".mb-grades");
@@ -1270,6 +1297,7 @@ async function loadSource(src, opts = {}) {
   }, 1000);
   State.loadingTok = tok;
   State.source = src;
+  tierPruned.clear();                      // a fresh load reads the tiers anew
   State.sourceSpec = specForSource(src);   // pivots override this below
   State.entryFloor = fyMinScore;   // remember the floor at entry; pivots never re-run this, so Refresh can restore it
   State.shuffle = false; State.searchMode = false; State.pool = null; State.apexes = [];

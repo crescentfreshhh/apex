@@ -396,6 +396,22 @@ def test_tier_board_is_ranked_by_the_trained_model(svc):
     assert max(got) <= float(scores.max()) + 1e-6
 
 
+def test_each_tier_channel_plays_only_its_own_tier(svc):
+    st = svc.client()
+    st.s["12"].update(rating100=100, o_counter=17)            # Exceptionnelle
+    st.s["15"].update(rating100=100, o_counter=16)            # Merveilleuse
+    svc.invalidate_meta()
+    svc._cat_cache = None
+    keys = [t["key"] for t in svc.board_sources()["tiers"]]
+    assert keys == ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "unreviewed"]
+    exc = svc.tier_board("exceptionnelle", per_scene=2)
+    assert exc["scenes"] == 1 and {h.scene_id for h in exc["hits"]} == {"12"}
+    mer = svc.tier_board("merveilleuse", per_scene=2)
+    assert mer["scenes"] == 1 and {h.scene_id for h in mer["hits"]} == {"15"}
+    both = svc.tier_board("exceptionnelle,legendaire", per_scene=2)   # an old combined link
+    assert {h.scene_id for h in both["hits"]} == {"3", "6", "9", "12"}
+
+
 def test_unreviewed_channel_only_holds_ungraded_scenes(svc):
     r = svc.tier_board("unreviewed", per_scene=2)
     sids = {h.scene_id for h in r["hits"]}
