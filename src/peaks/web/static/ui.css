@@ -577,3 +577,4 @@ html.hide-nums .num { display: none; }
 .pd-sim .pf-pic img { height: 100%; }
 .pd-sim .pf-initials { font-size: 26px; }
 .pf-favtxt { color: #ff5c8a; font-size: .8em; }
+.mv-n { font-weight: 600; color: var(--fg); }

@@ -1506,8 +1506,13 @@ def create_app(cfg=None):
         return service.curation_settings()
 
     @app.post("/api/library/curation")
-    def save_curation_settings(auto_legendaire_on_save: bool):
-        return service.save_curation_settings(auto_legendaire_on_save)
+    def save_curation_settings(auto_legendaire_on_save: bool | None = None, follow_renamer: bool | None = None):
+        return service.save_curation_settings(auto_legendaire_on_save, follow_renamer)
+
+    @app.get("/api/library/moves")
+    def renamer_moves():
+        """Files your renamer moved after a tier change, followed automatically."""
+        return service.renamer_follow_status()
 
     @app.get("/api/scene/{scene_id}/apex")
     def check_apex(scene_id: str, t: float, tag: str | None = None,

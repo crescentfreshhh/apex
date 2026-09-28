@@ -64,7 +64,7 @@ function showView(name) {
 // open a page and load what it shows
 function go(name) {
   showView(name);
-  if (name === "activity") refreshDashboard();
+  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); }
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
   if (name === "catalogue" && !cat.loaded) openCatalogue();
@@ -330,7 +330,29 @@ const TIER_NAME_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["mervei
   ["upscale", "0"], ["anomaly", "other O"], ["unreviewed", "unrated"], ["rejected", "1★"]];
 async function loadCuration() {
   const cb = $("#cur-auto-leg"); if (!cb) return;
-  try { cb.checked = !!(await api("/api/library/curation")).auto_legendaire_on_save; } catch {}
+  try {
+    const c = await api("/api/library/curation");
+    cb.checked = !!c.auto_legendaire_on_save;
+    if ($("#cur-follow")) $("#cur-follow").checked = c.follow_renamer !== false;
+  } catch {}
+}
+$("#cur-follow")?.addEventListener("change", async (e) => {
+  try { await api("/api/library/curation?follow_renamer=" + e.target.checked, { method: "POST" }); toast(e.target.checked ? "Following renamer moves" : "Renamer moves: Sync by hand"); }
+  catch (err) { toast(err.message, true); }
+});
+// Activity → Maintenance: files your renamer moved after a grade, followed automatically
+async function loadRenamerMoves() {
+  const el = $("#moves-status"); if (!el) return;
+  let m; try { m = await api("/api/library/moves"); } catch { return; }
+  if (!m.on) { el.innerHTML = 'Off — turn it on in Settings → Tiers &amp; renamer, or Sync by hand.'; return; }
+  const bits = [`<span class="mv-n">${m.today ? m.today.toLocaleString() : "No"}</span> move${m.today === 1 ? "" : "s"} followed today`];
+  if (m.watching) bits.push(`watching ${m.watching} just-graded scene${m.watching === 1 ? "" : "s"}`);
+  const last = (m.recent || [])[0];
+  let html = bits.join(" · ") + (last ? `<br><span class="faint">latest: ${esc(last.title || "scene " + last.scene_id)} → ${esc(last.path)}</span>` : "");
+  if ((m.unresolved || []).length)
+    html += `<br><span class="warn">⚠ ${m.unresolved.length} file${m.unresolved.length === 1 ? "" : "s"} moved where Stash can't see ${m.unresolved.length === 1 ? "it" : "them"} yet</span> — scan in Stash, then <button class="btn sm" id="moves-sync">↻ Sync</button>`;
+  el.innerHTML = html;
+  $("#moves-sync")?.addEventListener("click", () => $("#btn-sync").click());
 }
 // Settings → Display: exact numbers beside the words (this browser; megaboard too)
 if ($("#set-show-nums")) {

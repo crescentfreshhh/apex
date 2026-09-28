@@ -4820,13 +4820,18 @@ class Service(LibraryMixin, PerformersMixin):
         }
 
     def curation_settings(self) -> dict:
-        return {"auto_legendaire_on_save": bool(self._settings().get("auto_legendaire_on_save", True))}
+        return {"auto_legendaire_on_save": bool(self._settings().get("auto_legendaire_on_save", True)),
+                "follow_renamer": self.follow_renamer_on()}
 
-    def save_curation_settings(self, auto_legendaire_on_save: bool) -> dict:
+    def save_curation_settings(self, auto_legendaire_on_save: bool | None = None,
+                               follow_renamer: bool | None = None) -> dict:
         import json
 
         s = dict(self._settings())
-        s["auto_legendaire_on_save"] = bool(auto_legendaire_on_save)
+        if auto_legendaire_on_save is not None:
+            s["auto_legendaire_on_save"] = bool(auto_legendaire_on_save)
+        if follow_renamer is not None:
+            s["follow_renamer"] = bool(follow_renamer)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(s, indent=2) + "\n")
@@ -4970,6 +4975,7 @@ class Service(LibraryMixin, PerformersMixin):
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
         self._note_grade()
+        self._watch_path(sid, cur.get("path") or row.get("path"))   # follow the renamer's move
         return {"scene": row, "previous": prev}
 
     def restore_scene_grade(self, scene_id: str, rating100: int | None, o_counter: int,
@@ -4992,6 +4998,7 @@ class Service(LibraryMixin, PerformersMixin):
         if old is not None:                    # an undo puts the board's record back too
             self.exposure().restore(sid, old)
         row = self._cat_update_row(sid)
+        self._watch_path(sid, row.get("path"))           # an undo moves it back
         self._log_scene("restore", row, source=source,
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
@@ -5552,23 +5559,29 @@ class Service(LibraryMixin, PerformersMixin):
             misses[key] = _t.monotonic()
             return None
         if new != meta.get("path"):
-            cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-            for model in cache.models():
-                if not model or not cache.has(key, model):
-                    continue
-                try:
-                    times, vecs, m = cache.load(key, model)
-                    m["path"] = new
-                    cache.save(key, model, times, vecs, meta=m)
-                except Exception:  # noqa: BLE001 — leave that entry for a Sync
-                    continue
-            with self._index_lock:
-                for idx in self._index.values():
-                    km = idx.key_meta.get(key)
-                    if km is not None:
-                        km["path"] = new
+            self._apply_moved_path(key, new)
         misses.pop(key, None)
         return new
+
+    def _apply_moved_path(self, key: str, new: str) -> None:
+        """A scene's file moved (same fingerprint key): store the new path in
+        every model's cache entry and any loaded index — what a Sync does, for
+        one scene. Nothing is re-embedded."""
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        for model in cache.models():
+            if not model or not cache.has(key, model):
+                continue
+            try:
+                times, vecs, m = cache.load(key, model)
+                m["path"] = new
+                cache.save(key, model, times, vecs, meta=m)
+            except Exception:  # noqa: BLE001 — leave that entry for a Sync
+                continue
+        with self._index_lock:
+            for idx in self._index.values():
+                km = idx.key_meta.get(key)
+                if km is not None:
+                    km["path"] = new
 
     def stream_url(self, scene_id: str, start: float | None = None) -> str:
         # pure URL building — reuse one client rather than a new HTTP session per

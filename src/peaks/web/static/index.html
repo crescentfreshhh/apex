@@ -467,6 +467,8 @@
             <div class="mrow"><div><b>Sync with Stash</b><span>refresh moved scenes, drop deleted ones</span></div>
               <div class="row"><label class="check"><input type="checkbox" id="sync-prune" checked /> prune</label>
                 <button id="btn-sync" class="btn sm">↻ Sync</button><span id="sync-status" class="dim"></span></div></div>
+            <div class="mrow"><div><b>Renamer moves</b><span>after a tier change, Peaks follows the file your renamer moves — no Sync needed</span></div>
+              <div id="moves-status" class="dim small"></div></div>
             <div class="mrow"><div><b>Write peak markers</b><span>score scenes and add markers in Stash — dry-run first</span></div>
               <div class="row"><input id="score-tag" placeholder="tag (apex)" class="num-md" />
                 <label class="check"><input type="checkbox" id="score-write" /> write</label>
@@ -544,6 +546,9 @@
             <div><label class="check"><input type="checkbox" id="cur-auto-leg" /> Saving a moment makes its scene Légendaire</label>
               <div class="muted small">Applies to Unreviewed, Upscale, Merveilleuse, Exceptionnelle and anomaly scenes (never a 1★). Logged in Activity, undoable there. Scenes you saved from before this was on: Catalogue → “Saved → Légendaire”.</div>
               <span id="cur-status" class="dim"></span></div></div>
+          <div class="field"><div class="l"><b>Renamer moves</b><span>after every grade</span></div>
+            <div><label class="check"><input type="checkbox" id="cur-follow" checked /> Follow the file when your renamer moves it</label>
+              <div class="muted small">After a tier change Peaks watches the scene for a few minutes and updates its stored path the moment Stash reports the move — thumbnails and clips keep working, no Sync needed.</div></div></div>
           <div class="field"><div class="l"><b>Out-of-sync scenes</b><span>graded in Stash directly</span></div>
             <div><button id="btn-tag-sync" class="btn sm">Check &amp; sync…</button><div id="tag-sync-box" hidden></div></div></div>
         </div>

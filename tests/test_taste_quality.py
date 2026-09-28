@@ -957,3 +957,78 @@ def test_board_exposure_api(svc):
     assert r.status_code == 200 and r.json()["scenes"] == 2
     st = ExposureStore(svc.exposure().path)
     assert st.summary("5")["showings"] == 1.0 and st.summary("6")["pos"] == 1
+
+
+# --- following the renamer after a tier change ------------------------------------
+
+def _no_worker(svc, monkeypatch):
+    monkeypatch.setattr(svc, "_path_worker", lambda: None)     # tests drive the ticks
+    return svc
+
+
+def test_a_grade_follows_the_renamers_move_without_a_sync(svc, monkeypatch):
+    from peaks.cache import EmbeddingCache
+
+    _no_worker(svc, monkeypatch)
+    st = svc.client()
+    model = svc._model_name()
+    idx = svc.index(model)
+    key = next(k for k, m in idx.key_meta.items() if str(m.get("scene_id")) == "20")
+    rows = svc._catalogue_all()
+    svc.grade_scene("20", "exceptionnelle")
+    assert "20" in svc._path_watch
+    far = __import__("time").monotonic() + 1000
+    assert svc._path_watch_tick(now=far) == 0                  # the renamer hasn't run yet
+    assert svc._path_watch["20"]["step"] == 1
+    st.s["20"]["path"] = "/data/Exceptionnelle/Scene 20.mp4"   # …now it has
+    assert svc._path_watch_tick(now=far) == 1
+    assert "20" not in svc._path_watch
+    assert svc.index(model).key_meta[key]["path"] == "/data/Exceptionnelle/Scene 20.mp4"
+    _, _, meta = EmbeddingCache(svc.cfg.embedding.cache_dir).load(key, model)
+    assert meta["path"] == "/data/Exceptionnelle/Scene 20.mp4"
+    assert next(r for r in rows if r["scene_id"] == "20")["path"] == "/data/Exceptionnelle/Scene 20.mp4"
+    assert any(a.get("action") == "moved" and str(a.get("scene_id")) == "20" for a in svc.history(20))
+    status = svc.renamer_follow_status()
+    assert status["today"] == 1 and status["recent"][0]["scene_id"] == "20" and status["watching"] == 0
+
+
+def test_bulk_grades_are_followed_in_batched_reads(svc, monkeypatch):
+    _no_worker(svc, monkeypatch)
+    st = svc.client()
+    calls = []
+    real = st.scene_details
+    monkeypatch.setattr(st, "scene_details", lambda ids: (calls.append(len(ids)), real(ids))[1])
+    svc.grade_bulk(None, [str(i) for i in range(30, 50)], "merveilleuse")
+    for i in range(30, 50):
+        st.s[str(i)]["path"] = f"/data/Merveilleuse/{i}.mp4"
+    calls.clear()
+    assert svc._path_watch_tick(now=__import__("time").monotonic() + 1000) == 20
+    assert calls == [20]                                        # one read for all twenty
+
+
+def test_unmoved_scenes_stop_being_watched_and_hidden_moves_are_listed(svc, monkeypatch, tmp_path):
+    _no_worker(svc, monkeypatch)
+    st = svc.client()
+    st.s["22"]["path"] = str(tmp_path / "moved-behind-stash.mp4")   # folder visible, file gone
+    svc.grade_scene("21", "upscale")                               # a renamer that leaves it put
+    svc.grade_scene("22", "upscale")
+    far = __import__("time").monotonic() + 1000
+    for _ in range(len(svc._WATCH_STEPS)):
+        svc._path_watch_tick(now=far)
+    assert svc._path_watch == {}
+    un = svc.renamer_follow_status()["unresolved"]
+    assert [u["scene_id"] for u in un] == ["22"]                # /data/21.mp4's folder isn't here: no alarm
+
+
+def test_undo_is_followed_and_the_setting_turns_it_off(svc, monkeypatch):
+    _no_worker(svc, monkeypatch)
+    r = svc.grade_scene("23", "legendaire")
+    svc._path_watch.clear()
+    p = r["previous"]
+    svc.restore_scene_grade("23", p["rating100"], p["o_counter"], tag_ids=p["tag_ids"], organized=p["organized"])
+    assert "23" in svc._path_watch
+    svc._path_watch.clear()
+    svc.save_curation_settings(follow_renamer=False)
+    assert svc.curation_settings() == {"auto_legendaire_on_save": True, "follow_renamer": False}
+    svc.grade_scene("24", "legendaire")
+    assert "24" not in svc._path_watch

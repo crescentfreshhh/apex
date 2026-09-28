@@ -4,6 +4,7 @@ embedding/search code so the management surface stays readable."""
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -219,6 +220,7 @@ class LibraryMixin:
                 self.client().update_scene(sid, tag_ids=tags, organized=True)
                 self.invalidate_meta(sid)
                 row = self._cat_update_row(sid)
+                self._watch_path(sid, row.get("path"))      # the renamer will move it
                 self._log_scene("tag-sync", row, after={"tier": row["tier"]},
                                 detail=f"tag '{self.tier_tag_names()[row['tier']]}' + organized")
                 done += 1
@@ -229,6 +231,120 @@ class LibraryMixin:
             if job is not None:
                 job.progress = {"done": done + len(failed), "total": len(todo)}
         return {"synced": done, "failed": failed}
+
+    # --- following your renamer: a tier change moves the file; follow it -----------
+    # After a grade your renamer (a Stash plugin) renames/moves the file and Stash
+    # records the new path. Peaks' cache still has the old one until a Sync — so
+    # each changed scene is watched for a few minutes and fixed the moment Stash
+    # reports the move: every model's cache entry, any loaded index, the
+    # catalogue row. Nothing is re-embedded.
+    _WATCH_STEPS = (3.0, 10.0, 30.0, 90.0, 180.0)   # seconds after the change
+    _WATCH_TICK = 2.0
+
+    def follow_renamer_on(self) -> bool:
+        return bool(self._settings().get("follow_renamer", True))
+
+    def _watch_path(self, sid: str, old_path: str | None) -> None:
+        """Start following one scene after a tier change (`old_path`: where the
+        file was when the change was made)."""
+        if not self.follow_renamer_on():
+            return
+        now = time.monotonic()
+        with self.__dict__.setdefault("_watch_lock", threading.Lock()):
+            self.__dict__.setdefault("_path_watch", {})[str(sid)] = {
+                "t0": now, "step": 0, "due": now + self._WATCH_STEPS[0], "old": old_path}
+            if self.__dict__.get("_watch_running"):
+                return
+            self._watch_running = True
+        threading.Thread(target=self._path_worker, daemon=True, name="peaks-follow-renamer").start()
+
+    def _path_worker(self) -> None:
+        while True:
+            time.sleep(self._WATCH_TICK)
+            try:
+                self._path_watch_tick()
+            except Exception:  # noqa: BLE001 — never let the follower die on a blip
+                pass
+            with self._watch_lock:
+                if not self._path_watch:
+                    self._watch_running = False
+                    return
+
+    def _path_watch_tick(self, now: float | None = None) -> int:
+        """Check the scenes that are due: one batched Stash read per 400. Returns
+        how many moves were picked up."""
+        import os
+
+        now = time.monotonic() if now is None else now
+        with self._watch_lock:
+            due = [sid for sid, e in self._path_watch.items() if e["due"] <= now]
+        if not due:
+            return 0
+        model = self._model_name()
+        try:
+            idx = self.index(model)
+            sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        except Exception:  # noqa: BLE001 — no index: only the catalogue rows follow
+            idx, sid_key = None, {}
+        fixed = 0
+        for i in range(0, len(due), 400):
+            batch = due[i: i + 400]
+            try:
+                details = self._meta_client().scene_details(batch)
+            except Exception:  # noqa: BLE001 — Stash down: try again at the next step
+                details = None
+            for sid in batch:
+                with self._watch_lock:
+                    e = self._path_watch.get(sid)
+                if e is None:
+                    continue
+                cur = (details or {}).get(sid) or {}
+                new = cur.get("path")
+                key = sid_key.get(sid)
+                cached = ((idx.key_meta.get(key) or {}).get("path") if idx is not None and key else None)
+                if details is not None and new and (new != e["old"] or (cached and new != cached)):
+                    if key and cached != new:
+                        self._apply_moved_path(key, new)
+                    row = self._cat_put_row(sid, cur)
+                    self._log_scene("moved", row, before={"path": e["old"]}, after={"path": new},
+                                    detail="followed your renamer — path updated, nothing re-embedded")
+                    self.__dict__.setdefault("_moves", []).append(
+                        {"at": time.time(), "scene_id": sid, "title": row.get("title"), "path": new})
+                    del self._moves[:-200]
+                    self._unresolved_moves().pop(sid, None)
+                    with self._watch_lock:
+                        self._path_watch.pop(sid, None)
+                    fixed += 1
+                    continue
+                step = e["step"] + 1
+                if step >= len(self._WATCH_STEPS):
+                    with self._watch_lock:
+                        self._path_watch.pop(sid, None)
+                    # Stash still has the old path but the file isn't there: moved
+                    # behind Stash's back — a Stash scan (then Sync) is needed
+                    gone = new or e["old"]
+                    # (only when Peaks can see that folder at all — no false alarms
+                    # on a setup where the library isn't mounted here)
+                    if gone and os.path.isdir(os.path.dirname(gone)) and not os.path.exists(gone):
+                        self._unresolved_moves()[sid] = {"at": time.time(), "scene_id": sid,
+                                                         "title": cur.get("title") or "", "path": gone}
+                    continue
+                e["step"], e["due"] = step, e["t0"] + self._WATCH_STEPS[step]
+        return fixed
+
+    def _unresolved_moves(self) -> dict:
+        return self.__dict__.setdefault("_moves_unresolved", {})
+
+    def renamer_follow_status(self) -> dict:
+        """For the Maintenance card: moves picked up automatically today, the
+        most recent ones, scenes still being watched, and any the renamer moved
+        where Stash can't see them yet."""
+        day = time.strftime("%Y-%m-%d")
+        moves = self.__dict__.get("_moves", [])
+        today = [m for m in moves if time.strftime("%Y-%m-%d", time.localtime(m["at"])) == day]
+        return {"on": self.follow_renamer_on(), "today": len(today), "recent": moves[-5:][::-1],
+                "watching": len(self.__dict__.get("_path_watch", {})),
+                "unresolved": list(self._unresolved_moves().values())[-20:]}
 
     # --- bulk grading ------------------------------------------------------------
 
@@ -668,6 +784,7 @@ class LibraryMixin:
                 self.client().update_scene(sid, tag_ids=tags, organized=True)
                 self.invalidate_meta(sid)
                 row = self._cat_update_row(sid)
+                self._watch_path(sid, row.get("path"))      # the renamer will move it
                 self._log_scene("tag-sync", row, source="ingest", after={"tier": row["tier"]},
                                 detail=f"re-tagged '{self.tier_tag_names()[row['tier']]}' after a Stash stage")
                 fixed += 1
