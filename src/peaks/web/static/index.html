@@ -185,27 +185,38 @@
 
   <!-- PERFORMERS -->
   <section id="performers" class="view">
-    <div class="head"><h1>Performers</h1><span class="sub2">ranked by the moments they give you</span><span class="grow"></span>
+    <div class="head"><h1>Performers</h1><span class="sub2" id="perf-sub">everyone in your Stash</span><span class="grow"></span>
       <button id="btn-perf-roulette" class="btn" title="Surprise me — a random on-taste performer, endless on the board">🎲 Roulette</button>
       <button id="btn-perf-hof" class="btn" title="Auto-build best-of playlists for your top performers">🏆 Hall of Fame</button>
-      <button id="btn-perf-refresh" class="btn ghost" title="Re-scan the library from Stash">↻</button></div>
-    <div class="toolbar">
-      <input id="perf-search" class="search" placeholder="Find a performer…" />
-      <input id="perf-query" class="search" placeholder="focus (optional, e.g. lingerie)" title="Rank her best moments by this instead of your taste" />
-      <button id="btn-perf-search" class="btn pri">Best of →</button>
-      <span class="grow"></span>
-      <label class="muted">Sort <select id="perf-sort">
-          <option value="moments">Moments</option>
+      <button id="btn-perf-refresh" class="btn ghost" title="Re-read performers from Stash">↻</button></div>
+    <div class="pf-bar">
+      <input id="perf-search" class="search pf-search" type="search" placeholder="Search performers — names and aliases" autocomplete="off" spellcheck="false" />
+      <div class="pf-filters">
+        <button class="cat-chip pf-f" data-f="fav" title="Your Stash favourites">♥ Favourites</button>
+        <button class="cat-chip pf-f" data-f="graded" title="Performers with scenes you've graded">Graded</button>
+        <button class="cat-chip pf-f" data-f="lib" title="Performers with scenes in Peaks">In Peaks</button>
+        <select id="perf-min" title="Scenes in Stash">
+          <option value="0">Any number of scenes</option><option value="1">1+ scenes</option>
+          <option value="5">5+ scenes</option><option value="20">20+ scenes</option></select>
+        <label class="muted">Sort <select id="perf-sort">
+          <option value="taste">Your taste</option>
+          <option value="record">Track record</option>
           <option value="scenes">Scenes</option>
-          <option value="taste">Taste (best)</option>
-          <option value="affinity">You'd love ★</option>
-          <option value="engagement">Tiers 🏆</option>
+          <option value="added">Recently added</option>
+          <option value="az">A–Z</option>
         </select></label>
+      </div>
       <span id="perf-status" class="dim"></span>
     </div>
     <div id="compare-tray" class="dim" hidden></div>
-    <div id="perf-grid" class="perf-grid"></div>
+    <div id="perf-home">
+      <div id="perf-sections"></div>
+      <div class="pf-gridhead"><h3 id="perf-gridtitle">Everyone</h3><span id="perf-count" class="dim"></span></div>
+      <div id="perf-grid" class="pf-grid"></div>
+      <div id="perf-more" class="pf-more"></div>
+    </div>
     <div id="perf-detail" hidden></div>
+    <div id="perf-picker" class="pf-picker" hidden></div>
   </section>
 
   <!-- CATALOGUE -->

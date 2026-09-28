@@ -38,6 +38,7 @@ dev = [
     "scikit-learn",   # classifier tests exercise the real sklearn estimators
     "av>=12",         # sparse-sampler tests run against real generated video
     "fastapi>=0.110", # web API tests
+    "pillow",         # performer-picture cache tests
     "httpx",          # FastAPI TestClient transport
 ]
 

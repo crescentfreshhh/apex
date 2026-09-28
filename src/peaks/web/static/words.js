@@ -68,7 +68,7 @@
     return `added ${(days / 365).toFixed(1)} years ago`;
   }
   function rank(pct) {
-    if (pct < 0.1) return ["top", "a favourite"];
+    if (pct < 0.1) return ["top", "top pick"];
     if (pct < 0.3) return ["strong", "strong"];
     if (pct < 0.6) return ["mixed", "mixed"];
     return ["low", "rarely your taste"];

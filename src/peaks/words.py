@@ -207,7 +207,7 @@ def age(days: int | None) -> str | None:
 def rank(pct: float) -> tuple[str, str]:
     """(key, words) for a rank among your performers — `pct` 0 = best."""
     if pct < 0.1:
-        return "top", "a favourite"
+        return "top", "top pick"
     if pct < 0.3:
         return "strong", "strong"
     if pct < 0.6:

@@ -176,6 +176,25 @@ query FindPerformers($filter: FindFilterType, $performer_filter: PerformerFilter
 }
 """
 
+# every performer, for the Performers directory — richer fields first, and a
+# fallback for older Stash versions that lack some of them
+_ALL_PERFORMERS_QUERY = """
+query AllPerformers($filter: FindFilterType) {
+  findPerformers(filter: $filter) {
+    count
+    performers { id name alias_list image_path scene_count favorite rating100 created_at }
+  }
+}
+"""
+_ALL_PERFORMERS_QUERY_OLD = """
+query AllPerformers($filter: FindFilterType) {
+  findPerformers(filter: $filter) {
+    count
+    performers { id name image_path scene_count }
+  }
+}
+"""
+
 _FIND_TAGS_QUERY = """
 query FindTags($filter: FindFilterType, $tag_filter: TagFilterType) {
   findTags(filter: $filter, tag_filter: $tag_filter) {
@@ -583,6 +602,37 @@ class StashClient:
                 "image": p.get("image_path"), "scene_count": p.get("scene_count", 0),
             })
         return out
+
+    def iter_performers(self, page_size: int = 500) -> Iterator[dict]:
+        """Every performer in Stash as {id, name, aliases, image, has_image,
+        scene_count, favorite, rating100, created_at}, paged. Older Stash
+        versions without aliases/favourites/ratings still work (those come back
+        empty). `has_image` is False when Stash would serve its default silhouette."""
+        query = _ALL_PERFORMERS_QUERY
+        page = 1
+        while True:
+            variables = {"filter": {"per_page": page_size, "page": page, "sort": "name", "direction": "ASC"}}
+            try:
+                data = self.execute(query, variables)
+            except StashError as exc:
+                if query is _ALL_PERFORMERS_QUERY and "Cannot query field" in str(exc):
+                    query = _ALL_PERFORMERS_QUERY_OLD
+                    continue
+                raise
+            batch = data["findPerformers"]["performers"]
+            for p in batch:
+                img = p.get("image_path") or ""
+                yield {
+                    "id": str(p["id"]), "name": p.get("name") or "",
+                    "aliases": [a for a in (p.get("alias_list") or []) if a],
+                    "image": img or None, "has_image": bool(img) and "default=true" not in img,
+                    "scene_count": int(p.get("scene_count") or 0),
+                    "favorite": bool(p.get("favorite")), "rating100": p.get("rating100"),
+                    "created_at": p.get("created_at") or "",
+                }
+            if len(batch) < page_size:
+                return
+            page += 1
 
     def performer_image(self, performer_id: str) -> tuple[bytes, str] | None:
         """Fetch a performer's Stash image bytes (+content-type) through the authed

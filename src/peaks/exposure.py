@@ -101,6 +101,10 @@ class ExposureStore:
         return {"showings": showings, "days": days, "pos": pos, "neg": int(r.get("neg", 0)),
                 "passed": showings >= PASSED_SHOWINGS and days >= PASSED_DAYS and pos == 0}
 
+    def last_seen(self) -> dict[str, float]:
+        """{scene_id: when the board last showed it (unix time)}."""
+        return {sid: r["last_seen"] for sid, r in self._load().items() if r.get("last_seen")}
+
     def all(self) -> dict[str, dict]:
         return {sid: self.summary(sid) for sid in list(self._load())}
 

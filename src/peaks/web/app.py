@@ -274,7 +274,7 @@ def create_app(cfg=None):
     import secrets
     import time as _time
 
-    from fastapi import Cookie, FastAPI, HTTPException, Query, Request
+    from fastapi import Cookie, FastAPI, Header, HTTPException, Query, Request
     from fastapi.responses import (
         FileResponse,
         HTMLResponse,
@@ -978,6 +978,64 @@ def create_app(cfg=None):
     @app.post("/api/performers/hall-of-fame")
     def hall_of_fame(top_n: int = 10):
         return service.hall_of_fame(top_n=top_n)
+
+    @app.get("/api/performers/directory")
+    def performers_directory(refresh: bool = False, if_none_match: str | None = Header(None)):
+        """Every Stash performer + Peaks' figures, for the Performers page (served
+        from cache; refreshed in the background). Starts caching pictures in the
+        background when many are missing."""
+        import hashlib
+        import json as _json
+
+        if refresh:                     # ↻: re-read Stash now, rebuild the leaderboard behind
+            try:
+                service._fetch_stash_performers()
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(503, f"Couldn't read performers from Stash: {exc}")
+            threading.Thread(target=lambda: service.performer_stats(rebuild=True),
+                             daemon=True, name="peaks-perf-stats").start()
+        try:
+            d = service.performer_directory()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable and nothing cached
+            raise HTTPException(503, f"Couldn't read performers from Stash: {exc}")
+        in_lib = sum(1 for p in d["performers"] if p["lib"])
+        if d["photos_missing"] and d["photos_missing"] > 0.2 * max(1, in_lib) and not jobs.running("perf-photos"):
+            try:
+                jobs.start("perf-photos", service.warm_performer_photos)
+            except RuntimeError:
+                pass
+        body = _json.dumps(d, separators=(",", ":"))
+        etag = '"' + hashlib.md5(body.encode()).hexdigest() + '"'
+        if if_none_match == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(content=body, media_type="application/json", headers={"ETag": etag})
+
+    @app.get("/api/performer/{pid}/photo")
+    def performer_photo(pid: str, v: int = 0):
+        """Her picture, cached on disk (built once on a miss). The URL's `v`
+        changes with the picture, so the browser may keep it for a week."""
+        data = service.performer_photo(pid)
+        if not data:
+            raise HTTPException(404, "no picture")
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=604800"})
+
+    @app.get("/api/performer/{pid}/photo/options")
+    def performer_photo_options(pid: str):
+        return service.performer_photo_options(pid)
+
+    @app.post("/api/performer/{pid}/photo")
+    def performer_photo_choose(pid: str, body: dict | None = None):
+        """Use a picture ({kind: stash|cover|frame, scene_id|key,t}); an empty
+        body goes back to automatic."""
+        try:
+            return service.choose_performer_photo(pid, body or None)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/performer/{pid}/profile")
+    def performer_profile(pid: str):
+        return service.performer_profile(pid)
 
     @app.get("/api/performer/{pid}/image")
     def performer_image(pid: str):

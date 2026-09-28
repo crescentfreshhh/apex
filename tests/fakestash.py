@@ -45,6 +45,23 @@ class FakeStash:
     def capabilities(self):
         return dict(self.caps)
 
+    # performers: set `self.performers` to [{id, name, aliases, has_image, …}]
+    performers: list = []
+
+    def iter_performers(self, page_size=500):
+        for p in self.performers:
+            yield {"aliases": [], "image": None, "has_image": False, "scene_count": 0,
+                   "favorite": False, "rating100": None, "created_at": "", **p}
+
+    def performer_image(self, pid):
+        p = next((x for x in self.performers if x["id"] == str(pid)), None)
+        if not p or not p.get("has_image"):
+            return None
+        return _png(200, 300, (200, 60, 90)), "image/png"
+
+    def scene_screenshot(self, sid):
+        return (_png(320, 180, (40, 90, 160)), "image/png") if str(sid) in self.s else None
+
     def find_tag_by_name(self, name):
         for tid, n in self.tags.items():
             if n.lower() == name.lower():
@@ -152,3 +169,13 @@ class FakeStash:
 
     def stop_job(self, jid):
         self.calls.append(("stop", jid))
+
+
+def _png(w, h, rgb):
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (w, h), rgb).save(buf, format="PNG")
+    return buf.getvalue()

@@ -1180,28 +1180,30 @@ async function refreshCollections() {
 }
 // --- Performers tab: leaderboard + best-of collections ----------------------
 let perfLoaded = false;
+// --- Performers: every performer in Stash, searchable, with cached pictures ----
+// The directory (/api/performers/directory) is small enough to hold in the
+// browser, so search, filters and sorting are instant; the grid is built 60
+// cards at a time as you scroll.
+let perfDir = [], perfList = [], perfShown = 0, perfDirTries = 0;
+const perfFilters = new Set();
+const pfold = (t) => String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 async function openPerformers(refresh) {
   const grid = $("#perf-grid"); if (!grid) return;
-  showPerfDetail(false);   // always land on the grid
-  if (perfLoaded && !refresh) return;   // cached; use ↻ Rebuild to re-scan
-  grid.innerHTML = '<p class="dim">Reading performers…</p>';
-  $("#perf-status").textContent = "";
+  showPerfDetail(false);   // always land on the directory
+  if (perfLoaded && !refresh) { renderPerformers(); return; }
+  if (!perfDir.length) grid.innerHTML = '<p class="dim">Reading performers…</p>';
   try {
-    const sort = $("#perf-sort").value;
-    const d = await api(`/api/performers?sort=${sort}` + (refresh ? "&refresh=true" : ""));
+    const d = await api("/api/performers/directory" + (refresh ? "?refresh=true" : ""));
+    perfDir = d.performers || [];
+    perfDir.forEach((p) => { p._names = [p.name, ...(p.aliases || [])].map(fold); });
+    perfAffinities = perfDir.map((p) => p.taste && p.taste.affinity).filter((a) => a != null).sort((x, y) => y - x);
     perfLoaded = true;
-    renderPerformers(d.performers || []);
+    renderPerformers();
+    // Peaks' own figures (moments, taste) are built in the background the first time
+    const again = !d.stats_ready || d.photos_missing;
+    if (again && perfDirTries++ < 12) setTimeout(() => { perfLoaded = false; if ($("#performers.active")) openPerformers(); else perfLoaded = true; }, 6000);
+    else perfDirTries = 0;
   } catch (e) { grid.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
-}
-// a single static (lazy-loaded) cover thumb + hover-plays her #1 clip
-function perfPhotoHTML(r) {
-  const thumb = (r.top || []).map((t) => t.thumb).filter(Boolean)[0];
-  const stream = (r.top && r.top[0] && r.top[0].stream) || "";
-  const img = thumb
-    ? `<img loading="lazy" src="${thumb}" onerror="this.src='/api/performer/${encodeURIComponent(r.id)}/image'" />`
-    : `<img loading="lazy" src="/api/performer/${encodeURIComponent(r.id)}/image" onerror="this.style.display='none'" />`;
-  const hover = stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : "";
-  return `<div class="perf-photo">${img}${hover}</div>`;
 }
 // a performer's taste in words: where she ranks among all your performers
 let perfAffinities = [];     // every performer's mean taste, best first
@@ -1213,51 +1215,119 @@ function perfTasteHTML(aff, { cls = "perf-taste" } = {}) {
   const [k, w] = W.rank((at < 0 ? perfAffinities.length : at) / perfAffinities.length);
   return `<span class="${cls} rk-${k}" title="Mean taste ${p} — ranked ${at + 1} of ${perfAffinities.length} performers">★ ${esc(w)}${fig(p)}</span>`;
 }
-function renderPerformers(rows) {
-  const grid = $("#perf-grid");
-  perfAffinities = rows.map((r) => r.affinity).filter((a) => a != null).sort((a, b) => b - a);
-  if (!rows.length) { grid.innerHTML = '<p class="dim">No performers found — embed some scenes with performers assigned in Stash.</p>'; return; }
-  const maxMoments = Math.max(...rows.map((r) => r.moments)) || 1;
-  grid.innerHTML = rows.map((r) => {
-    const pct = Math.round((r.moments / maxMoments) * 100);
-    const taste = perfTasteHTML(r.affinity);
-    const eng = tierTally(r.tiers, { compact: true }) ? ` · ${tierTally(r.tiers, { compact: true })}` : "";
-    return `<div class="perf-card" data-id="${esc(r.id)}" data-name="${esc(r.name)}">
-      ${perfPhotoHTML(r)}
-      <div class="perf-body">
-        <div class="perf-name" title="${esc(r.name)}">${esc(r.name)}</div>
-        <div class="perf-bar"><span style="width:${pct}%"></span></div>
-        <div class="dim perf-stats">${r.moments.toLocaleString()} moments · ${r.scenes} scenes${eng}</div>
-        ${taste ? `<div class="perf-tasteline">${taste}</div>` : ""}
-        <div class="perf-actions">
-          <button class="perf-detail-btn">Open</button>
-          <button class="perf-best">⭐ Best of</button>
-          <button class="perf-play ghost">▶ Board</button>
-          <button class="perf-reel ghost" title="Export a single video of this performer's top 300 taste-ranked moments">⬇ Reel</button>
-        </div>
-      </div>
-    </div>`;
-  }).join("");
-  wirePerfHover(grid);
-  applyPerfFilter();   // keep the name filter applied across re-sorts/rebuilds
+function perfPhotoURL(p) {
+  if (!p.photo && !p.lib && !p.img) return "";
+  return `/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo || 0}`;
 }
-// live-filter the performer grid by the "Find a performer by name" box
-function applyPerfFilter() {
-  const q = ($("#perf-search")?.value || "").trim().toLowerCase();
-  document.querySelectorAll("#perf-grid .perf-card").forEach((card) => {
-    const name = (card.dataset.name || "").toLowerCase();
-    card.hidden = !!q && !name.includes(q);
+function perfInitials(name) {
+  return esc(String(name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase());
+}
+function perfPicHTML(p, { clip = true } = {}) {
+  const url = perfPhotoURL(p);
+  const img = url ? `<img loading="lazy" src="${url}" alt="" onerror="this.remove()" />` : "";
+  const hover = clip && p.clip ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${esc(p.clip)}"></video>` : "";
+  return `<div class="pf-pic"><span class="pf-initials">${perfInitials(p.name)}</span>${img}${hover}${p.fav ? '<span class="pf-fav" title="Favourite in Stash">♥</span>' : ""}</div>`;
+}
+// her record + taste in plain words (figures small beside them)
+function perfWordsHTML(p) {
+  const bits = [];
+  if (p.record) bits.push(`<span class="wr-${p.record.tone}" title="Your grades: ${p.record.n} scenes · kept ${Math.round(p.record.keep * 100)}% · ${Math.round(p.record.top * 100)}% ${esc(className("exceptionnelle"))}+">${esc(p.record.verdict)}</span>`);
+  if (p.taste) bits.push(`<span class="rk-${p.taste.key}" title="Mean taste ${Math.round(p.taste.affinity * 100)}%">★ ${esc(p.taste.word)}</span>`);
+  return bits.length ? `<div class="pf-words">${bits.join(" · ")}</div>` : "";
+}
+function perfCardHTML(p, q = "") {
+  const alias = q && !pfold(p.name).includes(q) ? (p.aliases || []).find((a) => pfold(a).includes(q)) : null;
+  const counts = [p.scenes ? `${p.scenes.toLocaleString()} scene${p.scenes === 1 ? "" : "s"}` : "", p.lib ? `${p.lib.toLocaleString()} in Peaks` : ""].filter(Boolean).join(" · ");
+  return `<div class="pf-card perf-card" data-id="${esc(p.id)}" data-name="${esc(p.name)}">
+    ${perfPicHTML(p)}
+    <div class="pf-quick"><button class="perf-best" title="Her best moments">⭐ Best</button><button class="perf-play" title="Endless megaboard channel">▶ Board</button><button class="perf-reel" title="Export a single video of her top 300 moments">⬇</button></div>
+    <div class="pf-info">
+      <div class="pf-name" title="${esc(p.name)}">${esc(p.name)}</div>
+      ${alias ? `<div class="pf-alias">aka ${esc(alias)}</div>` : ""}
+      ${perfWordsHTML(p)}
+      ${counts ? `<div class="pf-counts">${counts}</div>` : ""}
+    </div>
+  </div>`;
+}
+// search: prefix of a name/alias > start of a word > anywhere; then more scenes first
+function perfMatch(p, q) {
+  let best = 0;
+  for (const n of p._names) {
+    if (n.startsWith(q)) best = Math.max(best, 3);
+    else if (n.includes(" " + q) || n.includes("-" + q)) best = Math.max(best, 2);
+    else if (n.includes(q)) best = Math.max(best, 1);
+  }
+  return best;
+}
+const VERDICT_RANK = { "a favourite": 6, "a good bet": 5, "mixed": 4, "early days": 3, "hit and miss": 2, "usually a miss": 1 };
+function perfSorted(list) {
+  const sort = $("#perf-sort").value;
+  const by = {
+    taste: (p) => [p.taste ? p.taste.affinity : -9, p.lib, p.scenes],
+    record: (p) => [p.record ? VERDICT_RANK[p.record.verdict] || 0 : -1, p.record ? p.record.n : 0, p.lib],
+    scenes: (p) => [p.scenes, p.lib],
+    added: (p) => [p.created || ""],
+    az: null,
+  }[sort];
+  if (!by) return list.slice().sort((a, b) => a.name.localeCompare(b.name));
+  return list.slice().sort((a, b) => {
+    const x = by(a), y = by(b);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? 1 : -1;
+    return a.name.localeCompare(b.name);
   });
 }
+function renderPerformers() {
+  const grid = $("#perf-grid");
+  const q = pfold(($("#perf-search")?.value || "").trim());
+  const min = +($("#perf-min")?.value || 0);
+  let list = perfDir.filter((p) => (!perfFilters.has("fav") || p.fav) && (!perfFilters.has("graded") || p.record)
+    && (!perfFilters.has("lib") || p.lib) && p.scenes >= min);
+  if (q) {
+    const scored = list.map((p) => [perfMatch(p, q), p]).filter(([m]) => m > 0);
+    scored.sort((a, b) => b[0] - a[0] || b[1].lib - a[1].lib || b[1].scenes - a[1].scenes);
+    list = scored.map(([, p]) => p);
+  } else list = perfSorted(list);
+  perfList = list; perfShown = 0;
+  const browsing = !q && !perfFilters.size && !min;
+  $("#perf-sections").innerHTML = browsing ? perfSectionsHTML() : "";
+  wirePerfHover($("#perf-sections"));
+  $("#perf-gridtitle").textContent = q ? "Results" : browsing ? "Everyone" : "Matching";
+  $("#perf-count").textContent = `${list.length.toLocaleString()} of ${perfDir.length.toLocaleString()}`;
+  $("#perf-sub").textContent = `${perfDir.length.toLocaleString()} in your Stash · ${perfDir.filter((p) => p.lib).length.toLocaleString()} with scenes in Peaks`;
+  grid.innerHTML = list.length ? "" : `<p class="dim">${q ? `No one matches “${esc(q)}”.` : "No performers match these filters."}</p>`;
+  perfMore();
+}
+function perfMore() {
+  const grid = $("#perf-grid"), q = pfold(($("#perf-search")?.value || "").trim());
+  if (perfShown >= perfList.length) return;
+  const next = perfList.slice(perfShown, perfShown + 60);
+  perfShown += next.length;
+  grid.insertAdjacentHTML("beforeend", next.map((p) => perfCardHTML(p, q)).join(""));
+  wirePerfHover(grid);
+}
+new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting) && $("#performers.active") && !$("#perf-home").hidden) perfMore(); },
+  { rootMargin: "800px" }).observe($("#perf-more"));
+function perfSectionsHTML() {
+  const row = (title, sub, list) => list.length ? `<div class="pf-section"><h3>${title}</h3><div class="dim">${sub}</div>
+    <div class="pf-row">${list.slice(0, 16).map((p) => perfCardHTML(p)).join("")}</div></div>` : "";
+  const favs = perfDir.filter((p) => (p.record && p.record.verdict === "a favourite") || p.fav)
+    .sort((a, b) => (b.record ? b.record.n : 0) - (a.record ? a.record.n : 0));
+  const fresh = perfDir.filter((p) => p.new_to_you).sort((a, b) => b.lib - a.lib);
+  const stale = perfDir.filter((p) => p.stale).sort((a, b) => (b.last_seen_days ?? 9999) - (a.last_seen_days ?? 9999));
+  return row("Your favourites", "the performers you grade highest, and your ♥ in Stash", favs)
+    + row("New to you", "in scenes added lately — nothing graded yet", fresh)
+    + row("Not seen in a while", "ones you grade well that the megaboard hasn't shown you in two months", stale);
+}
 function wirePerfHover(container) {
-  container.querySelectorAll(".perf-card, .perf-hero").forEach((card) => {
-    const v = card.querySelector(".perf-hover"); if (!v) return;
+  container.querySelectorAll(".perf-card, .perf-hero, .pf-detail-head").forEach((card) => {
+    const v = card.querySelector(".perf-hover"); if (!v || v.dataset.wired) return;
+    v.dataset.wired = "1";
     card.addEventListener("mouseenter", () => { if (!v.src) v.src = v.dataset.stream; v.style.opacity = 1; v.play().catch(() => {}); });
     card.addEventListener("mouseleave", () => { v.pause(); v.style.opacity = 0; });
   });
 }
-async function performerBestOf(id, name) {
-  const query = $("#perf-query").value.trim();
+async function performerBestOf(id, name, query = "") {
+  query = (query || "").trim();
   setActiveView("explore");
   currentContext = { kind: "performer", id, name, query };
   $("#results").innerHTML = `<p class="dim">Finding ${esc(name)}'s best moments…</p>`;
@@ -1273,9 +1343,9 @@ async function performerBestOf(id, name) {
     if (!d.items.length) toast(`No embedded moments for ${name}`);
   } catch (e) { toast(e.message, true); }
 }
-function playPerformerBoard(id, name) {
+function playPerformerBoard(id, name, query = "") {
   const qs = new URLSearchParams({ src: "performer", id: id || "", name: name || "" });
-  const query = $("#perf-query").value.trim(); if (query) qs.set("pq", query);
+  if ((query || "").trim()) qs.set("pq", query.trim());
   window.open("/megaboard/?" + qs.toString(), "_blank");
 }
 // one-click: stitch a performer's top-N taste-ranked moments into a single video.
@@ -1307,21 +1377,28 @@ async function pollPerformerReel(id, name) {
     }
   } catch { /* transient; the job still finishes server-side and shows in the reel list */ }
 }
-$("#perf-grid")?.addEventListener("click", (e) => {
+$("#perf-home")?.addEventListener("click", (e) => {
   const card = e.target.closest(".perf-card"); if (!card) return;
   const { id, name } = card.dataset;
   if (e.target.closest(".perf-best")) performerBestOf(id, name);
   else if (e.target.closest(".perf-play")) playPerformerBoard(id, name);
   else if (e.target.closest(".perf-reel")) exportPerformerReel(id, name);
-  else openPerformerDetail(id);   // "Open" button or card body → detail page
+  else openPerformerDetail(id);   // the card itself → her page
 });
-$("#btn-perf-search")?.addEventListener("click", async () => {
-  const name = $("#perf-search").value.trim(); if (!name) return;
-  await performerBestOf("", name);   // id blank → backend resolves by name
+let perfSearchT = null;
+$("#perf-search")?.addEventListener("input", () => {   // live: every keystroke (lightly debounced)
+  clearTimeout(perfSearchT); perfSearchT = setTimeout(renderPerformers, 60);
 });
-$("#perf-search")?.addEventListener("input", applyPerfFilter);   // type to narrow the grid
-$("#perf-search")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-perf-search").click(); });
-$("#perf-sort")?.addEventListener("change", () => { perfLoaded = false; openPerformers(); });
+$("#perf-search")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { const first = perfList[0]; if (first) openPerformerDetail(first.id); }
+  if (e.key === "Escape") { e.target.value = ""; renderPerformers(); }
+});
+document.querySelectorAll(".pf-f").forEach((b) => b.addEventListener("click", () => {
+  const f = b.dataset.f; perfFilters.has(f) ? perfFilters.delete(f) : perfFilters.add(f);
+  b.classList.toggle("on", perfFilters.has(f)); renderPerformers();
+}));
+$("#perf-min")?.addEventListener("change", renderPerformers);
+$("#perf-sort")?.addEventListener("change", renderPerformers);
 $("#btn-perf-refresh")?.addEventListener("click", () => openPerformers(true));
 $("#btn-perf-roulette")?.addEventListener("click", async () => {
   try { const r = await api("/api/performer/roulette"); if (r.id) playPerformerBoard(r.id, r.name); else toast("No performers yet"); }
@@ -1336,66 +1413,123 @@ $("#btn-perf-hof")?.addEventListener("click", async () => {
 
 // --- performer detail page --------------------------------------------------
 function showPerfDetail(on) {
-  $("#perf-grid").hidden = on; $("#perf-detail").hidden = !on;
+  $("#perf-home").hidden = on; $("#perf-detail").hidden = !on;
+  document.querySelector("#performers .pf-bar").hidden = on;
 }
 async function openPerformerDetail(id) {
   const box = $("#perf-detail");
   setActiveView("performers");
   showPerfDetail(true);
   box.innerHTML = '<p class="dim">Loading…</p>';
-  try {
-    const d = await api("/api/performer/detail?id=" + encodeURIComponent(id));
-    renderPerfDetail(d);
-  } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+  // her library facts come fast; the moments (taste ranking) can take a moment longer
+  const [prof, det] = await Promise.all([
+    api(`/api/performer/${encodeURIComponent(id)}/profile`).catch(() => null),
+    api("/api/performer/detail?id=" + encodeURIComponent(id)).catch(() => null),
+  ]);
+  if (!prof && !det) { box.innerHTML = '<p class="dim">Couldn\'t load this performer.</p>'; return; }
+  renderPerfDetail(det || { id, performer: prof.name, items: [], stats: {} }, prof || {});
 }
-function renderPerfDetail(d) {
+const PF_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];   // best first
+function renderPerfDetail(d, prof = {}) {
   const box = $("#perf-detail");
   const items = d.items || [];
-  const thumbs = items.slice(0, 12).map((h) => h.thumb);
-  const stream = items[0] && items[0].stream;
   const s = d.stats || {};
-  const stat = (lbl, v) => v == null ? "" : `<span class="pd-stat">${lbl} <b>${v}</b></span>`;
+  const me = perfDir.find((p) => p.id === String(d.id)) || { id: String(d.id), name: d.performer || prof.name, photo: prof.photo, lib: 1, fav: prof.fav };
+  const name = d.performer || prof.name || me.name || "performer";
+  const stream = items[0] && items[0].stream;
   const dist = d.distribution ? sparkHTML(d.distribution.counts) : "";
   const fp = (d.fingerprint || []).map(([w]) => `<span class="fy-chip">${esc(w)}</span>`).join("");
-  const sim = (d.similar || []).map((p) =>
-    `<button class="pd-sim" data-id="${esc(p.id)}"><img loading="lazy" src="${(p.top && p.top[0] && p.top[0].thumb) || `/api/performer/${encodeURIComponent(p.id)}/image`}" onerror="this.style.opacity=.15"/><span>${esc(p.name)}</span></button>`).join("");
+  const sim = (d.similar || []).map((p) => {
+    const pp = perfDir.find((x) => x.id === String(p.id)) || { id: p.id, name: p.name, lib: 1 };
+    return `<button class="pd-sim" data-id="${esc(p.id)}">${perfPicHTML(pp, { clip: false })}<span>${esc(p.name)}</span></button>`;
+  }).join("");
+  const r = prof.record;
+  const tiers = prof.tiers || {};
+  const total = Object.values(tiers).reduce((a, b) => a + b, 0) || 1;
+  const bars = PF_TIERS.filter((t) => tiers[t]).map((t) =>
+    `<i class="tier-bg-${t}" style="width:${(100 * tiers[t] / total).toFixed(1)}%" title="${esc(TIER_NAMES[t] || t)}: ${tiers[t]}"></i>`).join("");
+  const tally = PF_TIERS.filter((t) => tiers[t]).map((t) => `${tierChip(t)} ${tiers[t]}`).join(" · ");
+  const record = r ? `<div class="pf-record"><b class="wr-${r.tone}">${esc(cap(r.verdict))}</b> — of ${r.n} graded, you kept ${esc(r.keep_words)}${fig(Math.round(r.keep * 100) + "%")},
+      and ${esc(r.top_words)} were ${esc(className("exceptionnelle"))} or better${fig(Math.round(r.top * 100) + "%")}.</div>`
+    : `<div class="pf-record dim">No graded scenes yet — her record starts with your first grade.</div>`;
+  const studios = (prof.studios || []).map((x) => `<button class="cat-chip pf-studio" data-studio="${esc(x.name)}">${esc(x.name)} <span class="n">${x.n}</span></button>`).join("");
+  const scenes = (prof.scenes || []).map((x) => `<div class="pf-scene" data-sid="${esc(x.scene_id)}">${tierChip(x.tier)}<span class="t" title="${esc(x.title)}">${esc(x.title)}</span><span class="faint small">${esc((x.date || "").slice(0, 4))}</span></div>`).join("");
   box.innerHTML = `
     <div class="row"><button id="pd-back" class="ghost">← Performers</button></div>
-    <div class="pd-head">
-      <div class="perf-hero">
-        <img loading="lazy" src="${thumbs[0] || `/api/performer/${encodeURIComponent(d.id)}/image`}" />
-        ${stream ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${stream}"></video>` : ""}
+    <div class="pf-detail-head">
+      <div>
+        ${perfPicHTML({ ...me, clip: stream }, { clip: !!stream })}
+        <div class="row" style="margin-top:8px"><button id="pd-pick" class="btn sm">🖼 Choose picture</button></div>
       </div>
       <div class="pd-info">
-        <h2>${esc(d.performer || "performer")}</h2>
-        <div class="pd-stats">
-          ${stat("moments", (s.moments || 0).toLocaleString())}
-          ${stat("scenes", s.scenes)}
+        <h2>${esc(name)}${me.fav ? ' <span class="pf-favtxt" title="Favourite in Stash">♥</span>' : ""}</h2>
+        ${(prof.aliases || []).length ? `<div class="dim small">also known as ${esc(prof.aliases.slice(0, 6).join(", "))}</div>` : ""}
+        ${record}
+        ${bars ? `<div class="pf-tierbars">${bars}</div><div class="small">${tally}</div>` : ""}
+        <div class="pd-stats" style="margin-top:8px">
+          ${s.moments ? `<span class="pd-stat">moments <b>${(s.moments || 0).toLocaleString()}</b></span>` : ""}
           ${s.affinity != null ? `<span class="pd-stat">taste <b>${perfTasteHTML(s.affinity, { cls: "" })}</b></span>` : ""}
-          ${stat("🏆", tierTally(s.tiers) || null)}
-          ${stat("✩", s.rating)}
         </div>
         ${dist ? `<div class="dim" style="margin-top:6px">how on-taste her moments are</div>${dist}` : ""}
         ${fp ? `<div class="dim" style="margin:8px 0 4px">known for</div><div class="fy-words">${fp}</div>` : ""}
+        <div class="pf-focus"><input id="pd-focus" class="search" placeholder="Her best, focused on… (e.g. lingerie) — optional" />
+          <button id="pd-bestof" class="btn pri">⭐ Best of</button></div>
         <div class="perf-actions" style="margin-top:10px">
-          <button id="pd-best" class="primary">⭐ Save best-of</button>
           <button id="pd-board" class="ghost">▶ Endless channel</button>
+          <button id="pd-best" class="ghost">💾 Save best-of</button>
           <button id="pd-reel" class="ghost" title="Export a single video of her top 300 taste-ranked moments">⬇ Reel</button>
           <button id="pd-compare" class="ghost">⚔ Compare</button>
+          <button id="pd-catalogue" class="ghost">☰ Her scenes in Catalogue</button>
         </div>
       </div>
     </div>
-    ${sim ? `<div class="dim" style="margin:14px 0 6px">if you like her, try…</div><div class="pd-similar">${sim}</div>` : ""}
-    <div class="dim" style="margin:14px 0 6px">her best moments</div>
-    <div id="pd-strip" class="grid"></div>`;
-  renderHits(items, $("#pd-strip"), 60);   // sets lastHits to her best (for save/play)
+    ${studios ? `<h3 style="margin:18px 0 0">Studios</h3><div class="pf-studios">${studios}</div>` : ""}
+    ${sim ? `<h3 style="margin:18px 0 6px">If you like her, try…</h3><div class="pd-similar">${sim}</div>` : ""}
+    ${items.length ? `<h3 style="margin:18px 0 6px">Her best moments</h3><div id="pd-strip" class="grid"></div>` : ""}
+    ${scenes ? `<h3 style="margin:18px 0 0">Her scenes <span class="dim small">${(prof.scenes || []).length} · best first</span></h3><div class="pf-scenes">${scenes}</div>` : ""}`;
+  if (items.length) renderHits(items, $("#pd-strip"), 60);   // sets lastHits to her best (for save/play)
   wirePerfHover(box);
+  const focus = () => $("#pd-focus").value;
   $("#pd-back").onclick = () => showPerfDetail(false);
-  $("#pd-board").onclick = () => playPerformerBoard(d.id, d.performer);
-  $("#pd-reel").onclick = () => exportPerformerReel(d.id, d.performer);
-  $("#pd-best").onclick = () => saveCollectionPrompt(items, `${d.performer} — best of`);
-  $("#pd-compare").onclick = () => addToCompare(d.id, d.performer);
+  $("#pd-bestof").onclick = () => performerBestOf(d.id, name, focus());
+  $("#pd-focus").onkeydown = (e) => { if (e.key === "Enter") performerBestOf(d.id, name, focus()); };
+  $("#pd-board").onclick = () => playPerformerBoard(d.id, name, focus());
+  $("#pd-reel").onclick = () => exportPerformerReel(d.id, name);
+  $("#pd-best").onclick = () => saveCollectionPrompt(items, `${name} — best of`);
+  $("#pd-compare").onclick = () => addToCompare(d.id, name);
+  $("#pd-pick").onclick = () => openPhotoPicker(d.id, name);
+  $("#pd-catalogue").onclick = () => { go("catalogue"); applyCatParams({ performer: name }); };
   box.querySelectorAll(".pd-sim").forEach((b) => b.onclick = () => openPerformerDetail(b.dataset.id));
+  box.querySelectorAll(".pf-studio").forEach((b) => b.onclick = () => { go("catalogue"); applyCatParams({ studio: b.dataset.studio, performer: name }); });
+  box.querySelectorAll(".pf-scene").forEach((b) => b.onclick = () => { go("catalogue"); applyCatParams({ performer: name, q: b.querySelector(".t").textContent }); });
+}
+// 🖼 Choose picture: her Stash photo, covers of her scenes, her best frames
+async function openPhotoPicker(id, name) {
+  const pk = $("#perf-picker");
+  pk.hidden = false;
+  pk.innerHTML = `<div class="box"><div class="row between"><h3 style="margin:0">Picture for ${esc(name)}</h3><button class="ghost" id="pk-x">✕</button></div><p class="dim">Loading…</p></div>`;
+  $("#pk-x").onclick = () => { pk.hidden = true; };
+  let d;
+  try { d = await api(`/api/performer/${encodeURIComponent(id)}/photo/options`); } catch (e) { pk.querySelector("p").textContent = e.message; return; }
+  const opts = d.options || [];
+  pk.querySelector(".box").innerHTML = `<div class="row between"><h3 style="margin:0">Picture for ${esc(name)}</h3>
+      <span><button class="ghost" id="pk-auto" title="Let Peaks choose (Stash photo first)">Automatic</button> <button class="ghost" id="pk-x">✕</button></span></div>
+    <p class="dim small">Her Stash photo, covers of her scenes (solo ones marked), and her best moments. Click one to use it everywhere.</p>
+    <div class="pf-opts">${opts.map((o, i) => `<div class="pf-opt ${o.chosen ? "on" : ""} ${o.kind !== "stash" ? "wide" : ""}" data-i="${i}">
+      <img loading="lazy" src="${o.thumb}" onerror="this.parentNode.remove()" /><span>${o.kind === "stash" ? "📷 Stash photo" : o.kind === "cover" ? (o.solo ? "🎬 solo · " : "🎬 ") + esc(o.label) : "✨ a moment"}</span></div>`).join("") || '<p class="dim">Nothing to choose from yet.</p>'}</div>`;
+  $("#pk-x").onclick = () => { pk.hidden = true; };
+  const done = async (body) => {
+    try {
+      const r = await api(`/api/performer/${encodeURIComponent(id)}/photo`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const p = perfDir.find((x) => x.id === String(id)); if (p) p.photo = r.photo;
+      document.querySelectorAll(`img[src*="/api/performer/${encodeURIComponent(id)}/photo"]`).forEach((im) => { im.src = `/api/performer/${encodeURIComponent(id)}/photo?v=${r.photo}`; });
+      pk.hidden = true; toast("Picture updated");
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#pk-auto").onclick = () => done({});
+  pk.querySelectorAll(".pf-opt").forEach((el) => el.onclick = () => {
+    const o = opts[+el.dataset.i]; done({ kind: o.kind, scene_id: o.scene_id, key: o.key, t: o.t });
+  });
 }
 function sparkHTML(counts) {
   const hi = Math.max(...counts) || 1;
@@ -1431,7 +1565,7 @@ async function renderCompare() {
     const col = (d) => {
       const s = d.stats || {};
       const fp = (d.fingerprint || []).slice(0, 8).map(([w]) => `<span class="fy-chip">${esc(w)}</span>`).join("");
-      const thumb = (d.items[0] && d.items[0].thumb) || `/api/performer/${encodeURIComponent(d.id)}/image`;
+      const thumb = `/api/performer/${encodeURIComponent(d.id)}/photo?v=${(perfDir.find((p) => p.id === String(d.id)) || {}).photo || 0}`;
       return `<div class="cmp-col">
         <img src="${thumb}" onerror="this.style.opacity=.15"/>
         <h3>${esc(d.performer)}</h3>

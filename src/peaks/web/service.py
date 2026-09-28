@@ -18,9 +18,10 @@ from ..embedding import canonical_name
 from ..search import Hit, SearchIndex
 from ..tiers import TIER_WEIGHT, tier_of
 from .library import LibraryMixin
+from .performers import PerformersMixin
 
 
-class Service(LibraryMixin):
+class Service(LibraryMixin, PerformersMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
