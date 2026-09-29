@@ -19,9 +19,10 @@ from ..search import Hit, SearchIndex
 from ..tiers import TIER_WEIGHT, tier_of
 from .library import LibraryMixin
 from .performers import PerformersMixin
+from .today import TodayMixin
 
 
-class Service(LibraryMixin, PerformersMixin):
+class Service(LibraryMixin, PerformersMixin, TodayMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -4821,13 +4822,15 @@ class Service(LibraryMixin, PerformersMixin):
 
     def curation_settings(self) -> dict:
         return {"auto_legendaire_on_save": bool(self._settings().get("auto_legendaire_on_save", True)),
-                "follow_renamer": self.follow_renamer_on()}
+                "follow_renamer": self.follow_renamer_on(), "today_goal": self.today_goal()}
 
     def save_curation_settings(self, auto_legendaire_on_save: bool | None = None,
-                               follow_renamer: bool | None = None) -> dict:
+                               follow_renamer: bool | None = None, today_goal: int | None = None) -> dict:
         import json
 
         s = dict(self._settings())
+        if today_goal is not None:
+            s["today_goal"] = max(1, min(500, int(today_goal)))
         if auto_legendaire_on_save is not None:
             s["auto_legendaire_on_save"] = bool(auto_legendaire_on_save)
         if follow_renamer is not None:

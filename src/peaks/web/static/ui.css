@@ -578,3 +578,44 @@ html.hide-nums .num { display: none; }
 .pd-sim .pf-initials { font-size: 26px; }
 .pf-favtxt { color: #ff5c8a; font-size: .8em; }
 .mv-n { font-weight: 600; color: var(--fg); }
+
+/* --- For You: today's decisions -------------------------------------------------- */
+.td-hero { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr); gap: 18px; margin-bottom: 18px; }
+@media (max-width: 900px) { .td-hero { grid-template-columns: 1fr; } }
+.td-player { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: 14px; overflow: hidden; }
+.td-player video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.td-sound { position: absolute; right: 10px; bottom: 12px; background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.2);
+  color: #fff; border-radius: 8px; padding: 4px 8px; }
+.td-dots { position: absolute; left: 12px; bottom: 14px; display: flex; gap: 6px; }
+.td-dots i { width: 22px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.3); cursor: pointer; }
+.td-dots i.on { background: var(--gold); }
+.td-teach { position: absolute; inset: 0; display: grid; place-items: center; background: #0b0b0d; }
+.td-teach img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.td-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; min-width: 0; }
+.td-top { display: flex; align-items: center; gap: 8px; }
+.td-job { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--gold); }
+.td-bar { height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 8px 0 12px; }
+.td-bar i { display: block; height: 100%; width: 0; background: var(--gold); transition: width .3s; }
+.td-title { font-size: 19px; margin: 0 0 2px; }
+.td-q { font-size: 16px; font-weight: 600; margin: 12px 0 6px; }
+.td-why { font-size: 13px; display: flex; flex-direction: column; gap: 4px; color: var(--dim); }
+.td-why .cat-pred, .td-why .cat-sig { margin: 0; }
+.td-grades { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 14px 0 8px; }
+.td-grades button { padding: 9px 4px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2, #1b1b21); font-size: 12px; }
+.td-grades button b { display: block; font-size: 15px; }
+.td-grades button.sug { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+.td-grades button.cur { opacity: .55; }
+.td-grades button:hover { border-color: var(--fg); }
+.td-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.td-keys { margin-top: auto; padding-top: 10px; font-size: 11.5px; color: var(--faint); }
+.td-done { text-align: center; padding: 24px 6px; }
+.td-done h2 { margin: 0 0 6px; }
+.td-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.td-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.td-card:hover { border-color: var(--gold); }
+.td-card.on { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+.td-card.zero { opacity: .5; }
+.td-card .n { font-size: 22px; font-weight: 700; }
+.td-card .l { font-weight: 600; } .td-card .d { font-size: 12px; color: var(--dim); }
+.td-card .g { font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); }
+.fy-strip { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }

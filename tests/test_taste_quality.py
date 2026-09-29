@@ -1029,6 +1029,6 @@ def test_undo_is_followed_and_the_setting_turns_it_off(svc, monkeypatch):
     assert "23" in svc._path_watch
     svc._path_watch.clear()
     svc.save_curation_settings(follow_renamer=False)
-    assert svc.curation_settings() == {"auto_legendaire_on_save": True, "follow_renamer": False}
+    assert svc.curation_settings() == {"auto_legendaire_on_save": True, "follow_renamer": False, "today_goal": 20}
     svc.grade_scene("24", "legendaire")
     assert "24" not in svc._path_watch

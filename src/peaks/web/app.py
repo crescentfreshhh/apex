@@ -837,8 +837,11 @@ def create_app(cfg=None):
 
     @app.get("/api/foryou")
     def foryou(top_k: int = 60, recent: int = 0, rebuild: bool = False,
-               profile: str | None = None):
-        r = service.recommend(top_k=top_k, recent=recent, rebuild=rebuild, profile=profile)
+               profile: str | None = None, daily: bool = False):
+        # daily: a rank-weighted shuffle seeded by today's date — changes every day
+        seed = int(__import__("time").strftime("%Y%m%d")) if daily else None
+        r = service.recommend(top_k=top_k, recent=recent, rebuild=rebuild, profile=profile,
+                              shuffle=True if daily else None, seed=seed)
         return {
             "items": _hit_payload(service, r["hits"]),
             "sources": r["sources"], "total": r["total"], "model": r["model"],
@@ -1506,8 +1509,28 @@ def create_app(cfg=None):
         return service.curation_settings()
 
     @app.post("/api/library/curation")
-    def save_curation_settings(auto_legendaire_on_save: bool | None = None, follow_renamer: bool | None = None):
-        return service.save_curation_settings(auto_legendaire_on_save, follow_renamer)
+    def save_curation_settings(auto_legendaire_on_save: bool | None = None, follow_renamer: bool | None = None,
+                               today_goal: int | None = None):
+        return service.save_curation_settings(auto_legendaire_on_save, follow_renamer, today_goal)
+
+    @app.get("/api/today")
+    def today(job: str | None = None, more: bool = False, n: int = Query(3, ge=1, le=10)):
+        """For You: the next decisions (today's mixed set, or one job's stream),
+        progress, the task board and this week's tally."""
+        try:
+            return service.curation_today(job=job, more=more, n=n)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/today/done")
+    def today_done(scene_id: str, undo: bool = False):
+        return service.today_mark(scene_id, undo=undo)
+
+    @app.post("/api/today/skip")
+    def today_skip(scene_id: str):
+        return service.today_mark(scene_id, skip=True)
 
     @app.get("/api/library/moves")
     def renamer_moves():

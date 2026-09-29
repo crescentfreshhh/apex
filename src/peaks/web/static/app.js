@@ -334,8 +334,13 @@ async function loadCuration() {
     const c = await api("/api/library/curation");
     cb.checked = !!c.auto_legendaire_on_save;
     if ($("#cur-follow")) $("#cur-follow").checked = c.follow_renamer !== false;
+    if ($("#cur-goal") && c.today_goal) $("#cur-goal").value = c.today_goal;
   } catch {}
 }
+$("#cur-goal")?.addEventListener("change", async (e) => {
+  try { const r = await api("/api/library/curation?today_goal=" + Math.max(1, +e.target.value || 20), { method: "POST" }); toast(`For You: ${r.today_goal} decisions a day (from tomorrow's set)`); }
+  catch (err) { toast(err.message, true); }
+});
 $("#cur-follow")?.addEventListener("change", async (e) => {
   try { await api("/api/library/curation?follow_renamer=" + e.target.checked, { method: "POST" }); toast(e.target.checked ? "Following renamer moves" : "Renamer moves: Sync by hand"); }
   catch (err) { toast(err.message, true); }
@@ -723,13 +728,13 @@ function tierTally(tiers, { compact = false } = {}) {
 
 // grade undo stack, shared by the Catalogue and the viewer's grade menu
 const gradeUndo = [];
-async function applyGrade(sid, grade) {
+async function applyGrade(sid, grade, undoKey = "Z") {
   const r = await api("/api/catalogue/grade", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scene_id: String(sid), grade }),
   });
   gradeUndo.push({ sid: String(sid), prev: r.previous, grade });
-  toast(`${gradeName(grade)} — Z to undo`);
+  toast(`${gradeName(grade)} — ${undoKey} to undo`);
   return r.scene;
 }
 async function undoGrade() {
@@ -1651,7 +1656,8 @@ async function loadForYou(rebuild) {
   const grid = $("#foryou-results");
   grid.innerHTML = '<p class="dim">Reading your taste…</p>';
   try {
-    const qs = new URLSearchParams(pparam({ top_k: 80, recent: recentN(), rebuild: rebuild ? "true" : "false" }));
+    const qs = new URLSearchParams(pparam({ top_k: 12, recent: recentN(), rebuild: rebuild ? "true" : "false",
+      daily: rebuild ? "false" : "true" }));
     const d = await api("/api/foryou?" + qs);
     foryouItems = d.items || [];
     if (!d.items.length) {
@@ -1668,8 +1674,7 @@ async function loadForYou(rebuild) {
       (d.diversified ? " · diverse mix" : "") +
       ` · ${d.model}`;
     currentContext = { kind: "foryou" };
-    renderHits(d.items, grid);
-    renderHero(d.items[0]);
+    renderHits(d.items, grid, 12);
   } catch (e) { grid.innerHTML = ""; toast(e.message, true); }
 }
 
@@ -2391,12 +2396,239 @@ document.addEventListener("click", (e) => {
 
 async function openForYou() {
   if (!profilesLoaded) await loadProfiles();
-  loadNextSwipe();
-  loadLibraryToday();
-  await loadForYou(false);   // cached taste = fast open; "Rebuild" forces a fresh rebuild
-  loadTasteBands();          // colours the For You tiles by taste band (cheap)
-  loadLabelCounts();         // header counts only; the taste panels load frames on expand
+  tdLoad();                  // today's decisions + the to-do board
+  await loadForYou(false);   // the small top-moments strip (changes daily)
+  loadTasteBands();          // colours the strip's tiles by taste band (cheap)
 }
+
+// --- For You: today's decisions -------------------------------------------------
+// One decision at a time from Peaks' suggestions (saves → Légendaire, let-go
+// suggestions, new scenes, second opinions…), a fixed mixed set of 20 per day.
+// The video autoplays the scene's best moments; 1–5 grade, Enter accepts Peaks'
+// pick, S skips, U undoes. Every ~6 answers, a quick "teach Peaks" 👍/👎.
+const td = { queue: [], answered: [], job: null, progress: null, sinceTeach: 0, teach: null,
+  moments: [], mi: 0, hop: null, loading: false, board: null, labels: {} };
+const TD_TEACH_EVERY = 6;
+const TD_SHORT = { reject: "Reject", upscale: "Upscale", merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
+const TD_QUESTION = {
+  saved: "You saved moments here — make it Légendaire?",
+  reject: "Let it go?",
+  new: "New scene — what tier is it?",
+  promote: "Peaks rates it above your grade — promote it?",
+  second: "Peaks rates it below your grade — still this tier?",
+  anomaly: "5★ with an unusual O-count — which tier is it?",
+  trim: "No saved moments — keep it?",
+};
+async function tdLoad({ more = false, keep = false } = {}) {
+  if (td.loading) return;
+  td.loading = true;
+  try {
+    const qs = new URLSearchParams({ n: 4 });
+    if (td.job) qs.set("job", td.job);
+    if (more) qs.set("more", "true");
+    const d = await api("/api/today?" + qs);
+    const have = new Set(td.queue.map((x) => x.scene_id));
+    td.queue = keep ? td.queue.concat(d.next.filter((x) => !have.has(x.scene_id))) : d.next;
+    td.progress = d.progress; td.remaining = d.remaining; td.board = d.board; td.labels = d.labels || {};
+    tdWeek(d.week); tdBoard();
+    if (!keep) tdShow();
+  } catch (e) { $("#td-body").innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+  finally { td.loading = false; }
+}
+function tdWeek(w) {
+  if (!w) return;
+  const bits = [`${w.decisions.toLocaleString()} decision${w.decisions === 1 ? "" : "s"}`];
+  if (w.promoted) bits.push(`${w.promoted} promoted`);
+  if (w.let_go) bits.push(`${w.let_go} let go`);
+  if (w.freed) bits.push(`${fmtBytes(w.freed)} freed`);
+  $("#td-week").textContent = "This week: " + bits.join(" · ");
+}
+function tdProgress() {
+  const p = td.progress, el = $("#td-prog"), bar = $("#td-bar");
+  if (td.job) { el.textContent = `${(td.remaining || 0).toLocaleString()} left in this list`; bar.style.width = "0"; return; }
+  if (!p) return;
+  el.textContent = p.done >= p.goal ? `${p.done} today — goal met 🎉` : `${p.done} of ${p.goal} today`;
+  bar.style.width = Math.min(100, 100 * p.done / Math.max(1, p.goal)) + "%";
+}
+function tdStopVideo() {
+  clearInterval(td.hop); td.hop = null;
+  const v = $("#td-video"); v.pause(); v.removeAttribute("src"); v.load();
+}
+function tdShow() {
+  tdProgress();
+  $("#td-job").textContent = td.job ? (td.labels[td.job] || td.job) + " · " : "";
+  if (!td.job && td.sinceTeach >= TD_TEACH_EVERY) return tdShowTeach();
+  $("#td-teach").hidden = true;
+  const x = td.queue[0];
+  if (!x) return tdShowDone();
+  $("#td-job").textContent = td.job ? `${td.labels[td.job] || td.job} · just this list` : (td.labels[x.job] || x.job);
+  const sub = [(x.performers || []).slice(0, 3).join(", "), x.studio, (x.date || "").slice(0, 4)].filter(Boolean).join(" · ");
+  const sug = x.suggest || (x.why ? { grade: x.pick, why: x.why, detail: x.detail } : null);
+  const why = [
+    sug && sug.why ? `<div class="cat-sug">${sug.grade ? `Suggest <b>${esc(gradeName(sug.grade))}</b> — ` : ""}${textNum(sug.why, sug.detail)}</div>` : "",
+    x.pred ? `<div class="cat-pred">${predHTML(x.pred)}${keeperHTML(x.pred) ? " · " + keeperHTML(x.pred) : ""}</div>` : "",
+    sigLine(x), whoLines(x, 4),
+  ].filter(Boolean).join("");
+  const cur = x.tier === "rejected" ? "reject" : x.tier;
+  $("#td-body").innerHTML = `
+    <h2 class="td-title">${tierBadge(x.rating100, x.o_counter, { showUnreviewed: true })} ${esc(x.title || "scene " + x.scene_id)}</h2>
+    <div class="dim small">${esc(sub)}${x.duration ? " · " + fmt(x.duration) : ""}${x.size ? " · " + fmtBytes(x.size) : ""}</div>
+    <div class="td-q">${esc(TD_QUESTION[x.job] || "What tier is it?")}</div>
+    <div class="td-why">${why}</div>
+    <div class="td-grades">${RV_GRADES.map(([g], k) => `<button data-g="${g}" class="g-${g} ${g === x.pick ? "sug" : ""} ${g === cur ? "cur" : ""}" title="${esc(gradeName(g))} (${k + 1})"><b>${k + 1}</b>${esc(TD_SHORT[g])}</button>`).join("")}</div>
+    <div class="td-actions">
+      ${x.pick ? `<button class="btn pri sm" id="td-accept">✓ ${esc(gradeName(x.pick))} <kbd>Enter</kbd></button>` : ""}
+      <button class="btn sm ghost" id="td-skip">Skip <kbd>S</kbd></button>
+      <button class="btn sm ghost" id="td-undo" ${td.answered.length ? "" : "disabled"}>Undo <kbd>U</kbd></button>
+      <button class="btn sm ghost" id="td-open" title="Open in the Review player">Open in Review</button>
+    </div>
+    <div class="td-keys">1–5 grade · Enter accept · S skip · U undo · Space pause · M sound · ←/→ moments</div>`;
+  $("#td-body").querySelectorAll(".td-grades button").forEach((b) => b.onclick = () => tdAnswer(b.dataset.g));
+  $("#td-accept")?.addEventListener("click", () => tdAnswer(x.pick));
+  $("#td-skip").onclick = tdSkip; $("#td-undo").onclick = tdUndo;
+  $("#td-open").onclick = () => { go("catalogue"); applyCatParams({ q: x.title || "" }); };
+  tdPlay(x);
+}
+// the scene's best moments, best first, hopping every 12 s (muted until you ask)
+function tdPlay(x) {
+  const v = $("#td-video");
+  clearInterval(td.hop);
+  td.moments = (x.moments || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0)).map((m) => m.t);
+  if (!td.moments.length) td.moments = [0];
+  td.mi = 0;
+  $("#td-dots").innerHTML = td.moments.length > 1 ? td.moments.map((_, i) => `<i data-i="${i}" class="${i ? "" : "on"}"></i>`).join("") : "";
+  $("#td-dots").querySelectorAll("i").forEach((d) => d.onclick = () => tdJump(+d.dataset.i - td.mi));
+  if (v.dataset.sid !== x.scene_id) {
+    v.dataset.sid = x.scene_id;
+    v.src = x.stream;
+    v.onloadedmetadata = () => { v.currentTime = td.moments[0]; v.play().catch(() => {}); };
+  } else { v.currentTime = td.moments[0]; v.play().catch(() => {}); }
+  td.hop = setInterval(() => { if (!v.paused) tdJump(1); }, 12000);
+}
+function tdJump(step) {
+  if (!td.moments.length) return;
+  td.mi = (td.mi + step + td.moments.length) % td.moments.length;
+  const v = $("#td-video"); v.currentTime = td.moments[td.mi];
+  $("#td-dots").querySelectorAll("i").forEach((d, i) => d.classList.toggle("on", i === td.mi));
+}
+async function tdAnswer(grade) {
+  const x = td.queue[0]; if (!x || !grade) return;
+  try { await applyGrade(x.scene_id, grade, "U"); } catch (e) { return toast(e.message, true); }
+  td.queue.shift(); td.answered.push(x); td.sinceTeach++;
+  if (td.progress && !td.job) td.progress.done++;
+  if (td.job) td.remaining = Math.max(0, (td.remaining || 1) - 1);
+  api(`/api/today/done?scene_id=${encodeURIComponent(x.scene_id)}`, { method: "POST" }).catch(() => {});
+  tdShow();
+  if (td.queue.length < 2) tdLoad({ keep: true });
+}
+async function tdSkip() {
+  const x = td.queue.shift(); if (!x) return;
+  await api(`/api/today/skip?scene_id=${encodeURIComponent(x.scene_id)}`, { method: "POST" }).catch(() => {});
+  if (td.queue.length < 2) await tdLoad({ keep: true });
+  if (td.queue[0] && td.queue[0].scene_id === x.scene_id && td.queue.length > 1) td.queue.push(td.queue.shift());
+  tdShow();
+}
+async function tdUndo() {
+  const x = td.answered.pop(); if (!x) return toast("nothing to undo");
+  const fresh = await undoGrade(); if (!fresh) { td.answered.push(x); return; }
+  await api(`/api/today/done?scene_id=${encodeURIComponent(x.scene_id)}&undo=true`, { method: "POST" }).catch(() => {});
+  td.queue.unshift({ ...x, ...fresh });
+  if (td.progress && !td.job) td.progress.done = Math.max(0, td.progress.done - 1);
+  td.sinceTeach = Math.max(0, td.sinceTeach - 1);
+  tdShow();
+}
+function tdShowDone() {
+  tdStopVideo();
+  const p = td.progress || {};
+  $("#td-body").innerHTML = td.job
+    ? `<div class="td-done"><h2>Nothing left here 🎉</h2><p class="dim">That list is clear.</p>
+        <button class="btn pri" id="td-back">← Back to today</button></div>`
+    : `<div class="td-done"><h2>Done for today 🎉</h2><p class="dim">${p.done || 0} decisions made. Your library thanks you.</p>
+        <button class="btn pri" id="td-more">Keep going →</button></div>`;
+  $("#td-back")?.addEventListener("click", () => { td.job = null; td.queue = []; tdLoad(); });
+  $("#td-more")?.addEventListener("click", () => tdLoad({ more: true }));
+}
+// "teach Peaks": the frame the taste model is least sure about
+async function tdShowTeach() {
+  tdStopVideo();
+  $("#td-job").textContent = "Teach Peaks";
+  let d; try { d = await api("/api/foryou/next?" + new URLSearchParams(pparam())); } catch { d = null; }
+  td.teach = d && d.item;
+  if (!td.teach) { td.sinceTeach = 0; return tdShow(); }
+  const t = $("#td-teach"); t.hidden = false;
+  t.innerHTML = `<img src="${td.teach.thumb}" alt="" />`;
+  $("#td-dots").innerHTML = "";
+  $("#td-body").innerHTML = `<div class="td-q">Quick one: is this your kind of moment?</div>
+    <div class="td-why"><span>Peaks is least sure about moments like this — one tap teaches it.</span>
+      <span class="faint">${esc(td.teach.title || "")} · ${fmt(td.teach.time)}</span></div>
+    <div class="td-actions" style="margin-top:14px"><button class="btn pri" id="td-love">👍 Love <kbd>↑</kbd></button>
+      <button class="btn" id="td-pass">👎 Pass <kbd>↓</kbd></button><button class="btn ghost" id="td-tskip">Not now</button></div>
+    <div class="td-keys">↑ love · ↓ pass · S not now</div>`;
+  $("#td-love").onclick = () => tdTeach(1); $("#td-pass").onclick = () => tdTeach(0);
+  $("#td-tskip").onclick = () => { td.sinceTeach = 0; tdShow(); };
+}
+async function tdTeach(label) {
+  const h = td.teach; if (!h) return;
+  try {
+    await api("/api/label?" + new URLSearchParams(pparam({ key: h.key, t: (+h.time).toFixed(2), label,
+      ...(h.scene_id ? { scene_id: h.scene_id } : {}) })), { method: "POST" });
+    toast(label ? "👍 noted — more like that" : "👎 noted — less like that");
+  } catch (e) { toast(e.message, true); }
+  td.teach = null; td.sinceTeach = 0; tdShow();
+}
+// the to-do board: every job with its count; upkeep opens the right screen
+function tdBoard() {
+  const b = td.board; if (!b) return;
+  const j = b.jobs || {}, n = (x) => (x ?? 0).toLocaleString();
+  const card = (grp, key, label, count, desc, act) => `<div class="td-card ${td.job === key ? "on" : ""} ${count ? "" : "zero"}" data-act="${act}" data-key="${key}">
+      <span class="g">${grp}</span><span class="n">${n(count)}</span><span class="l">${esc(label)}</span><span class="d">${desc}</span></div>`;
+  $("#td-board").innerHTML = [
+    card("Confirm", "saved", "Saved → Légendaire", j.saved, "you saved moments in these", "job"),
+    card("Confirm", "reject", "Suggested to let go", j.reject, "passed over or among your weakest", "job"),
+    card("Grade", "new", "New scenes", j.new, `${n(b.likely)} look like keepers`, "job"),
+    card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job"),
+    card("Second opinion", "second", "Second look", j.second, "Peaks rates them below your grade", "job"),
+    card("Second opinion", "anomaly", "Anomalies", j.anomaly, "5★ with an unusual O-count", "job"),
+    card("Trim", "trim", "No saved moments", j.trim, "past 30 days, nothing saved", "job"),
+    card("Upkeep", "dupes", "Duplicates", b.dupes, b.dupes == null ? "not checked yet — open to scan" : "groups to resolve", "dupes"),
+    card("Upkeep", "rejected", "Rejected, awaiting delete", b.rejected.count, b.rejected.bytes ? `free ${fmtBytes(b.rejected.bytes)}` : "nothing to free", "rejected"),
+    card("Upkeep", "conflict", "Tag conflicts", b.conflicts, "tier tags your renamer can't act on", "view"),
+    card("Upkeep", "quality", "Quality check", b.quality, "below the quality you usually keep", "view"),
+    card("Teach", "teach", "Teach Peaks", 1, "a quick 👍/👎 on what it's unsure of", "teach"),
+  ].join("");
+}
+$("#td-board")?.addEventListener("click", (e) => {
+  const c = e.target.closest(".td-card"); if (!c) return;
+  const { act, key } = c.dataset;
+  if (act === "job") { td.job = td.job === key ? null : key; td.queue = []; tdLoad(); window.scrollTo(0, 0); $("#content")?.scrollTo(0, 0); }
+  else if (act === "dupes") go("dupes");
+  else if (act === "rejected") { cat.view = ""; cat.tier = "rejected"; go("catalogue"); openCatalogue(); }
+  else if (act === "view") { cat.view = key; cat.tier = ""; go("catalogue"); openCatalogue(); }
+  else if (act === "teach") { td.sinceTeach = TD_TEACH_EVERY; tdShow(); }
+});
+$("#td-sound")?.addEventListener("click", () => {
+  const v = $("#td-video"); v.muted = !v.muted; $("#td-sound").textContent = v.muted ? "🔇" : "🔊";
+});
+document.addEventListener("keydown", (e) => {
+  if (!$("#foryou")?.classList.contains("active") || !$("#viewer").hidden || !$("#cmdk").hidden) return;
+  if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase(), v = $("#td-video");
+  if (td.teach && !$("#td-teach").hidden) {
+    if (k === "arrowup") { e.preventDefault(); tdTeach(1); }
+    else if (k === "arrowdown") { e.preventDefault(); tdTeach(0); }
+    else if (k === "s") { e.preventDefault(); td.teach = null; td.sinceTeach = 0; tdShow(); }
+    return;
+  }
+  const x = td.queue[0];
+  if (k >= "1" && k <= "5") { e.preventDefault(); tdAnswer(RV_GRADES[+k - 1][0]); }
+  else if (k === "enter" && x && x.pick) { e.preventDefault(); tdAnswer(x.pick); }
+  else if (k === "s") { e.preventDefault(); tdSkip(); }
+  else if (k === "u") { e.preventDefault(); tdUndo(); }
+  else if (k === " ") { e.preventDefault(); v.paused ? v.play().catch(() => {}) : v.pause(); }
+  else if (k === "m") { e.preventDefault(); $("#td-sound").click(); }
+  else if (k === "arrowright") { e.preventDefault(); tdJump(1); }
+  else if (k === "arrowleft") { e.preventDefault(); tdJump(-1); }
+});
 $("#btn-foryou-rebuild")?.addEventListener("click", () => {
   loadForYou(true); loadTasteBands(); loadLabelCounts();
   tasteVisualCollapse?.reloadIfOpen(); tasteLabelsCollapse?.reloadIfOpen();
@@ -2595,7 +2827,7 @@ document.querySelectorAll("#taste-manage [data-del]").forEach((b) =>
 document.addEventListener("keydown", (e) => {
   if (!$("#viewer").hidden) return;                       // viewer owns keys when open
   const teachOpen = $("#taste")?.classList.contains("active") && !$("#swipe-panel").hidden;
-  if (!$("#foryou")?.classList.contains("active") && !teachOpen) return;
+  if (!teachOpen) return;                                  // (For You has its own keys now)
   if (!$("#cmdk").hidden || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   if (e.key === "ArrowRight") { e.preventDefault(); swipeRate(1); }   // → = 👍 love
   else if (e.key === "ArrowLeft") { e.preventDefault(); swipeRate(0); }  // ← = 👎 pass

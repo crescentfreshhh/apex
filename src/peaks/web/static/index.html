@@ -50,41 +50,37 @@
 
   <!-- FOR YOU (home) -->
   <section id="foryou" class="view active">
-    <div class="head">
-      <h1>For You</h1>
+    <div class="head"><h1>For You</h1><span class="sub2">today's decisions</span><span class="grow"></span>
+      <span id="td-week" class="dim small"></span></div>
+    <div class="td-hero" id="td-hero">
+      <div class="td-player">
+        <video id="td-video" muted playsinline preload="auto"></video>
+        <div id="td-teach" class="td-teach" hidden></div>
+        <div id="td-dots" class="td-dots"></div>
+        <button id="td-sound" class="td-sound" title="Sound (M)">🔇</button>
+      </div>
+      <div class="td-panel" id="td-panel">
+        <div class="td-top"><span id="td-job" class="td-job"></span><span class="grow"></span><span id="td-prog" class="dim small"></span></div>
+        <div class="td-bar"><i id="td-bar"></i></div>
+        <div id="td-body"><p class="dim">Lining up today's decisions…</p></div>
+      </div>
+    </div>
+    <h2 class="shelf-h">Your to-do <span class="sub2">pick one to work through just that</span></h2>
+    <div id="td-board" class="td-board"></div>
+    <h2 class="shelf-h">Your top moments <span class="sub2">changes daily</span><span class="grow"></span>
       <span id="profile-row" class="row inline" title="Each profile keeps its own 👍/👎, saved moments, trained model, and feed">
         <select id="profile-select" class="pill-select"></select>
         <button id="btn-profile-new" class="btn sm ghost" title="Create a new taste profile">＋</button>
         <button id="btn-profile-del" class="btn sm ghost" title="Delete this profile (keeps its saved moments in Stash)" hidden>🗑</button>
       </span>
-      <span class="grow"></span>
-      <label class="check" title="Weight only your most recent loved moments — see what you're into lately"><input type="checkbox" id="foryou-recent" /> lately</label>
-      <button id="btn-foryou-rebuild" class="btn ghost" title="Rebuild the feed from your taste">↻</button>
-      <button id="btn-foryou-radio" class="btn" title="Lean back — an endless stream of your taste that adapts as you thumb">📻 Radio</button>
-      <button id="btn-foryou-board" class="btn pri" title="Play the current For You feed on the megaboard">▶ Play all</button>
-    </div>
-    <div id="foryou-status" class="cap fy-status"></div>
-    <div class="hero" id="fy-hero-wrap">
-      <div id="fy-hero" class="hero-big"></div>
-      <div class="hero-side">
-        <div class="card pad" id="fy-teach">
-          <div class="row between"><h3>Sharpen your taste</h3><span class="faint" id="fy-teach-n">learns as you go</span></div>
-          <div class="fy-teach-frame"><div id="fy-teach-img" class="pic"></div>
-            <div class="muted small">Peaks is least sure about moments like this. One tap teaches it.</div></div>
-          <div class="row"><button class="btn" id="fy-teach-no">👎 Pass <kbd>←</kbd></button><button class="btn" id="fy-teach-skip">Skip</button>
-            <button class="btn pri" id="fy-teach-yes">👍 Love <kbd>→</kbd></button></div>
-        </div>
-        <div class="card pad" id="fy-today">
-          <h3>Your library today</h3>
-          <div id="fy-today-body" class="today-grid"><span class="faint">…</span></div>
-          <div class="row"><button class="btn sm" data-go="review">Start reviewing →</button><button class="btn sm ghost" data-go="dupes">Duplicates →</button></div>
-        </div>
-      </div>
-    </div>
-    <h2 class="shelf-h">Top moments for you <span class="sub2">diverse across your library</span><span class="grow"></span>
+      <label class="check small" title="Weight only your most recent loved moments"><input type="checkbox" id="foryou-recent" /> lately</label>
+      <button id="btn-foryou-rebuild" class="btn sm ghost" title="Rebuild from your taste">↻</button>
+      <button id="btn-foryou-radio" class="btn sm" title="Lean back — an endless stream of your taste that adapts as you thumb">📻 Radio</button>
+      <button id="btn-foryou-board" class="btn sm pri" title="Play your taste on the megaboard">▶ Play all</button>
       <button id="toggle-taste-visual" class="btn sm ghost">▸ What you like</button></h2>
+    <div id="foryou-status" class="cap fy-status"></div>
     <div id="foryou-words" class="fy-words" hidden></div>
-    <div id="foryou-results" class="grid"></div>
+    <div id="foryou-results" class="grid fy-strip"></div>
   </section>
 
   <!-- TASTE: teach · picker · labels · manage -->
@@ -546,6 +542,9 @@
             <div><label class="check"><input type="checkbox" id="cur-auto-leg" /> Saving a moment makes its scene Légendaire</label>
               <div class="muted small">Applies to Unreviewed, Upscale, Merveilleuse, Exceptionnelle and anomaly scenes (never a 1★). Logged in Activity, undoable there. Scenes you saved from before this was on: Catalogue → “Saved → Légendaire”.</div>
               <span id="cur-status" class="dim"></span></div></div>
+          <div class="field"><div class="l"><b>Daily decisions</b><span>For You's set for the day</span></div>
+            <div class="row"><input id="cur-goal" type="number" min="1" max="500" class="num-md" value="20" />
+              <span class="muted small">decisions a day — you can always keep going past it</span></div></div>
           <div class="field"><div class="l"><b>Renamer moves</b><span>after every grade</span></div>
             <div><label class="check"><input type="checkbox" id="cur-follow" checked /> Follow the file when your renamer moves it</label>
               <div class="muted small">After a tier change Peaks watches the scene for a few minutes and updates its stored path the moment Stash reports the move — thumbnails and clips keep working, no Sync needed.</div></div></div>
