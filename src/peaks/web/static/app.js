@@ -64,7 +64,7 @@ function showView(name) {
 // open a page and load what it shows
 function go(name) {
   showView(name);
-  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); }
+  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); }
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
   if (name === "catalogue" && !cat.loaded) openCatalogue();
@@ -641,6 +641,42 @@ $("#btn-fail-list").addEventListener("click", async () => {
     el.hidden = false;
   } catch (e) { toast(e.message, true); }
 });
+$("#btn-fail-clean")?.addEventListener("click", async () => {
+  try {
+    const r = await api("/api/failures/reconcile", { method: "POST" });
+    const why = Object.entries(r.reasons).filter(([, n]) => n).map(([k, n]) => `${n} ${{ deleted: "deleted from Stash",
+      embedded: "embedded since", replaced: "file replaced", no_file: "no file in Stash", gone: "file gone" }[k]}`).join(", ");
+    toast(r.dropped ? `Cleared ${r.dropped} ${r.dropped === 1 ? "entry" : "entries"}: ${why} · ${r.left} still failing` : `Nothing to clear · ${r.left} still failing`);
+    refreshDashboard();
+    if (!$("#fail-list").hidden) { $("#fail-list").hidden = true; $("#btn-fail-list").click(); }
+  } catch (e) { toast(e.message, true); }
+});
+// Activity → Maintenance: zips and empty folders under /data, cleaned on each Sync
+async function loadCleanup(action) {
+  const el = $("#cleanup-status"); if (!el) return;
+  let c;
+  try { c = await api("/api/library/cleanup" + (action ? "?action=" + action : ""), action ? { method: "POST" } : undefined); }
+  catch (e) { el.textContent = e.message; return; }
+  const L = c.last;
+  const what = (x) => `${x.folders.toLocaleString()} empty folder${x.folders === 1 ? "" : "s"} · ${x.zips.toLocaleString()} zip${x.zips === 1 ? "" : "s"}${x.bytes ? " · " + fmtBytes(x.bytes) : ""}`;
+  let html = "";
+  if (!c.on) html = `Off. <button class="btn sm" data-cl="on">Turn on</button>`;
+  else if (!L) html = `Runs at the end of each Sync in <code>${esc(c.root)}</code>. <button class="btn sm" data-cl="preview">Check now</button>`;
+  else if (L.skipped) html = `<span class="warn">⚠ ${esc(L.skipped)}</span> <button class="btn sm" data-cl="preview">Check again</button>`;
+  else if (L.applied) html = `Last cleanup removed ${what(L)}${L.errors.length ? ` · <span class="warn">${L.errors.length} couldn't be removed</span>` : ""}. <button class="btn sm ghost" data-cl="run">Clean up now</button>`;
+  else if (!L.zips && !L.folders) html = `Nothing to clean in <code>${esc(c.root)}</code>.`;
+  else {
+    const sample = L.sample.slice(0, 8).map((x) => `<div class="faint">${x.kind === "zip" ? "🗜" : "📁"} ${esc(x.path)}</div>`).join("");
+    html = `Found ${what(L)}${c.approved ? "" : " — first time, so nothing was deleted yet"}.${sample}
+      ${c.approved ? `<button class="btn sm" data-cl="run">Clean up now</button>` : `<button class="btn pri sm" data-cl="approve">Approve &amp; delete — then automatic on every Sync</button>`}`;
+  }
+  if (c.on) html += ` <button class="btn sm ghost" data-cl="off" title="Stop cleaning up on Sync">Turn off</button>`;
+  el.innerHTML = html;
+  el.querySelectorAll("[data-cl]").forEach((b) => b.onclick = () => {
+    if (b.dataset.cl === "approve" && !confirm(`Delete ${what(L)} under ${c.root}?\n\nZip files and empty folders are removed for good. After this, every Sync cleans up automatically (turn it off here any time).`)) return;
+    loadCleanup(b.dataset.cl);
+  });
+}
 wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
   const tag = $("#score-tag").value.trim();
   const write = $("#score-write").checked;
@@ -2496,6 +2532,7 @@ function tdPlay(x) {
   tdStopVideo();
   const ms = (x.moments || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
   td.moments = ms.length ? ms.map((m) => m.t) : [0];
+  td.streams = ms.map((m) => m.stream);          // each moment's own stream (works when Stash transcodes)
   td.mi = 0;
   td.still = ms[0] && ms[0].thumb ? ms[0].thumb : `/api/scene/${encodeURIComponent(x.scene_id)}/cover`;
   const cover = `/api/scene/${encodeURIComponent(x.scene_id)}/cover`;
@@ -2509,29 +2546,47 @@ function tdPlay(x) {
 }
 function tdStart(i = 0) {
   const x = td.queue[0]; if (!x) return;
-  const v = $("#td-video");
   td.mi = Math.max(0, Math.min(i, td.moments.length - 1));
   $("#td-still").hidden = true;
+  const v = $("#td-video");
   v.hidden = false; v.poster = td.still || "";
-  $("#td-spin").hidden = false;
   $("#td-dots").innerHTML = td.moments.length > 1 ? td.moments.map((_, k) => `<i data-i="${k}" class="${k === td.mi ? "on" : ""}"></i>`).join("") : "";
   $("#td-dots").querySelectorAll("i").forEach((d) => d.onclick = () => tdJump(+d.dataset.i - td.mi));
-  v.onplaying = () => { $("#td-spin").hidden = true; };
-  v.onwaiting = () => { $("#td-spin").hidden = false; };
-  if (v.dataset.sid !== x.scene_id) {
-    v.dataset.sid = x.scene_id;
-    v.src = x.stream;
-    v.onloadedmetadata = () => { v.currentTime = td.moments[td.mi]; v.play().catch(() => {}); };
-  } else { v.currentTime = td.moments[td.mi]; v.play().catch(() => {}); }
+  tdLoadMoment();
   clearInterval(td.hop);
   td.hop = setInterval(() => { if (!v.paused) tdJump(1); }, 12000);
+}
+// load one moment and play it. Direct play serves the whole file (seek to the
+// moment); a transcode serves a stream that starts AT the moment (play from 0) —
+// told apart by its length, as the megaboard does.
+function tdLoadMoment() {
+  const x = td.queue[0]; if (!x) return;
+  const v = $("#td-video"), t = td.moments[td.mi] || 0;
+  const url = td.streams[td.mi] || x.stream;
+  $("#td-spin").hidden = false; $("#td-spin").textContent = "loading…";
+  v.onplaying = () => { $("#td-spin").hidden = true; };
+  v.onwaiting = () => { $("#td-spin").hidden = false; };
+  v.onerror = () => {
+    $("#td-spin").hidden = false;
+    $("#td-spin").innerHTML = 'Couldn\'t play this here — <a href="#" id="td-openrv">open in Review</a>';
+    $("#td-openrv")?.addEventListener("click", (e) => { e.preventDefault(); $("#td-open")?.click(); });
+  };
+  v.onloadedmetadata = () => {
+    const full = x.duration ? v.duration >= 0.9 * x.duration : !isFinite(v.duration) ? false : v.duration > t + 30;
+    if (full && t) { try { v.currentTime = t; } catch { /* not seekable: plays from the start */ } }
+    v.play().catch(() => {});
+  };
+  v.preload = "auto";
+  v.src = url;
+  v.load();
+  v.play().catch(() => {});        // the click is the user gesture; loading starts now
+  $("#td-dots").querySelectorAll("i").forEach((d, k) => d.classList.toggle("on", k === td.mi));
 }
 function tdJump(step) {
   if (!td.moments.length) return;
   if ($("#td-video").hidden) return tdStart(Math.max(0, step > 0 ? 0 : td.moments.length - 1));
   td.mi = (td.mi + step + td.moments.length) % td.moments.length;
-  const v = $("#td-video"); v.currentTime = td.moments[td.mi];
-  $("#td-dots").querySelectorAll("i").forEach((d, i) => d.classList.toggle("on", i === td.mi));
+  tdLoadMoment();
 }
 async function tdAnswer(grade) {
   const x = td.queue[0]; if (!x || !grade) return;
@@ -3859,6 +3914,9 @@ async function pollJobTray() {
   const kinds = new Set(running.map((j) => j.kind));
   const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync", "warmup"];
   if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || kinds.has("ingest")) refreshSidebar();
+  if ((pollJobTray.prev || []).includes("sync") && !kinds.has("sync") && $("#activity")?.classList.contains("active")) {
+    loadCleanup(); loadRenamerMoves();     // a Sync just finished: show what it tidied
+  }
   pollJobTray.prev = [...kinds];
   const badge = $("#nav-ct-jobs");
   if (badge) { badge.hidden = !running.length; badge.textContent = running.length || ""; }

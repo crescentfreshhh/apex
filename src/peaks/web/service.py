@@ -654,9 +654,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin):
         # log so the count reaches 0 on its own (they're gone from `scanned` too,
         # so they're never re-attempted).
         try:
-            pruned = self.prune_dead_failures()
+            rec = self.reconcile_failures()
+            pruned = rec["dropped"]
             if pruned:
-                log(f"cleaned up {pruned} deleted scene(s) from the failure log")
+                log(f"cleaned up {pruned} failure-log entr{'y' if pruned == 1 else 'ies'} that can't matter "
+                    f"any more ({', '.join(f'{v} {k}' for k, v in rec['reasons'].items() if v)})")
                 stats["failures_pruned"] = pruned
         except Exception:  # noqa: BLE001 — cleanup is best-effort, never fail the embed
             pass
@@ -1490,31 +1492,100 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin):
         if total["moved"]:
             log("moved = files renamed or moved since they were embedded (e.g. by your renamer "
                 "after grading) — stored paths updated, nothing re-embedded")
+        # failures that can't matter any more (deleted, replaced, gone…)
+        try:
+            rec = self.reconcile_failures()
+            total["failures_cleared"] = rec["dropped"]
+            if rec["dropped"]:
+                log(f"cleared {rec['dropped']} failure-log entr{'y' if rec['dropped'] == 1 else 'ies'} "
+                    f"that can't matter any more")
+        except Exception as exc:  # noqa: BLE001 — never fail a Sync on this
+            log(f"  (couldn't tidy the failure log: {exc})")
+        # zips and empty folders under the library root
+        cs = self.cleanup_settings()
+        if cs["on"]:
+            try:
+                c = self.cleanup_library_root(apply=cs["approved"], log=log)
+                total["cleanup"] = {k: c[k] for k in ("applied", "zips", "folders", "bytes", "skipped")}
+                if c["skipped"]:
+                    log(f"cleanup skipped: {c['skipped']}")
+                elif c["applied"]:
+                    log(f"cleanup: removed {c['folders']} empty folder(s) and {c['zips']} zip(s)")
+                elif c["zips"] or c["folders"]:
+                    log(f"cleanup: found {c['folders']} empty folder(s) and {c['zips']} zip(s) — "
+                        "approve once in Activity → Maintenance to delete them on every Sync")
+            except Exception as exc:  # noqa: BLE001
+                log(f"  (cleanup failed: {exc})")
         return total
 
     def prune_dead_failures(self) -> int:
-        """Drop failure-log entries whose scene has been DELETED from Stash — those
-        can never embed, so they'd otherwise wedge the count forever. Asks Stash
-        which of the failed `scene_id`s still exist and resolves the rest. Returns
-        the number pruned. If the Stash check can't be made (outage), prunes
-        nothing — a scene that's only transiently unreachable is never dropped."""
+        """How many failure-log entries `reconcile_failures` dropped (kept for
+        older callers)."""
+        return self.reconcile_failures()["dropped"]
+
+    def reconcile_failures(self) -> dict:
+        """Drop failure-log entries that can never matter again, so the count
+        comes down on its own. An entry goes when:
+          deleted   — its scene is gone from Stash
+          embedded  — its scene is embedded now (e.g. under a replaced file's key)
+          replaced  — Stash's file for the scene has a different fingerprint now
+          no_file   — Stash has the scene but no file for it
+          gone      — the recorded file isn't on disk (while its folder is visible)
+        If Stash can't be reached, only the on-disk check runs — a scene that is
+        only transiently unreachable is never dropped for being "deleted"."""
+        import os
+
         from ..failures import failure_log_for
 
         flog = failure_log_for(self.cfg)
         entries = flog.entries()
-        want = [e.get("scene_id") for e in entries if e.get("scene_id")]
-        if not want:
-            return 0
+        reasons = {"deleted": 0, "embedded": 0, "replaced": 0, "no_file": 0, "gone": 0}
+        if not entries:
+            return {"dropped": 0, "reasons": reasons, "left": 0}
+        want = [str(e["scene_id"]) for e in entries if e.get("scene_id")]
+        alive: set[str] | None = None
+        details: dict = {}
+        if want:
+            try:
+                alive = self.client().existing_scene_ids(want)
+            except Exception:  # noqa: BLE001 — Stash down: no Stash-based drops
+                alive = None
+            if alive is not None:
+                try:
+                    details = self.client().scene_details(sorted(alive))
+                except Exception:  # noqa: BLE001 — older client / blip: skip the file checks
+                    details = {}
+        embedded: set[str] = set()
         try:
-            alive = self.client().existing_scene_ids(want)
-        except Exception:  # noqa: BLE001 — Stash down: don't prune anything
-            return 0
-        pruned = 0
+            cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+            for m in cache.models():
+                if m:
+                    embedded |= {str(x.get("scene_id")) for x in self.index(m).key_meta.values()
+                                 if x.get("scene_id") is not None}
+        except Exception:  # noqa: BLE001
+            pass
+        drop: dict[str, str] = {}
         for e in entries:
-            sid = e.get("scene_id")
-            if sid is not None and str(sid) not in alive and flog.resolve(e["key"]):
-                pruned += 1
-        return pruned
+            key, sid, path = e["key"], (str(e["scene_id"]) if e.get("scene_id") else None), e.get("path")
+            why = None
+            if sid and alive is not None and sid not in alive:
+                why = "deleted"
+            elif sid and sid in embedded:
+                why = "embedded"
+            elif sid and sid in details:
+                d = details[sid] or {}
+                if not d.get("path"):
+                    why = "no_file"
+                elif d.get("fingerprint") and d["fingerprint"] != key:
+                    why = "replaced"
+            if why is None and path and os.path.isdir(os.path.dirname(path)) and not os.path.exists(path):
+                why = "gone"
+            if why:
+                drop[key] = why
+        flog.resolve_many(drop)
+        for why in drop.values():
+            reasons[why] += 1
+        return {"dropped": len(drop), "reasons": reasons, "left": len(flog)}
 
     def run_fix(self, job=None, limit: int = 0, dry_run: bool = False) -> dict:
         """Retry scenes recorded in the failure log through a fallback ladder.

@@ -1532,6 +1532,32 @@ def create_app(cfg=None):
     def today_skip(scene_id: str):
         return service.today_mark(scene_id, skip=True)
 
+    @app.post("/api/failures/reconcile")
+    def failures_reconcile():
+        """Drop failure-log entries that can't matter any more (deleted, replaced, gone…)."""
+        return service.reconcile_failures()
+
+    @app.get("/api/library/cleanup")
+    def library_cleanup_status():
+        return service.cleanup_status()
+
+    @app.post("/api/library/cleanup")
+    def library_cleanup(action: str = "preview"):
+        """preview · approve (enable automatic cleanup on Sync, and run it now) ·
+        run (delete now if approved, else preview) · on / off (the Sync step)."""
+        if action == "approve":
+            service.save_cleanup_settings(approved=True, on=True)
+            service.cleanup_library_root(apply=True)
+        elif action == "run":
+            service.cleanup_library_root(apply=service.cleanup_settings()["approved"])
+        elif action in ("on", "off"):
+            service.save_cleanup_settings(on=action == "on")
+        elif action == "preview":
+            service.cleanup_library_root(apply=False)
+        else:
+            raise HTTPException(400, "unknown action")
+        return service.cleanup_status()
+
     @app.get("/api/library/moves")
     def renamer_moves():
         """Files your renamer moved after a tier change, followed automatically."""

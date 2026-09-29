@@ -303,3 +303,51 @@ def test_run_embed_prunes_dead_failures_at_end(tmp_path, monkeypatch):
 
     svc.run_embed()
     assert flog.keys() == set()    # deleted-scene failure auto-pruned at end of embed
+
+
+class _DetailClient(_FakeClient):
+    """Stash that also reports each live scene's current file."""
+
+    def __init__(self, gone=frozenset(), files=None):
+        super().__init__(gone)
+        self.files = files or {}
+
+    def scene_details(self, ids):
+        return {i: self.files.get(i, {"path": f"/v/{i}.mp4", "fingerprint": f"k{i}"}) for i in ids}
+
+
+def test_reconcile_failures_drops_every_hopeless_entry(tmp_path):
+    svc, cfg = _service(tmp_path)
+    here = tmp_path / "lib"
+    here.mkdir()
+    (here / "still.mp4").write_bytes(b"x")
+    client = _DetailClient(gone={"2"}, files={
+        "3": {"path": "/v/3-new.mp4", "fingerprint": "k3-new"},   # the file was replaced
+        "4": {"path": None, "fingerprint": None},                  # Stash has no file for it
+        "6": {"path": str(here / "still.mp4"), "fingerprint": "k6"},
+    })
+    svc.client = lambda: client
+    flog = failure_log_for(cfg)
+    flog.record("k1", "1", "/v/1.mp4", error="x")                # still a real failure
+    flog.record("k2", "2", "/v/2.mp4", error="x")                # deleted from Stash
+    flog.record("k3", "3", "/v/3.mp4", error="x")                # replaced
+    flog.record("k4", "4", "/v/4.mp4", error="x")                # no file
+    flog.record("k5", None, str(here / "gone.mp4"), error="x")   # old entry, file deleted on disk
+    flog.record("k6", "6", str(here / "still.mp4"), error="x")   # file there, still failing
+    r = svc.reconcile_failures()
+    assert r["reasons"] == {"deleted": 1, "embedded": 0, "replaced": 1, "no_file": 1, "gone": 1}
+    assert r["dropped"] == 4 and r["left"] == 2 and flog.keys() == {"k1", "k6"}
+
+
+def test_reconcile_keeps_stash_based_entries_when_stash_is_down(tmp_path):
+    svc, cfg = _service(tmp_path)
+
+    def _boom():
+        raise RuntimeError("stash down")
+
+    svc.client = _boom
+    flog = failure_log_for(cfg)
+    flog.record("k7", "7", "/v/7.mp4", error="x")                # folder not visible: kept
+    flog.record("k8", None, str(tmp_path / "missing.mp4"), error="x")   # on-disk check still works
+    r = svc.reconcile_failures()
+    assert flog.keys() == {"k7"} and r["reasons"]["gone"] == 1

@@ -346,6 +346,110 @@ class LibraryMixin:
                 "watching": len(self.__dict__.get("_path_watch", {})),
                 "unresolved": list(self._unresolved_moves().values())[-20:]}
 
+    # --- cleaning the library root: zips and empty folders (on Sync) ---------------
+    # Your image-set zips and the empty folders a renamer leaves behind. Only
+    # *.zip files are deleted and only folders with nothing left in them are
+    # removed (os.rmdir — it refuses anything that isn't empty). The root itself
+    # is never removed; a missing, empty (unmounted?) or read-only root is left
+    # alone and the reason reported. The first run only lists what it would do;
+    # after you approve it once, every Sync cleans up automatically.
+
+    def _cleanup_root(self) -> Path:
+        import os
+
+        return Path(os.environ.get("PEAKS_CLEANUP_ROOT", "/data") or "/data")
+
+    def cleanup_settings(self) -> dict:
+        s = self._settings()
+        return {"on": bool(s.get("cleanup_on_sync", True)), "approved": bool(s.get("cleanup_approved", False)),
+                "root": str(self._cleanup_root())}
+
+    def save_cleanup_settings(self, on: bool | None = None, approved: bool | None = None) -> dict:
+        import json
+
+        s = dict(self._settings())
+        if on is not None:
+            s["cleanup_on_sync"] = bool(on)
+        if approved is not None:
+            s["cleanup_approved"] = bool(approved)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.cleanup_settings()
+
+    def cleanup_library_root(self, apply: bool = False, log=None) -> dict:
+        """Find (and with `apply`, delete) every *.zip under the root, then every
+        folder left with nothing in it, deepest first."""
+        import os
+
+        log = log or (lambda *_: None)
+        root = self._cleanup_root()
+        out = {"root": str(root), "applied": False, "zips": 0, "folders": 0, "bytes": 0,
+               "sample": [], "errors": [], "skipped": None, "at": time.time()}
+        if not root.is_absolute() or not root.is_dir():
+            out["skipped"] = f"{root} isn't there"
+        else:
+            try:
+                has_any = any(root.iterdir())
+            except OSError as exc:
+                has_any, out["skipped"] = False, f"can't read {root}: {exc}"
+            if not has_any and not out["skipped"]:
+                out["skipped"] = f"{root} is empty — is the library mounted?"
+        if out["skipped"]:
+            self._last_cleanup = out
+            return out
+        zips: list[Path] = []
+        empties: set[Path] = set()
+        for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+            here = Path(dirpath)
+            kept = [f for f in filenames if not f.lower().endswith(".zip")]
+            for f in filenames:
+                if f.lower().endswith(".zip"):
+                    zips.append(here / f)
+            # empty once its zips go: no other file, and every subfolder is empty too
+            if here != root and not kept and all((here / d) in empties for d in dirnames):
+                empties.add(here)
+        for z in zips:
+            try:
+                out["bytes"] += z.stat().st_size
+            except OSError:
+                pass
+        out["zips"], out["folders"] = len(zips), len(empties)
+        out["sample"] = ([{"kind": "zip", "path": str(z)} for z in zips[:40]]
+                         + [{"kind": "folder", "path": str(d)} for d in sorted(empties)[:40]])
+        if apply and (zips or empties):
+            if not os.access(root, os.W_OK):
+                out["skipped"] = (f"Peaks can't write to {root} — set the Media path to read-write "
+                                  "in the container settings")
+                self._last_cleanup = out
+                return out
+            done_z = done_d = freed = 0
+            for z in zips:
+                try:
+                    size = z.stat().st_size
+                    z.unlink()
+                    done_z += 1
+                    freed += size
+                    self.action_log().append("cleanup", path=str(z), detail="deleted zip (image set)", size=size)
+                    log(f"  - deleted zip {z}")
+                except OSError as exc:
+                    out["errors"].append({"path": str(z), "error": str(exc)})
+            for d in sorted(empties, key=lambda p: len(p.parts), reverse=True):
+                try:
+                    d.rmdir()                       # refuses unless truly empty
+                    done_d += 1
+                    self.action_log().append("cleanup", path=str(d), detail="removed empty folder")
+                    log(f"  - removed empty folder {d}")
+                except OSError as exc:
+                    out["errors"].append({"path": str(d), "error": str(exc)})
+            out.update(applied=True, zips=done_z, folders=done_d, bytes=freed)
+        self._last_cleanup = out
+        return out
+
+    def cleanup_status(self) -> dict:
+        return {**self.cleanup_settings(), "last": self.__dict__.get("_last_cleanup")}
+
     # --- bulk grading ------------------------------------------------------------
 
     def grade_bulk(self, job, scene_ids: list[str], grade: str) -> dict:
@@ -442,6 +546,13 @@ class LibraryMixin:
         for m in models:
             self.invalidate_index(m)
         gone = {r["scene_id"] for r in rows}
+        try:                                        # deleted scenes can't fail to embed any more
+            from ..failures import failure_log_for
+
+            failure_log_for(self.cfg).resolve_many(
+                r.get("fingerprint") or path_key(r.get("path") or r["scene_id"]) for r in rows)
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
         try:
             self.exposure().drop(gone)              # the board's record of them, too
         except Exception:  # noqa: BLE001 — best-effort

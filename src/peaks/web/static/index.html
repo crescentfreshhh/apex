@@ -454,6 +454,7 @@
             <button id="btn-fix" class="primary">Retry failed</button>
             <button id="btn-fix-stop" class="ghost" hidden>Stop</button>
             <button id="btn-fail-list" class="ghost">Show list</button>
+            <button id="btn-fail-clean" class="ghost" title="Drop entries for scenes that are deleted, replaced or whose file is gone — they can never embed">🧹 Clean up</button>
           </div>
           <pre id="fail-list" class="log" hidden></pre>
           <pre id="fix-log" class="log" hidden></pre>
@@ -465,6 +466,8 @@
             <div class="mrow"><div><b>Sync with Stash</b><span>refresh moved scenes, drop deleted ones</span></div>
               <div class="row"><label class="check"><input type="checkbox" id="sync-prune" checked /> prune</label>
                 <button id="btn-sync" class="btn sm">↻ Sync</button><span id="sync-status" class="dim"></span></div></div>
+            <div class="mrow"><div><b>Clean up /data</b><span>on every Sync: delete zip image sets and folders left empty</span></div>
+              <div id="cleanup-status" class="dim small"></div></div>
             <div class="mrow"><div><b>Renamer moves</b><span>after a tier change, Peaks follows the file your renamer moves — no Sync needed</span></div>
               <div id="moves-status" class="dim small"></div></div>
             <div class="mrow"><div><b>Write peak markers</b><span>score scenes and add markers in Stash — dry-run first</span></div>

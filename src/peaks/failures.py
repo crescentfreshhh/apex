@@ -97,6 +97,18 @@ class FailureLog:
                 return True
         return False
 
+    def resolve_many(self, keys) -> int:
+        """Drop several entries in one write. Returns how many were there."""
+        keys = set(keys)
+        with self._lock:
+            data = self._load()
+            hit = [k for k in keys if k in data]
+            for k in hit:
+                del data[k]
+            if hit:
+                self._write(data)
+        return len(hit)
+
     def clear(self) -> int:
         with self._lock:
             n = len(self._load())
