@@ -2453,6 +2453,7 @@ function tdProgress() {
 function tdStopVideo() {
   clearInterval(td.hop); td.hop = null;
   const v = $("#td-video"); v.pause(); v.removeAttribute("src"); v.load();
+  v.hidden = true; v.dataset.sid = ""; $("#td-spin").hidden = true;
 }
 function tdShow() {
   tdProgress();
@@ -2482,31 +2483,52 @@ function tdShow() {
       <button class="btn sm ghost" id="td-undo" ${td.answered.length ? "" : "disabled"}>Undo <kbd>U</kbd></button>
       <button class="btn sm ghost" id="td-open" title="Open in the Review player">Open in Review</button>
     </div>
-    <div class="td-keys">1–5 grade · Enter accept · S skip · U undo · Space pause · M sound · ←/→ moments</div>`;
+    <div class="td-keys">1–5 grade · Enter accept · S skip · U undo · P / click the still: play peaks · Space pause · M sound · ←/→ moments</div>`;
   $("#td-body").querySelectorAll(".td-grades button").forEach((b) => b.onclick = () => tdAnswer(b.dataset.g));
   $("#td-accept")?.addEventListener("click", () => tdAnswer(x.pick));
   $("#td-skip").onclick = tdSkip; $("#td-undo").onclick = tdUndo;
   $("#td-open").onclick = () => { go("catalogue"); applyCatParams({ q: x.title || "" }); };
   tdPlay(x);
 }
-// the scene's best moments, best first, hopping every 12 s (muted until you ask)
+// a still of the scene first (its best moment); click it — or a moment, or P —
+// to play its peak moments, best first, hopping every 12 s (muted until M)
 function tdPlay(x) {
-  const v = $("#td-video");
-  clearInterval(td.hop);
-  td.moments = (x.moments || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0)).map((m) => m.t);
-  if (!td.moments.length) td.moments = [0];
+  tdStopVideo();
+  const ms = (x.moments || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+  td.moments = ms.length ? ms.map((m) => m.t) : [0];
   td.mi = 0;
-  $("#td-dots").innerHTML = td.moments.length > 1 ? td.moments.map((_, i) => `<i data-i="${i}" class="${i ? "" : "on"}"></i>`).join("") : "";
+  td.still = ms[0] && ms[0].thumb ? ms[0].thumb : `/api/scene/${encodeURIComponent(x.scene_id)}/cover`;
+  const cover = `/api/scene/${encodeURIComponent(x.scene_id)}/cover`;
+  const st = $("#td-still");
+  st.hidden = false;
+  st.innerHTML = `<img class="td-still-img" src="${td.still}" alt="" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='${cover}'}" />
+    <div class="td-play"><span>▶</span>Play its peak moments</div>
+    ${ms.length > 1 ? `<div class="td-thumbs">${ms.map((m, i) => `<img data-i="${i}" src="${m.thumb}" title="${fmt(m.t)}" alt="" onerror="this.remove()" />`).join("")}</div>` : ""}`;
+  st.onclick = (e) => { const t = e.target.closest(".td-thumbs img"); tdStart(t ? +t.dataset.i : 0); };
+  $("#td-dots").innerHTML = "";
+}
+function tdStart(i = 0) {
+  const x = td.queue[0]; if (!x) return;
+  const v = $("#td-video");
+  td.mi = Math.max(0, Math.min(i, td.moments.length - 1));
+  $("#td-still").hidden = true;
+  v.hidden = false; v.poster = td.still || "";
+  $("#td-spin").hidden = false;
+  $("#td-dots").innerHTML = td.moments.length > 1 ? td.moments.map((_, k) => `<i data-i="${k}" class="${k === td.mi ? "on" : ""}"></i>`).join("") : "";
   $("#td-dots").querySelectorAll("i").forEach((d) => d.onclick = () => tdJump(+d.dataset.i - td.mi));
+  v.onplaying = () => { $("#td-spin").hidden = true; };
+  v.onwaiting = () => { $("#td-spin").hidden = false; };
   if (v.dataset.sid !== x.scene_id) {
     v.dataset.sid = x.scene_id;
     v.src = x.stream;
-    v.onloadedmetadata = () => { v.currentTime = td.moments[0]; v.play().catch(() => {}); };
-  } else { v.currentTime = td.moments[0]; v.play().catch(() => {}); }
+    v.onloadedmetadata = () => { v.currentTime = td.moments[td.mi]; v.play().catch(() => {}); };
+  } else { v.currentTime = td.moments[td.mi]; v.play().catch(() => {}); }
+  clearInterval(td.hop);
   td.hop = setInterval(() => { if (!v.paused) tdJump(1); }, 12000);
 }
 function tdJump(step) {
   if (!td.moments.length) return;
+  if ($("#td-video").hidden) return tdStart(Math.max(0, step > 0 ? 0 : td.moments.length - 1));
   td.mi = (td.mi + step + td.moments.length) % td.moments.length;
   const v = $("#td-video"); v.currentTime = td.moments[td.mi];
   $("#td-dots").querySelectorAll("i").forEach((d, i) => d.classList.toggle("on", i === td.mi));
@@ -2555,6 +2577,7 @@ async function tdShowTeach() {
   let d; try { d = await api("/api/foryou/next?" + new URLSearchParams(pparam())); } catch { d = null; }
   td.teach = d && d.item;
   if (!td.teach) { td.sinceTeach = 0; return tdShow(); }
+  $("#td-still").hidden = true;
   const t = $("#td-teach"); t.hidden = false;
   t.innerHTML = `<img src="${td.teach.thumb}" alt="" />`;
   $("#td-dots").innerHTML = "";
@@ -2624,7 +2647,8 @@ document.addEventListener("keydown", (e) => {
   else if (k === "enter" && x && x.pick) { e.preventDefault(); tdAnswer(x.pick); }
   else if (k === "s") { e.preventDefault(); tdSkip(); }
   else if (k === "u") { e.preventDefault(); tdUndo(); }
-  else if (k === " ") { e.preventDefault(); v.paused ? v.play().catch(() => {}) : v.pause(); }
+  else if (k === "p") { e.preventDefault(); if (v.hidden) tdStart(0); else { tdStopVideo(); if (td.queue[0]) tdPlay(td.queue[0]); } }
+  else if (k === " ") { e.preventDefault(); if (v.hidden) tdStart(0); else if (v.paused) v.play().catch(() => {}); else v.pause(); }
   else if (k === "m") { e.preventDefault(); $("#td-sound").click(); }
   else if (k === "arrowright") { e.preventDefault(); tdJump(1); }
   else if (k === "arrowleft") { e.preventDefault(); tdJump(-1); }

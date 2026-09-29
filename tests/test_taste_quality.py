@@ -997,13 +997,17 @@ def test_bulk_grades_are_followed_in_batched_reads(svc, monkeypatch):
     st = svc.client()
     calls = []
     real = st.scene_details
-    monkeypatch.setattr(st, "scene_details", lambda ids: (calls.append(len(ids)), real(ids))[1])
-    svc.grade_bulk(None, [str(i) for i in range(30, 50)], "merveilleuse")
+    monkeypatch.setattr(st, "scene_details", lambda ids: (calls.append(set(map(str, ids))), real(ids))[1])
+    graded = {str(i) for i in range(30, 50)}
+    svc.grade_bulk(None, sorted(graded), "merveilleuse")
     for i in range(30, 50):
         st.s[str(i)]["path"] = f"/data/Merveilleuse/{i}.mp4"
     calls.clear()
     assert svc._path_watch_tick(now=__import__("time").monotonic() + 1000) == 20
-    assert calls == [20]                                        # one read for all twenty
+    # (background readers — a catalogue refresh, a retrain — may also call Stash:
+    # count only reads of the watched scenes)
+    watched_reads = [c for c in calls if c & graded]
+    assert watched_reads == [graded]                            # one read for all twenty
 
 
 def test_unmoved_scenes_stop_being_watched_and_hidden_moves_are_listed(svc, monkeypatch, tmp_path):
