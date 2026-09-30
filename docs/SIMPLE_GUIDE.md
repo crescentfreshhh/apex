@@ -287,6 +287,22 @@ profiles** — new profiles only need pictures and a scoring pass, which takes
 minutes. Delete one profile's markers without touching the others:
 `peaks clear --tag apex-heels --write`.
 
+## Backups (and moving to a new server)
+
+Peaks backs up everything it knows once a week — your grades log, taste labels
+and models, settings, playlists, performer pictures and every embedding — to
+`/data/.peaks-backups`, i.e. inside your library share on the array (so the
+Media path must be **read-write**). Each snapshot is complete, but files that
+didn't change since the last one are shared, so a week usually costs only what's
+new. The library cleanup never touches that folder.
+
+- **Settings → Backup & restore**: schedule (day, time, how many to keep),
+  **Back up now**, and each snapshot's **Restore…** (a safety snapshot of how
+  things are now is taken first; no restart needed) and **⬇ Small** (everything
+  except the embeddings, as one small file for an off-box copy).
+- **New server**: map the same library share to `/data` (read-write), open
+  Settings → Backup & restore and restore the newest snapshot — no re-embedding.
+
 ## Cheat sheet (in the container console)
 
 | I want to... | Type |

@@ -274,7 +274,7 @@ def create_app(cfg=None):
     import secrets
     import time as _time
 
-    from fastapi import Cookie, FastAPI, Header, HTTPException, Query, Request
+    from fastapi import Body, Cookie, FastAPI, Header, HTTPException, Query, Request
     from fastapi.responses import (
         FileResponse,
         HTMLResponse,
@@ -1532,6 +1532,60 @@ def create_app(cfg=None):
     def today_skip(scene_id: str):
         return service.today_mark(scene_id, skip=True)
 
+    @app.get("/api/backup")
+    def backup_status():
+        return service.backup_status()
+
+    @app.post("/api/backup")
+    def backup_settings_or_run(run: bool = False, backup_on: bool | None = None, backup_day: int | None = None,
+                               backup_hour: int | None = None, backup_minute: int | None = None,
+                               backup_keep: int | None = None):
+        """Save the schedule, or (run=true) take a snapshot now as a job."""
+        if run:
+            try:
+                return jobs.start("backup", service.run_backup).as_dict()
+            except RuntimeError as exc:
+                raise HTTPException(409, str(exc))
+        return service.save_backup_settings(backup_on=backup_on, backup_day=backup_day, backup_hour=backup_hour,
+                                            backup_minute=backup_minute, backup_keep=backup_keep)
+
+    @app.get("/api/backup/{name}/preview")
+    def backup_snapshot_preview(name: str):
+        try:
+            return service.backup_restore_snapshot_preview(name)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.post("/api/backup/{name}/restore")
+    def backup_snapshot_restore(name: str, confirm: bool = False, grades: bool = False):
+        try:
+            service.backup_restore_snapshot_preview(name)          # exists?
+            return jobs.start("restore", lambda j: service.backup_restore(j, name, confirm=confirm,
+                                                                          grades=grades)).as_dict()
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.get("/api/backup/{name}/download")
+    def backup_snapshot_download(name: str):
+        from fastapi.responses import FileResponse
+
+        try:
+            path = service.export_small_backup(name)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(404, str(exc))
+        return FileResponse(path, media_type="application/gzip", filename=path.name)
+
+    @app.post("/api/backup/upload")
+    def backup_upload(data: bytes = Body(..., media_type="application/gzip")):
+        try:
+            return service.import_small_backup(data)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
     @app.post("/api/failures/reconcile")
     def failures_reconcile():
         """Drop failure-log entries that can't matter any more (deleted, replaced, gone…)."""
@@ -1789,6 +1843,12 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 if not busy and service.measure_due():
                     jobs.start("taste-measure", lambda j: service.train_taste(mode="full", job=j))
             except Exception:  # noqa: BLE001 — never let the scheduler die
+                pass
+            try:   # the weekly backup — waits for an embed / ingest to finish
+                busy = any(jobs.running(k) for k in ("embed", "ingest", "backup", "restore"))
+                if not busy and service.backup_due():
+                    jobs.start("backup", service.run_backup)
+            except Exception:  # noqa: BLE001
                 pass
             if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
                 if jobs.running("embed") is None:

@@ -351,7 +351,8 @@ class LibraryMixin:
     # *.zip files are deleted and only folders with nothing left in them are
     # removed (os.rmdir — it refuses anything that isn't empty). The root itself
     # is never removed; a missing, empty (unmounted?) or read-only root is left
-    # alone and the reason reported. The first run only lists what it would do;
+    # alone and the reason reported. Peaks' backup folder (and any folder holding
+    # a .peaks-keep marker) is never entered. The first run only lists what it would do;
     # after you approve it once, every Sync cleans up automatically.
 
     def _cleanup_root(self) -> Path:
@@ -401,14 +402,27 @@ class LibraryMixin:
             return out
         zips: list[Path] = []
         empties: set[Path] = set()
-        for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        # never enter Peaks' own backup folder, or any folder marked .peaks-keep
+        protected = set()
+        try:
+            protected.add(Path(self.backup_root()).resolve())
+        except Exception:  # noqa: BLE001
+            pass
+        walked = []
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
             here = Path(dirpath)
+            every = list(dirnames)
+            dirnames[:] = [d for d in dirnames
+                           if (here / d).resolve() not in protected and not (here / d / ".peaks-keep").exists()]
+            walked.append((here, every, filenames))
+        for here, every, filenames in reversed(walked):          # children before parents
             kept = [f for f in filenames if not f.lower().endswith(".zip")]
             for f in filenames:
                 if f.lower().endswith(".zip"):
                     zips.append(here / f)
             # empty once its zips go: no other file, and every subfolder is empty too
-            if here != root and not kept and all((here / d) in empties for d in dirnames):
+            # (a protected subfolder is never "empty", so its parent stays)
+            if here != root and not kept and all((here / d) in empties for d in every):
                 empties.add(here)
         for z in zips:
             try:

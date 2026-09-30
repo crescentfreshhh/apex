@@ -531,6 +531,7 @@
         <button data-sec="models">AI models</button>
         <button data-sec="ingest">Ingest</button>
         <button data-sec="display">Display</button>
+        <button data-sec="backup">Backup &amp; restore</button>
       </nav>
       <div class="sets">
         <div class="sec" data-sec="tiers">
@@ -601,6 +602,24 @@
             <div class="row"><select id="sel-clip">
               <option value="ViT-H-14">largest</option>
             </select><span id="models-status" class="dim"></span></div></div>
+        </div>
+        <div class="sec" data-sec="backup" hidden>
+          <h2>Backup &amp; restore</h2>
+          <p class="lead">Everything Peaks knows — grades log, taste, models, settings, playlists, pictures and every embedding — as weekly snapshots in your library share. Unchanged files are shared between snapshots, so a week usually costs only what's new.</p>
+          <div class="field"><div class="l"><b>Where</b><span>on the array, with your library</span></div>
+            <div><div id="bk-where" class="small"></div></div></div>
+          <div class="field"><div class="l"><b>Schedule</b><span>weekly</span></div>
+            <div class="row"><label class="check"><input type="checkbox" id="bk-on" /> Back up every</label>
+              <select id="bk-day"><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option>
+                <option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select>
+              <span class="muted">at</span><input id="bk-time" type="time" value="04:10" />
+              <span class="muted">· keep</span><input id="bk-keep" type="number" min="1" max="52" class="num-sm" value="4" /><span class="muted">snapshots</span>
+              <button id="bk-save" class="btn sm">Save</button></div></div>
+          <div class="field"><div class="l"><b>Now</b><span>takes a few minutes the first time</span></div>
+            <div class="row"><button id="bk-now" class="btn pri sm">Back up now</button><span id="bk-status" class="dim small"></span></div></div>
+          <div class="field"><div class="l"><b>Snapshots</b><span>newest first</span></div>
+            <div><div id="bk-list" class="bk-list"></div>
+              <div class="row" style="margin-top:8px"><label class="btn sm ghost" title="Restore from a small backup file downloaded earlier">⬆ Upload a small backup<input id="bk-upload" type="file" accept=".gz,.tgz,application/gzip" hidden /></label></div></div></div>
         </div>
         <div class="sec" data-sec="display" hidden>
           <h2>Display</h2>

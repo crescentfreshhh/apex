@@ -19,10 +19,11 @@ from ..search import Hit, SearchIndex
 from ..tiers import TIER_WEIGHT, tier_of
 from .library import LibraryMixin
 from .performers import PerformersMixin
+from .backup import BackupMixin
 from .today import TodayMixin
 
 
-class Service(LibraryMixin, PerformersMixin, TodayMixin):
+class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}

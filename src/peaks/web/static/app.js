@@ -93,7 +93,68 @@ function wireTabs(tabsSel, onShow) {
     if (onShow) onShow(t.dataset.tab);
   });
 }
+// --- Settings → Backup & restore -------------------------------------------------------
+async function loadBackup() {
+  let b; try { b = await api("/api/backup"); } catch (e) { $("#bk-where").textContent = e.message; return; }
+  const free = b.free != null ? ` · ${fmtBytes(b.free)} free` : "";
+  $("#bk-where").innerHTML = `<code>${esc(b.root)}</code>${free}<br>` + (b.writable
+    ? `<span class="ok">✓ writable</span>` + (b.links_ok === true ? ` · <span class="ok">✓ hard links working</span> (unchanged files take no extra space)`
+      : b.links_ok === false ? ` · <span class="warn">⚠ hard links not supported here — every snapshot is a full copy</span>` : "")
+    : `<span class="warn">⚠ ${esc(b.reason || "not writable")}</span> — backups are off until this is fixed`);
+  $("#bk-on").checked = !!b.backup_on; $("#bk-day").value = String(b.backup_day);
+  $("#bk-time").value = `${String(b.backup_hour).padStart(2, "0")}:${String(b.backup_minute).padStart(2, "0")}`;
+  $("#bk-keep").value = b.backup_keep; $("#bk-now").disabled = !b.writable;
+  const s = b.snapshots || [];
+  $("#bk-list").innerHTML = s.length ? s.map((x) => `<div class="bk-row" data-name="${esc(x.name)}">
+      <div><b>${esc(new Date((x.created || 0) * 1000).toLocaleString())}</b>${x.label ? ` <span class="faint">· ${esc(x.label)}</span>` : ""}
+        <div class="faint small">${x.files.toLocaleString()} files · ${fmtBytes(x.bytes)} in all · ${fmtBytes(x.new_bytes)} new${x.links_ok ? "" : " · full copy"}</div></div>
+      <span class="grow"></span>
+      <a class="btn sm ghost" href="/api/backup/${encodeURIComponent(x.name)}/download" title="Everything except the embeddings, as one small file">⬇ Small</a>
+      <button class="btn sm" data-bk-restore="${esc(x.name)}">Restore…</button></div>`).join("")
+    : '<span class="faint">No snapshots yet.</span>';
+}
+$("#bk-save")?.addEventListener("click", async () => {
+  const [h, m] = ($("#bk-time").value || "04:10").split(":").map((x) => +x);
+  const qs = new URLSearchParams({ backup_on: $("#bk-on").checked, backup_day: $("#bk-day").value, backup_hour: h, backup_minute: m, backup_keep: $("#bk-keep").value });
+  try { await api("/api/backup?" + qs, { method: "POST" }); toast("Backup schedule saved"); loadBackup(); } catch (e) { toast(e.message, true); }
+});
+$("#bk-now")?.addEventListener("click", async () => {
+  $("#bk-now").disabled = true;
+  try {
+    const job = await api("/api/backup?run=true", { method: "POST" });
+    const j = await waitJob(job.id, (x) => { const p = x.progress || {}; $("#bk-status").textContent = `backing up ${p.done ?? 0}/${p.total ?? "?"}…`; });
+    if (j.status === "error") throw new Error(j.error);
+    const r = j.result || {};
+    $("#bk-status").textContent = `✓ ${r.name}: ${fmtBytes(r.new_bytes || 0)} new, ${(r.linked || 0).toLocaleString()} files unchanged`;
+  } catch (e) { toast(e.message, true); $("#bk-status").textContent = ""; }
+  loadBackup();
+});
+$("#bk-list")?.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-bk-restore]"); if (!b) return;
+  const name = b.dataset.bkRestore;
+  let p; try { p = await api(`/api/backup/${encodeURIComponent(name)}/preview`); } catch (err) { return toast(err.message, true); }
+  const lines = Object.entries(p.parts).map(([k, v]) => `  ${k}: ${v.snapshot.toLocaleString()} files (you have ${v.now.toLocaleString()} now)`).join("\n");
+  if (!confirm(`Restore the snapshot from ${new Date(p.created * 1000).toLocaleString()}?\n\n${lines}\n\nPeaks first takes a safety snapshot of how things are now, then puts this one back (taste, models, settings, playlists, logs, embeddings) and reloads — no restart.`)) return;
+  const grades = confirm("Also re-apply the grades in this snapshot to Stash?\n\nOnly needed for a new or rebuilt Stash. Cancel = leave Stash as it is.");
+  try {
+    const job = await api(`/api/backup/${encodeURIComponent(name)}/restore?confirm=true&grades=${grades}`, { method: "POST" });
+    const j = await waitJob(job.id, () => { $("#bk-status").textContent = "restoring…"; });
+    if (j.status === "error") throw new Error(j.error);
+    toast(`Restored ${(j.result.restored || 0).toLocaleString()} files — safety snapshot ${j.result.safety}`);
+    $("#bk-status").textContent = "";
+  } catch (err) { toast(err.message, true); }
+  loadBackup();
+});
+$("#bk-upload")?.addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const r = await api("/api/backup/upload", { method: "POST", headers: { "content-type": "application/gzip" }, body: await f.arrayBuffer() });
+    toast(`Uploaded as ${r.name} — press Restore on it`); loadBackup();
+  } catch (err) { toast(err.message, true); }
+  e.target.value = "";
+});
 function showSettingsSection(sec) {
+  if (sec === "backup") loadBackup();
   document.querySelectorAll("#set-nav [data-sec]").forEach((b) => b.classList.toggle("on", b.dataset.sec === sec));
   document.querySelectorAll(".sets .sec").forEach((p) => { p.hidden = p.dataset.sec !== sec; });
 }
@@ -3904,7 +3965,7 @@ refreshDashboard();  // conn status + job reattach (runs even though it's not th
 const JOB_LABEL = { embed: "Embedding", ingest: "Ingest", score: "Writing markers", sync: "Syncing",
   fix: "Retrying failed", reel: "Exporting video", playlist: "Building board", library: "Updating Stash",
   dupes: "Finding duplicates", train: "Training taste", "taste-measure": "Measuring taste",
-  warmup: "Starting up" };
+  warmup: "Starting up", backup: "Backing up", restore: "Restoring", "perf-photos": "Performer photos" };
 async function pollJobTray() {
   const tray = $("#job-tray");
   if (!tray || document.hidden) return;

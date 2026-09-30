@@ -643,3 +643,7 @@ html.hide-nums .num { display: none; }
 .td-grades .g-legendaire b { color: var(--leg); }
 .td-grades button.cur { opacity: .8; border-style: dashed; }
 .td-teach[hidden] { display: none; }
+/* Settings → Backup & restore */
+.bk-list { display: flex; flex-direction: column; gap: 6px; }
+.bk-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.num-sm { width: 64px; }
