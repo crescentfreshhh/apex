@@ -1572,6 +1572,21 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin):
                                  if x.get("scene_id") is not None}
         except Exception:  # noqa: BLE001
             pass
+        def _mounted_above(path: str) -> bool:
+            """Is the missing file really gone? Its nearest surviving folder must be
+            a real, non-empty one below / — the file (and maybe its emptied folder)
+            was removed — not an unmounted share where everything looks missing."""
+            d = os.path.dirname(path)
+            while d and not os.path.isdir(d):
+                up = os.path.dirname(d)
+                if up == d:
+                    return False
+                d = up
+            try:
+                return bool(d) and d != os.path.dirname(d) and any(os.scandir(d))
+            except OSError:
+                return False
+
         drop: dict[str, str] = {}
         for e in entries:
             key, sid, path = e["key"], (str(e["scene_id"]) if e.get("scene_id") else None), e.get("path")
@@ -1586,7 +1601,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin):
                     why = "no_file"
                 elif d.get("fingerprint") and d["fingerprint"] != key:
                     why = "replaced"
-            if why is None and path and os.path.isdir(os.path.dirname(path)) and not os.path.exists(path):
+            if why is None and path and not os.path.exists(path) and _mounted_above(path):
                 why = "gone"
             if why:
                 drop[key] = why

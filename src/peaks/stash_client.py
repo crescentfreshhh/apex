@@ -269,6 +269,11 @@ mutation BulkSceneUpdate($input: BulkSceneUpdateInput!) {
 """
 
 
+def _is_not_found(exc: Exception) -> bool:
+    """Stash's error when an id in findScenes(ids:) no longer exists."""
+    return "not found" in str(exc).lower()
+
+
 class StashClient:
     # transient network errors are retried with these sleeps between attempts;
     # a multi-hour embed run pages the scene list lazily and shouldn't die at
@@ -413,8 +418,20 @@ class StashClient:
         # request small and fast. Merged transparently by scene id.
         BATCH = 400
         scenes: list[dict] = []
+        alive: set[str] | None = None
         for i in range(0, len(ids), BATCH):
-            data = self.execute(_SCENE_DETAILS_QUERY, {"ids": ids[i : i + BATCH]})
+            batch = ids[i : i + BATCH]
+            try:
+                data = self.execute(_SCENE_DETAILS_QUERY, {"ids": batch})
+            except StashError as exc:      # one deleted id fails the batch: drop the dead, retry
+                if not _is_not_found(exc):
+                    raise
+                if alive is None:
+                    alive = self.all_scene_ids()
+                batch = [x for x in batch if x in alive]
+                if not batch:
+                    continue
+                data = self.execute(_SCENE_DETAILS_QUERY, {"ids": batch})
             scenes.extend(data["findScenes"]["scenes"])
         from .models import SceneFile
 
@@ -596,8 +613,16 @@ class StashClient:
         ids = [str(i) for i in ids if i]
         if not ids:
             return set()
-        data = self.execute(_SCENES_EXIST_QUERY, {"ids": ids})
-        return {str(s["id"]) for s in data["findScenes"]["scenes"]}
+        # Stash's findScenes(ids:) fails the WHOLE query ("scene with id N not
+        # found") as soon as one id is deleted — exactly the case this is for —
+        # so a miss falls back to the full id list (one light query).
+        try:
+            data = self.execute(_SCENES_EXIST_QUERY, {"ids": ids})
+            return {str(s["id"]) for s in data["findScenes"]["scenes"]}
+        except StashError as exc:
+            if not _is_not_found(exc):
+                raise
+        return set(ids) & self.all_scene_ids()
 
     def scenes_for_performer(self, performer_id: str, limit: int = 500) -> list[str]:
         """Scene ids featuring a performer — powers 'more from this actress'."""

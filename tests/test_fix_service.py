@@ -351,3 +351,42 @@ def test_reconcile_keeps_stash_based_entries_when_stash_is_down(tmp_path):
     flog.record("k8", None, str(tmp_path / "missing.mp4"), error="x")   # on-disk check still works
     r = svc.reconcile_failures()
     assert flog.keys() == {"k7"} and r["reasons"]["gone"] == 1
+
+
+def test_reconcile_drops_a_file_whose_folder_was_removed_but_not_on_an_unmounted_share(tmp_path):
+    svc, cfg = _service(tmp_path)
+    svc.client = lambda: (_ for _ in ()).throw(RuntimeError("stash down"))
+    lib = tmp_path / "data"
+    (lib / "Kept").mkdir(parents=True)
+    (lib / "Kept" / "a.mp4").write_bytes(b"x")
+    empty = tmp_path / "unmounted"
+    empty.mkdir()
+    flog = failure_log_for(cfg)
+    flog.record("g1", None, str(lib / "Old Folder" / "Sub" / "b.mp4"), error="x")   # folder cleaned up too
+    flog.record("g2", None, str(empty / "Scenes" / "c.mp4"), error="x")             # share not mounted
+    r = svc.reconcile_failures()
+    assert flog.keys() == {"g2"} and r["reasons"]["gone"] == 1
+
+
+def test_client_existence_and_details_survive_stash_rejecting_deleted_ids():
+    """Real Stash fails findScenes(ids:) outright when one id is gone."""
+    from peaks.stash_client import StashClient, StashError
+
+    live = {"1", "3"}
+
+    class C(StashClient):
+        def __init__(self):
+            super().__init__(url="http://stash.test")
+
+        def execute(self, query, variables=None):
+            ids = (variables or {}).get("ids")
+            if ids is None:
+                return {"findScenes": {"scenes": [{"id": i} for i in sorted(live)]}}
+            for i in ids:
+                if i not in live:
+                    raise StashError(f"GraphQL errors: scene with id {i} not found")
+            return {"findScenes": {"scenes": [{"id": i, "title": f"T{i}"} for i in ids]}}
+
+    c = C()
+    assert c.existing_scene_ids(["1", "2", "3"]) == {"1", "3"}
+    assert set(c.scene_details(["1", "2", "3"])) == {"1", "3"}
