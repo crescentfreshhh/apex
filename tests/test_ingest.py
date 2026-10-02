@@ -321,3 +321,15 @@ def test_ingest_asks_first_while_an_embed_runs(svc, monkeypatch):
         _wait(client, j.json())
     finally:
         gate.set()
+
+
+def test_ingest_ends_by_removing_approved_same_file_copies(svc, stash):
+    stash.arriving = {}
+    stash.s["1"]["files"] = [{"id": "a", "path": "/data/x/None_2.mp4", "size": 7, "oshash": "h"},
+                             {"id": "b", "path": "/data/x/Clip.mp4", "size": 7, "oshash": "h"}]
+    out = svc.run_ingest()
+    assert out["stages"]["same-file copies"] == "1 found — awaiting approval" and len(stash.s["1"]["files"]) == 2
+    svc.save_copies_settings(approved=True)
+    out = svc.run_ingest()
+    assert out["stages"]["same-file copies"] == "removed 1"
+    assert [f["id"] for f in stash.s["1"]["files"]] == ["b"] and "1" in stash.s

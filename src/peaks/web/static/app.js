@@ -64,7 +64,7 @@ function showView(name) {
 // open a page and load what it shows
 function go(name) {
   showView(name);
-  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); }
+  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); loadCopies(); }
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
   if (name === "catalogue" && !cat.loaded) openCatalogue();
@@ -736,6 +736,39 @@ async function loadCleanup(action) {
   el.querySelectorAll("[data-cl]").forEach((b) => b.onclick = () => {
     if (b.dataset.cl === "approve" && !confirm(`Delete ${what(L)} under ${c.root}?\n\nZip files and empty folders are removed for good. After this, every Sync cleans up automatically (turn it off here any time).`)) return;
     loadCleanup(b.dataset.cl);
+  });
+}
+// Same-file copies: NOT the Duplicates tool — one scene, the same file twice.
+async function loadCopies(action) {
+  const el = $("#copies-status"); if (!el) return;
+  let c;
+  try { c = await api("/api/library/copies" + (action ? "?action=" + action : ""), action ? { method: "POST" } : undefined); }
+  catch (e) { el.textContent = e.message; return; }
+  const L = c.last;
+  const link = (id, t) => c.stash ? `<a href="${esc(c.stash)}/scenes/${esc(id)}" target="_blank" rel="noopener">${esc(t)}</a>` : esc(t);
+  const what = (n, b) => `${n.toLocaleString()} extra file${n === 1 ? "" : "s"}${b ? " · " + fmtBytes(b) : ""}`;
+  const fold = (title, rows) => rows.length ? `<details class="cp-more"><summary>${title} (${rows.length.toLocaleString()})</summary>${rows.join("")}</details>` : "";
+  const plans = (L?.plans || []).slice(0, 40).map((p) => `<div class="cp-plan">
+      <div>${link(p.scene_id, p.title || "Scene " + p.scene_id)} <span class="faint">· ${esc(p.why)}</span></div>
+      <div class="cp-keep">✓ keep ${esc(p.keep.path)}</div>
+      ${p.delete.map((d) => `<div class="cp-drop">✕ ${esc(d.path)}</div>`).join("")}</div>`);
+  const looks = (L?.needs_look || []).map((n) => `<div class="cp-plan"><div>${link(n.scene_id, n.title || "Scene " + n.scene_id)} <span class="faint">· ${esc(n.reason)}</span></div>${n.files.map((f) => `<div class="faint">${esc(f)}</div>`).join("")}</div>`);
+  const vers = (L?.versions || []).map((v) => `<div class="cp-plan"><div>${link(v.scene_id, v.title || "Scene " + v.scene_id)} <span class="faint">· different sizes, kept both</span></div>${v.files.map((f) => `<div class="faint">${esc(f.path)} · ${fmtBytes(f.size)}</div>`).join("")}</div>`);
+  const extras = fold("Same size, can't prove identical — your call", looks) + fold("Different versions — your call", vers);
+  let html = "";
+  if (!c.on) html = `Off. <button class="btn sm" data-cp="on">Turn on</button>`;
+  else if (!L) html = `Runs at the end of each Sync and Ingest. <button class="btn sm" data-cp="preview">Check now</button>`;
+  else if (L.applied) html = `Last run removed ${what(L.removed, L.freed)}${L.method === "direct" ? " (deleted on disk — Stash drops them on its next scan)" : ""}${L.errors.length ? ` · <span class="warn">${L.errors.length} scene${L.errors.length === 1 ? "" : "s"} couldn't be cleaned: ${esc(L.errors[0].error)}</span>` : ""}. <button class="btn sm ghost" data-cp="run">Check now</button>${extras}`;
+  else if (!L.files) html = `No identical copies found. <button class="btn sm ghost" data-cp="preview">Check again</button>${extras}`;
+  else html = `Found ${what(L.files, L.bytes)} across ${L.plans.length.toLocaleString()} scene${L.plans.length === 1 ? "" : "s"}${c.approved ? "" : " — first time, so nothing was deleted yet"}.
+      ${c.approved ? `<button class="btn sm" data-cp="run">Remove now</button>` : `<button class="btn pri sm" data-cp="approve">Approve &amp; remove — then automatic on every Sync / Ingest</button>`}
+      <div class="cp-list">${plans.join("")}${L.plans.length > 40 ? `<div class="faint">…and ${(L.plans.length - 40).toLocaleString()} more scenes</div>` : ""}</div>${extras}`;
+  if (c.on) html += ` <button class="btn sm ghost" data-cp="off" title="Stop removing copies on Sync / Ingest">Turn off</button>`;
+  el.innerHTML = html;
+  el.querySelectorAll("[data-cp]").forEach((b) => b.onclick = () => {
+    if (b.dataset.cp === "approve" && !confirm(`Delete ${what(L.files, L.bytes)} from disk?\n\nOnly files with the exact same size and content hash as a file the scene keeps. Scenes, grades, markers and tags stay. After this, every Sync and Ingest does it automatically (turn it off here any time).`)) return;
+    b.disabled = true;
+    loadCopies(b.dataset.cp);
   });
 }
 wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
@@ -3976,7 +4009,7 @@ async function pollJobTray() {
   const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync", "warmup"];
   if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || kinds.has("ingest")) refreshSidebar();
   if ((pollJobTray.prev || []).includes("sync") && !kinds.has("sync") && $("#activity")?.classList.contains("active")) {
-    loadCleanup(); loadRenamerMoves();     // a Sync just finished: show what it tidied
+    loadCleanup(); loadCopies(); loadRenamerMoves();     // a Sync just finished: show what it tidied
   }
   pollJobTray.prev = [...kinds];
   const badge = $("#nav-ct-jobs");

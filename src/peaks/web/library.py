@@ -4,6 +4,7 @@ embedding/search code so the management surface stays readable."""
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -463,6 +464,152 @@ class LibraryMixin:
 
     def cleanup_status(self) -> dict:
         return {**self.cleanup_settings(), "last": self.__dict__.get("_last_cleanup")}
+
+    # --- same-file copies: one scene, the same download attached twice -----------
+    # NOT the Duplicates tool (different scenes that look alike). Here Stash has
+    # already put 2+ files on ONE scene ("File count > 1"). Only files with the
+    # exact same size AND the same content hash (oshash, else md5) count as
+    # copies; one of each set is kept — in the scene's tier folder, with the
+    # cleaner name, the primary, the oldest — and only the extra FILES are
+    # deleted. The scene (grade, markers, tags, Peaks' data) is never touched,
+    # and never loses its last file. Same size but a different/missing hash, or
+    # different sizes, are only listed. First run lists; one approval makes it
+    # automatic on every Sync and Ingest.
+    _COLLISION_NAME = re.compile(r"^(none(_\d+)?|copy of .+|.+_\d+|.+ \(\d+\))$", re.I)
+
+    def copies_settings(self) -> dict:
+        s = self._settings()
+        return {"on": bool(s.get("copies_on", True)), "approved": bool(s.get("copies_approved", False))}
+
+    def save_copies_settings(self, on: bool | None = None, approved: bool | None = None) -> dict:
+        import json
+
+        s = dict(self._settings())
+        if on is not None:
+            s["copies_on"] = bool(on)
+        if approved is not None:
+            s["copies_approved"] = bool(approved)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(s, indent=2) + "\n")
+        self._settings_cache = s
+        return self.copies_settings()
+
+    def find_file_copies(self) -> dict:
+        """What would go: per scene, the file kept and the identical copies to
+        delete (with why), plus what's left for you to look at."""
+        import unicodedata
+
+        from ..tiers import tier_of
+
+        def fold(t: str) -> str:
+            return "".join(c for c in unicodedata.normalize("NFD", str(t or "")) if not unicodedata.combining(c)).lower().strip()
+
+        tags, names = self.tier_tag_names(), self.tier_display_names()
+        plans, needs_look, versions = [], [], []
+        for sc in self.client().multi_file_scenes():
+            tier = tier_of(sc.get("rating100"), sc.get("o_counter"))
+            homes = {fold(x) for x in (tags.get(tier), names.get(tier), tier) if x} if tier in tags else set()
+            primary = sc["files"][0]["id"]
+
+            def in_home(f):
+                return bool(homes) and any(fold(seg) in homes for seg in Path(f["path"]).parent.parts)
+
+            def rank(f):
+                stem = Path(f["basename"] or f["path"]).stem
+                return (not in_home(f), bool(self._COLLISION_NAME.match(stem)), f["id"] != primary, f["mod_time"] or "")
+
+            by_size: dict[int, list] = {}
+            for f in sc["files"]:
+                by_size.setdefault(f["size"], []).append(f)
+            if len(by_size) > 1:
+                versions.append({"scene_id": sc["id"], "title": sc["title"],
+                                 "files": [{"path": f["path"], "size": f["size"]} for f in sc["files"]]})
+            for size, fs in by_size.items():
+                if len(fs) < 2:
+                    continue
+                by_hash: dict[str, list] = {}
+                for f in fs:
+                    h = f["fingerprints"].get("oshash") or f["fingerprints"].get("md5")
+                    by_hash.setdefault(h or f"?{f['id']}", []).append(f)
+                for h, group in by_hash.items():
+                    if h.startswith("?") or len(group) < 2:
+                        continue
+                    keep = min(group, key=rank)
+                    drop = [f for f in group if f is not keep]
+                    why = ("kept the copy in the " + (names.get(tier) or tier) + " folder") if in_home(keep) and any(
+                        not in_home(f) for f in drop) else ("kept the cleaner name" if any(
+                            self._COLLISION_NAME.match(Path(f["basename"] or f["path"]).stem) for f in drop)
+                            and not self._COLLISION_NAME.match(Path(keep["basename"] or keep["path"]).stem)
+                        else "kept Stash's primary file" if keep["id"] == primary else "kept the oldest copy")
+                    plans.append({"scene_id": sc["id"], "title": sc["title"], "tier": tier, "size": size,
+                                  "keep": {"id": keep["id"], "path": keep["path"], "primary": keep["id"] == primary},
+                                  "delete": [{"id": f["id"], "path": f["path"]} for f in drop], "why": why})
+                left = [f for h, g in by_hash.items() if h.startswith("?") or len(g) < 2 for f in g]
+                if len(left) >= 2 or (left and len(by_hash) > 1):
+                    needs_look.append({"scene_id": sc["id"], "title": sc["title"], "size": size,
+                                       "files": [f["path"] for f in fs],
+                                       "reason": "same size, but the content hashes differ or are missing"})
+        return {"plans": plans, "needs_look": needs_look, "versions": versions,
+                "files": sum(len(p["delete"]) for p in plans),
+                "bytes": sum(p["size"] * len(p["delete"]) for p in plans)}
+
+    def remove_file_copies(self, apply: bool = False, log=None) -> dict:
+        """Find (and with `apply`, delete) the extra identical files."""
+        import os
+
+        log = log or (lambda *_: None)
+        found = self.find_file_copies()
+        out = {**found, "applied": False, "removed": 0, "freed": 0, "errors": [], "method": None, "at": time.time()}
+        if apply and found["plans"]:
+            client = self.client()
+            via_stash = bool(self.capabilities()["ops"].get("deleteFiles"))
+            out["method"] = "stash" if via_stash else "direct"
+            root = Path(self._cleanup_root()).resolve()
+            for p in found["plans"]:
+                try:
+                    if not p["keep"]["primary"]:           # never leave the scene pointing at a deleted file
+                        client.set_primary_file(p["scene_id"], p["keep"]["id"])
+                    if via_stash:
+                        client.delete_files([d["id"] for d in p["delete"]])
+                    else:
+                        for d in p["delete"]:
+                            path = Path(d["path"]).resolve()
+                            if root in path.parents and path.is_file():
+                                os.remove(path)
+                            else:
+                                raise RuntimeError(f"{d['path']} isn't under {root} — left for Stash")
+                    for d in p["delete"]:
+                        self.action_log().append("file-copy", scene_id=p["scene_id"], title=p["title"],
+                                                 path=d["path"], kept=p["keep"]["path"], size=p["size"],
+                                                 detail=f"removed an identical copy ({p['why']})")
+                        log(f"  - removed copy {d['path']} (kept {p['keep']['path']})")
+                    out["removed"] += len(p["delete"])
+                    out["freed"] += p["size"] * len(p["delete"])
+                    self.invalidate_meta(p["scene_id"])
+                except Exception as exc:  # noqa: BLE001 — one scene's trouble mustn't stop the rest
+                    out["errors"].append({"scene_id": p["scene_id"], "error": str(exc)})
+            out["applied"] = True
+        self._last_copies = out
+        return out
+
+    def file_copies_step(self, log=None) -> dict | None:
+        """The Sync / Ingest step: preview until approved, then remove."""
+        st = self.copies_settings()
+        if not st["on"]:
+            return None
+        r = self.remove_file_copies(apply=st["approved"], log=log)
+        if log:
+            if r["applied"]:
+                log(f"same-file copies: removed {r['removed']} file(s)" + (f", {len(r['errors'])} failed" if r["errors"] else ""))
+            elif r["files"]:
+                log(f"same-file copies: found {r['files']} identical extra file(s) — approve once in "
+                    "Activity → Maintenance to remove them on every Sync / Ingest")
+        return {k: r[k] for k in ("applied", "files", "removed", "freed", "bytes")}
+
+    def copies_status(self) -> dict:
+        return {**self.copies_settings(), "last": self.__dict__.get("_last_copies"),
+                "stash": str(self.cfg.stash.url or "").rstrip("/")}
 
     # --- bulk grading ------------------------------------------------------------
 
@@ -1052,6 +1199,13 @@ class LibraryMixin:
             self._write_ingest(record)
             self._cat_cache = None                 # new scenes → re-read the listing
 
+        try:                                       # the same download attached twice
+            c = self.file_copies_step(log)
+            if c is not None:
+                stages["same-file copies"] = (f"removed {c['removed']}" if c["applied"]
+                                              else f"{c['files']} found — awaiting approval" if c["files"] else "none")
+        except Exception as exc:  # noqa: BLE001 — never fail an ingest on this
+            stages["same-file copies"] = f"skipped: {exc}"
         try:
             self.action_log().append("ingest", detail=f"{len(new)} new scene(s)", stages=stages)
         except Exception:  # noqa: BLE001

@@ -1502,6 +1502,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin):
                     f"that can't matter any more")
         except Exception as exc:  # noqa: BLE001 — never fail a Sync on this
             log(f"  (couldn't tidy the failure log: {exc})")
+        # the same download attached twice to one scene
+        try:
+            c = self.file_copies_step(log)
+            if c is not None:
+                total["file_copies"] = c
+        except Exception as exc:  # noqa: BLE001
+            log(f"  (same-file copies check failed: {exc})")
         # zips and empty folders under the library root
         cs = self.cleanup_settings()
         if cs["on"]:

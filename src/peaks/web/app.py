@@ -1612,6 +1612,32 @@ def create_app(cfg=None):
             raise HTTPException(400, "unknown action")
         return service.cleanup_status()
 
+    @app.get("/api/library/copies")
+    def file_copies_status():
+        return service.copies_status()
+
+    @app.post("/api/library/copies")
+    def file_copies(action: str = "preview"):
+        """Same-file copies: preview · approve (and remove now, then on every
+        Sync / Ingest) · run · on / off."""
+        try:
+            if action == "approve":
+                service.save_copies_settings(approved=True, on=True)
+                service.remove_file_copies(apply=True)
+            elif action == "run":
+                service.remove_file_copies(apply=service.copies_settings()["approved"])
+            elif action in ("on", "off"):
+                service.save_copies_settings(on=action == "on")
+            elif action == "preview":
+                service.remove_file_copies(apply=False)
+            else:
+                raise HTTPException(400, "unknown action")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+        return service.copies_status()
+
     @app.get("/api/library/moves")
     def renamer_moves():
         """Files your renamer moved after a tier change, followed automatically."""

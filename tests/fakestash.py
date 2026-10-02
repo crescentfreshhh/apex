@@ -19,7 +19,8 @@ class FakeStash:
         self.calls: list = []
         self.caps = {"scenesDestroy": True, "findDuplicateScenes": True,
                      "metadataScan": True, "metadataIdentify": True,
-                     "metadataAutoTag": True, "findJob": True, "configuration": True}
+                     "metadataAutoTag": True, "findJob": True, "configuration": True,
+                     "deleteFiles": True}
 
     # --- reads ---------------------------------------------------------------
 
@@ -117,6 +118,39 @@ class FakeStash:
         for sid in scene_ids:
             self.s.pop(str(sid), None)
         return len(scene_ids)
+
+    # same-file copies: a scene's `files` = [{id, path, size, oshash?, md5?,
+    # mod_time?}]; files[0] is primary. Scenes with 2+ files are listed.
+
+    def multi_file_scenes(self, page_size=200):
+        out = []
+        for sid, v in self.s.items():
+            fs = v.get("files") or []
+            if len(fs) < 2:
+                continue
+            out.append({"id": sid, "title": v.get("title") or f"Scene {sid}",
+                        "rating100": v["rating100"], "o_counter": v["o_counter"],
+                        "files": [{"id": f["id"], "path": f["path"],
+                                   "basename": f["path"].rsplit("/", 1)[-1], "size": f["size"],
+                                   "mod_time": f.get("mod_time", ""),
+                                   "fingerprints": {k: f[k] for k in ("oshash", "md5") if f.get(k)}}
+                                  for f in fs]})
+        return out
+
+    def set_primary_file(self, scene_id, file_id):
+        self.calls.append(("primary", str(scene_id), str(file_id)))
+        fs = self.s[str(scene_id)]["files"]
+        f = next(x for x in fs if x["id"] == str(file_id))
+        fs.remove(f)
+        fs.insert(0, f)
+
+    def delete_files(self, file_ids):
+        self.calls.append(("delete_files", tuple(file_ids)))
+        ids = {str(i) for i in file_ids}
+        for v in self.s.values():
+            if v.get("files"):
+                v["files"] = [f for f in v["files"] if f["id"] not in ids]
+        return True
 
     def duplicate_groups(self, distance=0, duration_diff=-1.0):
         self.calls.append(("dupes", distance, duration_diff))

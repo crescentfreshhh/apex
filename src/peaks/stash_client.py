@@ -239,6 +239,29 @@ mutation ScenesDestroy($input: ScenesDestroyInput!) {
 }
 """
 
+# scenes with more than one file attached ("File count > 1" in Stash)
+_MULTI_FILE_FIELDS = """
+    count
+    scenes {
+      id title rating100 o_counter
+      files { id path basename size mod_time fingerprints { type value } }
+    }
+"""
+_MULTI_FILE_SCENES = """
+query MultiFile($filter: FindFilterType, $scene_filter: SceneFilterType) {
+  findScenes(filter: $filter, scene_filter: $scene_filter) {""" + _MULTI_FILE_FIELDS + """  }
+}
+"""
+_ALL_SCENES_FILES = """
+query AllFiles($filter: FindFilterType) {
+  findScenes(filter: $filter) {""" + _MULTI_FILE_FIELDS + """  }
+}
+"""
+_DELETE_FILES = "mutation DeleteFiles($ids: [ID!]!) { deleteFiles(ids: $ids) }"
+_SET_PRIMARY = """
+mutation SetPrimary($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }
+"""
+
 _BULK_SCENE_UPDATE = """
 mutation BulkSceneUpdate($input: BulkSceneUpdateInput!) {
   bulkSceneUpdate(input: $input) { id }
@@ -443,7 +466,7 @@ class StashClient:
         return {name: name in have for name in self.CAPABILITY_FIELDS}
 
     CAPABILITY_FIELDS = (
-        "scenesDestroy", "findDuplicateScenes", "metadataScan",
+        "scenesDestroy", "findDuplicateScenes", "metadataScan", "deleteFiles",
         "metadataIdentify", "metadataAutoTag", "findJob", "configuration",
     )
 
@@ -778,6 +801,48 @@ class StashClient:
             {"input": {"ids": scene_ids, "tag_ids": {"ids": tag_ids, "mode": "ADD"}}},
         )
         return len(scene_ids)
+
+    def multi_file_scenes(self, page_size: int = 200) -> list[dict]:
+        """Every scene with 2+ files: [{id, title, rating100, o_counter, files:
+        [{id, path, basename, size, mod_time, fingerprints{type: value}}]}] —
+        files[0] is the scene's primary file. Uses Stash's file_count filter;
+        an older Stash without it is paged in full and filtered here."""
+        def page_through(query, extra):
+            page, out = 1, []
+            while True:
+                data = self.execute(query, {"filter": {"per_page": page_size, "page": page}, **extra})
+                batch = data["findScenes"]["scenes"]
+                out.extend(batch)
+                if len(batch) < page_size:
+                    return out
+                page += 1
+        try:
+            scenes = page_through(_MULTI_FILE_SCENES,
+                                  {"scene_filter": {"file_count": {"value": 1, "modifier": "GREATER_THAN"}}})
+        except StashError:
+            scenes = page_through(_ALL_SCENES_FILES, {})
+        out = []
+        for sc in scenes:
+            files = sc.get("files") or []
+            if len(files) < 2:
+                continue
+            out.append({"id": str(sc["id"]), "title": sc.get("title") or "", "rating100": sc.get("rating100"),
+                        "o_counter": sc.get("o_counter") or 0,
+                        "files": [{"id": str(f["id"]), "path": f.get("path") or "", "basename": f.get("basename") or "",
+                                   "size": int(f.get("size") or 0), "mod_time": f.get("mod_time") or "",
+                                   "fingerprints": {fp["type"]: fp["value"] for fp in (f.get("fingerprints") or [])}}
+                                  for f in files]})
+        return out
+
+    def delete_files(self, file_ids: list[str]) -> bool:
+        """Delete files from disk and from Stash (deleteFiles). Irreversible."""
+        ids = [str(i) for i in file_ids if i]
+        if not ids:
+            return True
+        return bool(self.execute(_DELETE_FILES, {"ids": ids}).get("deleteFiles"))
+
+    def set_primary_file(self, scene_id: str, file_id: str) -> None:
+        self.execute(_SET_PRIMARY, {"input": {"id": str(scene_id), "primary_file_id": str(file_id)}})
 
     def destroy_scenes(self, scene_ids: list[str], delete_file: bool = True,
                        delete_generated: bool = True) -> int:

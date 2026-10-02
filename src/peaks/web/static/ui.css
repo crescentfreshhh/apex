@@ -647,3 +647,11 @@ html.hide-nums .num { display: none; }
 .bk-list { display: flex; flex-direction: column; gap: 6px; }
 .bk-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
 .num-sm { width: 64px; }
+
+/* Maintenance → Same-file copies */
+#copies-status .cp-list { max-height: 320px; overflow: auto; margin: 8px 0; }
+#copies-status .cp-plan { padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+#copies-status .cp-keep { color: var(--ok); }
+#copies-status .cp-drop { color: var(--bad); }
+#copies-status .cp-more { margin-top: 6px; }
+#copies-status .cp-more summary { cursor: pointer; }

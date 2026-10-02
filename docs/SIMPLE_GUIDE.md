@@ -303,6 +303,22 @@ new. The library cleanup never touches that folder.
 - **New server**: map the same library share to `/data` (read-write), open
   Settings → Backup & restore and restore the newest snapshot — no re-embedding.
 
+## Same-file copies (Stash's "File count > 1")
+
+When the same download lands twice, Stash hangs both files on one scene (and
+may rename one `None_2`). At the end of every Sync and Ingest Peaks removes the
+extra file — **only** when it has the exact same size *and* the same content
+hash as the one it keeps. It keeps the copy in the scene's tier folder
+(Légendaire, Exceptionnelle…), then the cleaner name, then Stash's primary, then
+the oldest. The scene itself — grade, O-count, markers, tags — is never touched,
+and never loses its last file. This is not the Duplicates tool (that one is for
+*different* scenes that look alike).
+
+The first time, it only lists what it would remove: **Activity → Maintenance →
+Same-file copies → Approve & remove**. After that it's automatic (Turn off
+there any time). Same-size files it can't prove identical, and different-size
+versions, are only listed for you to decide.
+
 ## Cheat sheet (in the container console)
 
 | I want to... | Type |
