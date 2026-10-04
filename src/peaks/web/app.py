@@ -1125,6 +1125,23 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash update failed: {exc}")
 
+    @app.post("/api/catalogue/keep")
+    def catalogue_keep(scene_id: str, undo: bool = False):
+        """'Keep as is': answer a suggestion at the current tier — nothing is
+        written to Stash. `undo` takes the answer back."""
+        try:
+            return service.undo_keep(scene_id) if undo else service.keep_as_is(scene_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.get("/api/verdicts")
+    def verdicts():
+        return service.verdict_status()
+
+    @app.post("/api/verdicts/clear")
+    def verdicts_clear():
+        return service.clear_verdicts()
+
     @app.post("/api/catalogue/restore")
     def catalogue_restore(body: RestoreIn):
         try:

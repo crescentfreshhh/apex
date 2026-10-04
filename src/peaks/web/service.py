@@ -23,9 +23,11 @@ from .backup import BackupMixin
 from .today import TodayMixin
 from .watch import WatchMixin
 from .dupequeue import DupeQueueMixin
+from .verdicts import VerdictMixin
 
 
-class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin):
+class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
+              VerdictMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5074,6 +5076,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
         self._note_grade()
+        self.record_verdict(sid, row["tier"], source=source)         # your answer, remembered
         self._watch_path(sid, cur.get("path") or row.get("path"))   # follow the renamer's move
         return {"scene": row, "previous": prev}
 
@@ -5096,6 +5099,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         old = self.__dict__.get("_expo_undo", {}).pop(sid, None)
         if old is not None:                    # an undo puts the board's record back too
             self.exposure().restore(sid, old)
+        if source in ("undo", "bulk undo"):    # an undone answer isn't an answer
+            self.undo_verdict(sid)
         row = self._cat_update_row(sid)
         self._watch_path(sid, row.get("path"))           # an undo moves it back
         self._log_scene("restore", row, source=source,
@@ -5525,14 +5530,15 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         sig = sig or {}
         n = sig.get("saves", 0)
         tier = row["tier"]
-        if n and tier in self.PROMOTABLE:
+        if n and tier in self.PROMOTABLE and not self._answered("saved", row, pred, sig):
             return {"grade": "legendaire",
                     "why": f"{n} saved moment{'s' if n != 1 else ''} — scenes you save from are Légendaire"}
         if tier == "anomaly":
             return self._suggest_for_anomaly(row, pred, names)
         q25, b = getattr(self, "_best_q25", None), sig.get("best")
         keeper = (pred or {}).get("keeper")
-        eligible = tier not in ("legendaire", "rejected") and not n and not sig.get("new")
+        eligible = (tier not in ("legendaire", "rejected") and not n and not sig.get("new")
+                    and not self._answered("reject", row, pred, sig))
         weak = (b is not None and q25 is not None and b <= q25 and (keeper is None or keeper < 0.5))
         if eligible and sig.get("passed"):
             # the megaboard keeps showing it and you never bite — with a so-so
@@ -5557,6 +5563,15 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict,
                 signals: dict | None = None) -> list[dict]:
+        out = self._triage_raw(view, pool, preds, floor, signals)
+        if view in ("saved", "promote", "second", "trim", "passed") and self._vd():
+            signals = signals or {}
+            out = [r for r in out if not self._answered(
+                view, r, preds.get(r["scene_id"]), signals.get(r["scene_id"]))]
+        return out
+
+    def _triage_raw(self, view: str, pool: list[dict], preds: dict, floor: dict,
+                    signals: dict | None = None) -> list[dict]:
         from ..tier_model import ORDINAL, quality_flag
 
         signals = signals or {}

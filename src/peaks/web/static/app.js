@@ -7,7 +7,7 @@ let SCALE = null;
 W.tasteScale().then((x) => { SCALE = x; });
 const $ = (s) => document.querySelector(s);
 // writes that change what the library-management counts show
-const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train)|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
+const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train|keep)|verdicts\/|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
 const api = async (path, opts) => {
   const r = await fetch(path, opts);
   if (r.status === 401) { location.reload(); throw new Error("session expired"); }
@@ -397,7 +397,17 @@ async function loadCuration() {
     if ($("#cur-follow")) $("#cur-follow").checked = c.follow_renamer !== false;
     if ($("#cur-goal") && c.today_goal) $("#cur-goal").value = c.today_goal;
   } catch {}
+  loadVerdicts();
 }
+async function loadVerdicts() {
+  const el = $("#vd-count"); if (!el) return;
+  try { const v = await api("/api/verdicts"); el.textContent = `${plural(v.answered, "scene")} answered`; } catch {}
+}
+$("#btn-vd-clear")?.addEventListener("click", async () => {
+  if (!confirm("Forget every answered suggestion? Scenes you've already decided on can be suggested again.")) return;
+  try { await api("/api/verdicts/clear", { method: "POST" }); loadVerdicts(); toast("Answered suggestions cleared"); }
+  catch (e) { toast(e.message, true); }
+});
 $("#cur-goal")?.addEventListener("change", async (e) => {
   try { const r = await api("/api/library/curation?today_goal=" + Math.max(1, +e.target.value || 20), { method: "POST" }); toast(`For You: ${r.today_goal} decisions a day (from tomorrow's set)`); }
   catch (err) { toast(err.message, true); }
@@ -867,10 +877,24 @@ async function applyGrade(sid, grade, undoKey = "Z") {
   toast(`${gradeName(grade)} — ${undoKey} to undo`);
   return r.scene;
 }
+// "Keep as is": answer a suggestion at the current tier — nothing changes in Stash;
+// the scene leaves the suggestion lists until there's new evidence
+async function keepAsIs(sid, undoKey = "Z") {
+  const r = await api(`/api/catalogue/keep?scene_id=${encodeURIComponent(sid)}`, { method: "POST" });
+  gradeUndo.push({ sid: String(sid), keep: true });
+  toast(`Kept as ${gradeName(r.scene.tier === "rejected" ? "reject" : r.scene.tier)} — won't be suggested again without new evidence · ${undoKey} to undo`);
+  return r.scene;
+}
 async function undoGrade() {
   const u = gradeUndo.pop();
   if (!u) { toast("nothing to undo"); return null; }
   if (u.bulk) return undoBulkGrade(u);
+  if (u.keep) {
+    try {
+      const r = await api(`/api/catalogue/keep?scene_id=${encodeURIComponent(u.sid)}&undo=true`, { method: "POST" });
+      toast("Undone — it can be suggested again"); return r.scene;
+    } catch (e) { gradeUndo.push(u); toast(e.message, true); return null; }
+  }
   try {
     const r = await api("/api/catalogue/restore", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2609,13 +2633,15 @@ function tdShow() {
     <div class="td-grades">${RV_GRADES.map(([g], k) => `<button data-g="${g}" class="g-${g} ${g === x.pick ? "sug" : ""} ${g === cur ? "cur" : ""}" title="${esc(gradeName(g))} (${k + 1})"><b>${k + 1}</b>${esc(TD_SHORT[g])}</button>`).join("")}</div>
     <div class="td-actions">
       ${x.pick ? `<button class="btn pri sm" id="td-accept">✓ ${esc(gradeName(x.pick))} <kbd>Enter</kbd></button>` : ""}
+      ${TD_KEEPABLE.has(x.job) ? `<button class="btn sm" id="td-keep" title="It's right where it is — don't suggest it again unless something new happens">Keep as ${esc(gradeName(cur))} <kbd>0</kbd></button>` : ""}
       <button class="btn sm ghost" id="td-skip">Skip <kbd>S</kbd></button>
       <button class="btn sm ghost" id="td-undo" ${td.answered.length ? "" : "disabled"}>Undo <kbd>U</kbd></button>
       <button class="btn sm ghost" id="td-open" title="Open in the Review player">Open in Review</button>
     </div>
-    <div class="td-keys">1–5 grade · Enter accept · S skip · U undo · P / click the still: play peaks · Space pause · M sound · ←/→ moments</div>`;
+    <div class="td-keys">1–5 grade · Enter accept · 0 keep as is · S skip · U undo · P / click the still: play peaks · Space pause · M sound · ←/→ moments</div>`;
   $("#td-body").querySelectorAll(".td-grades button").forEach((b) => b.onclick = () => tdAnswer(b.dataset.g));
   $("#td-accept")?.addEventListener("click", () => tdAnswer(x.pick));
+  $("#td-keep")?.addEventListener("click", () => tdAnswer(null, true));
   $("#td-skip").onclick = tdSkip; $("#td-undo").onclick = tdUndo;
   $("#td-open").onclick = () => { go("catalogue"); applyCatParams({ q: x.title || "" }); };
   tdPlay(x);
@@ -2682,9 +2708,12 @@ function tdJump(step) {
   td.mi = (td.mi + step + td.moments.length) % td.moments.length;
   tdLoadMoment();
 }
-async function tdAnswer(grade) {
-  const x = td.queue[0]; if (!x || !grade) return;
-  try { await applyGrade(x.scene_id, grade, "U"); } catch (e) { return toast(e.message, true); }
+const TD_KEEPABLE = new Set(["saved", "reject", "promote", "second", "trim"]);
+async function tdAnswer(grade, keep = false) {
+  const x = td.queue[0]; if (!x || (!grade && !keep)) return;
+  if (keep && !TD_KEEPABLE.has(x.job)) return;
+  try { if (keep) await keepAsIs(x.scene_id, "U"); else await applyGrade(x.scene_id, grade, "U"); }
+  catch (e) { return toast(e.message, true); }
   td.queue.shift(); td.answered.push(x); td.sinceTeach++;
   if (td.progress && !td.job) td.progress.done++;
   if (td.job) td.remaining = Math.max(0, (td.remaining || 1) - 1);
@@ -2796,6 +2825,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "enter" && x && x.pick) { e.preventDefault(); tdAnswer(x.pick); }
   else if (k === "s") { e.preventDefault(); tdSkip(); }
   else if (k === "u") { e.preventDefault(); tdUndo(); }
+  else if (k === "0") { e.preventDefault(); tdAnswer(null, true); }
   else if (k === "p") { e.preventDefault(); if (v.hidden) tdStart(0); else { tdStopVideo(); if (td.queue[0]) tdPlay(td.queue[0]); } }
   else if (k === " ") { e.preventDefault(); if (v.hidden) tdStart(0); else if (v.paused) v.play().catch(() => {}); else v.pause(); }
   else if (k === "m") { e.preventDefault(); $("#td-sound").click(); }
@@ -3482,7 +3512,10 @@ function catCardHTML(r, i) {
     : "";
   const flag = (r.flag ? `<div class="cat-flag">⚠ ${textNum(r.flag, r.flag_detail)}</div>` : "") +
     (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate</div>` : "");
-  const suggest = r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "";
+  const keepable = r.tier !== "unreviewed" && r.tier !== "anomaly"
+    && (r.suggest || ["promote", "second", "saved", "trim", "passed"].includes(cat.view));
+  const suggest = (r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "")
+    + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "");
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
@@ -3543,6 +3576,15 @@ async function gradeCat(i, grade) {
     catBumpCounts(r.tier, fresh.tier);
     // stays in place (dimmed) so the list doesn't jump and Z still has context
     cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred, _graded: true };
+    renderCatCard(i);
+    focusCat(i + 1);
+  } catch (e) { toast(e.message, true); }
+}
+async function keepCat(i) {
+  const r = cat.items[i]; if (!r) return;
+  try {
+    const fresh = await keepAsIs(r.scene_id);
+    cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred, suggest: null, _graded: true };
     renderCatCard(i);
     focusCat(i + 1);
   } catch (e) { toast(e.message, true); }
@@ -3618,6 +3660,7 @@ $("#cat-list")?.addEventListener("click", (e) => {
   }
   const g = e.target.closest(".cat-g");
   if (g) { focusCat(i, false); gradeCat(i, g.dataset.g); return; }
+  if (e.target.closest(".cat-keep")) { focusCat(i, false); keepCat(i); return; }
   const m = e.target.closest(".cat-m");
   if (m) { focusCat(i, false); watchCat(i, +m.dataset.j); return; }
   if (e.target.closest(".cat-cover")) { focusCat(i, false); watchCat(i); return; }
@@ -4287,7 +4330,9 @@ function renderReview() {
     r.pred && r.pred.from === "who" ? '<span class="faint">From performer/studio history — not seen yet</span>' : "",
     r.flag ? `<span class="warn">⚠ ${textNum(r.flag, r.flag_detail)}</span>` : "",
     r.suggest ? `Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}` : "",
-    r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>") + whoLines(r, 6);
+    r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>") + whoLines(r, 6)
+    + (rvKeepable(r) ? `<div><button class="btn sm" id="rv-keep" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as ${esc(gradeName(cur))} <kbd>0</kbd></button></div>` : "");
+  $("#rv-keep")?.addEventListener("click", rvKeep);
   const q = r.quality || {};
   const sg = r.signals;
   $("#rv-facts").innerHTML = (sg ? `<span>Saved</span><span>${sg.saves ? `★ ${sg.saves} moment${sg.saves === 1 ? "" : "s"}` : '<span class="faint">none yet</span>'}</span>
@@ -4304,6 +4349,23 @@ function renderReview() {
       <div class="pic"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.scene_id)}/cover" onerror="this.style.opacity=.1" /></div>
       <div><b>${esc(x.title)}</b><span class="muted">${esc(x.performers.slice(0, 2).join(", "))}${x.pred ? " · " + esc(W.confidence(x.pred.conf).toLowerCase()) + " " + esc(className(x.pred.tier)) : ""}</span></div></div>`).join("")
     || '<span class="faint">Last one in this list.</span>';
+}
+// a suggestion to answer: the scene has one, or you're working an answerable list
+function rvKeepable(r) {
+  return !!r && r.tier !== "unreviewed" && r.tier !== "anomaly"
+    && (!!r.suggest || (rv.source === "catalogue" && ["promote", "second", "saved", "trim", "passed"].includes(cat.view)));
+}
+async function rvKeep() {
+  const r = rv.items[rv.i]; if (!rvKeepable(r)) return;
+  try {
+    const fresh = await keepAsIs(r.scene_id);
+    rv.graded.add(r.scene_id);
+    rv.items[rv.i] = { ...r, ...fresh, suggest: null, moments: r.moments, stream: r.stream, pred: r.pred };
+    const ci = rv.source === "catalogue" ? cat.items.findIndex((x) => x.scene_id === r.scene_id) : -1;
+    if (ci >= 0) cat.items[ci] = { ...cat.items[ci], suggest: null, _graded: true };
+    else cat.loaded = false;
+    rvMove(1);
+  } catch (e) { toast(e.message, true); }
 }
 async function rvGrade(grade) {
   const r = rv.items[rv.i]; if (!r) return;
@@ -4444,6 +4506,7 @@ document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase(), v = $("#rv-v");
   if (k >= "1" && k <= "5") { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
+  else if (k === "0") { e.preventDefault(); rvKeep(); }
   else if (k === "j") { e.preventDefault(); rvMove(1); }
   else if (k === "k") { e.preventDefault(); rvMove(-1); }
   else if (k === "arrowright") { e.preventDefault(); rvJump(1); }
