@@ -1261,6 +1261,16 @@ def create_app(cfg=None):
             raise HTTPException(409, str(exc))
         return job.as_dict()
 
+    @app.get("/api/seedbox")
+    def seedbox():
+        """The seedbox pipeline: verdict, script health, throughput, pool, inbox."""
+        return service.seedbox_status()
+
+    @app.post("/api/seedbox/refresh")
+    def seedbox_refresh():
+        """Re-fetch qBittorrent now (at most every 30 s); files are always fresh."""
+        return service.seedbox_status(refresh=True)
+
     @app.get("/api/watch")
     def watch_status():
         return service.watch_status()

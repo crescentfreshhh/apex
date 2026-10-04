@@ -177,3 +177,19 @@ recency_halflife_days = 90.0
 # 1 = maximally diverse). A little spread keeps it from collapsing into
 # near-duplicates of your one favourite. (Env override: PEAKS_FEED_DIVERSITY)
 feed_diversity = 0.3
+
+[seedbox]
+# The Seedbox page (System → Seedbox): health of the seedbox-pull / -prune
+# scripts and the seedbox's qBittorrent pool. Everything here is read-only.
+# Where the scripts keep runs.log, *.failing, *.done and pull.log — mount
+# /mnt/user/appdata/seedbox-pull here READ-ONLY. (Env: PEAKS_SEEDBOX_DIR)
+dir = "/seedbox"
+# The norating inbox at its container path; blank = the watched folder with
+# "norating" in its name (Settings → Ingest). (Env: PEAKS_SEEDBOX_INBOX)
+inbox = ""
+# qBittorrent Web API (login + GETs only — nothing is ever paused or deleted).
+# Prefer the env vars so the password stays out of files.
+# (Env: PEAKS_QBT_URL, PEAKS_QBT_USER, PEAKS_QBT_PASSWORD)
+qbt_url = ""
+qbt_user = ""
+qbt_password = ""

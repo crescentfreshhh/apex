@@ -50,7 +50,7 @@ function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
 const VIEWS = ["foryou", "board", "explore", "performers", "catalogue", "review", "dupes",
-  "statistics", "taste", "activity", "dashboard"];
+  "statistics", "taste", "activity", "seedbox", "dashboard"];
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
   if (!VIEWS.includes(name)) name = "foryou";
@@ -73,6 +73,7 @@ function go(name) {
   if (name === "statistics") openStatistics();
   if (name === "taste") openTaste();
   if (name === "dashboard") { loadTierNames(); loadTierTags(); }
+  if (name === "seedbox") openSeedbox();
 }
 document.querySelectorAll(".nav[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
 // any [data-go] button jumps to a page (optionally a Settings section)
@@ -4576,6 +4577,96 @@ $("#btn-ingest-scan-save")?.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 loadScanOptions();
+
+// --- Seedbox: the seedbox → library pipeline at a glance (read-only) -------------------
+const SB_WORD = { green: "GREEN", yellow: "YELLOW", red: "RED" };
+let sbTimer = null;
+function sbAgo(sec) {
+  if (sec == null) return "never";
+  const m = Math.round(sec / 60);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = m / 60;
+  return h < 48 ? `${h.toFixed(h < 10 ? 1 : 0)} h ago` : `${Math.round(h / 24)} days ago`;
+}
+function sbWhen(epoch, now) {
+  if (!epoch) return '<span class="faint">never</span>';
+  return `${esc(new Date(epoch * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }))} <span class="faint">· ${sbAgo(now - epoch)}</span>`;
+}
+const sbNA = (reason) => `<div class="sb-na">Unavailable — ${esc(reason || "unknown reason")}</div>`;
+const sbGB = (gb) => gb >= 1000 ? `${(gb / 1000).toFixed(2)} TB` : `${(+gb).toFixed(gb < 10 ? 2 : 1)} GB`;
+function sbScript(name, h, now) {
+  const state = h.failing ? '<span class="sb-pill red">failing now</span>'
+    : h.last_run_ok === false ? '<span class="sb-pill yellow">last run failed</span>'
+    : h.last_ok ? '<span class="sb-pill green">ok</span>' : '<span class="sb-pill red">no success yet</span>';
+  return `<div class="sb-script"><div class="row between"><b>seedbox-${name}</b>${state}</div>
+    <div class="sb-kv"><span>Last success</span><span>${sbWhen(h.last_ok, now)}</span>
+      <span>Last 24 h</span><span>${h.ok_24h} ok${h.failed_24h ? ` · <span class="bad">${h.failed_24h} failed</span>` : " · 0 failed"}</span></div>
+    ${h.errors && h.errors.length ? `<div class="dim small" style="margin-top:6px">Latest errors in pull.log</div><pre class="log sb-errors">${esc(h.errors.join("\n"))}</pre>` : ""}</div>`;
+}
+function renderSeedbox(d) {
+  const now = d.now, v = d.verdict;
+  $("#sb-verdict").className = `panel sb-verdict ${v.status}`;
+  $("#sb-verdict").innerHTML = `<div class="sb-light"></div><div><div class="sb-status">${SB_WORD[v.status]} · ${esc(v.headline)}</div>
+    ${v.reasons.length ? `<ul>${v.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : '<div class="dim">Pulls and prunes are on schedule, qBittorrent answers, and nothing is stuck.</div>'}</div>`;
+  const dot = $("#nav-sb-dot");
+  if (dot) { dot.hidden = false; dot.className = `sb-dot ${v.status}`; dot.title = `${SB_WORD[v.status]}: ${v.headline}`; }
+  const sc = d.scripts, pool = d.pool, inbox = d.inbox;
+  $("#sb-refreshed").textContent = `files read ${new Date(now * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` +
+    (pool.fetched_at ? ` · qBittorrent ${pool.ok ? `${sbAgo(now - pool.fetched_at)} (cached ${Math.round(d.pool_ttl / 60)} min)`
+      : `checked ${sbAgo(now - pool.fetched_at)} (retried every minute)`}` : "");
+  // script health
+  $("#sb-scripts .sb-body").innerHTML = sc.ok
+    ? sbScript("pull", sc.pull, now) + sbScript("prune", sc.prune, now)
+      + (sc.malformed ? `<div class="faint small">${plural(sc.malformed, "unreadable line")} in runs.log skipped</div>` : "")
+    : sbNA(sc.reason);
+  // throughput
+  if (sc.ok) {
+    const t = sc.throughput, max = Math.max(1, ...t.per_day.map((x) => x.files));
+    const ever = Object.entries(sc.ever_pulled || {}).filter(([, n]) => n != null).map(([c, n]) => `${c}: ${n.toLocaleString()}`).join(" · ");
+    $("#sb-through .sb-body").innerHTML = `<div class="cards sb-cards">
+        <div class="card"><div class="k">Last 24 h</div><div class="v">${plural(t.last_24h, "file")}</div></div>
+        <div class="card"><div class="k">Last 7 days</div><div class="v">${plural(t.last_7d, "file")}</div></div></div>
+      <div class="sb-chart">${t.per_day.map((x) => `<div class="sb-bar" title="${esc(x.day)}: ${plural(x.files, "file")}">
+        <span class="n">${x.files || ""}</span><i style="height:${Math.round(100 * x.files / max)}%"></i><span class="d">${esc(x.day.split(" ")[0])}</span></div>`).join("")}</div>
+      ${ever ? `<div class="faint small">All-time pulled (from the .done lists) — ${esc(ever)}</div>` : ""}`;
+  } else $("#sb-through .sb-body").innerHTML = sbNA(sc.reason);
+  // pool
+  if (pool.ok) {
+    const cats = Object.entries(pool.by_category).map(([c, b]) =>
+      `<span>${esc(c === "1" ? "1 (norating)" : c)}</span><span>${plural(b.count, "torrent")} · ${sbGB(b.gb)}</span>`).join("");
+    $("#sb-pool .sb-body").innerHTML = `<div class="cards sb-cards">
+        <div class="card"><div class="k">Total</div><div class="v">${sbGB(pool.total.gb)}<span class="faint small"> · ${plural(pool.total.count, "torrent")}</span></div></div>
+        <div class="card"><div class="k">Seeding / paused</div><div class="v">${pool.seeding} / ${pool.paused}${pool.other ? `<span class="faint small"> · ${pool.other} other</span>` : ""}</div></div>
+        <div class="card"><div class="k">Waiting to be pruned</div><div class="v">${pool.waiting_prune.count} · ${sbGB(pool.waiting_prune.gb)}</div></div></div>
+      <div class="sb-kv">${cats}</div>
+      ${pool.stale_paused.length ? `<div class="warn small" style="margin-top:8px">Paused longer than 4 days (prune should have taken them):</div>
+        <div class="sb-kv small">${pool.stale_paused.slice(0, 6).map((s) => `<span title="${esc(s.name)}">${esc(s.name)}</span><span>${esc(s.category)} · ${s.age_days} d · ${sbGB(s.gb)}</span>`).join("")}</div>` : ""}`;
+  } else $("#sb-pool .sb-body").innerHTML = sbNA(pool.reason);
+  // inbox
+  $("#sb-inbox .sb-body").innerHTML = inbox.ok
+    ? `<div class="cards sb-cards"><div class="card"><div class="k">Waiting to be graded</div><div class="v">${plural(inbox.files, "file")} · ${sbGB(inbox.gb)}</div></div></div>
+       <div class="faint small"><code>${esc(inbox.path)}</code></div>`
+    : sbNA(inbox.reason);
+}
+async function openSeedbox(refresh) {
+  try {
+    const d = await api("/api/seedbox" + (refresh ? "/refresh" : ""), refresh ? { method: "POST" } : undefined);
+    renderSeedbox(d);
+  } catch (e) { $("#sb-verdict").className = "panel sb-verdict red"; $("#sb-verdict").textContent = "Couldn't load: " + e.message; }
+  clearInterval(sbTimer);
+  sbTimer = setInterval(() => {
+    if (document.hidden || !$("#seedbox")?.classList.contains("active")) return;
+    openSeedbox();
+  }, 60000);
+}
+$("#btn-sb-refresh")?.addEventListener("click", () => openSeedbox(true));
+// the nav dot: one quiet check at start-up (cached server-side, so it's cheap)
+setTimeout(() => api("/api/seedbox").then((d) => {
+  if (!(d.scripts.ok || d.pool.ok)) return;            // nothing set up yet: no dot
+  const dot = $("#nav-sb-dot"); if (!dot) return;
+  dot.hidden = false; dot.className = `sb-dot ${d.verdict.status}`; dot.title = `${SB_WORD[d.verdict.status]}: ${d.verdict.headline}`;
+}).catch(() => {}), 4000);
 
 // --- folder watch: new downloads ingest themselves --------------------------------
 let watchCfg = null;

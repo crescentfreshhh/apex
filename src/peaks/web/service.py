@@ -24,10 +24,11 @@ from .today import TodayMixin
 from .watch import WatchMixin
 from .dupequeue import DupeQueueMixin
 from .verdicts import VerdictMixin
+from .seedbox import SeedboxMixin
 
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
-              VerdictMixin):
+              VerdictMixin, SeedboxMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}

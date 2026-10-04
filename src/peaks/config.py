@@ -177,6 +177,22 @@ class AuthConfig:
 
 
 @dataclass
+class SeedboxConfig:
+    # The seedbox pipeline dashboard. `dir` is where the seedbox-pull scripts
+    # keep runs.log / *.failing / *.done / pull.log — mounted READ-ONLY into
+    # the container (Env: PEAKS_SEEDBOX_DIR). `inbox` is the norating folder
+    # at its container path; blank = the watched folder with "norating" in it
+    # (Env: PEAKS_SEEDBOX_INBOX). qBittorrent Web API credentials come from env
+    # (PEAKS_QBT_URL / PEAKS_QBT_USER / PEAKS_QBT_PASSWORD) or the gitignored
+    # config.toml [seedbox] section — never the repo.
+    dir: str = "/seedbox"
+    inbox: str = ""
+    qbt_url: str = ""
+    qbt_user: str = ""
+    qbt_password: str = ""
+
+
+@dataclass
 class LibraryConfig:
     # Only work on scenes whose file path starts with this (empty = whole
     # library). Point it at a folder to exclude everything else — e.g. skip VR.
@@ -194,6 +210,7 @@ class Config:
     library: LibraryConfig = field(default_factory=LibraryConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    seedbox: SeedboxConfig = field(default_factory=SeedboxConfig)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -387,7 +404,14 @@ class Config:
                 )
             ),
         )
+        sb_raw = raw.get("seedbox", {})
+        seedbox = SeedboxConfig(**{
+            k: str(os.environ.get(env, sb_raw.get(k, getattr(SeedboxConfig, k))) or "")
+            for k, env in (("dir", "PEAKS_SEEDBOX_DIR"), ("inbox", "PEAKS_SEEDBOX_INBOX"),
+                           ("qbt_url", "PEAKS_QBT_URL"), ("qbt_user", "PEAKS_QBT_USER"),
+                           ("qbt_password", "PEAKS_QBT_PASSWORD"))})
         return cls(
+            seedbox=seedbox,
             stash=stash,
             sampling=sampling,
             markers=markers,

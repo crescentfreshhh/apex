@@ -32,6 +32,7 @@
     <button class="nav tab" data-view="taste"><span class="ic">✦</span>Taste</button>
     <div class="grp">System</div>
     <button class="nav tab" data-view="activity"><span class="ic">↻</span>Activity<span class="ct hot" id="nav-ct-jobs" hidden></span></button>
+    <button class="nav tab" data-view="seedbox"><span class="ic">⇣</span>Seedbox<span class="sb-dot" id="nav-sb-dot" hidden></span></button>
     <button class="nav tab" data-view="dashboard"><span class="ic">⚙</span>Settings</button>
     <div class="spacer"></div>
     <div id="job-tray" class="tray" hidden></div>
@@ -523,6 +524,19 @@
         <div id="backup-diff" hidden></div>
         <div id="hist-list" class="hist-list dim">Loading…</div>
       </div>
+    </div>
+  </section>
+
+  <!-- SEEDBOX: is the seedbox → library pipeline healthy? (read-only) -->
+  <section id="seedbox" class="view">
+    <div class="head"><h1>Seedbox pipeline</h1><span class="sub2" id="sb-refreshed"></span><span class="grow"></span>
+      <button id="btn-sb-refresh" class="btn ghost" title="Re-read the scripts' files and re-ask qBittorrent (at most every 30 s)">↻ Refresh</button></div>
+    <div id="sb-verdict" class="panel sb-verdict"></div>
+    <div class="sb-grid">
+      <div class="panel" id="sb-scripts"><h3>Script health</h3><div class="sb-body"></div></div>
+      <div class="panel" id="sb-through"><h3>Throughput</h3><div class="sb-body"></div></div>
+      <div class="panel" id="sb-pool"><h3>Seedbox pool</h3><div class="sb-body"></div></div>
+      <div class="panel" id="sb-inbox"><h3>Inbox</h3><div class="sb-body"></div></div>
     </div>
   </section>
 

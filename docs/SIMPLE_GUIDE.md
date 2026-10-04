@@ -318,6 +318,24 @@ pass it still brings the files into Stash and leaves the embedding to that pass.
 **Check now** looks straight away. Activity → Ingest shows what it's watching
 and the last auto-ingest.
 
+## Seedbox pipeline page (System → Seedbox)
+
+One page that says whether the seedbox → library pipeline is healthy: a
+GREEN / YELLOW / RED verdict with the reasons, the pull and prune scripts' last
+successful runs, files pulled per day, the seedbox's torrent pool, and how much
+is waiting in norating. Everything is read-only. In the container settings:
+
+- **Seedbox pipeline state (read-only)**: host `/mnt/user/appdata/seedbox-pull`
+  → container `/seedbox`, access mode **Read Only**.
+- **PEAKS_QBT_URL / PEAKS_QBT_USER / PEAKS_QBT_PASSWORD**: the seedbox's
+  qBittorrent Web UI address and login. Peaks only logs in and reads the torrent
+  list (cached 5 minutes) — it never pauses, deletes or changes a torrent.
+- The inbox is the norating folder you watch in Settings → Ingest (or set
+  `PEAKS_SEEDBOX_INBOX` to its container path under `/data`).
+
+A source Peaks can't read shows as "unavailable" with the reason — never as
+zeros — and makes the verdict RED until it's fixed.
+
 ## Same-file copies (Stash's "File count > 1")
 
 When the same download lands twice, Stash hangs both files on one scene (and
