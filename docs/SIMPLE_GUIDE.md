@@ -303,6 +303,21 @@ new. The library cleanup never touches that folder.
 - **New server**: map the same library share to `/data` (read-write), open
   Settings → Backup & restore and restore the newest snapshot — no re-embedding.
 
+## Automatic ingest (watch your download folder)
+
+**Settings → Ingest → Watch for new files**: add the folder your downloads land
+in (e.g. `/data/sysbackup/norating` — it must be inside a Stash library folder),
+switch it on, Save. Files already there count as seen.
+
+Peaks looks at the folder once a minute. A new video counts once it has stopped
+growing for 2 minutes; when the folder has then been quiet for 3 minutes, one
+Ingest runs for the whole batch — scanning only that folder — and the new scenes
+appear in Review. Partial downloads (`.part`, `.!qB`, rsync's hidden temp files)
+are ignored. It waits for a running Ingest, Sync or backup; during a long embed
+pass it still brings the files into Stash and leaves the embedding to that pass.
+**Check now** looks straight away. Activity → Ingest shows what it's watching
+and the last auto-ingest.
+
 ## Same-file copies (Stash's "File count > 1")
 
 When the same download lands twice, Stash hangs both files on one scene (and

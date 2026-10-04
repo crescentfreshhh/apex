@@ -561,6 +561,11 @@ class StashClient:
         info = self._type(type_name) or {}
         return any(f["name"] == field for f in info.get("inputFields") or [])
 
+    def library_paths(self) -> list[str]:
+        """The folders Stash's library covers (Settings → Library)."""
+        data = self.execute("query { configuration { general { stashes { path } } } }")
+        return [s["path"] for s in (data["configuration"]["general"].get("stashes") or []) if s.get("path")]
+
     def config_defaults(self) -> dict:
         """The saved task defaults from Stash's Tasks page: {scan, identify,
         autoTag} (None where not saved / not supported by this Stash)."""

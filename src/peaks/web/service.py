@@ -21,9 +21,10 @@ from .library import LibraryMixin
 from .performers import PerformersMixin
 from .backup import BackupMixin
 from .today import TodayMixin
+from .watch import WatchMixin
 
 
-class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin):
+class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}

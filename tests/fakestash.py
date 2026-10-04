@@ -171,7 +171,10 @@ class FakeStash:
         return {k: v for k, v in (value or {}).items() if v is not None}
 
     def input_has(self, type_name, field):
-        return True
+        return (type_name, field) not in getattr(self, "no_fields", set())
+
+    def library_paths(self):
+        return list(getattr(self, "libraries", ["/data"]))
 
     def _task(self, kind, inp):
         self.calls.append((kind, inp))

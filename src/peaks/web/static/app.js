@@ -64,7 +64,7 @@ function showView(name) {
 // open a page and load what it shows
 function go(name) {
   showView(name);
-  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); loadCopies(); }
+  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); loadCopies(); loadWatch(); }
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
   if (name === "catalogue" && !cat.loaded) openCatalogue();
@@ -4450,6 +4450,81 @@ $("#btn-ingest-scan-save")?.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 loadScanOptions();
+
+// --- folder watch: new downloads ingest themselves --------------------------------
+let watchCfg = null;
+function watchLine(w) {
+  if (!w.watch_on || !w.watch_paths.length) return "";
+  const where = w.watch_paths.map((p) => `<code>${esc(p)}</code>`).join(", ");
+  const bits = [`👁 Watching ${where}`];
+  if (w.settling) bits.push(`${plural(w.settling, "new file")} still arriving`);
+  else if (w.settled) bits.push(`${plural(w.settled, "new file")} ready — ingesting once the folder is quiet`);
+  if (w.last_run) bits.push(`last auto-ingest ${ago(w.last_run.at)}: ${plural(w.last_run.files, "file")}`
+    + (w.last_ingest && w.last_ingest.stages?.scan ? ` → ${esc(w.last_ingest.stages.scan)}` : ""));
+  else if (w.checked) bits.push("nothing new yet");
+  if (w.unreadable?.length) bits.push(`<span class="warn">can't read ${esc(w.unreadable.join(", "))}</span>`);
+  return bits.join(" · ");
+}
+async function loadWatch(fresh) {
+  let w;
+  try { w = fresh || await api("/api/watch"); } catch { return; }
+  const line = $("#watch-line");
+  if (line) { const h = watchLine(w); line.innerHTML = h; line.hidden = !h; }
+  if (!$("#watch-on")) return;
+  if (!watchCfg || fresh) {
+    watchCfg = { on: w.watch_on, paths: [...w.watch_paths], settle: w.watch_settle, quiet: w.watch_quiet };
+    $("#watch-on").checked = watchCfg.on;
+    $("#watch-settle").value = String(watchCfg.settle);
+    $("#watch-quiet").value = String(watchCfg.quiet);
+  }
+  renderWatchPaths();
+  $("#watch-warn").innerHTML = (w.warnings || []).map((x) => `⚠ ${esc(x)}`).join("<br>");
+}
+function renderWatchPaths() {
+  const el = $("#watch-paths"); if (!el || !watchCfg) return;
+  el.innerHTML = watchCfg.paths.length
+    ? watchCfg.paths.map((p, i) => `<div class="watch-path"><code>${esc(p)}</code><button class="btn sm ghost" data-wrm="${i}" title="Stop watching">✕</button></div>`).join("")
+    : `<div class="faint small">No folder yet — add the one your downloads land in.</div>`;
+  el.querySelectorAll("[data-wrm]").forEach((b) => b.onclick = () => { watchCfg.paths.splice(+b.dataset.wrm, 1); renderWatchPaths(); });
+}
+async function watchDirs() {
+  const v = $("#watch-new").value.trim();
+  const under = v.endsWith("/") ? v.replace(/\/+$/, "") || "/" : v.includes("/") ? v.slice(0, v.lastIndexOf("/")) || "/" : "";
+  try {
+    const d = await api("/api/watch/dirs" + (under ? "?under=" + encodeURIComponent(under) : ""));
+    $("#watch-dirs").innerHTML = d.dirs.map((x) => `<option value="${esc(x)}">`).join("");
+  } catch {}
+}
+$("#watch-new")?.addEventListener("focus", watchDirs);
+$("#watch-new")?.addEventListener("input", () => { clearTimeout(watchDirs.t); watchDirs.t = setTimeout(watchDirs, 200); });
+$("#watch-add")?.addEventListener("click", () => {
+  const v = $("#watch-new").value.trim().replace(/\/+$/, "");
+  if (!v || !watchCfg) return;
+  if (!watchCfg.paths.includes(v)) watchCfg.paths.push(v);
+  $("#watch-new").value = ""; renderWatchPaths();
+});
+$("#watch-save")?.addEventListener("click", async () => {
+  if (!watchCfg) return;
+  watchCfg.on = $("#watch-on").checked;
+  watchCfg.settle = +$("#watch-settle").value; watchCfg.quiet = +$("#watch-quiet").value;
+  if (watchCfg.on && !watchCfg.paths.length) { toast("Add the folder to watch first", true); return; }
+  try {
+    const w = await api("/api/watch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(watchCfg) });
+    loadWatch(w);
+    $("#watch-set-status").textContent = w.watch_on ? "saved — watching (files already there count as seen)" : "saved — off";
+  } catch (e) { toast(e.message, true); }
+});
+$("#watch-check")?.addEventListener("click", async () => {
+  try {
+    const w = await api("/api/watch?action=check", { method: "POST" });
+    loadWatch(w);
+    $("#watch-set-status").textContent = w.started ? "new files found — ingest started (see Activity)"
+      : w.settling ? `${plural(w.settling, "file")} still arriving — it'll ingest once they've settled`
+      : w.watch_on ? "nothing new" : "the watch is off";
+  } catch (e) { toast(e.message, true); }
+});
+loadWatch();
+setInterval(() => { if (!document.hidden && $("#activity")?.classList.contains("active")) loadWatch(); }, 30000);
 
 // (last, so every page's code is defined before the first route runs)
 // land on the page in the URL (#/catalogue …), else For You — the home page

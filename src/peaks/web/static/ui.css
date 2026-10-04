@@ -655,3 +655,11 @@ html.hide-nums .num { display: none; }
 #copies-status .cp-drop { color: var(--bad); }
 #copies-status .cp-more { margin-top: 6px; }
 #copies-status .cp-more summary { cursor: pointer; }
+
+/* Settings → Ingest → Watch for new files */
+.watch-set { display: grid; gap: 10px; }
+.watch-paths { display: grid; gap: 4px; }
+.watch-path { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }
+.watch-add input { flex: 1; min-width: 0; }
+.watch-line { margin: 6px 0 2px; overflow-wrap: anywhere; }

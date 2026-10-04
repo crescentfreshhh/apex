@@ -390,6 +390,7 @@
       <div>
         <div class="panel" id="ingest-panel">
           <div class="row between"><h3>Ingest</h3><span id="ingest-status" class="dim"></span></div>
+          <div id="watch-line" class="watch-line small dim" hidden></div>
           <div class="steps" id="ingest-steps">
             <div class="st" data-st="scan"><b>Scan</b><span>phashes on</span></div>
             <div class="st" data-st="identify"><b>Identify</b><span>new scenes</span></div>
@@ -637,6 +638,17 @@
           <div class="field"><div class="l"><b>Scan</b><span>same options as Stash → Tasks → Scan</span></div>
             <div><div id="ingest-scan" class="toggles"></div>
               <div class="row"><button id="btn-ingest-scan-save" class="btn sm pri">Save</button><span id="ingest-scan-status" class="dim"></span></div></div></div>
+          <div class="field"><div class="l"><b>Watch for new files</b><span>new downloads in these folders are ingested on their own — once they've stopped growing and the folder has gone quiet</span></div>
+            <div class="watch-set">
+              <label class="tog-row"><span>Ingest new files automatically</span><input type="checkbox" class="switch" id="watch-on" /></label>
+              <div id="watch-paths" class="watch-paths"></div>
+              <div class="row watch-add"><input id="watch-new" list="watch-dirs" placeholder="/data/sysbackup/norating" autocomplete="off" />
+                <datalist id="watch-dirs"></datalist><button id="watch-add" class="btn sm">Add folder</button></div>
+              <div class="row small"><label>Settled after <select id="watch-settle"><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option></select></label>
+                <label>then quiet for <select id="watch-quiet"><option value="0">no wait</option><option value="60">1 min</option><option value="180">3 min</option><option value="600">10 min</option></select></label></div>
+              <div id="watch-warn" class="warn small"></div>
+              <div class="row"><button id="watch-save" class="btn sm pri">Save</button><button id="watch-check" class="btn sm ghost">Check now</button><span id="watch-set-status" class="dim small"></span></div>
+            </div></div>
         </div>
       </div>
     </div>

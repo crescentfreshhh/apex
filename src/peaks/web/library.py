@@ -1082,15 +1082,18 @@ class LibraryMixin:
         except Exception:  # noqa: BLE001 — never block an ingest on housekeeping
             pass
 
-    def run_ingest(self, job=None, embed_busy=None) -> dict:
+    def run_ingest(self, job=None, embed_busy=None, paths: list[str] | None = None,
+                   trigger: str = "manual") -> dict:
         log = job.log if job is not None else print
         for op in ("metadataScan", "findJob"):
             self.require_op(op)
         client = self.client()
         client.timeout = 120
         stages: dict[str, str] = {}
-        record = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "running": True,
+        record = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "running": True, "trigger": trigger,
                   "stage": "scan", "new": self.last_ingest().get("new") or [], "stages": stages}
+        if trigger == "watch":
+            log("started by the folder watch: new files in " + ", ".join(paths or []))
         before = client.all_scene_ids()
         try:
             defaults = client.config_defaults()
@@ -1116,7 +1119,11 @@ class LibraryMixin:
             opts = self.ingest_scan_options()
             scan_in = {k: v for k, v in opts.items() if client.input_has("ScanMetadataInput", k)}
             on = [label for k, (label, _) in self.INGEST_SCAN_FIELDS.items() if scan_in.get(k)]
-            log("1/5 scan: " + (", ".join(on) or "nothing extra generated"))
+            where = ""
+            if paths and client.input_has("ScanMetadataInput", "paths"):
+                scan_in["paths"] = list(paths)     # only the watched folders — quick
+                where = " · only " + ", ".join(paths)
+            log("1/5 scan: " + (", ".join(on) or "nothing extra generated") + where)
             self._wait_stash_job(client, client.metadata_scan(scan_in), "scan", job)
             new = sorted(client.all_scene_ids() - before, key=lambda x: int(x) if x.isdigit() else 0)
             stages["scan"] = f"{len(new)} new scene(s)"
@@ -1213,7 +1220,7 @@ class LibraryMixin:
         if job is not None:
             job.progress = {"stage": "done"}
         log("done — " + " · ".join(f"{k}: {v}" for k, v in stages.items()))
-        return {"new": len(new), "stages": stages,
+        return {"new": len(new), "stages": stages, "trigger": trigger,
                 "duplicates": len((dupes or {}).get("groups", []))}
 
     def _merge_dupes(self, found: dict) -> None:

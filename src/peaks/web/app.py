@@ -1238,6 +1238,32 @@ def create_app(cfg=None):
             raise HTTPException(409, str(exc))
         return job.as_dict()
 
+    @app.get("/api/watch")
+    def watch_status():
+        return service.watch_status()
+
+    @app.post("/api/watch")
+    def watch_update(body: dict | None = None, action: str = "save"):
+        """save ({on, paths, settle, quiet}) · check (look now, skip the quiet wait)."""
+        body = body or {}
+        if action == "check":
+            try:
+                job = _watch_go(service, jobs, force=True)
+            except RuntimeError as exc:
+                raise HTTPException(409, str(exc))
+            return {**service.watch_status(), "started": job.as_dict() if job else None}
+        if action != "save":
+            raise HTTPException(400, "unknown action")
+        paths = body.get("paths")
+        if paths is not None and not isinstance(paths, list):
+            raise HTTPException(400, "paths must be a list")
+        return service.save_watch_settings(on=body.get("on"), paths=paths,
+                                           settle=body.get("settle"), quiet=body.get("quiet"))
+
+    @app.get("/api/watch/dirs")
+    def watch_dirs(under: str | None = None):
+        return service.watch_dirs(under)
+
     @app.get("/api/ingest/scan-options")
     def ingest_scan_options():
         return {"options": service.ingest_scan_options(),
@@ -1839,6 +1865,23 @@ def _start_memwatch(app, service: Service) -> None:
     app.state._memwatch_stop = stop
 
 
+_WATCH_WAIT_FOR = ("ingest", "sync", "backup", "restore")
+
+
+def _watch_go(service: Service, jobs: JobManager, force: bool = False):
+    """One folder-watch look; starts the Ingest when files are ready and nothing
+    it should wait for is running. Returns the started job, or None."""
+    go = service.watch_tick(force=force)       # always look, so settling keeps counting
+    if not go or any(jobs.running(k) for k in _WATCH_WAIT_FOR):
+        return None
+    if not service.capabilities()["ops"].get("metadataScan"):
+        return None
+    job = jobs.start("ingest", lambda j: service.run_ingest(
+        j, embed_busy=lambda: jobs.running("embed") is not None, paths=go["paths"], trigger="watch"))
+    service.watch_started(go["files"])
+    return job
+
+
 def _start_scheduler(app, service: Service, jobs: JobManager):
     """Recurring incremental-embed scheduler. Always running; it polls the
     settings each minute and reads the interval/enabled state live, so the
@@ -1874,6 +1917,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 busy = any(jobs.running(k) for k in ("embed", "ingest", "backup", "restore"))
                 if not busy and service.backup_due():
                     jobs.start("backup", service.run_backup)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # the folder watch: new downloads → one Ingest, after they settle
+                _watch_go(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
