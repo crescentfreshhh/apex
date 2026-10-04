@@ -663,3 +663,10 @@ html.hide-nums .num { display: none; }
   background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }
 .watch-add input { flex: 1; min-width: 0; }
 .watch-line { margin: 6px 0 2px; overflow-wrap: anywhere; }
+
+/* Duplicates → the delete queue */
+.dupe-queue { position: sticky; top: 0; z-index: 3; margin: 8px 0; padding: 8px 12px; border: 1px solid var(--line2);
+  border-radius: 8px; background: var(--panel2); display: grid; gap: 4px; }
+.dupe-queue .dq-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dupe-queue .dq-row { display: flex; align-items: center; gap: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.dupe-queue .dq-row.bad { color: var(--bad); }

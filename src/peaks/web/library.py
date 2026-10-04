@@ -901,6 +901,7 @@ class LibraryMixin:
             out.append({"scenes": rows, "keep": keep, "best_grade": self.dupe_best_grade(rows),
                         "reclaim": sum(size.values()) - size[keep]})
         out.sort(key=lambda g: -g["reclaim"])
+        out = self.dupe_queue_hide(out)            # already waiting in the delete queue
         result = {"groups": out, "accuracy": accuracy, "duration_diff": duration_diff,
                   "checked_at": _t.strftime("%Y-%m-%d %H:%M"), "ignored": len(ignored),
                   "reclaim": sum(g["reclaim"] for g in out)}

@@ -327,8 +327,11 @@
           <option value="-1">any</option><option value="0">equal</option>
           <option value="1">±1 s</option><option value="5">±5 s</option><option value="10">±10 s</option></select></label>
         <button id="btn-dupe-scan" class="btn pri">Find duplicates</button>
-        <span class="faint small">Recommended = most pixels (8K VR beats 4K) → bitrate → size. Keeping a copy moves the best grade to it first.</span>
+        <label class="check" title="Off: copies are only removed from Stash; the files stay on disk"><input type="checkbox" id="dupe-files" checked /> Delete the video files too</label>
+        <button id="btn-dupe-all" class="btn ghost" title="Queue every group with its ★ Recommended copy kept">Keep recommended in every group</button>
+        <span class="faint small">Recommended = most pixels (8K VR beats 4K) → bitrate → size. "Keep this" queues at once — deletions run in the background; the kept copy takes the group's highest tier first.</span>
       </div>
+      <div id="dupe-queue" class="dupe-queue" hidden></div>
       <div id="dupe-list" class="dupe-list"></div>
     </div>
   </section>

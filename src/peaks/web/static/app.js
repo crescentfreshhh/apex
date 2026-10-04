@@ -3814,6 +3814,7 @@ function renderDupes() {
 }
 async function openDupes() {
   try { const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); } } catch {}
+  pollDupeQueue();
   if (!dupe.data) $("#dupe-list").innerHTML = '<div class="empty">Pick an accuracy and <b>Find duplicates</b> — Stash compares phashes across the library.</div>';
 }
 $("#btn-cat-new")?.addEventListener("click", () => {
@@ -3923,38 +3924,98 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
   }
   const copy = e.target.closest(".dupe-copy");
   if (e.target.closest(".dupe-keep") && copy) {
-    const keep = g.scenes.find((r) => r.scene_id === copy.dataset.sid);
-    const others = g.scenes.filter((r) => r !== keep);
-    const order = ["upscale", "merveilleuse", "exceptionnelle", "legendaire"];
-    const keepTags = keep.tag_state?.present || [];
-    const carry = g.best_grade && (order.indexOf(keep.tier) < order.indexOf(g.best_grade)
-      || keepTags.length !== 1 || keepTags[0] !== g.best_grade);
-    const bytes = others.reduce((a, r) => a + (+r.size || 0), 0);
-    showDeleteDialog({
-      title: "Keep one copy, delete the others",
-      summary: (df) => `Keeping <b>${esc(keep.quality.res || "?")}${keep.quality.w ? ` (${keep.quality.w}×${keep.quality.h})` : ""} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
-        (df ? `Deleting <b>${plural(others.length, "copy", "copies")}</b> (${fmtBytes(bytes)}) with their files:`
-            : `Removing <b>${plural(others.length, "copy", "copies")}</b> from Stash — the files stay on disk:`) +
-        (carry ? `<br>The kept copy becomes <b>${esc(TIER_NAMES[g.best_grade])}</b> first — the highest tier in this group (tier tag + organized), so it isn't lost.` : ""),
-      note: "Duplicate copies aren't counted as rejects. Every deleted file is recorded in Settings → History.",
-      items: others, total: others.length,
-      goLabel: (df) => df ? `Delete ${plural(others.length, "copy", "copies")}` : `Remove ${plural(others.length, "copy", "copies")} from Stash`,
-      run: async (status, deleteFile) => {
-        const job = await api("/api/duplicates/resolve", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keep: keep.scene_id, delete: others.map((r) => r.scene_id), confirm: true, delete_file: deleteFile }),
-        });
-        const j = await waitJob(job.id, () => status("deleting…"));
-        if (j.status === "error") throw new Error(j.error);
-        const r = j.result;
-        toast((r.files_deleted === false ? `Kept 1 · removed ${r.deleted} from Stash (files kept)`
-          : `Kept 1 · deleted ${r.deleted} · freed ${fmtBytes(r.freed_bytes)}`) + (r.carried_grade ? ` · tier carried over: ${TIER_NAMES[r.carried_grade] || r.carried_grade}` : ""));
-        dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
-        dupe.data.reclaim -= g.reclaim;
-        renderDupes(); loadHistory();
-      },
-    });
+    // no dialog, no waiting: the decision is queued and the group leaves the list
+    const keep = copy.dataset.sid;
+    const others = g.scenes.filter((r) => r.scene_id !== keep).map((r) => r.scene_id);
+    const df = dupeDeleteFiles();
+    dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
+    dupe.data.reclaim -= g.reclaim;
+    renderDupes();
+    try {
+      const r = await api("/api/duplicates/queue", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keep, delete: others, delete_file: df }) });
+      renderDupeQueue(r);
+      toast(`Queued: keeping 1, ${df ? "deleting" : "removing"} ${plural(others.length, "copy", "copies")} — Undo in the bar for 5 s`);
+    } catch (err) {
+      toast(err.message, true);
+      dupe.data.groups.push(g); dupe.data.groups.sort((x, y) => y.reclaim - x.reclaim);
+      dupe.data.reclaim += g.reclaim; renderDupes();
+    }
   }
+});
+// --- the delete queue: decisions go in, a background worker works through them ---
+function dupeDeleteFiles() {
+  const el = $("#dupe-files"); return el ? el.checked : true;
+}
+(() => {
+  const el = $("#dupe-files"); if (!el) return;
+  try { el.checked = localStorage.getItem("peaks_dupe_files") !== "0"; } catch {}
+  el.addEventListener("change", () => { try { localStorage.setItem("peaks_dupe_files", el.checked ? "1" : "0"); } catch {} });
+})();
+let dqTimer = null, dqSeen = 0;
+function renderDupeQueue(q) {
+  const bar = $("#dupe-queue"); if (!bar || !q) return;
+  const busy = q.queued.length + q.running.length;
+  const doneNow = q.done.filter((x) => x.finished_at > dqSeen);
+  if (!busy && !q.failed.length && !doneNow.length) { bar.hidden = true; clearInterval(dqTimer); dqTimer = null; return; }
+  bar.hidden = false;
+  const total = busy + doneNow.length;
+  const head = busy
+    ? (q.paused ? `⏸ Paused · ${plural(q.queued.length, "group")} waiting`
+       : !q.running.length ? `🕐 ${plural(q.queued.length, "group")} queued — starting in a moment`
+       : `🗑 Deleting ${doneNow.length + 1} of ${total}${q.queued.length ? ` · ${q.queued.length} more queued` : ""}`)
+    : `✓ Done · ${plural(doneNow.length, "group")} resolved`;
+  const freed = doneNow.reduce((a, x) => a + (+(x.result || {}).freed_bytes || 0), 0);
+  const now = Date.now() / 1000;
+  const undoable = q.queued.filter((x) => x.not_before > now);
+  bar.innerHTML = `<div class="dq-head"><b>${head}</b>${freed ? ` · ${fmtBytes(freed)} freed` : ""}
+      ${q.queued_bytes ? ` · ${fmtBytes(q.queued_bytes)} to go` : ""}<span class="grow"></span>
+      ${busy ? (q.paused ? `<button class="btn sm" data-dq="resume">Resume</button>` : `<button class="btn sm ghost" data-dq="stop" title="Finish the current group, then pause">Stop</button>`) : ""}
+      ${q.queued.length ? `<button class="btn sm ghost" data-dq="clear" title="Drop what hasn't started — those groups come back">Clear queued</button>` : ""}
+      ${!busy ? `<button class="btn sm ghost" data-dq="hide">Hide</button>` : ""}</div>
+    ${q.running.map((x) => `<div class="dq-row">⏳ ${esc(x.title)}</div>`).join("")}
+    ${undoable.map((x) => `<div class="dq-row">🕐 ${esc(x.title)} <button class="btn sm" data-dq-undo="${esc(x.id)}">Undo</button></div>`).join("")}
+    ${q.failed.map((x) => `<div class="dq-row bad">⚠ ${esc(x.title)} — ${esc(x.error || "failed")}
+      <button class="btn sm" data-dq-retry="${esc(x.id)}">Retry</button><button class="btn sm ghost" data-dq-dismiss="${esc(x.id)}">Dismiss</button></div>`).join("")}`;
+  if ((busy || undoable.length) && !dqTimer) dqTimer = setInterval(pollDupeQueue, 2000);
+}
+async function pollDupeQueue() {
+  try {
+    const q = await api("/api/duplicates/queue");
+    renderDupeQueue(q);
+    if (!q.queued.length && !q.running.length) { clearInterval(dqTimer); dqTimer = null; loadHistory(); }
+  } catch {}
+}
+$("#dupe-queue")?.addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  try {
+    let q;
+    if (b.dataset.dq === "hide") { dqSeen = Date.now() / 1000; $("#dupe-queue").hidden = true; return; }
+    if (b.dataset.dq) q = await api("/api/duplicates/queue/" + b.dataset.dq, { method: "POST" });
+    for (const k of ["undo", "retry", "dismiss"]) {
+      const id = b.dataset["dq" + k[0].toUpperCase() + k.slice(1)];
+      if (id) q = await api(`/api/duplicates/queue/${encodeURIComponent(id)}/${k}`, { method: "POST" });
+    }
+    if (b.dataset.dqUndo || b.dataset.dq === "clear") {      // those groups come back
+      const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); }
+    }
+    renderDupeQueue(q || await api("/api/duplicates/queue"));
+  } catch (err) { toast(err.message, true); }
+});
+$("#btn-dupe-all")?.addEventListener("click", async () => {
+  const gs = dupe.data?.groups || [];
+  if (!gs.length) return;
+  const df = dupeDeleteFiles();
+  const bytes = gs.reduce((a, g) => a + g.reclaim, 0);
+  if (!confirm(`Keep the recommended copy in all ${gs.length} groups and ${df
+    ? `delete the other ${plural(gs.reduce((a, g) => a + g.scenes.length - 1, 0), "copy", "copies")} with their files (${fmtBytes(bytes)})`
+    : "remove the other copies from Stash (files stay on disk)"}?\n\nEach kept copy takes its group's highest tier first. Deletions run in the background — you can Stop or Clear the queue any time.`)) return;
+  try {
+    const r = await api("/api/duplicates/queue/recommended?delete_file=" + df, { method: "POST" });
+    const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); }
+    renderDupeQueue(r);
+    toast(`Queued ${plural(r.added, "group")}${r.skipped ? ` · ${r.skipped} skipped (already queued)` : ""}`);
+  } catch (err) { toast(err.message, true); }
 });
 $("#btn-cat-delete")?.addEventListener("click", () => openDeleteDialog(null));
 $("#btn-cat-delsel")?.addEventListener("click", () =>

@@ -170,6 +170,11 @@ def _catalogue_models():
         confirm: bool = False
         delete_file: bool = True
 
+    class DupeQueueIn(BaseModel):
+        keep: str
+        delete: list[str]
+        delete_file: bool = True
+
     class DupeIgnoreIn(BaseModel):
         scene_ids: list[str]
 
@@ -186,12 +191,13 @@ def _catalogue_models():
         neg: dict[str, int] = {}
 
     return (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
-            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn, TasteScoresIn, ExposureIn)
+            TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn, TasteScoresIn, ExposureIn,
+            DupeQueueIn)
 
 
 (GradeIn, RestoreIn, TierNamesIn, ConfirmIn, BulkGradeIn, BulkRestoreIn,
  TierTagsIn, DeleteIn, DupeResolveIn, DupeIgnoreIn, SavedViewIn,
- TasteScoresIn, ExposureIn) = _catalogue_models()
+ TasteScoresIn, ExposureIn, DupeQueueIn) = _catalogue_models()
 
 
 def _login_model():
@@ -1312,6 +1318,63 @@ def create_app(cfg=None):
         return _library_job(lambda j: service.resolve_duplicate(j, body.keep, body.delete, confirm=True,
                                                                 delete_file=body.delete_file))
 
+    # --- duplicates in batches: decisions queue, deletions run in the background ---
+
+    def _dupe_drain():
+        return _start_dupe_drain(service, jobs)
+
+    @app.get("/api/duplicates/queue")
+    def dupe_queue():
+        return service.dupe_queue_status()
+
+    @app.post("/api/duplicates/queue")
+    def dupe_queue_add(body: DupeQueueIn):
+        caps = service.capabilities()
+        if not caps["ops"].get("scenesDestroy"):
+            raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
+        try:
+            item = service.dupe_queue_add(body.keep, body.delete, delete_file=body.delete_file)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        _dupe_drain()
+        return {"item": item, **service.dupe_queue_status()}
+
+    @app.post("/api/duplicates/queue/recommended")
+    def dupe_queue_recommended(delete_file: bool = True):
+        caps = service.capabilities()
+        if not caps["ops"].get("scenesDestroy"):
+            raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
+        out = service.dupe_queue_add_recommended(delete_file=delete_file)
+        _dupe_drain()
+        return out
+
+    @app.post("/api/duplicates/queue/{action}")
+    def dupe_queue_all(action: str):
+        if action == "clear":
+            return service.dupe_queue_clear()
+        if action in ("stop", "resume"):
+            service.dupe_queue_pause(action == "stop")   # the worker stops after the current group
+            if action == "resume":
+                _dupe_drain()
+            return service.dupe_queue_status()
+        raise HTTPException(400, "unknown action")
+
+    @app.post("/api/duplicates/queue/{item_id}/{action}")
+    def dupe_queue_item(item_id: str, action: str):
+        fn = {"undo": service.dupe_queue_undo, "retry": service.dupe_queue_retry,
+              "dismiss": service.dupe_queue_dismiss}.get(action)
+        if fn is None:
+            raise HTTPException(400, "unknown action")
+        try:
+            out = fn(item_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        if action == "retry":
+            _dupe_drain()
+        return out
+
     @app.post("/api/duplicates/ignore")
     def duplicates_ignore(body: DupeIgnoreIn):
         try:
@@ -1865,6 +1928,17 @@ def _start_memwatch(app, service: Service) -> None:
     app.state._memwatch_stop = stop
 
 
+def _start_dupe_drain(service: Service, jobs: JobManager):
+    """Run the duplicate delete queue as THE library job, if there's work and
+    no library job is running (one Stash write stream at a time)."""
+    if not service.dupe_queue_pending() or jobs.running("library") is not None:
+        return None
+    try:
+        return jobs.start("library", service.drain_dupe_queue)
+    except RuntimeError:
+        return None
+
+
 _WATCH_WAIT_FOR = ("ingest", "sync", "backup", "restore")
 
 
@@ -1917,6 +1991,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 busy = any(jobs.running(k) for k in ("embed", "ingest", "backup", "restore"))
                 if not busy and service.backup_due():
                     jobs.start("backup", service.run_backup)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # duplicate deletions waiting (after a restart / another library job)
+                _start_dupe_drain(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             try:   # the folder watch: new downloads → one Ingest, after they settle

@@ -207,3 +207,125 @@ def test_group_label_counts_tags(svc, tagged, monkeypatch):
     _wait(client, client.post("/api/duplicates/scan").json())
     b = next(g for g in client.get("/api/duplicates").json()["groups"] if g["keep"] in ("4", "5"))
     assert b["best_grade"] == "exceptionnelle"
+
+
+# --- batches: decisions queue, deletions run in the background ------------------------
+
+@pytest.fixture
+def queued(svc, stash, monkeypatch):
+    import peaks.web.dupequeue as dq
+
+    monkeypatch.setattr(dq, "UNDO_SECONDS", 0.0)
+    stash.dupes = [["1", "2", "3"], ["4", "5"], ["6", "7"]]
+    stash.s["7"] = dict(stash.s["6"], fingerprint="fp7", size=400_000_000)
+    svc.find_duplicates(None)
+    return svc
+
+
+def test_queue_returns_at_once_then_the_worker_resolves_in_order(queued, stash):
+    svc = queued
+    svc.dupe_queue_add("2", ["1", "3"])
+    svc.dupe_queue_add("5", ["4"])
+    svc.dupe_queue_add("6", ["7"], delete_file=False)
+    assert not [c for c in stash.calls if c[0] == "destroy"]               # nothing deleted yet
+    assert svc.cached_duplicates()["groups"] == []                          # all three left the view
+    assert len(svc.dupe_queue_status()["queued"]) == 3
+    r = svc.drain_dupe_queue(None, sleep=lambda s: None)
+    assert r == {"resolved": 3, "failed": 0}
+    destroys = [c for c in stash.calls if c[0] == "destroy"]
+    assert [d[1] for d in destroys] == [("1", "3"), ("4",), ("7",)]
+    assert destroys[2][2] is False                                          # files kept for that one
+    assert stash.s["2"]["o_counter"] == 18                                  # tier carried first
+    st = svc.dupe_queue_status()
+    assert len(st["done"]) == 3 and st["queued"] == [] and st["freed"] > 0
+
+
+def test_undo_before_it_starts_puts_the_group_back(svc, stash, monkeypatch):
+    svc.find_duplicates(None)
+    it = svc.dupe_queue_add("5", ["4"])                                     # 5 s undo window
+    assert svc.drain_dupe_queue(None, sleep=lambda s: svc.dupe_queue_undo(it["id"])) == {"resolved": 0, "failed": 0}
+    assert not [c for c in stash.calls if c[0] == "destroy"]
+    assert any(g["keep"] == "5" for g in svc.cached_duplicates()["groups"])
+
+
+def test_overlapping_group_is_refused(queued):
+    queued.dupe_queue_add("2", ["1", "3"])
+    with pytest.raises(ValueError, match="overlap"):
+        queued.dupe_queue_add("1", ["2"])
+
+
+def test_a_failure_is_listed_the_rest_run_and_retry_requeues(queued, stash):
+    svc = queued
+    svc.dupe_queue_add("2", ["1", "3"])
+    svc.dupe_queue_add("5", ["4"])
+    del stash.s["2"]                                                        # the keeper vanished meanwhile
+    r = svc.drain_dupe_queue(None, sleep=lambda s: None)
+    assert r == {"resolved": 1, "failed": 1} and "4" not in stash.s
+    st = svc.dupe_queue_status()
+    bad = st["failed"][0]
+    assert "no longer in Stash" in bad["error"]
+    svc.dupe_queue_retry(bad["id"])
+    assert len(svc.dupe_queue_status()["queued"]) == 1
+    svc.dupe_queue_dismiss(svc.drain_dupe_queue(None, sleep=lambda s: None) and svc.dupe_queue_status()["failed"][0]["id"])
+    assert svc.dupe_queue_status()["failed"] == []
+
+
+def test_stop_pauses_after_the_current_group_and_resume_continues(queued, stash):
+    svc = queued
+    svc.dupe_queue_add("2", ["1", "3"])
+    svc.dupe_queue_add("5", ["4"])
+    real = svc.resolve_duplicate
+
+    def once_then_stop(*a, **k):
+        out = real(*a, **k)
+        svc.dupe_queue_pause(True)                                          # Stop pressed mid-run
+        return out
+
+    svc.resolve_duplicate = once_then_stop
+    assert svc.drain_dupe_queue(None, sleep=lambda s: None)["resolved"] == 1
+    assert len(svc.dupe_queue_status()["queued"]) == 1 and not svc.dupe_queue_pending()
+    svc.resolve_duplicate = real
+    svc.dupe_queue_pause(False)
+    assert svc.drain_dupe_queue(None, sleep=lambda s: None)["resolved"] == 1
+
+
+def test_queue_survives_a_restart_and_a_mid_delete_item_reruns(queued, stash, tmp_path):
+    import peaks.web.service as svc_mod
+
+    svc = queued
+    it = svc.dupe_queue_add("5", ["4"])
+    svc._dq()["items"][0]["status"] = "running"                            # the container died mid-delete
+    svc._dq_save()
+    fresh = svc_mod.Service(svc.cfg)
+    assert fresh.dupe_queue_status()["queued"][0]["id"] == it["id"]
+    assert fresh.drain_dupe_queue(None, sleep=lambda s: None)["resolved"] == 1 and "4" not in stash.s
+
+
+def test_recommended_in_every_group_skips_ignored(queued, stash):
+    svc = queued
+    svc.ignore_duplicate_group(["6", "7"])
+    svc.find_duplicates(None)
+    r = svc.dupe_queue_add_recommended()
+    assert r["added"] == 2
+    assert sorted(x["keep"] for x in r["queued"]) == ["2", "5"]
+    svc.find_duplicates(None)                                               # a re-scan hides queued groups
+    assert svc.cached_duplicates()["groups"] == []
+
+
+def test_queue_api_starts_the_worker(queued, stash, monkeypatch):
+    import peaks.web.dupequeue as dq
+
+    monkeypatch.setattr(dq, "UNDO_SECONDS", 0.5)
+    client = _api(queued, monkeypatch)
+    r = client.post("/api/duplicates/queue", json={"keep": "5", "delete": ["4"]})
+    assert r.status_code == 200 and r.json()["item"]["keep"] == "5"
+    assert client.post("/api/duplicates/queue", json={"keep": "4", "delete": ["5"]}).status_code == 409
+    for _ in range(300):
+        st = client.get("/api/duplicates/queue").json()
+        if st["done"]:
+            break
+        time.sleep(0.02)
+    assert st["done"][0]["keep"] == "5" and "4" not in stash.s
+    assert client.post("/api/duplicates/queue/nope/undo").status_code == 404
+    assert client.post("/api/duplicates/queue/stop").json()["paused"] is True
+    assert client.post("/api/duplicates/queue/resume").json()["paused"] is False
