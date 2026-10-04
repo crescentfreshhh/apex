@@ -96,7 +96,7 @@ def test_keep_carries_the_grade_first_then_deletes_others(svc, stash, monkeypatc
 
 
 def test_keep_never_downgrades_the_kept_copy(svc, stash, monkeypatch):
-    stash.s["2"].update(rating100=100, o_counter=18)        # already Légendaire
+    stash.s["2"].update(rating100=100, o_counter=18, tag_ids=["11"], organized=True)  # already Légendaire, tagged
     stash.s["1"].update(o_counter=16)                       # the other is only Merveilleuse
     client = _api(svc, monkeypatch)
     j = _wait(client, client.post("/api/duplicates/resolve",
@@ -138,3 +138,72 @@ def test_resolve_can_keep_the_other_files(svc, stash, monkeypatch):
     j = _wait(client, client.post("/api/duplicates/resolve",
                                   json={"keep": "5", "delete": ["4"], "confirm": True, "delete_file": False}).json())
     assert ("destroy", ("4",), False, True) in stash.calls and j["result"]["freed_bytes"] == 0
+
+
+# --- the winner takes the group's highest tier, tier TAGS included ------------------
+
+def _tags(stash, sid):
+    return sorted(stash.tags[t] for t in stash.s[sid]["tag_ids"])
+
+
+@pytest.fixture
+def tagged(stash):
+    stash.tags.update({"12": "exceptionnelle", "13": "merveilleuse", "14": "blonde"})
+    return stash
+
+
+def test_a_tier_tag_on_a_deleted_copy_carries_to_the_keeper(svc, tagged):
+    tagged.s["5"]["tag_ids"] = ["12"]                       # ungraded, but tagged exceptionnelle
+    tagged.s["4"]["tag_ids"] = ["14"]                       # keeper: unreviewed, a normal tag
+    r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
+    assert r["carried_grade"] == "exceptionnelle"
+    kinds = [c[0] for c in tagged.calls]
+    assert kinds.index("update") < kinds.index("destroy")
+    assert tagged.s["4"]["rating100"] == 100 and tagged.s["4"]["o_counter"] == 17
+    assert _tags(tagged, "4") == ["blonde", "exceptionnelle"] and tagged.s["4"]["organized"]
+    assert any("highest tag" in (e.get("detail") or "") for e in svc.history() if e["action"] == "duplicate")
+
+
+def test_disagreeing_tags_the_higher_one_wins_and_the_lower_goes(svc, tagged):
+    tagged.s["4"].update(rating100=100, o_counter=16, tag_ids=["13"], organized=True)   # Merveilleuse
+    tagged.s["5"]["tag_ids"] = ["12"]                                                    # tagged exceptionnelle
+    r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
+    assert r["carried_grade"] == "exceptionnelle"
+    assert tagged.s["4"]["o_counter"] == 17 and _tags(tagged, "4") == ["exceptionnelle"]
+
+
+def test_keeper_already_highest_and_tagged_is_left_alone(svc, tagged):
+    tagged.s["1"]["tag_ids"] = ["11"]
+    tagged.s["2"].update(tag_ids=["12"])                    # the other copy: tagged exceptionnelle
+    r = svc.resolve_duplicate(None, "1", ["2"], confirm=True)
+    assert r["carried_grade"] is None and tagged.s["1"]["o_counter"] == 18
+    assert not [c for c in tagged.calls if c[0] == "update"]
+
+
+def test_keeper_missing_its_own_tier_tag_gets_it(svc, tagged):
+    tagged.s["4"].update(rating100=100, o_counter=17, organized=False)                  # Exceptionnelle, untagged
+    r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
+    assert r["carried_grade"] == "exceptionnelle" and _tags(tagged, "4") == ["exceptionnelle"]
+    assert tagged.s["4"]["organized"]
+
+
+def test_rejected_or_unreviewed_copies_set_nothing(svc, tagged):
+    tagged.s["5"].update(rating100=20)                      # a reject
+    r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
+    assert r["carried_grade"] is None and tagged.s["4"]["rating100"] is None
+
+
+def test_custom_tier_tag_names_are_honoured(svc, tagged):
+    svc.save_tier_tags({"exceptionnelle": "Tier 2"})
+    tagged.tags["15"] = "Tier 2"
+    tagged.s["5"]["tag_ids"] = ["15"]
+    r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
+    assert r["carried_grade"] == "exceptionnelle" and _tags(tagged, "4") == ["Tier 2"]
+
+
+def test_group_label_counts_tags(svc, tagged, monkeypatch):
+    tagged.s["5"]["tag_ids"] = ["12"]
+    client = _api(svc, monkeypatch)
+    _wait(client, client.post("/api/duplicates/scan").json())
+    b = next(g for g in client.get("/api/duplicates").json()["groups"] if g["keep"] in ("4", "5"))
+    assert b["best_grade"] == "exceptionnelle"

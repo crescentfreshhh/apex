@@ -846,10 +846,19 @@ class LibraryMixin:
 
     @staticmethod
     def dupe_best_grade(rows: list[dict]) -> str | None:
+        return LibraryMixin.dupe_best_tier(rows)[0]
+
+    @staticmethod
+    def dupe_best_tier(rows: list[dict]) -> tuple[str | None, str | None]:
+        """The highest keeper tier anywhere in a duplicate group — from a copy's
+        grade OR any tier tag it carries — and where it came from ('grade' /
+        'tag'). Rejected / unreviewed never count."""
         for t in ("legendaire", "exceptionnelle", "merveilleuse", "upscale"):
-            if any(r["tier"] == t for r in rows):
-                return t
-        return None
+            if any(r.get("tier") == t for r in rows):
+                return t, "grade"
+            if any(t in ((r.get("tag_state") or {}).get("present") or []) for r in rows):
+                return t, "tag"
+        return None, None
 
     def find_duplicates(self, job=None, accuracy: str = "exact", duration_diff: float = -1.0,
                         only_ids: set[str] | None = None) -> dict:
@@ -920,19 +929,24 @@ class LibraryMixin:
         fresh = self.client().scene_details([keep_id, *delete_ids])
         if keep_id not in fresh:
             raise LookupError(f"the copy to keep (scene {keep_id}) is no longer in Stash")
-        rows = [self._cat_row(s, m) for s, m in fresh.items()]
-        best = self.dupe_best_grade(rows)
+        rows = {s: self._cat_row(s, m) for s, m in fresh.items()}
+        best, best_from = self.dupe_best_tier(list(rows.values()))
         order = ["upscale", "merveilleuse", "exceptionnelle", "legendaire"]
         kept_tier = tier_of(fresh[keep_id].get("rating100"), fresh[keep_id].get("o_counter"))
+        kept_tags = (rows[keep_id].get("tag_state") or {}).get("present") or []
         carried = None
-        if best and (kept_tier not in order or order.index(kept_tier) < order.index(best)):
+        # the winner takes the group's highest tier — from a grade or a tier tag —
+        # and exactly that one tier tag (grade_scene: rating/O, tag, organized)
+        if best and (kept_tier not in order or order.index(kept_tier) < order.index(best)
+                     or kept_tags != [best]):
             self.grade_scene(keep_id, best, source="duplicate")
             carried = best
         res = self.delete_scenes(job, delete_ids, confirm=True, reason="duplicate",
                                  keep_ids={keep_id}, delete_file=delete_file)
         keep_row = self._cat_update_row(keep_id)
         self._log_scene("duplicate", keep_row, detail=(
-            f"kept this copy, deleted {res['deleted']}" + (f", carried grade {best}" if carried else "")))
+            f"kept this copy, deleted {res['deleted']}"
+            + (f", made it {best} (highest {best_from} in the group)" if carried else "")))
         cached = getattr(self, "_dupe_cache", None)
         if cached:
             cached["groups"] = [g for g in cached["groups"]

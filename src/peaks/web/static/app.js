@@ -3926,14 +3926,16 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
     const keep = g.scenes.find((r) => r.scene_id === copy.dataset.sid);
     const others = g.scenes.filter((r) => r !== keep);
     const order = ["upscale", "merveilleuse", "exceptionnelle", "legendaire"];
-    const carry = g.best_grade && order.indexOf(keep.tier) < order.indexOf(g.best_grade);
+    const keepTags = keep.tag_state?.present || [];
+    const carry = g.best_grade && (order.indexOf(keep.tier) < order.indexOf(g.best_grade)
+      || keepTags.length !== 1 || keepTags[0] !== g.best_grade);
     const bytes = others.reduce((a, r) => a + (+r.size || 0), 0);
     showDeleteDialog({
       title: "Keep one copy, delete the others",
       summary: (df) => `Keeping <b>${esc(keep.quality.res || "?")}${keep.quality.w ? ` (${keep.quality.w}×${keep.quality.h})` : ""} · ${keep.quality.mbps ?? "?"} Mbps</b> — ${esc(keep.path)}.<br>` +
         (df ? `Deleting <b>${plural(others.length, "copy", "copies")}</b> (${fmtBytes(bytes)}) with their files:`
             : `Removing <b>${plural(others.length, "copy", "copies")}</b> from Stash — the files stay on disk:`) +
-        (carry ? `<br>The kept copy is graded <b>${esc(TIER_NAMES[g.best_grade])}</b> first (tier tag + organized), so the grade isn't lost.` : ""),
+        (carry ? `<br>The kept copy becomes <b>${esc(TIER_NAMES[g.best_grade])}</b> first — the highest tier in this group (tier tag + organized), so it isn't lost.` : ""),
       note: "Duplicate copies aren't counted as rejects. Every deleted file is recorded in Settings → History.",
       items: others, total: others.length,
       goLabel: (df) => df ? `Delete ${plural(others.length, "copy", "copies")}` : `Remove ${plural(others.length, "copy", "copies")} from Stash`,
@@ -3946,7 +3948,7 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
         if (j.status === "error") throw new Error(j.error);
         const r = j.result;
         toast((r.files_deleted === false ? `Kept 1 · removed ${r.deleted} from Stash (files kept)`
-          : `Kept 1 · deleted ${r.deleted} · freed ${fmtBytes(r.freed_bytes)}`) + (r.carried_grade ? " · grade carried over" : ""));
+          : `Kept 1 · deleted ${r.deleted} · freed ${fmtBytes(r.freed_bytes)}`) + (r.carried_grade ? ` · tier carried over: ${TIER_NAMES[r.carried_grade] || r.carried_grade}` : ""));
         dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
         dupe.data.reclaim -= g.reclaim;
         renderDupes(); loadHistory();
