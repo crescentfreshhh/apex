@@ -1966,7 +1966,30 @@ def _start_dupe_drain(service: Service, jobs: JobManager):
         return None
 
 
-_WATCH_WAIT_FOR = ("ingest", "sync", "backup", "restore")
+# the folder watch waits for these: an embed holds the model + index in memory,
+# and Stash's scan / generate shouldn't compete with it
+def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: float, run) -> str | None:
+    """One heavy job at a time: an embed never starts during an ingest (or
+    another embed). Embeds an ingest had to leave go first; the recurring pass
+    waits — and starts the minute the ingest ends — rather than being skipped."""
+    import time as _t
+
+    if jobs.running("embed") is not None or jobs.running("ingest") is not None:
+        return None
+    try:
+        if service.embed_followup():
+            jobs.start("embed", service.run_embed_followup)
+            return "followup"
+        if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
+            jobs.start("embed", run)
+            state["last"] = _t.time()
+            return "scheduled"
+    except RuntimeError:
+        pass                                       # a run is already going
+    return None
+
+
+_WATCH_WAIT_FOR = ("ingest", "embed", "sync", "backup", "restore")
 
 
 def _watch_go(service: Service, jobs: JobManager, force: bool = False):
@@ -1977,9 +2000,22 @@ def _watch_go(service: Service, jobs: JobManager, force: bool = False):
         return None
     if not service.capabilities()["ops"].get("metadataScan"):
         return None
-    job = jobs.start("ingest", lambda j: service.run_ingest(
-        j, embed_busy=lambda: jobs.running("embed") is not None, paths=go["paths"], trigger="watch"))
-    service.watch_started(go["files"])
+    files = go["files"]
+
+    def _ingest(j):
+        try:
+            out = service.run_ingest(j, embed_busy=lambda: jobs.running("embed") is not None,
+                                     paths=go["paths"], trigger="watch")
+        except InterruptedError:
+            raise                                  # you stopped it: no automatic retry
+        except Exception as exc:
+            service.watch_failed(files, str(exc))  # back in the queue; retried in 10 min
+            raise
+        service.watch_succeeded()
+        return out
+
+    job = jobs.start("ingest", _ingest)
+    service.watch_started(files)
     return job
 
 
@@ -1987,14 +2023,15 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
     """Recurring incremental-embed scheduler. Always running; it polls the
     settings each minute and reads the interval/enabled state live, so the
     Dashboard toggle takes effect without a container restart (interval 0 = off)."""
-    import time as _t
-
     stop = threading.Event()
     state = {"last": 0.0}
 
     def _embed_then_sync(job):
         s = service.schedule_settings()
         stats = service.run_embed(job)
+        if service._clip_too() and not job.cancelled:      # text search keeps up too
+            job.log("--- text search (CLIP) for anything new ---")
+            stats["clip"] = service.run_embed(job, model="clip")
         if s.get("sync"):
             job.log("--- reconciling cache with Stash (sync) ---")
             stats["sync"] = service.run_sync(job, prune=s.get("prune", False))
@@ -2028,13 +2065,7 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 _watch_go(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
-            if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
-                if jobs.running("embed") is None:
-                    try:
-                        jobs.start("embed", _embed_then_sync)
-                        state["last"] = _t.time()
-                    except RuntimeError:
-                        pass  # a run is already going
+            _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
 
     threading.Thread(target=_loop, daemon=True, name="peaks-scheduler").start()
     app.state._scheduler_stop = stop

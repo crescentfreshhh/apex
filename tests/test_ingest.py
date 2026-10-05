@@ -122,7 +122,8 @@ def test_nothing_new_runs_only_the_scan(svc, stash):
 
 def test_embed_skipped_while_an_embed_pass_runs(svc, stash):
     out = svc.run_ingest(embed_busy=lambda: True)
-    assert "embed" not in _kinds(stash) and out["stages"]["embed"].startswith("skipped")
+    assert "embed" not in _kinds(stash) and out["stages"]["embed"].startswith("deferred")
+    assert svc.embed_followup() == sorted(svc.last_ingest()["new"], key=int)   # owed, not dropped
 
 
 def test_ingest_refused_without_scan_support(svc, stash, monkeypatch):
@@ -333,3 +334,57 @@ def test_ingest_ends_by_removing_approved_same_file_copies(svc, stash):
     out = svc.run_ingest()
     assert out["stages"]["same-file copies"] == "removed 1"
     assert [f["id"] for f in stash.s["1"]["files"]] == ["b"] and "1" in stash.s
+
+
+# --- the hands-off pipeline: CLIP, scope, owed embeds ----------------------------------
+
+def _models(stash):
+    return [c for c in stash.calls if c[0] == "embed"]
+
+
+def test_new_scenes_also_get_text_search_when_a_clip_index_exists(svc, stash, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    seen = []
+    monkeypatch.setattr(svc_mod.Service, "run_embed",
+                        lambda self, job=None, **kw: seen.append((kw.get("model"), sorted(kw.get("scene_ids") or [])))
+                        or {"embedded": len(kw.get("scene_ids") or []), "failed": 0})
+    monkeypatch.setattr(svc_mod.Service, "has_clip_index", lambda self: True)
+    out = svc.run_ingest()
+    assert seen == [(None, ["10", "11"]), ("clip", ["10", "11"])]
+    assert "text search: 2 embedded" in out["stages"]["embed"]
+
+
+def test_no_clip_pass_without_a_clip_index(svc, stash, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.Service, "has_clip_index", lambda self: False)
+    out = svc.run_ingest()
+    assert len(_models(stash)) == 1 and "text search" not in out["stages"]["embed"]
+
+
+def test_library_path_that_excludes_the_new_files_is_called_out(svc, stash):
+    svc.cfg.library.path = "/data/Elsewhere"
+    out = svc.run_ingest(trigger="watch")
+    assert "embed" not in _kinds(stash)
+    assert out["stages"]["embed"].startswith("0 in scope") and "/data/Elsewhere" in out["stages"]["embed"]
+    w = svc.ingest_warnings(svc.last_ingest())
+    assert any("0 in scope" in x for x in w)
+
+
+def test_identify_without_sources_is_a_warning(svc, stash):
+    stash.defaults = {"scan": None, "identify": None, "autoTag": None}
+    svc.run_ingest(trigger="watch")
+    assert any("identify was skipped" in x for x in svc.ingest_warnings(svc.last_ingest()))
+
+
+def test_owed_embeds_run_later_and_survive_a_restart(svc, stash):
+    import peaks.web.service as svc_mod
+
+    svc.run_ingest(embed_busy=lambda: True)                 # an embed pass was running
+    assert svc.embed_followup() == ["10", "11"]
+    fresh = svc_mod.Service(svc.cfg)                         # container restarted meanwhile
+    assert fresh.embed_followup() == ["10", "11"]
+    st = fresh.run_embed_followup()
+    assert st["embedded"] == 2 and fresh.embed_followup() == []
+    assert _models(stash)[-1] == ("embed", ["10", "11"])

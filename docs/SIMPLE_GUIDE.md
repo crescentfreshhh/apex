@@ -313,9 +313,12 @@ Peaks looks at the folder once a minute. A new video counts once it has stopped
 growing for 2 minutes; when the folder has then been quiet for 3 minutes, one
 Ingest runs for the whole batch — scanning only that folder — and the new scenes
 appear in Review. Partial downloads (`.part`, `.!qB`, rsync's hidden temp files)
-are ignored. It waits for a running Ingest, Sync or backup; during a long embed
-pass it still brings the files into Stash and leaves the embedding to that pass.
-**Check now** looks straight away. Activity → Ingest shows what it's watching
+are ignored. One heavy job runs at a time: the watch waits for a running embed,
+Ingest, Sync or backup, and the every-X-hours embed waits for an Ingest — each
+starts the minute the other ends. New scenes are embedded for taste *and* text
+search (when you use it). If an auto-ingest fails (Stash down…), its files are
+tried again 10 minutes later; scenes an Ingest couldn't embed are embedded as
+soon as nothing else runs. **Check now** looks straight away. Activity → Ingest shows what it's watching
 and the last auto-ingest.
 
 ## Seedbox pipeline page (System → Seedbox)

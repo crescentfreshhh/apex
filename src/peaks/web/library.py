@@ -1189,13 +1189,24 @@ class LibraryMixin:
                 stage("embed")
                 if job is not None:
                     job.progress = {"stage": "embed"}
-                if embed_busy and embed_busy():
-                    stages["embed"] = "skipped — an embed pass is already running; the next pass picks these up"
+                prefix = (self.cfg.library.path or "").rstrip("/")
+                try:
+                    new_paths = [m["path"] for m in client.scene_details(new).values() if m.get("path")]
+                except Exception:  # noqa: BLE001 — unknown paths: don't second-guess the scope
+                    new_paths = []
+                if prefix and new_paths and not any(p == prefix or p.startswith(prefix + "/") for p in new_paths):
+                    stages["embed"] = (f"0 in scope — PEAKS_LIBRARY_PATH ({prefix}) excludes these files, "
+                                       "so Peaks doesn't embed them")
+                    log("4/5 embed: " + stages["embed"])
+                elif embed_busy and embed_busy():
+                    # owed, not "the next pass": the running pass listed its scenes before these existed
+                    self.add_embed_followup(new)
+                    stages["embed"] = "deferred — an embed pass is running; these are embedded as soon as it finishes"
                     log("4/5 embed: " + stages["embed"])
                 else:
                     log(f"4/5 embed: {len(new)} new scene(s)")
-                    st = self.run_embed(job, scene_ids=set(new))
-                    stages["embed"] = f"{st.get('embedded', 0)} embedded, {st.get('failed', 0)} failed"
+                    st = self.embed_new_scenes(job, new)
+                    stages["embed"] = st["summary"]
 
                 # 5. duplicates among the new scenes
                 stage("duplicates")

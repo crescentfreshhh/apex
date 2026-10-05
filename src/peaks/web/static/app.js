@@ -4686,7 +4686,12 @@ function watchLine(w) {
     + (w.last_ingest && w.last_ingest.stages?.scan ? ` → ${esc(w.last_ingest.stages.scan)}` : ""));
   else if (w.checked) bits.push("nothing new yet");
   if (w.unreadable?.length) bits.push(`<span class="warn">can't read ${esc(w.unreadable.join(", "))}</span>`);
-  return bits.join(" · ");
+  if (w.last_error) bits.push(`<span class="bad">last auto-ingest failed: ${esc(w.last_error.error)}`
+    + (w.retry_after ? ` · retrying at ${new Date(w.retry_after * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "") + "</span>");
+  if (w.embed_owed) bits.push(`${plural(w.embed_owed, "new scene")} waiting to be embedded — next as soon as nothing else runs`);
+  let html = bits.join(" · ");
+  if (w.ingest_warnings?.length) html += w.ingest_warnings.map((x) => `<div class="warn">⚠ ${esc(x)}</div>`).join("");
+  return html;
 }
 async function loadWatch(fresh) {
   let w;

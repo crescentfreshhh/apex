@@ -164,3 +164,114 @@ def test_api_save_status_dirs_and_check(svc, folder, monkeypatch, tmp_path):
     assert d["dirs"] == [str(tmp_path / "data" / "sysbackup")]
     r = api.post("/api/watch", params={"action": "check"}).json()
     assert r["started"] is None
+
+
+# --- the scheduler: one heavy job at a time, owed embeds, retries ------------------------
+
+class _Jobs:
+    def __init__(self, running=()):
+        self.live, self.started = set(running), []
+
+    def running(self, k):
+        return object() if k in self.live else None
+
+    def start(self, kind, fn):
+        if kind in self.live:
+            raise RuntimeError("busy")
+        self.started.append((kind, fn))
+        return type("J", (), {"as_dict": lambda self: {"kind": kind}})()
+
+
+def test_scheduled_embed_waits_for_an_ingest_then_starts(svc):
+    import peaks.web.app as app_mod
+
+    state = {"last": 0.0}
+    jobs = _Jobs(running={"ingest"})
+    assert app_mod._scheduled_embeds(svc, jobs, state, 3600, "run") is None
+    assert state["last"] == 0.0 and jobs.started == []      # still due, not skipped
+    jobs.live.clear()
+    assert app_mod._scheduled_embeds(svc, jobs, state, 3600, "run") == "scheduled"
+    assert jobs.started[0][0] == "embed" and state["last"] > 0
+
+
+def test_owed_embeds_go_before_the_scheduled_pass(svc):
+    import peaks.web.app as app_mod
+
+    svc.add_embed_followup(["7"])
+    jobs = _Jobs()
+    assert app_mod._scheduled_embeds(svc, jobs, {"last": 0.0}, 0, "run") == "followup"
+    assert jobs.started[0][1] == svc.run_embed_followup
+
+
+def test_watch_waits_for_a_running_embed(svc, folder, monkeypatch):
+    import time as _t
+
+    import peaks.web.app as app_mod
+
+    (folder / "a.mp4").write_bytes(b"a")
+    t0 = _t.time()
+    monkeypatch.setattr(_t, "time", lambda: t0)
+    app_mod._watch_go(svc, _Jobs())
+    monkeypatch.setattr(_t, "time", lambda: t0 + SETTLE + QUIET + 1)
+    jobs = _Jobs(running={"embed"})
+    assert app_mod._watch_go(svc, jobs) is None and jobs.started == []
+    jobs.live.clear()
+    assert app_mod._watch_go(svc, jobs) is not None and jobs.started[0][0] == "ingest"
+
+
+def test_a_failed_auto_ingest_is_retried_after_ten_minutes(svc, folder, monkeypatch):
+    import time as _t
+
+    import peaks.web.app as app_mod
+    import peaks.web.service as svc_mod
+
+    (folder / "a.mp4").write_bytes(b"a")
+    t = [_t.time()]
+    monkeypatch.setattr(_t, "time", lambda: t[0])
+    app_mod._watch_go(svc, _Jobs())
+    t[0] += SETTLE + QUIET + 1
+    jobs = _Jobs()
+    app_mod._watch_go(svc, jobs)
+    _, fn = jobs.started[0]
+
+    def boom(self, job=None, **kw):
+        raise RuntimeError("scan failed: Stash is down")
+
+    monkeypatch.setattr(svc_mod.Service, "run_ingest", boom)
+    with pytest.raises(RuntimeError):
+        fn(None)
+    st = svc.watch_status()
+    assert "Stash is down" in st["last_error"]["error"] and st["retry_after"] == pytest.approx(t[0] + 600)
+    t[0] += 120
+    assert app_mod._watch_go(svc, _Jobs()) is None             # not before the retry time
+    t[0] += 600
+    jobs = _Jobs()
+    assert app_mod._watch_go(svc, jobs) is not None             # the same files, again
+    monkeypatch.setattr(svc_mod.Service, "run_ingest", lambda self, job=None, **kw: {"new": 1})
+    jobs.started[0][1](None)
+    assert svc.watch_status()["last_error"] is None
+
+
+def test_stopping_an_auto_ingest_does_not_retry(svc, folder, monkeypatch):
+    import time as _t
+
+    import peaks.web.app as app_mod
+    import peaks.web.service as svc_mod
+
+    (folder / "a.mp4").write_bytes(b"a")
+    t = [_t.time()]
+    monkeypatch.setattr(_t, "time", lambda: t[0])
+    app_mod._watch_go(svc, _Jobs())
+    t[0] += SETTLE + QUIET + 1
+    jobs = _Jobs()
+    app_mod._watch_go(svc, jobs)
+
+    def stopped(self, job=None, **kw):
+        raise InterruptedError("scan stopped")
+
+    monkeypatch.setattr(svc_mod.Service, "run_ingest", stopped)
+    with pytest.raises(InterruptedError):
+        jobs.started[0][1](None)
+    assert svc.watch_status()["last_error"] is None
+    t[0] += 10_000
+    assert app_mod._watch_go(svc, _Jobs()) is None
