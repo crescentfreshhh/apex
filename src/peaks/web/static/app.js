@@ -4595,13 +4595,19 @@ function sbWhen(epoch, now) {
 }
 const sbNA = (reason) => `<div class="sb-na">Unavailable — ${esc(reason || "unknown reason")}</div>`;
 const sbGB = (gb) => gb >= 1000 ? `${(gb / 1000).toFixed(2)} TB` : `${(+gb).toFixed(gb < 10 ? 2 : 1)} GB`;
+// what a run accomplished, from runs.log's 4th field (prune only has it if the script logs it)
+function sbDid(name, n) {
+  if (n == null) return `<span class="faint" title="seedbox-${name} doesn't write a count to runs.log's 4th field">count not logged</span>`;
+  return name === "pull" ? `pulled ${plural(n, "file")}` : `pruned ${plural(n, "torrent")}`;
+}
 function sbScript(name, h, now) {
   const state = h.failing ? '<span class="sb-pill red">failing now</span>'
     : h.last_run_ok === false ? '<span class="sb-pill yellow">last run failed</span>'
     : h.last_ok ? '<span class="sb-pill green">ok</span>' : '<span class="sb-pill red">no success yet</span>';
   return `<div class="sb-script"><div class="row between"><b>seedbox-${name}</b>${state}</div>
-    <div class="sb-kv"><span>Last success</span><span>${sbWhen(h.last_ok, now)}</span>
-      <span>Last 24 h</span><span>${h.ok_24h} ok${h.failed_24h ? ` · <span class="bad">${h.failed_24h} failed</span>` : " · 0 failed"}</span></div>
+    <div class="sb-kv"><span>Last run</span><span>${h.last_run ? `${sbWhen(h.last_run, now)} · ${h.last_run_ok ? "" : '<span class="bad">failed</span> · '}${sbDid(name, h.last_run_count)}` : '<span class="faint">never</span>'}</span>
+      <span>Last success</span><span>${sbWhen(h.last_ok, now)}</span>
+      <span>Last 24 h</span><span>${h.ok_24h} ok${h.failed_24h ? ` · <span class="bad">${h.failed_24h} failed</span>` : " · 0 failed"}${h.count_24h != null ? ` · ${sbDid(name, h.count_24h)}` : ""}</span></div>
     ${h.errors && h.errors.length ? `<div class="dim small" style="margin-top:6px">Latest errors in pull.log</div><pre class="log sb-errors">${esc(h.errors.join("\n"))}</pre>` : ""}</div>`;
 }
 function renderSeedbox(d) {

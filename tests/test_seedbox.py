@@ -259,3 +259,15 @@ def test_api_route(svc, monkeypatch):
     r = api.get("/api/seedbox").json()
     assert r["verdict"]["status"] == "red" and "password" not in str(r).lower().replace("peaks_qbt_password", "")
     assert api.post("/api/seedbox/refresh").status_code == 200
+
+
+def test_last_run_and_24h_counts_pull_and_prune():
+    runs, _ = parse_runs(_log((NOW - 3 * H, "pull", "ok", 4), (NOW - H, "pull", "ok", 2),
+                              (NOW - 2 * H, "prune", "ok", ""), (NOW - 30 * H, "prune", "ok", 9)))
+    pull = script_health(runs, "pull", NOW, failing=False)
+    assert pull["last_run_count"] == 2 and pull["count_24h"] == 6
+    prune = script_health(runs, "prune", NOW, failing=False)
+    assert prune["last_run_count"] is None and prune["count_24h"] is None      # not logged → not zero
+    runs, _ = parse_runs(_log((NOW - H, "prune", "ok", 3), (NOW - 2 * H, "prune", "ok", "")))
+    prune = script_health(runs, "prune", NOW, failing=False)
+    assert prune["last_run_count"] == 3 and prune["count_24h"] == 3

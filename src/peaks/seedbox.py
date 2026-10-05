@@ -75,6 +75,10 @@ def script_health(runs: list[Run], kind: str, now: float, failing: bool) -> dict
         "last_ok_ago_min": None if last_ok is None else round((now - last_ok) / 60),
         "last_run": last.at if last else None,
         "last_run_ok": last.ok if last else None,
+        # what the last run accomplished: files pulled / torrents pruned (None = not logged)
+        "last_run_count": last.files if last else None,
+        "count_24h": (sum(r.files for r in day if r.files is not None)
+                      if any(r.files is not None for r in day) else None),
         "ok_24h": sum(1 for r in day if r.ok),
         "failed_24h": sum(1 for r in day if not r.ok),
         # a failure in the last day that has been followed by a success since
