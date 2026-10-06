@@ -315,8 +315,9 @@ Ingest runs for the whole batch — scanning only that folder — and the new sc
 appear in Review. Partial downloads (`.part`, `.!qB`, rsync's hidden temp files)
 are ignored. One heavy job runs at a time: the watch waits for a running embed,
 Ingest, Sync or backup, and the every-X-hours embed waits for an Ingest — each
-starts the minute the other ends. New scenes are embedded for taste *and* text
-search (when you use it). If an auto-ingest fails (Stash down…), its files are
+starts the minute the other ends. New scenes are embedded with the main model;
+text search (CLIP) for them is a manual pass (Activity → Embedding → Options →
+CLIP). If an auto-ingest fails (Stash down…), its files are
 tried again 10 minutes later; scenes an Ingest couldn't embed are embedded as
 soon as nothing else runs. **Check now** looks straight away. Activity → Ingest shows what it's watching
 and the last auto-ingest.

@@ -342,25 +342,24 @@ def _models(stash):
     return [c for c in stash.calls if c[0] == "embed"]
 
 
-def test_new_scenes_also_get_text_search_when_a_clip_index_exists(svc, stash, monkeypatch):
+def test_automatic_embeds_use_the_main_model_only_even_with_a_clip_index(svc, stash, monkeypatch):
+    import peaks.web.app as app_mod
     import peaks.web.service as svc_mod
 
     seen = []
     monkeypatch.setattr(svc_mod.Service, "run_embed",
-                        lambda self, job=None, **kw: seen.append((kw.get("model"), sorted(kw.get("scene_ids") or [])))
+                        lambda self, job=None, **kw: seen.append(kw.get("model"))
                         or {"embedded": len(kw.get("scene_ids") or []), "failed": 0})
     monkeypatch.setattr(svc_mod.Service, "has_clip_index", lambda self: True)
-    out = svc.run_ingest()
-    assert seen == [(None, ["10", "11"]), ("clip", ["10", "11"])]
-    assert "text search: 2 embedded" in out["stages"]["embed"]
-
-
-def test_no_clip_pass_without_a_clip_index(svc, stash, monkeypatch):
-    import peaks.web.service as svc_mod
-
-    monkeypatch.setattr(svc_mod.Service, "has_clip_index", lambda self: False)
-    out = svc.run_ingest()
-    assert len(_models(stash)) == 1 and "text search" not in out["stages"]["embed"]
+    out = svc.run_ingest()                                  # the ingest's embed step
+    assert seen == [None] and out["stages"]["embed"] == "2 embedded, 0 failed"
+    svc.add_embed_followup(["10"])                          # an owed embed
+    svc.run_embed_followup()
+    assert seen == [None, None]
+    monkeypatch.setattr(svc_mod.Service, "run_sync", lambda self, job=None, **kw: {})
+    job = type("J", (), {"cancelled": False, "log": lambda self, *a: None})()
+    app_mod._scheduled_embed_pass(svc, job)                 # the hourly pass
+    assert seen == [None, None, None]                       # never a CLIP backfill
 
 
 def test_library_path_that_excludes_the_new_files_is_called_out(svc, stash):

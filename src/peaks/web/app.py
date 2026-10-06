@@ -1968,6 +1968,17 @@ def _start_dupe_drain(service: Service, jobs: JobManager):
 
 # the folder watch waits for these: an embed holds the model + index in memory,
 # and Stash's scan / generate shouldn't compete with it
+def _scheduled_embed_pass(service: Service, job) -> dict:
+    """The recurring pass: the main model only (text-search / CLIP embeds are a
+    manual choice — never a surprise library-wide backfill), then a sync."""
+    s = service.schedule_settings()
+    stats = service.run_embed(job)
+    if s.get("sync"):
+        job.log("--- reconciling cache with Stash (sync) ---")
+        stats["sync"] = service.run_sync(job, prune=s.get("prune", False))
+    return stats
+
+
 def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: float, run) -> str | None:
     """One heavy job at a time: an embed never starts during an ingest (or
     another embed). Embeds an ingest had to leave go first; the recurring pass
@@ -2027,15 +2038,7 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
     state = {"last": 0.0}
 
     def _embed_then_sync(job):
-        s = service.schedule_settings()
-        stats = service.run_embed(job)
-        if service._clip_too() and not job.cancelled:      # text search keeps up too
-            job.log("--- text search (CLIP) for anything new ---")
-            stats["clip"] = service.run_embed(job, model="clip")
-        if s.get("sync"):
-            job.log("--- reconciling cache with Stash (sync) ---")
-            stats["sync"] = service.run_sync(job, prune=s.get("prune", False))
-        return stats
+        return _scheduled_embed_pass(service, job)
 
     def _loop():
         if stop.wait(30):  # small initial delay so startup isn't slammed

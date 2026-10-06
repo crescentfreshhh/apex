@@ -226,8 +226,7 @@ class WatchMixin:
             self._save_followup(set(self.embed_followup()) | {str(i) for i in ids})
 
     def run_embed_followup(self, job=None) -> dict:
-        """Embed the scenes an ingest had to leave (DINO, then CLIP when you use
-        text search). They're cleared whether or not each embeds — failures go
+        """Embed the scenes an ingest had to leave (main model). They're cleared whether or not each embeds — failures go
         to the failure log as with any embed, so nothing loops."""
         ids = self.embed_followup()
         if not ids:
@@ -239,29 +238,11 @@ class WatchMixin:
             self._save_followup(set(self.embed_followup()) - set(ids))
         return out
 
-    def _clip_too(self) -> bool:
-        """Also embed for text search? Only when you have a CLIP index and the
-        default model isn't CLIP already."""
-        from ..embedding import canonical_name
-
-        try:
-            return canonical_name(self.cfg.embedding.model) != "clip" and self.has_clip_index()
-        except Exception:  # noqa: BLE001
-            return False
-
     def embed_new_scenes(self, job, ids) -> dict:
-        """The default model, then CLIP (text search) when it's in use — only
-        these scenes. Returns run stats plus a one-line summary."""
-        ids = {str(i) for i in ids}
-        st = self.run_embed(job, scene_ids=ids)
-        line = f"{st.get('embedded', 0)} embedded, {st.get('failed', 0)} failed"
-        if self._clip_too() and not (job is not None and job.cancelled):
-            if job is not None:
-                job.log("  + text search (CLIP) for the same scenes")
-            c = self.run_embed(job, scene_ids=ids, model="clip")
-            st["clip"] = c
-            line += f" · text search: {c.get('embedded', 0)} embedded"
-        st["summary"] = line
+        """Embed just these scenes with the main model (text-search / CLIP stays
+        a manual pass). Returns run stats plus a one-line summary."""
+        st = self.run_embed(job, scene_ids={str(i) for i in ids})
+        st["summary"] = f"{st.get('embedded', 0)} embedded, {st.get('failed', 0)} failed"
         return st
 
     # --- what the UI shows -----------------------------------------------------------
