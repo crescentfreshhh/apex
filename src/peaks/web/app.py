@@ -1284,6 +1284,9 @@ def create_app(cfg=None):
                 job = _watch_go(service, jobs, force=True)
             except RuntimeError as exc:
                 raise HTTPException(409, str(exc))
+            except Exception as exc:  # noqa: BLE001 — say what broke, don't 500 blind
+                service.watch_check_failed(exc)
+                raise HTTPException(500, f"folder check failed — {type(exc).__name__}: {exc}")
             return {**service.watch_status(), "started": job.as_dict() if job else None}
         if action != "save":
             raise HTTPException(400, "unknown action")
@@ -2066,8 +2069,8 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 pass
             try:   # the folder watch: new downloads → one Ingest, after they settle
                 _watch_go(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
+                service.watch_check_failed(exc)
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
 
     threading.Thread(target=_loop, daemon=True, name="peaks-scheduler").start()

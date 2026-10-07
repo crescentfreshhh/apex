@@ -275,3 +275,61 @@ def test_stopping_an_auto_ingest_does_not_retry(svc, folder, monkeypatch):
     assert svc.watch_status()["last_error"] is None
     t[0] += 10_000
     assert app_mod._watch_go(svc, _Jobs()) is None
+
+
+# --- regression: grading (the renamer follower) must not break the folder watch -----------
+
+def test_watch_still_works_after_a_grade(svc, folder, stash):
+    import time as _t
+
+    import peaks.web.app as app_mod
+
+    svc.grade_scene("1", "exceptionnelle")                  # starts the renamer follower
+    (folder / "after-grade.mp4").write_bytes(b"x")
+    assert svc.watch_tick(now=_t.time()) is None            # no TypeError
+    go = svc.watch_tick(now=_t.time() + SETTLE + QUIET + 5)
+    assert go and go["files"] == [str(folder / "after-grade.mp4")]
+    app_mod._watch_go(svc, _Jobs(), force=True)              # the scheduler path, no TypeError either
+
+
+def test_no_instance_attribute_shadows_a_method(svc, folder, stash, tmp_path, monkeypatch):
+    """Mixins share one object: an attribute stored under a method's name breaks
+    that method for good (what silently stopped the folder watch)."""
+    monkeypatch.setenv("PEAKS_SEEDBOX_DIR", str(tmp_path / "nope"))
+    svc.grade_scene("1", "exceptionnelle")
+    svc.watch_tick()
+    svc.watch_status()
+    svc.keep_as_is("1")
+    svc.dupe_queue_status()
+    svc.seedbox_status()
+    svc.copies_status()
+    svc.cleanup_status()
+    svc.backup_status()
+    cls = type(svc)
+    clash = [n for n in vars(svc) if callable(getattr(cls, n, None)) or isinstance(getattr(cls, n, None), property)]
+    assert clash == []
+
+
+def test_a_crashing_check_is_reported_not_swallowed(svc, folder, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    broken = {"on": True}
+    real = type(svc).watch_tick
+
+    def boom(self, *a, **k):
+        if broken["on"]:
+            raise TypeError("'_thread.lock' object is not callable")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(type(svc), "watch_tick", boom)
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(app_mod.create_app(svc.cfg))
+    r = api.post("/api/watch", params={"action": "check"})
+    assert r.status_code == 500 and "folder check failed" in r.json()["detail"]
+    st = api.get("/api/watch").json()
+    assert "not callable" in st["check_error"]["error"]
+    broken["on"] = False
+    svc.watch_tick()                                        # a good check clears it
+    assert svc.watch_status()["check_error"] is None

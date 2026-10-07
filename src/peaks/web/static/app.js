@@ -4679,7 +4679,9 @@ let watchCfg = null;
 function watchLine(w) {
   if (!w.watch_on || !w.watch_paths.length) return "";
   const where = w.watch_paths.map((p) => `<code>${esc(p)}</code>`).join(", ");
-  const bits = [`👁 Watching ${where}`];
+  const ago = w.checked ? Math.max(0, Math.round((w.now || Date.now() / 1000) - w.checked)) : null;
+  const bits = [`👁 Watching ${where}` + (ago == null ? "" : ` <span class="faint">· checked ${ago < 90 ? ago + " s" : Math.round(ago / 60) + " min"} ago</span>`)];
+  if (w.check_error) bits.push(`<span class="bad">⚠ folder check failing: ${esc(w.check_error.error)}</span>`);
   if (w.settling) bits.push(`${plural(w.settling, "new file")} still arriving`);
   else if (w.settled) bits.push(`${plural(w.settled, "new file")} ready — ingesting once the folder is quiet`);
   if (w.last_run) bits.push(`last auto-ingest ${ago(w.last_run.at)}: ${plural(w.last_run.files, "file")}`

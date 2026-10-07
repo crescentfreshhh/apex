@@ -51,7 +51,7 @@ class WatchMixin:
         s = dict(self._settings())
         if on is not None:
             if on and not s.get("watch_on"):      # switched on: start from what's there now
-                with self._watch_lock():
+                with self._folder_watch_lock():
                     self._watch_state().pop("roots", None)
                     self._watch_save()
             s["watch_on"] = bool(on)
@@ -122,7 +122,7 @@ class WatchMixin:
                     files[p] = (st.st_size, st.st_mtime)
         return files, bad
 
-    def _watch_lock(self):
+    def _folder_watch_lock(self):
         import threading
 
         return self.__dict__.setdefault("_watch_lk", threading.RLock())
@@ -130,7 +130,7 @@ class WatchMixin:
     def watch_tick(self, now: float | None = None, force: bool = False) -> dict | None:
         """Look at the folders once. Returns {paths, files} when an Ingest should
         start now (`force` skips the quiet wait — never the settle), else None."""
-        with self._watch_lock():
+        with self._folder_watch_lock():
             return self._watch_tick(now, force)
 
     def _watch_tick(self, now: float | None, force: bool) -> dict | None:
@@ -142,6 +142,7 @@ class WatchMixin:
         st = self._watch_state()
         files, bad = self._watch_list(roots)
         st["checked"], st["unreadable"] = now, bad
+        st.pop("check_error", None)
         if st.get("roots") != roots:               # first look (or new folders): baseline
             st.update(roots=roots, done=sorted(files), seen={}, last_change=0.0, baseline_at=now)
             self._watch_save()
@@ -166,7 +167,7 @@ class WatchMixin:
 
     def watch_started(self, files: list[str], now: float | None = None) -> None:
         """An Ingest took these files: they're handled."""
-        with self._watch_lock():
+        with self._folder_watch_lock():
             self._watch_took(files, now)
 
     def _watch_took(self, files: list[str], now: float | None) -> None:
@@ -178,11 +179,23 @@ class WatchMixin:
                           "sample": [os.path.basename(f) for f in files[:5]]}
         self._watch_save()
 
+    def watch_check_failed(self, exc: BaseException, now: float | None = None) -> None:
+        """The minute check itself crashed: remember why, so the Activity line
+        says so instead of the watch going quiet. Deliberately lock-free — the
+        lock may be what broke."""
+        try:
+            st = self._watch_state()
+            st["check_error"] = {"at": time.time() if now is None else now,
+                                 "error": f"{type(exc).__name__}: {exc}"[:300]}
+            self._watch_save()
+        except Exception:  # noqa: BLE001 — reporting must never raise
+            pass
+
     def watch_failed(self, files: list[str], error: str, now: float | None = None) -> None:
         """The ingest for these files failed: they go back to waiting (already
         settled) and the batch is retried after RETRY_SECONDS."""
         now = time.time() if now is None else now
-        with self._watch_lock():
+        with self._folder_watch_lock():
             st = self._watch_state()
             st["done"] = sorted(set(st["done"]) - set(files))
             for f in files:
@@ -196,7 +209,7 @@ class WatchMixin:
             self._watch_save()
 
     def watch_succeeded(self) -> None:
-        with self._watch_lock():
+        with self._folder_watch_lock():
             st = self._watch_state()
             if "last_error" in st or "retry_after" in st:
                 st.pop("last_error", None)
@@ -222,7 +235,7 @@ class WatchMixin:
         os.replace(tmp, p)
 
     def add_embed_followup(self, ids) -> None:
-        with self._watch_lock():
+        with self._folder_watch_lock():
             self._save_followup(set(self.embed_followup()) | {str(i) for i in ids})
 
     def run_embed_followup(self, job=None) -> dict:
@@ -234,7 +247,7 @@ class WatchMixin:
         if job is not None:
             job.log(f"embedding {len(ids)} new scene(s) an ingest left for later")
         out = self.embed_new_scenes(job, ids)
-        with self._watch_lock():
+        with self._folder_watch_lock():
             self._save_followup(set(self.embed_followup()) - set(ids))
         return out
 
@@ -256,6 +269,7 @@ class WatchMixin:
                 "settled": st.get("settled", 0), "unreadable": st.get("unreadable", []),
                 "baseline_at": st.get("baseline_at"), "last_run": st.get("last_run"),
                 "last_ingest": auto, "last_error": st.get("last_error"),
+                "check_error": st.get("check_error"), "now": time.time(),
                 "retry_after": st.get("retry_after"), "embed_owed": len(self.embed_followup()),
                 "ingest_warnings": self.ingest_warnings(auto),
                 "warnings": self.watch_warnings(cfg["watch_paths"])}
