@@ -655,7 +655,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             failure_log=failure_log_for(self.cfg),
             should_stop=(lambda: job.cancelled) if job else None,
         )
-        self.invalidate_index(embedder.name)
+        if stats.get("embedded"):              # nothing new → keep the loaded index warm
+            self.invalidate_index(embedder.name)
         # deleted-from-Stash scenes can't ever embed — drop them from the failure
         # log so the count reaches 0 on its own (they're gone from `scanned` too,
         # so they're never re-attempted).
@@ -1487,13 +1488,22 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if prune and not scenes and any(cache.keys(m) for m in models):
             log("  ! Stash returned no scenes — skipping prune (cache left intact)")
             safe_prune = False
+        changed = False
         for model in models:
             log(f"sync: model {model} ({len(scenes)} live scenes)")
-            s = sync_cache(scenes, cache, model, prune=safe_prune, log=log)
+            moved: dict = {}
+            s = sync_cache(scenes, cache, model, prune=safe_prune, log=log, moved_out=moved)
             for k in total:
                 total[k] += s.get(k, 0)
-            self.invalidate_index(model)
-        self.invalidate_meta()
+            # keep the (minute-long to load) index warm unless it really changed:
+            # pruned entries or a scene id change → rebuild; path-only moves → patch
+            if s.get("pruned") or any(idc for _, _, idc in moved.values()):
+                self.invalidate_index(model)
+            elif moved:
+                self._patch_index_paths(model, moved)
+            changed = changed or bool(s.get("pruned") or moved)
+        if changed:
+            self.invalidate_meta()
         total["models"] = len(models)
         if total["moved"]:
             log("moved = files renamed or moved since they were embedded (e.g. by your renamer "
@@ -1769,7 +1779,21 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 idx = None
                 cache = EmbeddingCache(self.cfg.embedding.cache_dir)
                 keys = cache.keys(model)
-                idx = SearchIndex(cache, model).build(keys, on_progress=getattr(self, "_build_progress", None))
+                outer = getattr(self, "_build_progress", None)
+
+                def progress(done, n):
+                    self._build_last = {"done": done, "total": n}
+                    if outer:
+                        outer(done, n)
+
+                import time as _t
+
+                self._index_building = _t.time()
+                self._build_last = {"done": 0, "total": len(keys)}
+                try:
+                    idx = SearchIndex(cache, model).build(keys, on_progress=progress)
+                finally:
+                    self._index_building = None
                 idx.source_key_count = len(keys)
                 self._index[model] = idx
             return idx
@@ -1813,6 +1837,32 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         except Exception:  # noqa: BLE001
             pass
         return {"scenes": len(rows), "frames": idx.size, "seconds": round(_t.time() - t0, 1)}
+
+    def _patch_index_paths(self, model: str, moved: dict) -> None:
+        """Files that only moved (same fingerprint key, same scene): update the
+        stored paths in the loaded index instead of throwing it away."""
+        with self._index_lock:
+            idx = self._index.get(model)
+            if idx is None:
+                return
+            for key, (path, _sid, _idc) in moved.items():
+                km = idx.key_meta.get(key)
+                if km is not None:
+                    km["path"] = path
+
+    def index_loaded(self, model: str | None = None) -> bool:
+        """Is the main index in memory? Lock-free on purpose: a build holds the
+        index lock for the whole (minute-long) load."""
+        return (model or self._model_name()) in self._index
+
+    def warm_status(self) -> dict:
+        """For the 'Loading your library' banner: is the index loaded, being
+        built (by the warm-up job or by a page asking for it), and how far."""
+        building = self.__dict__.get("_index_building")
+        prog = self.__dict__.get("_build_last") or {}
+        return {"loaded": self.index_loaded(), "building": bool(building),
+                "done": prog.get("done"), "total": prog.get("total"),
+                "since": building}
 
     def invalidate_index(self, model: str | None = None) -> None:
         with self._index_lock:

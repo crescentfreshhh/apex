@@ -698,3 +698,12 @@ html.hide-nums .num { display: none; }
 .sb-bar .d { font-size: 11px; color: var(--faint); margin-top: 3px; }
 .sb-dot { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; background: var(--line2); }
 .sb-dot.green { background: var(--ok); } .sb-dot.yellow { background: var(--ano); } .sb-dot.red { background: var(--bad); }
+
+/* "Loading your library" while the embeddings index loads */
+.warm-banner { margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--line2); border-radius: 10px;
+  background: var(--panel2); font-size: 13px; position: relative; overflow: hidden; }
+.warm-banner .spin { display: inline-block; width: 10px; height: 10px; margin-right: 8px; border-radius: 50%;
+  border: 2px solid var(--gold); border-right-color: transparent; animation: warmspin .8s linear infinite; vertical-align: -1px; }
+@keyframes warmspin { to { transform: rotate(360deg); } }
+.warm-banner .warm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: transparent; }
+.warm-banner .warm-bar i { display: block; height: 100%; background: var(--gold); transition: width .6s; }

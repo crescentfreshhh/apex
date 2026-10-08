@@ -4756,6 +4756,37 @@ $("#watch-check")?.addEventListener("click", async () => {
 loadWatch();
 setInterval(() => { if (!document.hidden && $("#activity")?.classList.contains("active")) loadWatch(); }, 30000);
 
+// --- "Loading your library…": the embeddings index (~a minute to load) isn't in
+// memory yet — say so instead of showing blank cards, and refresh when it's in
+let warmTimer = null, warmWasLoading = false;
+async function checkWarm(start) {
+  let w;
+  try { w = await api("/api/warm" + (start ? "?start=true" : "")); } catch { return; }
+  const el = $("#warm-banner"); if (!el) return;
+  if (w.loading) {
+    const pct = w.pct != null ? Math.round(100 * w.pct)
+      : (w.total ? Math.round(100 * (w.done || 0) / w.total) : null);
+    const what = w.stage || (w.total ? `Loading embeddings · ${(w.done || 0).toLocaleString()} / ${w.total.toLocaleString()} scenes` : "Loading your library");
+    el.innerHTML = `<span class="spin"></span><b>Loading your library</b> · ${esc(what)}${pct != null ? ` · ${pct}%` : ""}
+      <span class="faint">— pages fill in on their own when it's ready</span>
+      <div class="warm-bar"><i style="width:${pct || 3}%"></i></div>`;
+    el.hidden = false;
+    warmWasLoading = true;
+    if (!warmTimer) warmTimer = setInterval(() => checkWarm(false), 2000);
+  } else {
+    el.hidden = true;
+    clearInterval(warmTimer); warmTimer = null;
+    if (warmWasLoading) {                       // it just finished: fill the open page
+      warmWasLoading = false;
+      const v = document.querySelector(".view.active")?.id;
+      if (v && ["foryou", "board", "explore", "performers", "statistics", "taste"].includes(v)) go(v);
+    }
+  }
+}
+checkWarm(true);
+// coming back to a tab after a while: the index may have been dropped meanwhile
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkWarm(true); });
+
 // (last, so every page's code is defined before the first route runs)
 // land on the page in the URL (#/catalogue …), else For You — the home page
 refreshSidebar(0);   // sidebar counts from the start, not only once the Catalogue opens

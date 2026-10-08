@@ -1261,6 +1261,19 @@ def create_app(cfg=None):
             raise HTTPException(409, str(exc))
         return job.as_dict()
 
+    @app.get("/api/warm")
+    def warm(start: bool = False):
+        """Is the library loaded? Pages show 'Loading your library …' meanwhile.
+        `start` kicks the background warm-up if nothing is loading it yet."""
+        if start:
+            _rewarm(service, jobs)
+        st = service.warm_status()
+        w = jobs.running("warmup")
+        if w is not None:
+            st.update(building=True, stage=(w.progress or {}).get("stage"), pct=(w.progress or {}).get("pct"))
+        st["loading"] = (not st["loaded"]) or st["building"]
+        return st
+
     @app.get("/api/seedbox")
     def seedbox():
         """The seedbox pipeline: verdict, script health, throughput, pool, inbox."""
@@ -2003,6 +2016,28 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
     return None
 
 
+_WARM_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library")
+
+
+def _rewarm(service: Service, jobs: JobManager):
+    """The main index got dropped (an embed added scenes, an ingest freed memory
+    for Stash, a delete…): reload it in the background now, so whoever opens
+    Peaks next doesn't wait a minute on blank cards. Waits for heavy jobs;
+    honours PEAKS_WARM_ON_START=0."""
+    import os
+
+    if os.environ.get("PEAKS_WARM_ON_START", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if service.index_loaded() or service.warm_status()["building"]:
+        return None
+    if any(jobs.running(k) for k in _WARM_WAIT_FOR):
+        return None
+    try:
+        return jobs.start("warmup", service.warm_up)
+    except RuntimeError:
+        return None
+
+
 _WATCH_WAIT_FOR = ("ingest", "embed", "sync", "backup", "restore")
 
 
@@ -2072,6 +2107,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
                 service.watch_check_failed(exc)
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
+            try:   # anything that dropped the index: reload it before anyone opens a page
+                _rewarm(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
 
     threading.Thread(target=_loop, daemon=True, name="peaks-scheduler").start()
     app.state._scheduler_stop = stop

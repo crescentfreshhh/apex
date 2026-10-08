@@ -352,6 +352,7 @@ def sync_cache(
     *,
     prune: bool = False,
     log: Logger = print,
+    moved_out: dict | None = None,
 ) -> dict:
     """Reconcile one model's cache against the current Stash library.
 
@@ -365,6 +366,8 @@ def sync_cache(
     WHOLE library (unscoped) so a scene that merely moved out of the embed
     scope isn't mistaken for a deletion. Returns counts; when ``prune`` is
     False the orphans are only reported (a dry run for the destructive half).
+    `moved_out`, when given, collects {key: (new path, scene id, id_changed)}
+    so a caller can patch an in-memory index instead of rebuilding it.
     """
     current: dict[str, Scene] = {}
     for scene in scenes:
@@ -395,6 +398,8 @@ def sync_cache(
             meta["scene_id"] = scene.id
             cache.save(key, model_name, times, vecs, meta=meta)
             stats["moved"] += 1
+            if moved_out is not None:
+                moved_out[key] = (new_path, scene.id, id_changed)
             if path_changed:
                 log(f"  ~ moved {key}: -> {new_path}")
     return stats
