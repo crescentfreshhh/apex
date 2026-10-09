@@ -4225,26 +4225,62 @@ async function ingestInfo() {
   try { const d = await api("/api/ingest"); return { ...(d.last || {}), live: !!(d.running || (d.last || {}).running) }; }
   catch { return {}; }
 }
+// The default queue, best first: the last ingest's new scenes → Likely keepers →
+// every unreviewed scene. `exclude` = scenes already handled this session, so a
+// finished list never comes straight back. null = truly nothing to review.
+async function loadDefaultQueue(exclude = new Set()) {
+  const keep = (items) => items.filter((x) => !exclude.has(x.scene_id) && (!x.tier || x.tier === "unreviewed"));
+  const sources = [
+    [{ new: "true", tier: "unreviewed", sort: "added", limit: 500 }, "New from ingest", "ingest"],
+    [{ view: "likely", limit: 200 }, "Likely keepers", "default"],
+    [{ tier: "unreviewed", limit: 500, sort: "date" }, TIER_NAMES.unreviewed, "default"],
+  ];
+  for (const [q, label, source] of sources) {
+    let d;
+    try { d = await api("/api/catalogue?" + new URLSearchParams(q)); } catch (e) { toast(e.message, true); continue; }
+    let items = keep(d.items || []);
+    if (!items.length) continue;
+    if (source === "ingest") { const idn = (x) => +x.scene_id || 0; items = items.sort((a, b) => idn(a) - idn(b)); }
+    return { items, label, source };
+  }
+  return null;
+}
+function rvApplyQueue(q) {
+  rv.items = q ? q.items : []; rv.i = 0;
+  rv.label = q ? q.label : rv.label; rv.source = q ? q.source : rv.source;
+  rv.loadedAt = Date.now();
+}
+// a list you've finished (or that's gone stale) isn't "your queue" any more
+function rvNeedsReload() {
+  if (!rv.items.length || rv.i >= rv.items.length) return true;
+  if (rv.items.every((x) => rv.graded.has(x.scene_id))) return true;
+  return rv.source !== "catalogue" && rv.loadedAt && Date.now() - rv.loadedAt > 15 * 60 * 1000;
+}
+// ran off the end of a list: carry straight on with the next one
+async function rvNextQueue() {
+  if (rv.rolling) return;
+  rv.rolling = true;
+  try {
+    const done = new Set([...rv.graded, ...rv.items.map((x) => x.scene_id)]);
+    const q = await loadDefaultQueue(done);
+    if (q) {
+      rvApplyQueue(q);
+      toast(`Next up: ${q.label} · ${plural(q.items.length, "scene")}`);
+    }
+    renderReview();
+  } finally { rv.rolling = false; }
+}
 async function openReview() {
   const ing = await ingestInfo();
   const force = rv.forceIngest; rv.forceIngest = false;
   if (rv.fromCatalogue && cat.items.length) {
     rv.items = cat.items.slice(); rv.i = Math.max(0, Math.min(cat.focus, rv.items.length - 1));
-    rv.label = catListLabel(); rv.source = "catalogue";
-  } else if ((force || (ing.live && rv.source !== "ingest") || (!rv.items.length && (ing.new || []).length))
-             && await loadIngestQueue().catch(() => false)) {
-    /* reviewing the ingest's new scenes */
-  } else if (!rv.items.length) {
+    rv.label = catListLabel(); rv.source = "catalogue"; rv.loadedAt = Date.now();
+  } else if ((force || (ing.live && rv.source !== "ingest")) && await loadIngestQueue().catch(() => false)) {
+    rv.loadedAt = Date.now();                       /* reviewing the ingest's new scenes */
+  } else if (rvNeedsReload()) {
     $("#rv-title").textContent = "Loading your queue…";
-    try {
-      let d = await api("/api/catalogue?" + new URLSearchParams({ view: "likely", limit: 200 }));
-      rv.label = "Likely keepers";
-      if (!d.items.length) {
-        d = await api("/api/catalogue?" + new URLSearchParams({ tier: "unreviewed", limit: 200, sort: "date" }));
-        rv.label = TIER_NAMES.unreviewed;
-      }
-      rv.items = d.items; rv.i = 0; rv.source = "default";
-    } catch (e) { rv.items = []; toast(e.message, true); }
+    rvApplyQueue(await loadDefaultQueue(rv.graded));
   }
   rv.fromCatalogue = false;
   renderReview();
@@ -4289,8 +4325,14 @@ function renderReview() {
   const v = $("#rv-v");
   if (!r) {
     v.removeAttribute("src"); v.load();
-    $("#rv-empty").innerHTML = `<h2>Queue done 🎉</h2><p class="muted">Nothing left in ${esc(rv.label || "this list")}.</p>
-      <button class="btn pri" data-go="catalogue">Back to Catalogue</button>`;
+    const left = parseInt(($("#nav-ct-review")?.textContent || "0").replace(/\D/g, ""), 10) || 0;
+    $("#rv-empty").innerHTML = left
+      ? `<h2>That list is done</h2><p class="muted">${plural(left, "unreviewed scene")} still waiting.</p>
+         <button class="btn pri" id="rv-reload">Review unreviewed (${left.toLocaleString()})</button>
+         <button class="btn" data-go="catalogue">Back to Catalogue</button>`
+      : `<h2>Queue done 🎉</h2><p class="muted">Nothing left to review.</p>
+         <button class="btn pri" data-go="catalogue">Back to Catalogue</button>`;
+    $("#rv-reload")?.addEventListener("click", () => { rv.items = []; openReview(); });
     return;
   }
   $("#rv-title").textContent = r.title;
@@ -4386,8 +4428,10 @@ function rvMove(d) {
   const n = rv.i + d;
   if (n < 0) return;
   rv.i = Math.min(n, rv.items.length);
+  const morePages = rv.source === "catalogue" && cat.items.length < cat.total;
+  if (rv.i >= rv.items.length && !morePages) { rvNextQueue(); return; }   // carry on, don't dead-end
   renderReview();
-  if (rv.source === "catalogue" && rv.i >= rv.items.length - 3 && cat.items.length < cat.total) rvMoreFromCatalogue();
+  if (morePages && rv.i >= rv.items.length - 3) rvMoreFromCatalogue();
 }
 async function rvMoreFromCatalogue() {
   if (rv.loadingMore) return;
