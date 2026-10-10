@@ -1098,15 +1098,16 @@ def create_app(cfg=None):
     @app.get("/api/catalogue")
     def catalogue(
         tier: str | None = None, res: str | None = None, min_mbps: float | None = None,
-        q: str | None = None, sort: str = "date", offset: int = 0,
+        q: str | None = None, sort: str | None = None, offset: int = 0,
         limit: int = Query(60, ge=1, le=500), refresh: bool = False,
         view: str | None = None, new: bool = False,
         performer: str | None = None, studio: str | None = None, tag: str | None = None,
         date_from: str | None = None, date_to: str | None = None,
         dur_min: float | None = None, dur_max: float | None = None, ids_only: bool = False,
+        dir: str | None = Query(None, pattern="^(asc|desc)$"),
     ):
         try:
-            return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort,
+            return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
                                      view=view, new=new, performer=performer, studio=studio,
                                      tag=tag, date_from=date_from, date_to=date_to,

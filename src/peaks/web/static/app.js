@@ -3151,7 +3151,7 @@ const CAT_PAGE = 60;
 const CAT_CHIPS = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
 const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, views: {}, model: null,
               focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false,
-              isNew: false };
+              isNew: false, sortTouched: false, sortDir: "" };
 const CAT_VIEWS = [
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
@@ -3168,8 +3168,32 @@ const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
 const CAT_FILTERS = [["performer", "#cat-perf"], ["studio", "#cat-studio"], ["tag", "#cat-tag"],
   ["date_from", "#cat-from"], ["date_to", "#cat-to"], ["dur_min", "#cat-dmin"], ["dur_max", "#cat-dmax"]];
+// Sort: every key both ways. [natural direction, label descending, label ascending]
+const SORT_DIRS = {
+  date: ["desc", "Newest first", "Oldest first"], added: ["desc", "Most recently added", "Added longest ago"],
+  performer: ["asc", "Z → A", "A → Z"], title: ["asc", "Z → A", "A → Z"],
+  predicted: ["desc", "Highest tier first", "Lowest tier first"], quality: ["desc", "Best first", "Worst first"],
+  bitrate: ["desc", "Highest first", "Lowest first"], duration: ["desc", "Longest first", "Shortest first"],
+  size: ["desc", "Largest first", "Smallest first"],
+};
+// a suggestion list opens in its own order, a tier list newest-first — until you pick a sort
+function catSyncSort() {
+  const sel = $("#cat-sort"); if (!sel) return;
+  if (!cat.sortTouched) sel.value = cat.view ? "suggested" : "date";
+  else if (!cat.view && sel.value === "suggested") sel.value = "date";
+  const d = SORT_DIRS[sel.value], btn = $("#cat-dir");
+  if (!btn) return;
+  btn.hidden = !d;
+  if (d) {
+    const dir = cat.sortDir || d[0];
+    btn.textContent = `${dir === "desc" ? "↓" : "↑"} ${dir === "desc" ? d[1] : d[2]}`;
+    btn.title = `Click for ${dir === "desc" ? d[2] : d[1]}`;
+  }
+}
 function catParams(offset, refresh) {
+  catSyncSort();
   const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
+  if (cat.sortDir && SORT_DIRS[$("#cat-sort").value]) qs.set("dir", cat.sortDir);
   for (const [k, sel] of CAT_FILTERS) { const v = ($(sel)?.value || "").trim(); if (v) qs.set(k, v); }
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
@@ -3318,6 +3342,7 @@ function renderCatStorage(st) {
 function catCurrentParams() {
   const p = { sort: $("#cat-sort").value, q: $("#cat-q").value.trim(), res: $("#cat-res").value,
     min_mbps: $("#cat-mbps").value };
+  if (cat.sortDir) p.dir = cat.sortDir;
   if (cat.view) p.view = cat.view; else if (cat.tier) p.tier = cat.tier;
   if (cat.isNew) p.new = true;
   for (const [k, sel] of CAT_FILTERS) p[k] = ($(sel)?.value || "").trim();
@@ -3326,7 +3351,8 @@ function catCurrentParams() {
 function applyCatParams(p) {
   setDupeMode(false);
   cat.view = p.view || ""; cat.tier = p.view ? "" : (p.tier || ""); cat.isNew = !!p.new;
-  $("#cat-sort").value = p.sort || "date"; $("#cat-q").value = p.q || "";
+  cat.sortTouched = !!p.sort; cat.sortDir = p.dir || "";
+  $("#cat-sort").value = p.sort || (p.view ? "suggested" : "date"); $("#cat-q").value = p.q || "";
   $("#cat-res").value = p.res || ""; $("#cat-mbps").value = p.min_mbps || "";
   for (const [k, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = p[k] || "";
   if (CAT_FILTERS.some(([k]) => p[k])) $("#cat-filters").hidden = false;
@@ -3669,7 +3695,17 @@ $("#cat-list")?.addEventListener("click", (e) => {
 });
 let catQT;
 $("#cat-q")?.addEventListener("input", () => { clearTimeout(catQT); catQT = setTimeout(() => openCatalogue(), 300); });
-for (const sel of ["#cat-res", "#cat-sort", "#cat-mbps"]) $(sel)?.addEventListener("change", () => openCatalogue());
+for (const sel of ["#cat-res", "#cat-mbps"]) $(sel)?.addEventListener("change", () => openCatalogue());
+$("#cat-sort")?.addEventListener("change", () => {
+  cat.sortTouched = true; cat.sortDir = "";          // a new key starts in its natural direction
+  openCatalogue();
+});
+$("#cat-dir")?.addEventListener("click", () => {
+  const d = SORT_DIRS[$("#cat-sort").value]; if (!d) return;
+  cat.sortTouched = true;
+  cat.sortDir = (cat.sortDir || d[0]) === "desc" ? "asc" : "desc";
+  openCatalogue();
+});
 $("#btn-cat-refresh")?.addEventListener("click", () => openCatalogue({ refresh: true }));
 $("#btn-cat-more")?.addEventListener("click", () => openCatalogue({ append: true }));
 document.addEventListener("keydown", (e) => {

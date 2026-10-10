@@ -343,3 +343,74 @@ def test_tier_api_validation(svc, monkeypatch):
     assert client.post("/api/catalogue/reel", params={"tiers": "rejected"}).status_code == 400
     src = client.get("/api/board/sources").json()
     assert [t["key"] for t in src["tiers"]][0] == "legendaire"
+
+
+# --- sorting: performer, both directions, inside suggestion lists ---------------------
+
+def _ids(r):
+    return [x["scene_id"] for x in r["items"]]
+
+
+@pytest.fixture
+def perfs(stash):
+    stash.s["1"]["performers"] = ["Zoe", "Ánna"]      # files under Anna (accent ignored)
+    stash.s["2"]["performers"] = ["bella"]            # case ignored
+    stash.s["3"]["performers"] = []                   # no performer: always last
+    stash.s["4"]["performers"] = ["Anna"]             # ties with 1 → title decides
+    stash.s["1"]["title"], stash.s["4"]["title"] = "B scene", "A scene"
+    return stash
+
+
+def test_performer_sort_both_ways_missing_last(svc, perfs):
+    assert _ids(svc.catalogue(sort="performer")) == ["4", "1", "2", "3"]            # A → Z
+    assert _ids(svc.catalogue(sort="performer", dir="asc")) == ["4", "1", "2", "3"]
+    assert _ids(svc.catalogue(sort="performer", dir="desc")) == ["2", "4", "1", "3"]  # Z → A, ties still by title
+
+
+@pytest.mark.parametrize("key", ["date", "added", "title", "predicted", "quality", "bitrate",
+                                 "duration", "size", "performer"])
+def test_every_sort_flips(svc, perfs, key):
+    a = _ids(svc.catalogue(sort=key, dir="asc"))
+    d = _ids(svc.catalogue(sort=key, dir="desc"))
+    assert sorted(a) == sorted(d) == ["1", "2", "3", "4"]
+    natural = _ids(svc.catalogue(sort=key))
+    assert natural == (d if svc.SORT_DESC_DEFAULT[key] else a)
+
+
+def test_missing_values_last_both_ways(svc, stash):
+    stash.s["3"]["bit_rate"] = None
+    stash.s["4"].pop("bit_rate", None)
+    for d in ("asc", "desc"):
+        assert _ids(svc.catalogue(sort="bitrate", dir=d))[-2:] in (["3", "4"], ["4", "3"])
+    assert _ids(svc.catalogue(sort="bitrate", dir="asc"))[:2] == ["2", "1"]
+
+
+def test_sorts_apply_inside_suggestion_views(svc, stash, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    real = svc_mod.Service._triage_raw
+
+    def fixed(self, view, pool, preds, floor, signals=None):           # a view with its own order
+        if view == "quality":
+            order = ["3", "1", "4"]
+            return sorted([r for r in pool if r["scene_id"] in order], key=lambda r: order.index(r["scene_id"]))
+        return real(self, view, pool, preds, floor, signals)
+
+    monkeypatch.setattr(svc_mod.Service, "_triage_raw", fixed)
+    assert _ids(svc.catalogue(view="quality")) == ["3", "1", "4"]                 # no sort: its own order
+    assert _ids(svc.catalogue(view="quality", sort="suggested")) == ["3", "1", "4"]
+    assert _ids(svc.catalogue(view="quality", sort="date", dir="asc")) == ["4", "3", "1"]
+    assert _ids(svc.catalogue(view="quality", sort="date")) == ["1", "3", "4"]
+    assert _ids(svc.catalogue(sort="suggested")) == _ids(svc.catalogue(sort="date"))   # tier list: Newest
+
+
+def test_api_rejects_a_bad_direction(svc, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(app_mod.create_app(svc.cfg))
+    assert api.get("/api/catalogue", params={"sort": "title", "dir": "sideways"}).status_code == 422
+    r = api.get("/api/catalogue", params={"sort": "title", "dir": "desc"}).json()
+    assert [x["scene_id"] for x in r["items"]] == sorted([x["scene_id"] for x in r["items"]], reverse=True)

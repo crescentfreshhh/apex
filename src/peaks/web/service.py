@@ -4754,14 +4754,70 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     break
         return row
 
+    # sort key → (value of a row or None when it has none, natural order is descending?)
+    SORT_DESC_DEFAULT = {"date": True, "duration": True, "title": False, "bitrate": True,
+                         "quality": True, "predicted": True, "size": True, "added": True,
+                         "performer": False}
+
+    @staticmethod
+    def _fold(text: str) -> str:
+        import unicodedata
+
+        return "".join(c for c in unicodedata.normalize("NFD", str(text or ""))
+                       if not unicodedata.combining(c)).casefold().strip()
+
+    def _sort_rows(self, pool: list[dict], sort: str | None, direction: str | None, *,
+                   in_view: bool, preds: dict, res_rank: dict) -> list[dict]:
+        """Order a list. No sort (or 'suggested') keeps a suggestion view's own
+        order, and is Newest elsewhere. `direction` 'asc' / 'desc' flips any key
+        (absent = its natural direction). Rows missing the value go last either
+        way; titles break ties."""
+        if not sort or sort == "suggested":
+            if in_view:
+                return pool
+            sort = "date"
+        if sort not in self.SORT_DESC_DEFAULT:
+            sort = "date"
+        desc = self.SORT_DESC_DEFAULT[sort] if direction not in ("asc", "desc") else direction == "desc"
+        fold = self._fold
+
+        def perf(r):
+            names = [fold(p) for p in (r.get("performers") or []) if str(p).strip()]
+            return min(names) if names else None
+
+        def quality(r):
+            q = r.get("quality") or {}
+            if not q.get("res") and q.get("mbps") is None:
+                return None
+            return (res_rank.get(q.get("res") or "", -1), q.get("mbps") or 0)
+
+        value = {
+            "date": lambda r: r.get("date") or None,
+            "duration": lambda r: r.get("duration") or None,
+            "title": lambda r: fold(r.get("title")) or None,
+            "bitrate": lambda r: (r.get("quality") or {}).get("mbps"),
+            "quality": quality,
+            "predicted": lambda r: (preds.get(r["scene_id"]) or {}).get("expected"),
+            "size": lambda r: int(r.get("size") or 0) or None,
+            "added": lambda r: r.get("created_at") or None,
+            "performer": perf,
+        }[sort]
+        keyed = [(value(r), r) for r in pool]
+        have = [x for x in keyed if x[0] is not None]
+        missing = [r for v, r in keyed if v is None]
+        have.sort(key=lambda x: fold(x[1].get("title")))          # ties: title A → Z…
+        have.sort(key=lambda x: x[0], reverse=desc)                # …kept by the stable sort
+        return [r for _, r in have] + missing
+
     def catalogue(self, tier: str | None = None, res: str | None = None,
                   min_mbps: float | None = None, q: str | None = None,
-                  sort: str = "date", offset: int = 0, limit: int = 60,
+                  sort: str | None = None, offset: int = 0, limit: int = 60,
                   refresh: bool = False, view: str | None = None, new: bool = False,
                   performer: str | None = None, studio: str | None = None,
                   tag: str | None = None, date_from: str | None = None,
                   date_to: str | None = None, dur_min: float | None = None,
-                  dur_max: float | None = None, ids_only: bool = False) -> dict:
+                  dur_max: float | None = None, ids_only: bool = False,
+                  dir: str | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -4830,21 +4886,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         elif tiers:
             pool = [r for r in pool if r["tier"] in tiers]
 
-        res_rank = {c: i for i, c in enumerate(RES_CLASSES)}
-        keyfns = {
-            "date": (lambda r: r["date"] or "", True),
-            "duration": (lambda r: r["duration"] or 0, True),
-            "title": (lambda r: r["title"].lower(), False),
-            "bitrate": (lambda r: r["quality"]["mbps"] or 0, True),
-            "quality": (lambda r: (res_rank.get(r["quality"]["res"] or "", -1),
-                                   r["quality"]["mbps"] or 0), True),
-            "predicted": (lambda r: (preds.get(r["scene_id"]) or {}).get("expected", -1), True),
-            "size": (lambda r: int(r.get("size") or 0), True),
-            "added": (lambda r: r.get("created_at") or "", True),
-        }
-        if not in_view:
-            fn, rev = keyfns.get(sort, keyfns["date"])
-            pool.sort(key=fn, reverse=rev)
+        pool = self._sort_rows(pool, sort, dir, in_view=in_view, preds=preds,
+                               res_rank={c: i for i, c in enumerate(RES_CLASSES)})
         if ids_only:        # a bulk action over the whole list (no cards, no thumbnails)
             return {"ids": [r["scene_id"] for r in pool], "total": len(pool)}
         page = pool[offset: offset + limit]
