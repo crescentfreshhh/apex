@@ -50,7 +50,7 @@ function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
 const VIEWS = ["foryou", "board", "explore", "performers", "catalogue", "review", "dupes",
-  "statistics", "taste", "activity", "seedbox", "dashboard"];
+  "statistics", "taste", "activity", "seedbox", "dashboard", "perfreview"];
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
   if (!VIEWS.includes(name)) name = "foryou";
@@ -74,6 +74,7 @@ function go(name) {
   if (name === "taste") openTaste();
   if (name === "dashboard") { loadTierNames(); loadTierTags(); }
   if (name === "seedbox") openSeedbox();
+  if (name === "perfreview") openPerfReview();
 }
 document.querySelectorAll(".nav[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
 // any [data-go] button jumps to a page (optionally a Settings section)
@@ -3172,6 +3173,7 @@ const CAT_FILTERS = [["performer", "#cat-perf"], ["studio", "#cat-studio"], ["ta
 const SORT_DIRS = {
   date: ["desc", "Newest first", "Oldest first"], added: ["desc", "Most recently added", "Added longest ago"],
   performer: ["asc", "Z → A", "A → Z"], title: ["asc", "Z → A", "A → Z"],
+  tier: ["desc", "Best first", "Worst first"],
   predicted: ["desc", "Highest tier first", "Lowest tier first"], quality: ["desc", "Best first", "Worst first"],
   bitrate: ["desc", "Highest first", "Lowest first"], duration: ["desc", "Longest first", "Shortest first"],
   size: ["desc", "Largest first", "Smallest first"],
@@ -3195,6 +3197,7 @@ function catParams(offset, refresh) {
   const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
   if (cat.sortDir && SORT_DIRS[$("#cat-sort").value]) qs.set("dir", cat.sortDir);
   for (const [k, sel] of CAT_FILTERS) { const v = ($(sel)?.value || "").trim(); if (v) qs.set(k, v); }
+  if (cat.performerId) qs.set("performer_id", cat.performerId);
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
   if (cat.isNew) qs.set("new", "true");
@@ -3351,7 +3354,7 @@ function catCurrentParams() {
 function applyCatParams(p) {
   setDupeMode(false);
   cat.view = p.view || ""; cat.tier = p.view ? "" : (p.tier || ""); cat.isNew = !!p.new;
-  cat.sortTouched = !!p.sort; cat.sortDir = p.dir || "";
+  cat.sortTouched = !!p.sort; cat.sortDir = p.dir || ""; cat.performerId = p.performer_id || "";
   $("#cat-sort").value = p.sort || (p.view ? "suggested" : "date"); $("#cat-q").value = p.q || "";
   $("#cat-res").value = p.res || ""; $("#cat-mbps").value = p.min_mbps || "";
   for (const [k, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = p[k] || "";
@@ -4311,7 +4314,8 @@ async function openReview() {
   const force = rv.forceIngest; rv.forceIngest = false;
   if (rv.fromCatalogue && cat.items.length) {
     rv.items = cat.items.slice(); rv.i = Math.max(0, Math.min(cat.focus, rv.items.length - 1));
-    rv.label = catListLabel(); rv.source = "catalogue"; rv.loadedAt = Date.now();
+    rv.label = pr.active ? `Performer review · ${pr.active.name}` : catListLabel();
+    rv.source = "catalogue"; rv.loadedAt = Date.now();
   } else if ((force || (ing.live && rv.source !== "ingest")) && await loadIngestQueue().catch(() => false)) {
     rv.loadedAt = Date.now();                       /* reviewing the ingest's new scenes */
   } else if (rvNeedsReload()) {
@@ -4450,6 +4454,7 @@ async function rvGrade(grade) {
   const r = rv.items[rv.i]; if (!r) return;
   try {
     const fresh = await applyGrade(r.scene_id, grade);
+    prNote(r, fresh, grade);
     rv.graded.add(r.scene_id);
     rv.items[rv.i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred };
     const ci = rv.source === "catalogue" ? cat.items.findIndex((x) => x.scene_id === r.scene_id) : -1;
@@ -4465,7 +4470,10 @@ function rvMove(d) {
   if (n < 0) return;
   rv.i = Math.min(n, rv.items.length);
   const morePages = rv.source === "catalogue" && cat.items.length < cat.total;
-  if (rv.i >= rv.items.length && !morePages) { rvNextQueue(); return; }   // carry on, don't dead-end
+  if (rv.i >= rv.items.length && !morePages) {
+    if (pr.active && rv.source === "catalogue") { prFinish(); return; }   // her scenes are done
+    rvNextQueue(); return;                                                 // carry on, don't dead-end
+  }
   renderReview();
   if (morePages && rv.i >= rv.items.length - 3) rvMoreFromCatalogue();
 }
@@ -4657,6 +4665,142 @@ $("#btn-ingest-scan-save")?.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 loadScanOptions();
+
+// --- Performer review: pick her, read her repertoire, then her scenes best first --------
+const pr = { active: null, brief: null };      // active: {pid, name, total, changes: {sid: {from, to, size}}}
+const PR_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed"];
+const PR_COLOR = { legendaire: "var(--leg)", exceptionnelle: "var(--exc)", merveilleuse: "var(--mer)",
+  upscale: "var(--ups)", anomaly: "var(--ano)", unreviewed: "var(--unr)", rejected: "var(--rej)" };
+const prPhoto = (p) => p.photo ? `<img src="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" loading="lazy" />`
+  : `<div class="pr-photo-ph"></div>`;
+function prTierBar(tiers) {
+  const n = PR_TIERS.reduce((a, t) => a + (tiers[t] || 0), 0) || 1;
+  return `<div class="pr-tiers" title="${esc(PR_TIERS.filter((t) => tiers[t]).map((t) => `${TIER_NAMES[t]} ${tiers[t]}`).join(" · "))}">`
+    + PR_TIERS.filter((t) => tiers[t]).map((t) => `<i style="width:${100 * tiers[t] / n}%;background:${PR_COLOR[t]}"></i>`).join("") + "</div>";
+}
+const prWhen = (d) => d == null ? "never reviewed" : d === 0 ? "reviewed today" : `reviewed ${d < 60 ? d + " days" : Math.round(d / 30) + " months"} ago`;
+async function openPerfReview() {
+  $("#pr-brief").hidden = true; $("#pr-pick").hidden = false;
+  const res = $("#pr-resume");
+  if (pr.active && rv.source === "catalogue" && rv.i < rv.items.length) {
+    res.hidden = false;
+    res.innerHTML = `<span>In progress: <b>${esc(pr.active.name)}</b> · ${rv.i + 1} of ${rv.items.length}</span>
+      <button class="btn pri sm" id="pr-resume-go">▶ Resume</button><button class="btn sm ghost" id="pr-resume-drop">Drop it</button>`;
+    $("#pr-resume-go").onclick = () => go("review");
+    $("#pr-resume-drop").onclick = () => { pr.active = null; res.hidden = true; };
+  } else res.hidden = true;
+  prSearch();
+}
+async function prSearch() {
+  const q = $("#pr-q").value.trim();
+  let d;
+  try { d = await api("/api/perf-review?" + new URLSearchParams(q ? { q, limit: 80 } : { limit: 80 })); }
+  catch (e) { $("#pr-list").innerHTML = `<p class="warn">${esc(e.message)}</p>`; return; }
+  $("#pr-list").innerHTML = d.performers.length ? d.performers.map((p) => `<div class="pr-row" data-pid="${esc(p.id)}">
+      ${prPhoto(p)}<div class="nm"><b>${esc(p.name)}</b><span>${esc(p.aliases.slice(0, 3).join(", "))}</span></div>
+      ${prTierBar(p.tiers)}<span class="dim small">${plural(p.scenes, "scene")} · ${prWhen(p.reviewed_days)}</span></div>`).join("")
+    + (d.total > d.performers.length ? `<p class="faint small">…${(d.total - d.performers.length).toLocaleString()} more — keep typing</p>` : "")
+    : `<p class="dim">No performer matches “${esc(q)}”.</p>`;
+}
+$("#pr-q")?.addEventListener("input", () => { clearTimeout(prSearch.t); prSearch.t = setTimeout(prSearch, 180); });
+$("#pr-list")?.addEventListener("click", (e) => { const row = e.target.closest("[data-pid]"); if (row) prBrief(row.dataset.pid); });
+async function prRandom() {
+  try {
+    const p = await api("/api/perf-review/random" + (pr.brief ? "?exclude=" + encodeURIComponent(pr.brief.id) : ""));
+    prBrief(p.id);
+  } catch (e) { toast(e.message, true); }
+}
+$("#pr-random")?.addEventListener("click", prRandom);
+async function prBrief(pid) {
+  let b;
+  try { b = await api("/api/perf-review/" + encodeURIComponent(pid)); } catch (e) { return toast(e.message, true); }
+  pr.brief = b;
+  if (!$("#perfreview").classList.contains("active")) showView("perfreview");
+  $("#pr-pick").hidden = true; $("#pr-resume").hidden = true;
+  const rp = b.repertoire, rec = b.record, t = b.taste, o = b.open, f = b.footprint, lr = b.last_review;
+  const years = rp.first ? (rp.first.slice(0, 4) === (rp.latest || "").slice(0, 4) ? rp.first.slice(0, 4) : `${rp.first.slice(0, 4)}–${(rp.latest || "").slice(0, 4)}`) : "";
+  const shape = b.shape.map((x) => `<span>${esc(TIER_NAMES[x.tier] || x.tier)}</span>
+      <div class="bar" title="${x.pct}% of her scenes · ${x.lib_pct}% of your library"><i style="width:${x.pct}%;background:${PR_COLOR[x.tier]}"></i><b style="left:${x.lib_pct}%"></b></div>
+      <span>${x.n} · ${x.pct}% <span class="faint">vs ${x.lib_pct}%</span></span>`).join("");
+  const openBits = [["unreviewed", "unreviewed"], ["promote", "promotion candidates"], ["second", "second-look"],
+    ["trim", "trim suggestions"], ["reject", "suggested rejects"]].filter(([k]) => o[k]).map(([k, w]) => `<b>${o[k]}</b> ${w}`);
+  $("#pr-brief").hidden = false;
+  $("#pr-brief").innerHTML = `
+    <div class="pr-brief-head">${prPhoto(b)}<div>
+      <h2>${esc(b.name)}${b.fav ? " <span title=\"Favourite in Stash\">★</span>" : ""}</h2>
+      <div class="dim">${esc(b.aliases.join(" · "))}</div>
+      <div class="pr-big" style="margin-top:8px">${plural(rp.scenes, "scene")} in Peaks</div>
+      <div class="dim small">${years ? esc(years) + " · " : ""}${rp.newest_added ? "newest " + esc(rp.newest_added) : ""}${rp.rejected ? ` · ${rp.rejected} rejected set aside` : ""}</div>
+    </div></div>
+    <div class="pr-grid">
+      <div class="panel"><h3>Your verdict so far</h3>${rec ? `<div class="pr-big">${esc(rec.verdict)}</div>
+        <div class="dim">you keep ${esc(rec.keep_words || "")} of her scenes · ${esc(rec.top_words || "")} make your top tiers</div>`
+        : '<div class="dim">Not enough graded scenes for a verdict yet — this review sets it.</div>'}</div>
+      <div class="panel"><h3>Tier shape <span class="faint small">her % · line = your library</span></h3><div class="pr-shape">${shape}</div></div>
+      <div class="panel"><h3>Taste</h3>${t.rank ? `<div class="pr-big">${esc(t.rank.word)}</div>` : ""}
+        <div class="dim">${plural(t.saves, "saved moment")} across her scenes</div>
+        ${t.best ? `<div class="dim small" style="margin-top:6px">Her strongest: <b>${esc(t.best.title || "scene " + t.best.scene_id)}</b> · ${esc(TIER_NAMES[t.best.tier] || t.best.tier)}</div>` : ""}</div>
+      <div class="panel"><h3>Open questions</h3>${openBits.length ? `<div>${openBits.join(" · ")}</div>` : '<div class="dim">Nothing pending — every scene is graded and no suggestions are open.</div>'}</div>
+      <div class="panel"><h3>Footprint</h3><div class="pr-big">${f.gb.toLocaleString()} GB</div>
+        <div class="dim">${f.low_gb ? `${f.low_gb} GB in Unreviewed / Upscale · ` : ""}4K or better: ${esc(f.hi_res_share)} (${f.hi_res})</div></div>
+      <div class="panel"><h3>Last review</h3>${lr ? `<div class="pr-big">${lr.days === 0 ? "today" : lr.days + " days ago"}</div>
+        <div class="dim">${lr.seen} seen · ${lr.regraded} re-graded · ${lr.rejected} rejected${lr.times > 1 ? ` · ${lr.times} reviews so far` : ""}</div>`
+        : '<div class="dim">First review.</div>'}</div>
+      ${rp.studios && rp.studios.length ? `<div class="panel"><h3>Studios</h3><div class="dim">${rp.studios.map((x) => `${esc(x.name)} <b>${x.n}</b>`).join(" · ")}</div></div>` : ""}
+    </div>
+    <div class="pr-actions">
+      <button class="btn pri" id="pr-start">▶ Start review · ${plural(rp.scenes, "scene")}, best first</button>
+      <button class="btn" id="pr-other">🎲 Someone else</button>
+      <button class="btn ghost" id="pr-back">← Back to performers</button></div>`;
+  $("#pr-start").onclick = prStart;
+  $("#pr-other").onclick = prRandom;
+  $("#pr-back").onclick = () => { pr.brief = null; openPerfReview(); };
+}
+async function prStart() {
+  const b = pr.brief; if (!b) return;
+  // her scenes, every tier but Rejected, best first — as a Catalogue list the Review player walks
+  setDupeMode(false);
+  cat.view = ""; cat.isNew = false; cat.performerId = b.id; cat.tier = PR_TIERS.join(",");
+  cat.sortTouched = true; cat.sortDir = ""; $("#cat-sort").value = "tier";
+  $("#cat-q").value = ""; $("#cat-res").value = ""; $("#cat-mbps").value = "";
+  for (const [, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = "";
+  await openCatalogue();
+  if (!cat.items.length) return toast("No scenes to review for " + b.name, true);
+  pr.active = { pid: b.id, name: b.name, total: cat.total, changes: {} };
+  cat.focus = 0; rv.fromCatalogue = true; rv.graded = new Set();
+  go("review");
+}
+// what a grade during the review changed (for the summary)
+function prNote(r, fresh, grade) {
+  if (!pr.active || rv.source !== "catalogue" || !(r.performer_ids || []).includes(pr.active.pid)) return;
+  const prev = pr.active.changes[r.scene_id]?.from ?? r.tier;
+  pr.active.changes[r.scene_id] = { from: prev, to: fresh.tier, size: +r.size || 0, reject: grade === "reject" };
+}
+async function prFinish() {
+  const a = pr.active; if (!a) return;
+  // where each touched scene ended up NOW (an undo puts it back)
+  const now = new Map(rv.items.map((x) => [x.scene_id, x.tier]));
+  const ch = Object.entries(a.changes).map(([sid, c]) => ({ ...c, to: now.get(sid) ?? c.to }));
+  const rejected = ch.filter((c) => c.to === "rejected" && c.from !== "rejected");
+  const regraded = ch.filter((c) => c.to !== c.from && c.to !== "rejected");
+  const seen = rv.items.length;
+  const freed = rejected.reduce((n, c) => n + c.size, 0);
+  const summary = { seen, regraded: regraded.length, rejected: rejected.length,
+    kept: seen - regraded.length - rejected.length, freed_bytes: freed };
+  try { await api(`/api/perf-review/${encodeURIComponent(a.pid)}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(summary) }); } catch {}
+  pr.active = null; pr.brief = null; cat.performerId = "";
+  rv.i = rv.items.length;
+  $("#rv").hidden = true; $("#rv-empty").hidden = false;
+  $("#rv-v").removeAttribute("src"); $("#rv-v").load();
+  $("#rv-empty").innerHTML = `<h2>${esc(a.name)} — done</h2>
+    <p class="pr-sum">${plural(seen, "scene")} reviewed · <b>${summary.regraded}</b> re-graded · <b>${summary.rejected}</b> rejected${freed ? ` (${fmtBytes(freed)} to free)` : ""} · <b>${summary.kept}</b> kept as they were</p>
+    <div class="pr-actions"><button class="btn pri" id="pr-next">🎲 Next random performer</button>
+      <button class="btn" id="pr-pick-another">Pick another</button>
+      <button class="btn ghost" data-go="catalogue">Back to Catalogue</button></div>`;
+  $("#pr-next").onclick = async () => { go("perfreview"); await prRandom(); };
+  $("#pr-pick-another").onclick = () => go("perfreview");
+  loadHistory?.();
+}
 
 // --- Seedbox: the seedbox → library pipeline at a glance (read-only) -------------------
 const SB_WORD = { green: "GREEN", yellow: "YELLOW", red: "RED" };

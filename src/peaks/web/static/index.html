@@ -25,6 +25,7 @@
       <span id="cat-views" class="side-views"></span>
       <button id="btn-cat-new" class="side-view" hidden title="Scenes added by the last ingest">✦ New</button>
     </div>
+    <button class="nav tab" data-view="perfreview"><span class="ic">♀</span>Performer review</button>
     <button class="nav tab" data-view="review"><span class="ic">▶</span>Review queue<span class="ct" id="nav-ct-review"></span></button>
     <button class="nav tab" data-view="dupes"><span class="ic">⧉</span>Duplicates<span class="ct hot" id="nav-ct-dupes" hidden></span></button>
     <button class="nav tab" data-view="statistics"><span class="ic">◔</span>Insights</button>
@@ -260,6 +261,7 @@
           <option value="date" selected>Date</option>
           <option value="added">Date added</option>
           <option value="performer">Performer</option>
+          <option value="tier">Tier</option>
           <option value="title">Title</option>
           <option value="predicted">Predicted tier</option>
           <option value="quality">Quality</option>
@@ -294,6 +296,18 @@
   </section>
 
   <!-- REVIEW QUEUE: one scene at a time -->
+  <!-- PERFORMER REVIEW: one performer at a time — her repertoire first, then her scenes -->
+  <section id="perfreview" class="view">
+    <div class="head"><h1>Performer review</h1><span class="sub2">one performer at a time — her repertoire first, then her scenes best first</span>
+      <span class="grow"></span><button id="pr-random" class="btn pri">🎲 Random performer</button></div>
+    <div id="pr-resume" class="panel pr-resume" hidden></div>
+    <div id="pr-pick">
+      <input id="pr-q" class="pr-q" placeholder="Search performers — names and aliases…" autocomplete="off" />
+      <div id="pr-list" class="pr-list"></div>
+    </div>
+    <div id="pr-brief" hidden></div>
+  </section>
+
   <section id="review" class="view">
     <div id="rv-empty" class="empty" hidden></div>
     <div id="rv" class="rv">

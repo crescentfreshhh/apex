@@ -988,6 +988,33 @@ def create_app(cfg=None):
     def hall_of_fame(top_n: int = 10):
         return service.hall_of_fame(top_n=top_n)
 
+    # --- performer review: one performer at a time --------------------------------
+
+    @app.get("/api/perf-review")
+    def perf_review_list(q: str | None = None, limit: int = Query(60, ge=1, le=500)):
+        try:
+            return service.perf_review_list(q=q, limit=limit)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, f"Couldn't read the library: {exc}")
+
+    @app.get("/api/perf-review/random")
+    def perf_review_random(exclude: str | None = None):
+        p = service.perf_review_random(exclude=exclude)
+        if p is None:
+            raise HTTPException(404, "no performer with 3+ scenes to review")
+        return p
+
+    @app.get("/api/perf-review/{pid}")
+    def perf_review_brief(pid: str):
+        try:
+            return service.perf_review_brief(pid)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.post("/api/perf-review/{pid}/done")
+    def perf_review_done(pid: str, body: dict | None = None):
+        return service.perf_review_done(pid, body or {})
+
     @app.get("/api/performers/directory")
     def performers_directory(refresh: bool = False, if_none_match: str | None = Header(None)):
         """Every Stash performer + Peaks' figures, for the Performers page (served
@@ -1104,10 +1131,11 @@ def create_app(cfg=None):
         performer: str | None = None, studio: str | None = None, tag: str | None = None,
         date_from: str | None = None, date_to: str | None = None,
         dur_min: float | None = None, dur_max: float | None = None, ids_only: bool = False,
-        dir: str | None = Query(None, pattern="^(asc|desc)$"),
+        dir: str | None = Query(None, pattern="^(asc|desc)$"), performer_id: str | None = None,
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
+                                     performer_id=performer_id,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
                                      view=view, new=new, performer=performer, studio=studio,
                                      tag=tag, date_from=date_from, date_to=date_to,

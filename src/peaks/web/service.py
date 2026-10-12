@@ -25,10 +25,16 @@ from .watch import WatchMixin
 from .dupequeue import DupeQueueMixin
 from .verdicts import VerdictMixin
 from .seedbox import SeedboxMixin
+from .perfreview import PerfReviewMixin
+
+
+# the Catalogue's "Tier" sort: best → worst
+TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upscale": 3,
+                  "anomaly": 2, "unreviewed": 1, "rejected": 0}
 
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
-              VerdictMixin, SeedboxMixin):
+              VerdictMixin, SeedboxMixin, PerfReviewMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -4757,7 +4763,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     # sort key → (value of a row or None when it has none, natural order is descending?)
     SORT_DESC_DEFAULT = {"date": True, "duration": True, "title": False, "bitrate": True,
                          "quality": True, "predicted": True, "size": True, "added": True,
-                         "performer": False}
+                         "performer": False, "tier": True}
 
     @staticmethod
     def _fold(text: str) -> str:
@@ -4801,11 +4807,16 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "size": lambda r: int(r.get("size") or 0) or None,
             "added": lambda r: r.get("created_at") or None,
             "performer": perf,
+            # best → worst (ties: newest first, via the date tiebreak below)
+            "tier": lambda r: TIER_RANK_SORT.get(r.get("tier"), 0),
         }[sort]
         keyed = [(value(r), r) for r in pool]
         have = [x for x in keyed if x[0] is not None]
         missing = [r for v, r in keyed if v is None]
-        have.sort(key=lambda x: fold(x[1].get("title")))          # ties: title A → Z…
+        if sort == "tier":                                         # ties: newest first…
+            have.sort(key=lambda x: x[1].get("date") or "", reverse=True)
+        else:
+            have.sort(key=lambda x: fold(x[1].get("title")))      # ties: title A → Z…
         have.sort(key=lambda x: x[0], reverse=desc)                # …kept by the stable sort
         return [r for _, r in have] + missing
 
@@ -4817,7 +4828,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                   tag: str | None = None, date_from: str | None = None,
                   date_to: str | None = None, dur_min: float | None = None,
                   dur_max: float | None = None, ids_only: bool = False,
-                  dir: str | None = None) -> dict:
+                  dir: str | None = None, performer_id: str | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -4837,6 +4848,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         def keep(r) -> bool:
             if fresh is not None and r["scene_id"] not in fresh:
+                return False
+            if performer_id and str(performer_id) not in (r.get("performer_ids") or []):
                 return False
             if perf and perf not in (p.lower() for p in r["performers"]):
                 return False

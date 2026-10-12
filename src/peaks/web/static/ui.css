@@ -707,3 +707,29 @@ html.hide-nums .num { display: none; }
 @keyframes warmspin { to { transform: rotate(360deg); } }
 .warm-banner .warm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: transparent; }
 .warm-banner .warm-bar i { display: block; height: 100%; background: var(--gold); transition: width .6s; }
+
+/* Performer review */
+.pr-q { width: 100%; max-width: 560px; padding: 9px 12px; margin-bottom: 12px; }
+.pr-list { display: grid; gap: 6px; }
+.pr-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) 150px max-content; gap: 12px; align-items: center;
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; }
+.pr-row:hover { border-color: var(--line2); background: var(--panel2); }
+.pr-row img, .pr-photo-ph { width: 44px; height: 56px; object-fit: cover; border-radius: 6px; background: var(--panel2); }
+.pr-row .nm b { display: block; } .pr-row .nm span { color: var(--faint); font-size: 12px; }
+.pr-tiers { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); }
+.pr-tiers i { display: block; height: 100%; }
+.pr-brief-head { display: flex; gap: 18px; align-items: flex-start; margin-bottom: 14px; }
+.pr-brief-head img, .pr-brief-head .pr-photo-ph { width: 120px; height: 160px; border-radius: 10px; object-fit: cover; }
+.pr-brief-head h2 { margin: 0 0 4px; font-size: 26px; }
+.pr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.pr-grid .panel { margin: 0; }
+.pr-grid h3 { margin-bottom: 8px; }
+.pr-big { font-size: 22px; font-weight: 700; }
+.pr-shape { display: grid; grid-template-columns: 110px minmax(0, 1fr) max-content; gap: 4px 10px; align-items: center; font-size: 12px; }
+.pr-shape .bar { position: relative; height: 10px; background: var(--line); border-radius: 5px; }
+.pr-shape .bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; }
+.pr-shape .bar b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); opacity: .7; }
+.pr-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.pr-resume { display: flex; align-items: center; gap: 10px; }
+.pr-resume[hidden] { display: none; }
+.pr-sum { font-size: 15px; line-height: 1.6; }
