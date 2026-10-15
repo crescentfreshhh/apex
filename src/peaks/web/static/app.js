@@ -4285,15 +4285,25 @@ async function loadDefaultQueue(exclude = new Set()) {
   return null;
 }
 function rvApplyQueue(q) {
+  rv.note = "";
   rv.items = q ? q.items : []; rv.i = 0;
   rv.label = q ? q.label : rv.label; rv.source = q ? q.source : rv.source;
   rv.loadedAt = Date.now();
 }
 // a list you've finished (or that's gone stale) isn't "your queue" any more
 function rvNeedsReload() {
+  if (rv.source === "catalogue" && rv.items.length) return false;   // your chosen list: never swapped
   if (!rv.items.length || rv.i >= rv.items.length) return true;
   if (rv.items.every((x) => rv.graded.has(x.scene_id))) return true;
   return rv.source !== "catalogue" && rv.loadedAt && Date.now() - rv.loadedAt > 15 * 60 * 1000;
+}
+// switch Review to another Catalogue list — only ever because you asked
+async function rvOpenCatList(p) {
+  cat.view = p.view || ""; cat.tier = p.view ? "" : (p.tier || ""); cat.isNew = false;
+  cat.performerId = ""; cat.sortTouched = false; cat.sortDir = "";
+  await openCatalogue();
+  cat.focus = 0; rv.fromCatalogue = true; rv.graded = new Set();
+  go("review");
 }
 // ran off the end of a list: carry straight on with the next one
 async function rvNextQueue() {
@@ -4301,10 +4311,12 @@ async function rvNextQueue() {
   rv.rolling = true;
   try {
     const done = new Set([...rv.graded, ...rv.items.map((x) => x.scene_id)]);
+    const was = rv.label;
     const q = await loadDefaultQueue(done);
     if (q) {
       rvApplyQueue(q);
-      toast(`Next up: ${q.label} · ${plural(q.items.length, "scene")}`);
+      rv.note = `moved on — ${was} is done`;             // said in the header, not just a toast
+      toast(`${was} is done · now: ${q.label} · ${plural(q.items.length, "scene")}`);
     }
     renderReview();
   } finally { rv.rolling = false; }
@@ -4314,6 +4326,7 @@ async function openReview() {
   const force = rv.forceIngest; rv.forceIngest = false;
   if (rv.fromCatalogue && cat.items.length) {
     rv.items = cat.items.slice(); rv.i = Math.max(0, Math.min(cat.focus, rv.items.length - 1));
+    rv.note = "";
     rv.label = pr.active ? `Performer review · ${pr.active.name}` : catListLabel();
     rv.source = "catalogue"; rv.loadedAt = Date.now();
   } else if ((force || (ing.live && rv.source !== "ingest")) && await loadIngestQueue().catch(() => false)) {
@@ -4363,6 +4376,22 @@ function renderReview() {
   const r = rv.items[rv.i];
   $("#rv").hidden = !r; $("#rv-empty").hidden = !!r;
   const v = $("#rv-v");
+  if (!r && rv.source === "catalogue" && rv.items.length && !pr.active) {
+    v.removeAttribute("src"); v.load();
+    const views = cat.views || {}, here = cat.view;
+    const next = CAT_VIEWS.filter(([k]) => k !== here && views[k] > 0).slice(0, 3)
+      .map(([k, label]) => `<button class="btn" data-rv-list="view:${k}">${esc(label)} (${views[k].toLocaleString()})</button>`);
+    const unrev = (cat.counts || {}).unreviewed || 0;
+    if (unrev && !(here === "" && cat.tier === "unreviewed")) next.push(`<button class="btn" data-rv-list="tier:unreviewed">${esc(TIER_NAMES.unreviewed)} (${unrev.toLocaleString()})</button>`);
+    $("#rv-empty").innerHTML = `<h2>${esc(rv.label)} — done</h2>
+      <p class="muted">${plural(rv.items.length, "scene")} in this list · ${rv.graded.size.toLocaleString()} graded here. Nothing switches on its own — pick what's next:</p>
+      <div class="pr-actions">${next.join("")}<button class="btn ghost" data-go="catalogue">Back to Catalogue</button></div>`;
+    $("#rv-empty").querySelectorAll("[data-rv-list]").forEach((b) => b.onclick = () => {
+      const [kind, val] = b.dataset.rvList.split(":");
+      rvOpenCatList(kind === "view" ? { view: val } : { tier: val });
+    });
+    return;
+  }
   if (!r) {
     v.removeAttribute("src"); v.load();
     const left = parseInt(($("#nav-ct-review")?.textContent || "0").replace(/\D/g, ""), 10) || 0;
@@ -4378,7 +4407,8 @@ function renderReview() {
   $("#rv-title").textContent = r.title;
   $("#rv-sub").textContent = [r.performers.slice(0, 3).join(", "), r.studio, r.date].filter(Boolean).join(" · ");
   const total = rv.source === "catalogue" ? Math.max(cat.total || 0, rv.items.length) : rv.items.length;
-  $("#rv-pos").textContent = `${rv.label} · ${rv.i + 1} of ${total.toLocaleString()}`;
+  $("#rv-pos").innerHTML = `<b>${esc(rv.label)}</b> · ${rv.i + 1} of ${total.toLocaleString()}`
+    + (rv.note ? ` <span class="rv-note">↪ ${esc(rv.note)}</span>` : "");
   // player: start at the best moment, peaks marked on the timeline
   rv.peaks = (r.moments || []).map((m) => m.t).sort((a, b) => a - b);
   let start = (r.moments && r.moments.length) ? r.moments.reduce((a, b) => ((b.score || 0) > (a.score || 0) ? b : a)).t : 0;
@@ -4472,7 +4502,8 @@ function rvMove(d) {
   const morePages = rv.source === "catalogue" && cat.items.length < cat.total;
   if (rv.i >= rv.items.length && !morePages) {
     if (pr.active && rv.source === "catalogue") { prFinish(); return; }   // her scenes are done
-    rvNextQueue(); return;                                                 // carry on, don't dead-end
+    if (rv.source === "catalogue") { renderReview(); return; }            // your list: its done screen
+    rvNextQueue(); return;                                                 // the plain queue carries on
   }
   renderReview();
   if (morePages && rv.i >= rv.items.length - 3) rvMoreFromCatalogue();

@@ -107,6 +107,8 @@ class BackupMixin:
                     continue
                 if part == "models" and _MODEL_SKIP.search(f.name):
                     continue
+                if part == "embeddings" and f.relative_to(src).parts[0] == "_index":
+                    continue                      # the index snapshot: rebuilt from the cache
                 out.append((f, str(f.relative_to(src))))
         return out
 

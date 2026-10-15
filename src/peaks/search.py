@@ -147,6 +147,92 @@ class SearchIndex:
         return self.apply(lambda b: b @ q).astype(np.float32, copy=False)
 
     def build(self, keys: list[str] | None = None, on_progress=None) -> "SearchIndex":
+        """The index for these keys — from the saved snapshot when it's current
+        (seconds), patched with just the scenes that changed, or built from the
+        cache and then snapshotted (see `index_snapshot`)."""
+        from . import index_snapshot as snap
+
+        keys = keys if keys is not None else self.cache.keys(self.model_name)
+        if not snap.enabled():
+            return self._build_full(keys, on_progress)
+        stats: dict = {}
+        try:
+            stats = snap.file_stats(self.cache, self.model_name, keys)
+            if self._from_snapshot(keys, stats, on_progress):
+                return self
+        except Exception:  # noqa: BLE001 — any doubt: the full build below
+            self.__init__(self.cache, self.model_name)
+        self._build_full(keys, on_progress)
+        if self.size:
+            snap.write_behind(self, self.cache, self.model_name, stats)
+        return self
+
+    def _adopt(self, matrix, times, order: list[tuple[str, int, int, dict]], bf16: bool) -> None:
+        """Take a finished matrix + per-scene row ranges (in row order)."""
+        self.matrix, self.times, self._bf16 = matrix, times, bf16
+        self._key_rows, self.key_meta = {}, {}
+        all_keys: list[str] = []
+        all_scenes: list[str | None] = []
+        for key, a, b, meta in order:
+            self._key_rows[key] = (a, b)
+            self.key_meta[key] = {"scene_id": meta.get("scene_id"), "path": meta.get("path")}
+            all_keys.extend([key] * (b - a))
+            all_scenes.extend([meta.get("scene_id")] * (b - a))
+        self.keys, self.scene_ids = all_keys, all_scenes
+
+    def _from_snapshot(self, keys: list[str], stats: dict, on_progress=None) -> bool:
+        from . import index_snapshot as snap
+
+        s = snap.read(self.cache, self.model_name)
+        if s is None:
+            return False
+        man, scenes = s["man"], s["man"]["scenes"]
+        wanted = [k for k in keys if k in stats]
+        same = [k for k in wanted if k in scenes and scenes[k]["st"] == stats[k]]
+        fresh = [k for k in wanted if k not in set(same)]
+        old = sorted(((k, *scenes[k]["rows"]) for k in same), key=lambda x: x[1])
+        if not fresh and len(same) == len(scenes):              # nothing changed: map it
+            self._adopt(s["matrix"], s["times"], [(k, a, b, scenes[k]) for k, a, b in old], man["bf16"])
+            return True
+        # a few scenes changed: keep the rest, read only those files
+        loaded = []
+        for i, key in enumerate(fresh):
+            if on_progress and i % 50 == 0:
+                on_progress(i, len(fresh))
+            try:
+                times, vecs, meta = self.cache.load(key, self.model_name)
+            except Exception:  # noqa: BLE001
+                continue
+            if vecs.shape[0]:
+                if vecs.shape[1] != man["dim"]:
+                    return False
+                loaded.append((key, times, vecs, meta))
+        total = sum(b - a for _, a, b in old) + sum(v.shape[0] for _, _, v, _ in loaded)
+        if total == 0:
+            return False
+        bf16 = _index_dtype_for(total, man["dim"]) == "bfloat16"
+        if bf16 != man["bf16"]:
+            return False                                          # crossed the size line: rebuild
+        matrix = np.empty((total, man["dim"]), dtype=np.uint16 if bf16 else np.float32)
+        times_all = np.empty((total,), dtype=np.float32)
+        order, pos = [], 0
+        for key, a, b in old:
+            n = b - a
+            matrix[pos:pos + n] = s["matrix"][a:b]
+            times_all[pos:pos + n] = s["times"][a:b]
+            order.append((key, pos, pos + n, scenes[key]))
+            pos += n
+        for key, times, vecs, meta in loaded:
+            n = vecs.shape[0]
+            matrix[pos:pos + n] = _f32_to_bf16(vecs) if bf16 else vecs
+            times_all[pos:pos + n] = times.astype(np.float32)
+            order.append((key, pos, pos + n, meta))
+            pos += n
+        self._adopt(matrix, times_all, order, bf16)
+        snap.write_behind(self, self.cache, self.model_name, stats)
+        return True
+
+    def _build_full(self, keys: list[str] | None = None, on_progress=None) -> "SearchIndex":
         """Load every cached scene for this model into one matrix.
 
         Vectors are L2-normalized at write time, so cosine similarity is just a

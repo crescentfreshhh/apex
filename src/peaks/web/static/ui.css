@@ -733,3 +733,4 @@ html.hide-nums .num { display: none; }
 .pr-resume { display: flex; align-items: center; gap: 10px; }
 .pr-resume[hidden] { display: none; }
 .pr-sum { font-size: 15px; line-height: 1.6; }
+.rv-note { color: var(--ano); font-size: 12px; margin-left: 6px; }

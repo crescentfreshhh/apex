@@ -169,7 +169,8 @@ class EmbeddingCache:
         """Names of every model that has a cache directory (dinov2, clip, ...)."""
         if not self.root.exists():
             return []
-        return sorted(p.name for p in self.root.iterdir() if p.is_dir())
+        # "_index" (the search-index snapshots) and other "_" folders aren't models
+        return sorted(p.name for p in self.root.iterdir() if p.is_dir() and not p.name.startswith("_"))
 
     def delete(self, key: str, model_name: str) -> bool:
         """Remove a cached scene entry. Returns True if a file was deleted.
