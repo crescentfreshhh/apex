@@ -1586,8 +1586,9 @@ def create_app(cfg=None):
     def board_tier(tiers: str, count: int = Query(3000, ge=1, le=10000),
                    per_scene: int = Query(4, ge=1, le=50)):
         """Megaboard source: the best moments of every scene in the chosen tiers
-        (comma-separated keys, e.g. 'exceptionnelle,legendaire'), or 'unreviewed'
-        for the scenes you haven't graded yet."""
+        (comma-separated keys, e.g. 'exceptionnelle,legendaire'), 'unreviewed'
+        for the scenes you haven't graded yet, or 'unsaved' for the scenes with
+        no saved moment yet."""
         try:
             r = service.tier_board(tiers, count=count, per_scene=per_scene)
         except ValueError as exc:

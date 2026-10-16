@@ -403,7 +403,7 @@ def test_each_tier_channel_plays_only_its_own_tier(svc):
     svc.invalidate_meta()
     svc._cat_cache = None
     keys = [t["key"] for t in svc.board_sources()["tiers"]]
-    assert keys == ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "unreviewed"]
+    assert keys == ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "unreviewed", "unsaved"]
     exc = svc.tier_board("exceptionnelle", per_scene=2)
     assert exc["scenes"] == 1 and {h.scene_id for h in exc["hits"]} == {"12"}
     mer = svc.tier_board("merveilleuse", per_scene=2)
@@ -420,6 +420,22 @@ def test_unreviewed_channel_only_holds_ungraded_scenes(svc):
     assert any(t["key"] == "unreviewed" for t in svc.board_sources()["tiers"])
     with pytest.raises(ValueError):
         svc.tier_label("unreviewed")                       # exports stay keeper-only
+
+
+def test_unsaved_channel_holds_scenes_without_a_saved_moment(svc):
+    st = svc.client()
+    st.markers = [{"scene_id": "3", "seconds": 12.0, "marker_id": "m1", "title": ""},
+                  {"scene_id": "12", "seconds": 40.0, "marker_id": "m2", "title": ""}]
+    svc.__dict__.pop("_marker_cache", None)
+    r = svc.tier_board("unsaved", per_scene=2)
+    sids = {h.scene_id for h in r["hits"]}
+    assert r["label"] == "No saved moments yet" and sids
+    assert not sids & {"3", "12"}                          # a saved moment: not here
+    assert "1" not in sids                                 # rejected: not here either
+    assert {"6", "9"} & sids                               # graded but unsaved: here
+    assert r["scenes"] == len([x for x in svc._catalogue_all() if x["tier"] != "rejected"]) - 2
+    with pytest.raises(ValueError):
+        svc.tier_label("unsaved")                          # exports stay keeper-only
 
 
 def test_cancelled_measure_leaves_the_model_alone(svc):

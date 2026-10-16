@@ -1017,10 +1017,18 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def tier_board(self, tiers, count: int = 3000, per_scene: int = 4) -> dict:
         """Megaboard supply for chosen tiers: each tier scene's best moments.
         `tiers="unreviewed"` is the discovery channel — the best moments of the
-        scenes you haven't graded yet (not rejected, not graded)."""
+        scenes you haven't graded yet (not rejected, not graded).
+        `tiers="unsaved"`: every scene (any grade but rejected) you haven't
+        saved a moment in yet — their best moments, to find one worth saving."""
         if tiers == "unreviewed":
             sids = [r["scene_id"] for r in self._catalogue_all() if r["tier"] == "unreviewed"]
             label = "Unreviewed — best moments"
+        elif tiers == "unsaved":
+            saved = {str(m["scene_id"]) for m in self._saved_markers(self.cfg.markers.tag_name)
+                     if m.get("scene_id")}
+            sids = [r["scene_id"] for r in self._catalogue_all()
+                    if r["tier"] != "rejected" and r["scene_id"] not in saved]
+            label = "No saved moments yet"
         else:
             sids = self.tier_scene_ids(tiers)
             label = self.tier_label(tiers)
@@ -1437,6 +1445,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         tiers = [{"key": t, "label": names[t]}
                  for t in ("legendaire", "exceptionnelle", "merveilleuse", "upscale")]
         tiers.append({"key": "unreviewed", "label": "Unreviewed — best moments"})
+        tiers.append({"key": "unsaved", "label": "No saved moments yet"})
         return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections(),
                 "tiers": tiers}
 

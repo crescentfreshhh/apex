@@ -718,11 +718,14 @@ function setTier(sid, tier) {
 // a tier channel plays only its own tier: grade a scene out of it and its moments
 // leave the rotation (the tile on screen stays until it rotates); grade it back
 // in — or undo — and they return. Pivots are "more like this" and aren't touched.
+// The "no saved moments" channel goes by saves, not grade: a scene leaves when
+// you save a moment in it (or reject it), and grading it otherwise keeps it.
 const tierPruned = new Map();   // scene_id -> {apexes, base} taken out of the channel
+const savedHere = new Set();    // scenes you saved a moment in from the board
 function keepTierChannelPure(sid, tier) {
   if (!(State.source || "").startsWith("tier:") || State.pivot) return;
   const keys = State.source.slice(5).split(",");
-  const inChannel = keys.includes(tier);
+  const inChannel = keys.includes("unsaved") ? tier !== "rejected" && !savedHere.has(sid) : keys.includes(tier);
   const mine = (a) => String(a.scene_id) === sid;
   if (!inChannel) {
     if (tierPruned.has(sid)) return;
@@ -1241,7 +1244,9 @@ async function saveApex(scene_id, t) {
   expoRespond(scene_id);
   try {
     const r = await api(`/api/scene/${encodeURIComponent(scene_id)}/apex?t=${(+t || 0).toFixed(2)}` + tagParam(), { method: "POST" });
+    savedHere.add(String(scene_id));
     if (r && r.promoted_from) setTier(scene_id, "legendaire");   // saving promotes the scene
+    else keepTierChannelPure(String(scene_id), State.tierOf[String(scene_id)] || "unreviewed");
     flashStatus("★ saved moment @ " + fmt(t) + (r && r.promoted_from ? ` · scene now ${gradeLabel("legendaire")}` : ""));
   } catch (e) { flashStatus(e.message); }
 }
@@ -1471,7 +1476,9 @@ async function loadSource(src, opts = {}) {
       catch (e) { return isStale(tok) ? undefined : showError("Couldn't load this tier.\n\n(" + e.message + ")"); }
       State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
       if (!State.apexes.length)
-        return isStale(tok) ? undefined : showError(`No embedded moments in ${d.label || "this tier"} yet.\n\nGrade some scenes in the Catalogue first.`);
+        return isStale(tok) ? undefined : showError(tiers === "unsaved"
+          ? "Every embedded scene has a saved moment — nothing left here."
+          : `No embedded moments in ${d.label || "this tier"} yet.\n\nGrade some scenes in the Catalogue first.`);
       pickApex = makeQueuePicker(State.apexes);   // every clip before repeating
       setStatus(`🏆 ${d.label} · ${d.scenes} scenes`);
     } else if (src === "foryou") {
@@ -1523,7 +1530,7 @@ async function initSources(initial) {
     for (const c of s.collections || [])
       opts.push(`<option value="collection:${esc(c.safe)}">Playlist: ${esc(c.name)} (${c.count})</option>`);
     for (const t of s.tiers || [])
-      opts.push(`<option value="tier:${esc(t.key)}">${t.key === "unreviewed" ? "" : "Tier: "}${esc(t.label)}</option>`);
+      opts.push(`<option value="tier:${esc(t.key)}">${t.key === "unreviewed" || t.key === "unsaved" ? "" : "Tier: "}${esc(t.label)}</option>`);
     if (initial && initial.startsWith("tier:") && !(s.tiers || []).some((t) => "tier:" + t.key === initial)) {
       const label = initial.slice(5).split(",").map((k) => MB_TIER_NAMES[k] || k).join(" + ");
       opts.push(`<option value="${esc(initial)}">Tiers: ${esc(label)}</option>`);
