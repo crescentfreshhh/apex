@@ -28,6 +28,10 @@ from .seedbox import SeedboxMixin
 from .perfreview import PerfReviewMixin
 
 
+class IndexMemoryError(RuntimeError):
+    """Not enough memory to load the library index right now (retried later)."""
+
+
 # the Catalogue's "Tier" sort: best → worst
 TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upscale": 3,
                   "anomaly": 2, "unreviewed": 1, "rejected": 0}
@@ -1760,7 +1764,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     # --- search index --------------------------------------------------------
 
-    def index(self, model: str | None = None, refresh: bool = False) -> SearchIndex:
+    def index(self, model: str | None = None, refresh: bool = False, _rebuild: bool = False) -> SearchIndex:
         """The in-memory search index for `model`, built lazily and cached.
 
         A cached index is normally reused until an embed pass finishes (which
@@ -1772,19 +1776,26 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         model = model or self._model_name()
         with self._index_lock:
             idx = self._index.get(model)
-            rebuild = idx is None or idx.size == 0
+            rebuild = idx is None or idx.size == 0 or _rebuild
             if refresh and not rebuild:
                 cache = EmbeddingCache(self.cfg.embedding.cache_dir)
                 if len(cache.keys(model)) != getattr(idx, "source_key_count", -1):
                     rebuild = True
             if rebuild:
+                cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+                keys = cache.keys(model)
+                # never allocate a second whole-library matrix the container can't
+                # hold: free the derived caches first, else keep serving the old one
+                if not self._index_room(cache, model, keys, old=idx):
+                    if idx is not None and idx.size:
+                        self._index_stale.add(model)          # retried when memory frees up
+                        return idx
+                    raise IndexMemoryError(self._index_room_msg)
                 # drop the old index first so its matrix is freed before the new
                 # one is allocated — a whole-library float32 matrix is GBs, and
                 # holding both at once is what spiked RSS during an embed.
                 self._index.pop(model, None)
                 idx = None
-                cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-                keys = cache.keys(model)
                 outer = getattr(self, "_build_progress", None)
 
                 def progress(done, n):
@@ -1802,7 +1813,132 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     self._index_building = None
                 idx.source_key_count = len(keys)
                 self._index[model] = idx
+                self._index_stale.discard(model)
             return idx
+
+    # --- index memory: stale instead of dropped, and never two copies past the limit ---
+
+    @property
+    def _index_stale(self) -> set:
+        return self.__dict__.setdefault("_index_stale_set", set())
+
+    def mark_index_stale(self, models=None) -> None:
+        """Scenes were deleted: keep serving the loaded index (a deleted scene's
+        frames just fail to load) and rebuild once, when nothing heavy runs."""
+        for m in (models or list(self._index)):
+            if m in self._index:
+                self._index_stale.add(m)
+
+    def index_state(self) -> str:
+        m = self._model_name()
+        if self.__dict__.get("_index_building") or self.__dict__.get("_index_rebuilding"):
+            return "building"
+        if m not in self._index:
+            return "cold"
+        return "stale" if m in self._index_stale else "warm"
+
+    @staticmethod
+    def _index_need_bytes(cache, model: str, keys: list[str]) -> int:
+        """What building this index would allocate — from the snapshot manifest
+        when there is one, else from the cache's file sizes (stored float16)."""
+        import json
+        import os
+
+        from .. import index_snapshot as snap
+        from ..search import _index_dtype_for
+
+        try:
+            man = json.loads((snap.snap_dir(cache, model) / "manifest.json").read_text())
+            return int(man["total"]) * int(man["dim"]) * (2 if man["bf16"] else 4)
+        except Exception:  # noqa: BLE001
+            pass
+        f16 = 0
+        for k in keys:
+            try:
+                f16 += os.path.getsize(cache._file(k, model))
+            except OSError:
+                pass
+        values = f16 // 2
+        return values * (2 if _index_dtype_for(values // 1024 or 1, 1024) == "bfloat16" else 4)
+
+    def _index_room(self, cache, model: str, keys: list[str], old=None) -> bool:
+        """Room for a (re)build within the memory limit? Sheds derived caches
+        first; with a still-live old index the new one must fit beside it."""
+        from . import memwatch
+
+        limit = memwatch.soft_limit_bytes()
+        if not limit:
+            return True
+        need = self._index_need_bytes(cache, model, keys)
+        margin = 1 << 30                               # 1 GB for everything else
+        if memwatch.rss_bytes() + need + margin <= limit:
+            return True
+        self.shed_memory(drop_indexes=False)           # derived caches (the caller holds _index_lock)
+        for m in [m for m in self._index if m != model]:
+            self._index.pop(m, None)                   # other models' indexes
+        import gc
+
+        gc.collect()
+        memwatch.malloc_trim()
+        rss = memwatch.rss_bytes()
+        if old is not None and getattr(old, "size", 0):
+            # building replaces it: what it frees counts, if nothing else holds it
+            freed = getattr(getattr(old, "matrix", None), "nbytes", 0)
+            ok = rss + need + margin - freed <= limit
+        else:
+            ok = rss + need + margin <= limit
+        if not ok:
+            self._index_room_msg = (f"Not enough memory to load the library right now "
+                                    f"({rss / 1073741824:.1f} of {limit / 1073741824:.1f} GB in use, "
+                                    f"it needs {need / 1073741824:.1f} GB) — it loads as soon as "
+                                    f"the running work finishes.")
+        return ok
+
+    def rebuild_stale_index(self, job=None) -> dict:
+        """The scheduler's once-when-idle rebuild after deletes. With room for
+        two copies it's built beside the old one (pages keep working) and
+        swapped in; otherwise the old one is let go first and pages wait for
+        the load, as at start-up. No room even for that: keep the old one."""
+        import time as _t
+
+        m = self._model_name()
+        if m not in self._index_stale:
+            return {"rebuilt": False}
+        cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+        keys = cache.keys(m)
+        with self._index_lock:
+            before = self._index.get(m)
+            beside = before is not None and self._index_room(cache, m, keys, old=None)
+        if beside:
+            self._index_rebuilding = _t.time()
+            try:
+                idx = SearchIndex(cache, m).build(keys)
+            finally:
+                self._index_rebuilding = None
+            idx.source_key_count = len(keys)
+            with self._index_lock:
+                self._index[m] = idx
+                self._index_stale.discard(m)
+            before = None
+            from . import memwatch
+
+            memwatch.malloc_trim()
+        else:
+            try:
+                idx = self.index(m, _rebuild=True)
+            except IndexMemoryError:
+                return {"rebuilt": False, "reason": "memory"}
+            if idx is before:
+                return {"rebuilt": False, "reason": "memory"}
+        self._invalidate_taste_caches()        # scores are per index row
+        return {"rebuilt": True, "beside": beside}
+
+    def index_health(self) -> str:
+        """For the health line: `index=warm 9.8G`, `stale`, `building`, `cold`."""
+        st = self.index_state()
+        idx = self._index.get(self._model_name())
+        gb = getattr(getattr(idx, "matrix", None), "nbytes", 0) / 1073741824
+        return f"{st} {gb:.1f}G" if gb else st
 
     def warm_up(self, job=None) -> dict:
         """Container start: load what the first page needs before anyone asks —
@@ -3134,6 +3270,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             if ckey in running:
                 return
             running.add(ckey)
+
+        if self.__dict__.get("_index_building") or self.__dict__.get("_index_rebuilding"):   # not beside a rebuild: next request retries
+            running.discard(ckey)
+            return
 
         def run():
             from . import forensics

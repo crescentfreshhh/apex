@@ -42,6 +42,23 @@ _CHUNK = 8192  # rows per float32 working chunk (32 MB at 1024-dim)
 _LITTLE = sys.byteorder == "little"
 
 
+_RELEASE_EVERY = 512 << 20
+
+
+def _release_mapped(arr) -> None:
+    """Drop a read-only memory-mapped array's resident pages (they're re-read
+    from the file if touched again). No-op for an ordinary array."""
+    import mmap
+
+    mm = getattr(arr, "_mmap", None)
+    if mm is None or not hasattr(mm, "madvise") or not hasattr(mmap, "MADV_DONTNEED"):
+        return
+    try:
+        mm.madvise(mmap.MADV_DONTNEED)
+    except (OSError, ValueError):
+        pass
+
+
 def _index_dtype_for(total: int, dim: int) -> str:
     want = os.environ.get("PEAKS_INDEX_DTYPE", "auto").lower()
     if want in ("float32", "f32"):
@@ -216,12 +233,18 @@ class SearchIndex:
         matrix = np.empty((total, man["dim"]), dtype=np.uint16 if bf16 else np.float32)
         times_all = np.empty((total,), dtype=np.float32)
         order, pos = [], 0
+        src, row_bytes, since = s["matrix"], matrix.itemsize * man["dim"], 0
         for key, a, b in old:
             n = b - a
-            matrix[pos:pos + n] = s["matrix"][a:b]
+            matrix[pos:pos + n] = src[a:b]
             times_all[pos:pos + n] = s["times"][a:b]
             order.append((key, pos, pos + n, scenes[key]))
             pos += n
+            since += n * row_bytes
+            if since >= _RELEASE_EVERY:               # done with those snapshot pages: let them go,
+                _release_mapped(src)                  # so the copy never holds two whole matrices
+                since = 0
+        _release_mapped(src)
         for key, times, vecs, meta in loaded:
             n = vecs.shape[0]
             matrix[pos:pos + n] = _f32_to_bf16(vecs) if bf16 else vecs

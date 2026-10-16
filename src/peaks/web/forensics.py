@@ -186,6 +186,11 @@ def _gpu() -> str | None:
         return "gpu=?"
 
 
+def set_index_probe(fn) -> None:
+    """The service's `index_health` — the health line shows the index state."""
+    _state["index"] = fn
+
+
 def health_line(jobs=None) -> str:
     from . import memwatch
 
@@ -201,6 +206,12 @@ def health_line(jobs=None) -> str:
     if jobs is not None:
         running = sorted({j.kind for j in jobs.list() if j.status == "running"})
         parts.append("jobs=" + (",".join(running) or "-"))
+    probe = _state.get("index")
+    if probe:
+        try:
+            parts.append("index=" + probe())
+        except Exception:  # noqa: BLE001
+            pass
     work = sorted(k for k, n in _state["busy"].items() if n > 0)
     if work:
         parts.append("work=" + ",".join(work))

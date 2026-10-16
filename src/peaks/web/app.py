@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from .jobs import JobManager
-from .service import Service
+from .service import IndexMemoryError, Service
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -1298,7 +1298,7 @@ def create_app(cfg=None):
             _rewarm(service, jobs)
         st = service.warm_status()
         w = jobs.running("warmup")
-        if w is not None:
+        if w is not None and not (st["loaded"] and not st["building"]):   # a stale rebuild beside a live index: no banner
             st.update(building=True, stage=(w.progress or {}).get("stage"), pct=(w.progress or {}).get("pct"))
         st["loading"] = (not st["loaded"]) or st["building"]
         return st
@@ -1906,7 +1906,15 @@ def create_app(cfg=None):
     _start_scheduler(app, service, jobs)  # always on; it reads the interval live
 
     _start_memwatch(app, service)
+    forensics.set_index_probe(service.index_health)
     _start_heartbeat(app, jobs)
+
+    @app.exception_handler(IndexMemoryError)
+    def _no_room(request, exc):
+        """No index yet and no memory for one: say so instead of crashing."""
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse({"detail": str(exc)}, status_code=503)
     _start_warmup(service, jobs)
 
     @app.get("/api/crash-report")
@@ -2030,8 +2038,8 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
     waits — and starts the minute the ingest ends — rather than being skipped."""
     import time as _t
 
-    if jobs.running("embed") is not None or jobs.running("ingest") is not None:
-        return None
+    if any(jobs.running(k) is not None for k in ("embed", "ingest", "warmup")):
+        return None                                # warm-up first: never two big loads at once
     try:
         if service.embed_followup():
             jobs.start("embed", service.run_embed_followup)
@@ -2057,10 +2065,15 @@ def _rewarm(service: Service, jobs: JobManager):
 
     if os.environ.get("PEAKS_WARM_ON_START", "1").strip().lower() in ("0", "false", "no", "off"):
         return None
-    if service.index_loaded() or service.warm_status()["building"]:
+    if service.warm_status()["building"] or any(jobs.running(k) for k in _WARM_WAIT_FOR):
         return None
-    if any(jobs.running(k) for k in _WARM_WAIT_FOR):
-        return None
+    if service.index_loaded():
+        if service.index_state() != "stale":
+            return None
+        try:   # deletes since the last build: one rebuild now that nothing heavy runs
+            return jobs.start("warmup", service.rebuild_stale_index)
+        except RuntimeError:
+            return None
     try:
         return jobs.start("warmup", service.warm_up)
     except RuntimeError:

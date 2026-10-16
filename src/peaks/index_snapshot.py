@@ -80,6 +80,31 @@ def read(cache, model: str) -> dict | None:
     return {"man": man, "matrix": matrix, "times": times}
 
 
+_FLUSH_EVERY = 256 << 20
+
+
+def _save_flushed(path: Path, arr: np.ndarray) -> None:
+    """np.save, in chunks that are forced to disk and dropped from the page
+    cache as they go: a ~10 GB snapshot never sits in memory unwritten, where
+    it would count against the container's limit."""
+    arr = np.ascontiguousarray(arr)
+    flat = arr.reshape(-1).view(np.uint8) if arr.size else np.empty(0, np.uint8)
+    with open(path, "wb") as fh:
+        np.lib.format.write_array_header_1_0(fh, np.lib.format.header_data_from_array_1_0(arr))
+        fd = fh.fileno()
+        start = fh.tell()
+        for off in range(0, flat.size, _FLUSH_EVERY):
+            fh.write(memoryview(flat[off:off + _FLUSH_EVERY]))
+            fh.flush()
+            os.fsync(fd)
+            if hasattr(os, "posix_fadvise"):
+                try:
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                except OSError:
+                    pass
+        assert fh.tell() == start + flat.size
+
+
 def write(index, cache, model: str, stats: dict[str, list[int]]) -> bool:
     """Save `index` (a built SearchIndex) as the snapshot. Safe to call from a
     background thread; a concurrent write for the same model is skipped."""
@@ -101,8 +126,7 @@ def write(index, cache, model: str, stats: dict[str, list[int]]) -> bool:
                "bf16": bool(index._bf16), "scenes": scenes, "written": time.time()}
         for name, arr in (("matrix", index.matrix), ("times", index.times)):
             tmp = d / f"{name}-{gen}.npy.tmp"
-            with open(tmp, "wb") as fh:
-                np.save(fh, np.asarray(arr))
+            _save_flushed(tmp, np.asarray(arr))
             os.replace(tmp, d / f"{name}-{gen}.npy")
         tmp = d / "manifest.json.tmp"
         tmp.write_text(json.dumps(man))

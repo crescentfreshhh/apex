@@ -704,8 +704,9 @@ class LibraryMixin:
                 cache.delete(key, m)
             self.set_scene_hidden(r["scene_id"], False)
             self.invalidate_meta(r["scene_id"])
-        for m in models:
-            self.invalidate_index(m)
+        # keep serving the loaded index; one rebuild later, when nothing heavy runs
+        # (a queue of deletions used to rebuild the whole ~10 GB index every time)
+        self.mark_index_stale(models)
         gone = {r["scene_id"] for r in rows}
         try:                                        # deleted scenes can't fail to embed any more
             from ..failures import failure_log_for
