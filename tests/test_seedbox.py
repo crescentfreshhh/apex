@@ -17,12 +17,12 @@ def _log(*rows):
 
 # --- runs.log ----------------------------------------------------------------------
 
-def test_parse_runs_reads_pull_and_prune_and_skips_garbage():
+def test_parse_runs_keeps_pull_skips_other_scripts_quietly_and_counts_garbage():
     text = _log((NOW - 100, "pull", "ok", 3), (NOW - 50, "prune", "ok", ""), (NOW - 10, "pull", "fail", 0)) + \
-        "garbage\n\n1|pull|ok\nabc|pull|ok|1\n5|push|ok|1\n6|pull|maybe|1\n7|pull|ok|x\n"
+        "garbage\n\n1|pull|ok\nabc|pull|ok|1\n5|cleanup|ok|whatever\n6|pull|maybe|1\n7|pull|ok|x\n"
     runs, bad = parse_runs(text)
-    assert [(r.kind, r.ok, r.files) for r in runs] == [("pull", True, 3), ("prune", True, None), ("pull", False, 0)]
-    assert bad == 6
+    assert [(r.kind, r.ok, r.files) for r in runs] == [("pull", True, 3), ("pull", False, 0)]
+    assert bad == 5                           # prune / cleanup lines aren't "unreadable"
     assert parse_runs("")[0] == [] and parse_runs(None)[1] == 0
 
 
@@ -38,7 +38,6 @@ def test_script_health_last_ok_counts_and_recovery():
     assert h["last_ok"] == NOW - 20 * 60 and h["last_ok_ago_min"] == 20
     assert h["ok_24h"] == 2 and h["failed_24h"] == 1 and h["recovered_24h"] is True
     assert script_health(runs, "pull", NOW, failing=True)["recovered_24h"] is False
-    assert script_health(runs, "prune", NOW, failing=False)["last_ok"] is None
 
 
 def test_throughput_24h_7d_and_per_day():
@@ -60,20 +59,18 @@ def _t(cat, state, gb, age_days, done=True, name="x"):
             "added_on": at - 600, "completion_on": at if done else -1}
 
 
-def test_pool_summary_by_category_states_and_waiting_prune():
+def test_pool_summary_by_category_and_states():
     p = pool_summary([_t("1", "pausedUP", 2, 1), _t("vr", "pausedUP", 10, 5, name="old vr"),
                       _t("1", "uploading", 3, 1), _t("other", "pausedUP", 1, 9),
                       _t("vr", "stalledUP", 4, 0.5), _t("1", "downloading", 1, 0, done=False)], NOW)
     assert p["total"] == {"count": 6, "gb": 21.0}
     assert p["by_category"]["1"] == {"count": 3, "gb": 6.0} and p["by_category"]["vr"]["count"] == 2
     assert p["seeding"] == 2 and p["paused"] == 3 and p["other"] == 1
-    assert p["waiting_prune"] == {"count": 2, "gb": 12.0}                 # paused in 1/vr only
-    assert [s["name"] for s in p["stale_paused"]] == ["old vr"]          # >4 days; "other" never counts
+    assert "waiting_prune" not in p and "stale_paused" not in p          # no prune expectations
 
 
-def test_pool_uses_added_on_when_never_completed_and_5x_states():
-    p = pool_summary([_t("1", "stoppedUP", 1, 6, done=False)], NOW)
-    assert p["paused"] == 1 and p["stale_paused"][0]["age_days"] == 6.0
+def test_pool_counts_5x_paused_states():
+    assert pool_summary([_t("1", "stoppedUP", 1, 6, done=False)], NOW)["paused"] == 1
 
 
 # --- the verdict -----------------------------------------------------------------------
@@ -83,10 +80,9 @@ def _health(last_ok_ago=600, failing=False, failed=0, recovered=False):
             "failed_24h": failed, "recovered_24h": recovered}
 
 
-def _v(pull=None, prune=None, scripts_ok=True, qbt_ok=True, pool=None, qbt_reason="down"):
-    return verdict(scripts_ok=scripts_ok, scripts_reason="mount missing",
-                   pull=pull or _health(), prune=prune or _health(),
-                   qbt_ok=qbt_ok, qbt_reason=qbt_reason, pool=pool or {"stale_paused": []}, now=NOW)
+def _v(pull=None, scripts_ok=True, qbt_ok=True, pool=None, qbt_reason="down"):
+    return verdict(scripts_ok=scripts_ok, scripts_reason="mount missing", pull=pull or _health(),
+                   qbt_ok=qbt_ok, qbt_reason=qbt_reason, pool=pool or {}, now=NOW)
 
 
 def test_green_when_all_is_well():
@@ -96,9 +92,7 @@ def test_green_when_all_is_well():
 
 @pytest.mark.parametrize("kw, words", [
     ({"pull": _health(failing=True)}, "seedbox-pull is failing"),
-    ({"prune": _health(failing=True)}, "seedbox-prune is failing"),
     ({"pull": _health(last_ok_ago=2 * H + 60)}, "no successful pull for"),
-    ({"prune": _health(last_ok_ago=3 * H + 60)}, "no successful prune for"),
     ({"pull": _health(last_ok_ago=None)}, "no successful pull on record"),
     ({"qbt_ok": False}, "qBittorrent unreachable"),
     ({"scripts_ok": False}, "can't read the pipeline's state files"),
@@ -109,24 +103,22 @@ def test_each_red_rule(kw, words):
 
 
 def test_gap_limits_are_exclusive():
-    assert _v(pull=_health(last_ok_ago=2 * H - 60), prune=_health(last_ok_ago=3 * H - 60))["status"] == "green"
+    assert _v(pull=_health(last_ok_ago=2 * H - 60))["status"] == "green"
 
 
-def test_yellow_for_a_recovered_failure_and_for_old_paused_torrents():
+def test_yellow_for_a_recovered_failure():
     v = _v(pull=_health(failed=2, recovered=True))
     assert v["status"] == "yellow" and "failed 2×" in v["reasons"][0] and "recovered" in v["reasons"][0]
-    v = _v(pool={"stale_paused": [{"age_days": 5.2}, {"age_days": 4.5}]})
-    assert v["status"] == "yellow" and "2 paused torrents" in v["reasons"][0] and "5.2" in v["reasons"][0]
 
 
 def test_red_beats_yellow_and_lists_both():
-    v = _v(pull=_health(failing=True), prune=_health(failed=1, recovered=True))
-    assert v["status"] == "red" and len(v["reasons"]) == 2 and "failing" in v["reasons"][0]
+    v = _v(pull=_health(failing=True, failed=1, recovered=True), qbt_ok=False)
+    assert v["status"] == "red" and "failing" in v["reasons"][0] and "unreachable" in v["reasons"][1]
 
 
 def test_unreadable_scripts_never_green():
-    v = verdict(scripts_ok=False, scripts_reason="no runs.log", pull=None, prune=None,
-                qbt_ok=True, qbt_reason=None, pool={"stale_paused": []}, now=NOW)
+    v = verdict(scripts_ok=False, scripts_reason="no runs.log", pull=None,
+                qbt_ok=True, qbt_reason=None, pool={}, now=NOW)
     assert v["status"] == "red"
 
 
@@ -214,7 +206,9 @@ def test_missing_mount_and_unconfigured_api_are_unavailable_not_zero(svc):
 def test_reads_the_folder_without_writing_and_caches_the_pool(svc, tmp_path, monkeypatch):
     d = tmp_path / "seedbox"
     d.mkdir()
-    (d / "runs.log").write_text(_log((NOW - 25 * 60, "pull", "ok", 2), (NOW - 40 * 60, "prune", "ok", "")))
+    # the retired prune script's leftovers: an old run, and its failing flag
+    (d / "runs.log").write_text(_log((NOW - 25 * 60, "pull", "ok", 2), (NOW - 9 * DAY, "prune", "fail", "")))
+    (d / "prune.failing").touch()
     (d / "1.done").write_text("a.mp4\nb.mp4\n")
     (d / "pull.log").write_text("x\n2026/10/04 ERROR : boom\n")
     inbox = tmp_path / "data" / "Rando" / "norating"
@@ -235,6 +229,7 @@ def test_reads_the_folder_without_writing_and_caches_the_pool(svc, tmp_path, mon
     svc._sb_qbt = FakeQbt()
     st = svc.seedbox_status(now=NOW)
     assert st["verdict"]["status"] == "green", st["verdict"]
+    assert "prune" not in st["scripts"] and st["scripts"]["malformed"] == 0
     assert st["scripts"]["pull"]["errors"] == []                      # only shown while failing
     assert st["scripts"]["ever_pulled"] == {"1": 2, "vr": None}
     assert st["inbox"]["files"] == 1
@@ -261,13 +256,11 @@ def test_api_route(svc, monkeypatch):
     assert api.post("/api/seedbox/refresh").status_code == 200
 
 
-def test_last_run_and_24h_counts_pull_and_prune():
+def test_last_run_and_24h_counts():
     runs, _ = parse_runs(_log((NOW - 3 * H, "pull", "ok", 4), (NOW - H, "pull", "ok", 2),
-                              (NOW - 2 * H, "prune", "ok", ""), (NOW - 30 * H, "prune", "ok", 9)))
+                              (NOW - 2 * H, "prune", "ok", ""), (NOW - 30 * H, "pull", "ok", 9)))
     pull = script_health(runs, "pull", NOW, failing=False)
     assert pull["last_run_count"] == 2 and pull["count_24h"] == 6
-    prune = script_health(runs, "prune", NOW, failing=False)
-    assert prune["last_run_count"] is None and prune["count_24h"] is None      # not logged → not zero
-    runs, _ = parse_runs(_log((NOW - H, "prune", "ok", 3), (NOW - 2 * H, "prune", "ok", "")))
-    prune = script_health(runs, "prune", NOW, failing=False)
-    assert prune["last_run_count"] == 3 and prune["count_24h"] == 3
+    runs, _ = parse_runs(_log((NOW - H, "pull", "ok", ""), (NOW - 2 * H, "pull", "ok", "")))
+    pull = script_health(runs, "pull", NOW, failing=False)
+    assert pull["last_run_count"] is None and pull["count_24h"] is None        # not logged → not zero

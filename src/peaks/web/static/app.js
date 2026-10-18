@@ -4850,10 +4850,10 @@ function sbWhen(epoch, now) {
 }
 const sbNA = (reason) => `<div class="sb-na">Unavailable — ${esc(reason || "unknown reason")}</div>`;
 const sbGB = (gb) => gb >= 1000 ? `${(gb / 1000).toFixed(2)} TB` : `${(+gb).toFixed(gb < 10 ? 2 : 1)} GB`;
-// what a run accomplished, from runs.log's 4th field (prune only has it if the script logs it)
+// what a run accomplished, from runs.log's 4th field
 function sbDid(name, n) {
   if (n == null) return `<span class="faint" title="seedbox-${name} doesn't write a count to runs.log's 4th field">count not logged</span>`;
-  return name === "pull" ? `pulled ${plural(n, "file")}` : `pruned ${plural(n, "torrent")}`;
+  return `pulled ${plural(n, "file")}`;
 }
 function sbScript(name, h, now) {
   const state = h.failing ? '<span class="sb-pill red">failing now</span>'
@@ -4869,7 +4869,7 @@ function renderSeedbox(d) {
   const now = d.now, v = d.verdict;
   $("#sb-verdict").className = `panel sb-verdict ${v.status}`;
   $("#sb-verdict").innerHTML = `<div class="sb-light"></div><div><div class="sb-status">${SB_WORD[v.status]} · ${esc(v.headline)}</div>
-    ${v.reasons.length ? `<ul>${v.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : '<div class="dim">Pulls and prunes are on schedule, qBittorrent answers, and nothing is stuck.</div>'}</div>`;
+    ${v.reasons.length ? `<ul>${v.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : '<div class="dim">Pulls are on schedule, qBittorrent answers, and nothing is stuck.</div>'}</div>`;
   const dot = $("#nav-sb-dot");
   if (dot) { dot.hidden = false; dot.className = `sb-dot ${v.status}`; dot.title = `${SB_WORD[v.status]}: ${v.headline}`; }
   const sc = d.scripts, pool = d.pool, inbox = d.inbox;
@@ -4878,7 +4878,7 @@ function renderSeedbox(d) {
       : `checked ${sbAgo(now - pool.fetched_at)} (retried every minute)`}` : "");
   // script health
   $("#sb-scripts .sb-body").innerHTML = sc.ok
-    ? sbScript("pull", sc.pull, now) + sbScript("prune", sc.prune, now)
+    ? sbScript("pull", sc.pull, now)
       + (sc.malformed ? `<div class="faint small">${plural(sc.malformed, "unreadable line")} in runs.log skipped</div>` : "")
     : sbNA(sc.reason);
   // throughput
@@ -4898,11 +4898,8 @@ function renderSeedbox(d) {
       `<span>${esc(c === "1" ? "1 (norating)" : c)}</span><span>${plural(b.count, "torrent")} · ${sbGB(b.gb)}</span>`).join("");
     $("#sb-pool .sb-body").innerHTML = `<div class="cards sb-cards">
         <div class="card"><div class="k">Total</div><div class="v">${sbGB(pool.total.gb)}<span class="faint small"> · ${plural(pool.total.count, "torrent")}</span></div></div>
-        <div class="card"><div class="k">Seeding / paused</div><div class="v">${pool.seeding} / ${pool.paused}${pool.other ? `<span class="faint small"> · ${pool.other} other</span>` : ""}</div></div>
-        <div class="card"><div class="k">Waiting to be pruned</div><div class="v">${pool.waiting_prune.count} · ${sbGB(pool.waiting_prune.gb)}</div></div></div>
-      <div class="sb-kv">${cats}</div>
-      ${pool.stale_paused.length ? `<div class="warn small" style="margin-top:8px">Paused longer than 4 days (prune should have taken them):</div>
-        <div class="sb-kv small">${pool.stale_paused.slice(0, 6).map((s) => `<span title="${esc(s.name)}">${esc(s.name)}</span><span>${esc(s.category)} · ${s.age_days} d · ${sbGB(s.gb)}</span>`).join("")}</div>` : ""}`;
+        <div class="card"><div class="k">Seeding / paused</div><div class="v">${pool.seeding} / ${pool.paused}${pool.other ? `<span class="faint small"> · ${pool.other} other</span>` : ""}</div></div></div>
+      <div class="sb-kv">${cats}</div>`;
   } else $("#sb-pool .sb-body").innerHTML = sbNA(pool.reason);
   // inbox
   $("#sb-inbox .sb-body").innerHTML = inbox.ok

@@ -3,7 +3,7 @@
 Three sources, each reported on its own ({ok, reason, data}) so one being
 unavailable never blanks the others or shows zeros as if they were real:
 - the scripts' state folder (cfg.seedbox.dir, mounted read-only — opened for
-  reading only): runs.log, pull.failing / prune.failing, 1.done / vr.done,
+  reading only): runs.log (pull runs), pull.failing, 1.done / vr.done,
   the tail of pull.log;
 - the seedbox's qBittorrent (login + GET only), cached for POOL_TTL;
 - the norating inbox under /data.
@@ -45,10 +45,9 @@ class SeedboxMixin:
         except OSError as exc:
             return {"ok": False, "reason": f"can't read {runs_file}: {exc.strerror or exc}"}
         runs, bad = parse_runs(text)
-        failing = {k: (d / f"{k}.failing").exists() for k in ("pull", "prune")}
-        pull = script_health(runs, "pull", now, failing["pull"])
-        prune = script_health(runs, "prune", now, failing["prune"])
-        pull["errors"] = self._sb_error_lines(d / "pull.log") if failing["pull"] else []
+        failing = (d / "pull.failing").exists()
+        pull = script_health(runs, "pull", now, failing)
+        pull["errors"] = self._sb_error_lines(d / "pull.log") if failing else []
         done = {}
         for cat in ("1", "vr"):
             try:
@@ -56,7 +55,7 @@ class SeedboxMixin:
                     done[cat] = sum(1 for line in fh if line.strip())
             except OSError:
                 done[cat] = None
-        return {"ok": True, "reason": None, "pull": pull, "prune": prune, "malformed": bad,
+        return {"ok": True, "reason": None, "pull": pull, "malformed": bad,
                 "runs": len(runs), "first_run": runs[0].at if runs else None,
                 "throughput": throughput(runs, now), "ever_pulled": done}
 
@@ -139,7 +138,7 @@ class SeedboxMixin:
         pool = self._sb_pool(now, force=refresh)
         inbox = self._sb_inbox()
         v = verdict(scripts_ok=scripts["ok"], scripts_reason=scripts.get("reason"),
-                    pull=scripts.get("pull"), prune=scripts.get("prune"),
+                    pull=scripts.get("pull"),
                     qbt_ok=pool["ok"], qbt_reason=pool.get("reason"),
                     pool=pool if pool["ok"] else None, now=now)
         return {"verdict": v, "scripts": scripts, "pool": pool, "inbox": inbox, "now": now,
