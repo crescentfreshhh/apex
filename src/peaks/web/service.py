@@ -26,6 +26,8 @@ from .dupequeue import DupeQueueMixin
 from .verdicts import VerdictMixin
 from .seedbox import SeedboxMixin
 from .perfreview import PerfReviewMixin
+from .find import FindMixin
+from .studios import StudiosMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -38,7 +40,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upsc
 
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
-              VerdictMixin, SeedboxMixin, PerfReviewMixin):
+              VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -4743,6 +4745,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "scene_id": sid,
             "title": m.get("title") or os.path.splitext(os.path.basename(path))[0],
             "date": m.get("date") or "",
+            "details": (m.get("details") or "")[:600],
             "duration": m.get("duration"),
             "performers": m.get("performers") or [],
             # parallel to `performers` (Stash ids: the performer/studio track records key on them)
@@ -4977,7 +4980,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                   tag: str | None = None, date_from: str | None = None,
                   date_to: str | None = None, dur_min: float | None = None,
                   dur_max: float | None = None, ids_only: bool = False,
-                  dir: str | None = None, performer_id: str | None = None) -> dict:
+                  dir: str | None = None, performer_id: str | None = None,
+                  performer_ids: list[str] | None = None, perf_mode: str = "all",
+                  studios: list[str] | None = None, tags: list[str] | None = None,
+                  tags_not: list[str] | None = None, vr: str | None = None,
+                  added_from: str | None = None, added_to: str | None = None,
+                  saves: str | None = None, min_o: int | None = None,
+                  size_min: float | None = None, size_max: float | None = None,
+                  organized: str | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -4986,25 +4996,52 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         rows = self._catalogue_all(refresh=refresh)
         tiers = {t for t in (tier or "").split(",") if t}
         resset = {r for r in (res or "").split(",") if r}
-        needle = (q or "").strip().lower()
+        terms = self._search_terms(q)
+        aliases = self._perf_aliases() if terms else {}
         ingest = self.last_ingest()
         fresh = set(ingest.get("new") or []) if new else None
         dupe_ids = set(ingest.get("dupe_ids") or [])
 
         perf = (performer or "").strip().lower()
-        stud = (studio or "").strip().lower()
-        tagn = (tag or "").strip().lower()
+        pids = {str(p) for p in (performer_ids or []) if str(p).strip()}
+        if performer_id:
+            pids.add(str(performer_id))
+        studset = {x.strip().lower() for x in [studio, *(studios or [])] if x and x.strip()}
+        tagall = {x.strip().lower() for x in [tag, *(tags or [])] if x and x.strip()}
+        tagnot = {x.strip().lower() for x in (tags_not or []) if x and x.strip()}
+        saved = self._saved_scene_ids() if saves in ("yes", "no") else None
+        gb = 1e9
 
         def keep(r) -> bool:
             if fresh is not None and r["scene_id"] not in fresh:
                 return False
-            if performer_id and str(performer_id) not in (r.get("performer_ids") or []):
-                return False
+            if pids:
+                mine = set(r.get("performer_ids") or [])
+                if not (pids <= mine if perf_mode != "any" else pids & mine):
+                    return False
             if perf and perf not in (p.lower() for p in r["performers"]):
                 return False
-            if stud and stud != (r["studio"] or "").lower():
+            if studset and (r["studio"] or "").lower() not in studset:
                 return False
-            if tagn and tagn not in (t.lower() for t in r["tags"]):
+            if tagall or tagnot:
+                have = {t.lower() for t in r["tags"]}
+                if not tagall <= have or tagnot & have:
+                    return False
+            if vr in ("vr", "flat") and self._is_vr(r) != (vr == "vr"):
+                return False
+            if added_from and (r.get("created_at") or "")[:10] < added_from:
+                return False
+            if added_to and (not r.get("created_at") or r["created_at"][:10] > added_to):
+                return False
+            if saved is not None and (r["scene_id"] in saved) != (saves == "yes"):
+                return False
+            if min_o and (r.get("o_counter") or 0) < int(min_o):
+                return False
+            if size_min and (r.get("size") or 0) < float(size_min) * gb:
+                return False
+            if size_max and (r.get("size") or 0) > float(size_max) * gb:
+                return False
+            if organized in ("yes", "no") and bool(r.get("organized")) != (organized == "yes"):
                 return False
             if date_from and (r["date"] or "") < date_from:
                 return False
@@ -5018,9 +5055,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 return False
             if min_mbps and (r["quality"]["mbps"] or 0) < float(min_mbps):
                 return False
-            if needle:
-                hay = " ".join([r["title"], r["studio"], r["path"], *r["performers"]]).lower()
-                if needle not in hay:
+            if terms:
+                hay = self._row_hay(r, aliases)
+                if any((t in hay) == neg for neg, t in terms):
                     return False
             return True
 

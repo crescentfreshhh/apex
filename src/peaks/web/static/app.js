@@ -49,7 +49,7 @@ function pparam(extra = {}) {
 function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
-const VIEWS = ["foryou", "board", "explore", "performers", "catalogue", "review", "dupes",
+const VIEWS = ["foryou", "board", "explore", "performers", "studios", "catalogue", "review", "dupes",
   "statistics", "taste", "activity", "seedbox", "dashboard", "perfreview"];
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
@@ -59,7 +59,7 @@ function showView(name) {
   const smart = $("#side-smart"); if (smart) smart.hidden = !["catalogue", "review"].includes(name);
   document.body.classList.remove("nav-open");
   $("#content")?.scrollTo(0, 0);
-  if (location.hash !== "#/" + name) history.replaceState(null, "", "#/" + name);
+  if (location.hash.split("?")[0] !== "#/" + name) history.replaceState(null, "", "#/" + name);
 }
 // open a page and load what it shows
 function go(name) {
@@ -67,7 +67,13 @@ function go(name) {
   if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); loadCopies(); loadWatch(); }
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
-  if (name === "catalogue" && !cat.loaded) openCatalogue();
+  if (name === "studios") openStudios();
+  if (name === "catalogue") {
+    const qs = location.hash.split("?")[1];
+    if (qs) applyCatParams(qsToParams(qs));       // a bookmarked / shared list
+    else if (!cat.loaded) openCatalogue();
+    else catSyncUrl();
+  }
   if (name === "review") openReview();
   if (name === "dupes") openDupes();
   if (name === "statistics") openStatistics();
@@ -1636,7 +1642,7 @@ function renderPerfDetail(d, prof = {}) {
       and ${esc(r.top_words)} were ${esc(className("exceptionnelle"))} or better${fig(Math.round(r.top * 100) + "%")}.</div>`
     : `<div class="pf-record dim">No graded scenes yet — her record starts with your first grade.</div>`;
   const studios = (prof.studios || []).map((x) => `<button class="cat-chip pf-studio" data-studio="${esc(x.name)}">${esc(x.name)} <span class="n">${x.n}</span></button>`).join("");
-  const scenes = (prof.scenes || []).map((x) => `<div class="pf-scene" data-sid="${esc(x.scene_id)}">${tierChip(x.tier)}<span class="t" title="${esc(x.title)}">${esc(x.title)}</span><span class="faint small">${esc((x.date || "").slice(0, 4))}</span></div>`).join("");
+  const scenes = (prof.scenes || []).length ? `<div class="scene-cards" data-cards></div>` : "";
   box.innerHTML = `
     <div class="row"><button id="pd-back" class="ghost">← Performers</button></div>
     <div class="pf-detail-head">
@@ -1667,9 +1673,10 @@ function renderPerfDetail(d, prof = {}) {
       </div>
     </div>
     ${studios ? `<h3 style="margin:18px 0 0">Studios</h3><div class="pf-studios">${studios}</div>` : ""}
+    <div id="pd-costars"></div>
     ${sim ? `<h3 style="margin:18px 0 6px">If you like her, try…</h3><div class="pd-similar">${sim}</div>` : ""}
     ${items.length ? `<h3 style="margin:18px 0 6px">Her best moments</h3><div id="pd-strip" class="grid"></div>` : ""}
-    ${scenes ? `<h3 style="margin:18px 0 0">Her scenes <span class="dim small">${(prof.scenes || []).length} · best first</span></h3><div class="pf-scenes">${scenes}</div>` : ""}`;
+    ${scenes ? `<h3 style="margin:18px 0 6px">Her scenes <span class="dim small">${(prof.scenes || []).length} · best first</span></h3>${scenes}` : ""}`;
   if (items.length) renderHits(items, $("#pd-strip"), 60);   // sets lastHits to her best (for save/play)
   wirePerfHover(box);
   const focus = () => $("#pd-focus").value;
@@ -1681,11 +1688,122 @@ function renderPerfDetail(d, prof = {}) {
   $("#pd-best").onclick = () => saveCollectionPrompt(items, `${name} — best of`);
   $("#pd-compare").onclick = () => addToCompare(d.id, name);
   $("#pd-pick").onclick = () => openPhotoPicker(d.id, name);
-  $("#pd-catalogue").onclick = () => { go("catalogue"); applyCatParams({ performer: name }); };
+  $("#pd-catalogue").onclick = () => openCatWith({ performer_ids: [String(d.id)], pnames: [name] });
   box.querySelectorAll(".pd-sim").forEach((b) => b.onclick = () => openPerformerDetail(b.dataset.id));
-  box.querySelectorAll(".pf-studio").forEach((b) => b.onclick = () => { go("catalogue"); applyCatParams({ studio: b.dataset.studio, performer: name }); });
-  box.querySelectorAll(".pf-scene").forEach((b) => b.onclick = () => { go("catalogue"); applyCatParams({ performer: name, q: b.querySelector(".t").textContent }); });
+  box.querySelectorAll(".pf-studio").forEach((b) => b.onclick = () => openCatWith({ performer_ids: [String(d.id)], pnames: [name], studios: [b.dataset.studio] }));
+  wireSceneCards(box, prof.scenes || []);
+  loadCostars(d.id, name);
 }
+// scene covers (performer and studio pages): a page at a time, click to play
+function wireSceneCards(box, scenes, per = 48) {
+  const host = box.querySelector("[data-cards]"); if (!host) return;
+  let shown = 0;
+  const card = (x) => `<button class="scene-card" data-sid="${esc(x.scene_id)}" title="${esc(x.title)}">
+      <span class="sc-img"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.scene_id)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
+      <span class="sc-meta">${tierChip(x.tier)}<span class="sc-t">${esc(x.title)}</span></span>
+      <span class="faint small">${esc([(x.date || "").slice(0, 4), x.studio || (x.performers || []).join(", ")].filter(Boolean).join(" · "))}</span></button>`;
+  const more = () => {
+    host.querySelector(".sc-more")?.remove();
+    host.insertAdjacentHTML("beforeend", scenes.slice(shown, shown + per).map(card).join(""));
+    shown = Math.min(scenes.length, shown + per);
+    if (shown < scenes.length) host.insertAdjacentHTML("beforeend", `<button class="btn ghost sc-more">Show more (${scenes.length - shown})</button>`);
+  };
+  host.onclick = (e) => {
+    if (e.target.closest(".sc-more")) { more(); return; }
+    const c = e.target.closest(".scene-card"); if (!c) return;
+    const x = scenes.find((y) => String(y.scene_id) === c.dataset.sid);
+    if (x && x.stream) openViewer(sceneHit(x));
+  };
+  more();
+}
+// who she shares scenes with: click for the scenes with both of them
+async function loadCostars(id, name) {
+  const box = $("#pd-costars"); if (!box) return;
+  let d; try { d = await api(`/api/performer/${encodeURIComponent(id)}/costars`); } catch { return; }
+  const c = d.costars || [];
+  if (!c.length) return;
+  box.innerHTML = `<h3 style="margin:18px 0 6px">Often with</h3><div class="costars">${c.map((p) =>
+    `<button class="costar" data-id="${esc(p.id)}" data-name="${esc(p.name)}" title="Scenes with ${esc(name)} and ${esc(p.name)} in the Catalogue">
+      ${perfMiniPic(p)}<span>${esc(p.name)}</span><span class="faint small">${p.n}</span>
+      <span class="costar-go" data-her title="${esc(p.name)}'s page">→</span></button>`).join("")}</div>`;
+  box.querySelectorAll(".costar").forEach((b) => b.onclick = (e) => {
+    if (e.target.closest("[data-her]")) { openPerformerDetail(b.dataset.id); return; }
+    openCatWith({ performer_ids: [String(id), b.dataset.id], pnames: [name, b.dataset.name] });
+  });
+}
+// --- Studios: every studio in the library, and a page per studio --------------------------
+const st = { t: null, loaded: false };
+function tierBarsHTML(tiers) {
+  const total = Object.values(tiers || {}).reduce((a, b) => a + b, 0) || 1;
+  return PF_TIERS.filter((t) => tiers[t]).map((t) =>
+    `<i class="tier-bg-${t}" style="width:${(100 * tiers[t] / total).toFixed(1)}%" title="${esc(TIER_NAMES[t] || t)}: ${tiers[t]}"></i>`).join("");
+}
+function recordHTML(r, what) {
+  return r ? `<div class="pf-record"><b class="wr-${r.tone}">${esc(cap(r.verdict))}</b> — of ${r.n} graded, you kept ${esc(r.keep_words)}${fig(Math.round(r.keep * 100) + "%")},
+      and ${esc(r.top_words)} were ${esc(className("exceptionnelle"))} or better${fig(Math.round(r.top * 100) + "%")}.</div>`
+    : `<div class="pf-record dim">No graded scenes yet — ${what} record starts with your first grade.</div>`;
+}
+async function openStudios() {
+  $("#st-detail").hidden = true; $("#st-grid").hidden = false; $("#st-bar").hidden = false;
+  const q = $("#st-search").value.trim();
+  $("#st-status").textContent = "loading…";
+  let d;
+  try { d = await api("/api/studios?" + new URLSearchParams({ q, sort: $("#st-sort").value })); }
+  catch (e) { $("#st-grid").innerHTML = `<p class="dim">${esc(e.message)}</p>`; $("#st-status").textContent = ""; return; }
+  $("#st-status").textContent = "";
+  $("#st-sub").textContent = q ? `${d.total} matching` : `${d.total} in your library`;
+  $("#st-grid").innerHTML = d.studios.map((x) => `<button class="st-card" data-name="${esc(x.name)}">
+      <span class="sc-img"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.cover)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
+      <span class="st-name">${esc(x.name)}</span>
+      <span class="pf-tierbars">${tierBarsHTML(x.tiers)}</span>
+      <span class="faint small">${plural(x.scenes, "scene")}${x.top ? ` · ${x.top} top-tier` : ""}${x.record ? ` · <span class="wr-${x.record.tone}">${esc(x.record.verdict)}</span>` : ""}</span>
+    </button>`).join("") || '<p class="dim">No studios match.</p>';
+  st.loaded = true;
+}
+$("#st-search")?.addEventListener("input", () => { clearTimeout(st.t); st.t = setTimeout(openStudios, 200); });
+$("#st-sort")?.addEventListener("change", openStudios);
+$("#st-grid")?.addEventListener("click", (e) => {
+  const c = e.target.closest(".st-card"); if (c) openStudioDetail(c.dataset.name);
+});
+async function openStudioDetail(name) {
+  showView("studios");
+  const box = $("#st-detail");
+  $("#st-grid").hidden = true; $("#st-bar").hidden = true; box.hidden = false;
+  box.innerHTML = '<p class="dim">Loading…</p>';
+  let d;
+  try { d = await api("/api/studio?name=" + encodeURIComponent(name)); }
+  catch (e) { box.innerHTML = `<div class="row"><button id="sd-back" class="ghost">← Studios</button></div><p class="dim">${esc(e.message)}</p>`; $("#sd-back").onclick = openStudios; return; }
+  const tally = PF_TIERS.filter((t) => d.tiers[t]).map((t) => `${tierChip(t)} ${d.tiers[t]}`).join(" · ");
+  const span = d.first ? (d.first.slice(0, 4) === (d.latest || "").slice(0, 4) ? d.first.slice(0, 4) : `${d.first.slice(0, 4)}–${(d.latest || "").slice(0, 4)}`) : "";
+  box.innerHTML = `<div class="row"><button id="sd-back" class="ghost">← Studios</button></div>
+    <div class="pd-info" style="margin-top:8px">
+      <h2>${esc(d.name)}</h2>
+      <div class="dim">${plural(d.scenes, "scene")}${d.rejected ? ` · ${d.rejected} rejected` : ""}${span ? ` · released ${esc(span)}` : ""} · ${d.gb} GB</div>
+      ${recordHTML(d.record, "its")}
+      <div class="pf-tierbars">${tierBarsHTML(d.tiers)}</div><div class="small">${tally}</div>
+      <div class="perf-actions" style="margin-top:10px">
+        <button id="sd-cat" class="btn pri">☰ Open in Catalogue</button>
+        <button id="sd-review" class="ghost" title="Grade its scenes one at a time, best first">▶ Review its scenes</button>
+      </div>
+    </div>
+    ${d.performers.length ? `<h3 style="margin:18px 0 6px">Its performers</h3><div class="costars">${d.performers.map((p) =>
+      `<button class="costar" data-id="${esc(p.id)}" data-name="${esc(p.name)}" title="${esc(p.name)} at ${esc(d.name)} — in the Catalogue">
+        ${perfMiniPic(p)}<span>${esc(p.name)}</span><span class="faint small">${p.n}${p.top ? ` · ${p.top}★` : ""}</span>
+        <span class="costar-go" data-her title="${esc(p.name)}'s page">→</span></button>`).join("")}</div>` : ""}
+    <h3 style="margin:18px 0 6px">Best scenes</h3><div class="scene-cards" data-cards></div>`;
+  $("#sd-back").onclick = openStudios;
+  $("#sd-cat").onclick = () => openCatWith({ studios: [d.name] });
+  $("#sd-review").onclick = async () => {
+    await openCatWith({ studios: [d.name], sort: "tier" });
+    if (cat.items.length) $("#btn-cat-review")?.click();
+  };
+  box.querySelectorAll(".costar").forEach((b) => b.onclick = (e) => {
+    if (e.target.closest("[data-her]")) { openPerformerDetail(b.dataset.id); return; }
+    openCatWith({ studios: [d.name], performer_ids: [b.dataset.id], pnames: [b.dataset.name] });
+  });
+  wireSceneCards(box, d.best);
+}
+
 // 🖼 Choose picture: her Stash photo, covers of her scenes, her best frames
 async function openPhotoPicker(id, name) {
   const pk = $("#perf-picker");
@@ -2541,8 +2659,7 @@ const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 function tierChip(t) { return `<span class="tchip tc-${t}">${esc(TIER_NAMES[t] || t)}</span>`; }
 document.addEventListener("click", (e) => {
   const c = e.target.closest("[data-who-performer],[data-who-studio]"); if (!c) return;
-  go("catalogue");
-  applyCatParams({ performer: c.dataset.whoPerformer || "", studio: c.dataset.whoStudio || "" });
+  openCatWith({ performer: c.dataset.whoPerformer || "", studio: c.dataset.whoStudio || "" });
 });
 document.addEventListener("click", (e) => {
   const c = e.target.closest("[data-open-view]"); if (!c) return;
@@ -2645,7 +2762,7 @@ function tdShow() {
   $("#td-accept")?.addEventListener("click", () => tdAnswer(x.pick));
   $("#td-keep")?.addEventListener("click", () => tdAnswer(null, true));
   $("#td-skip").onclick = tdSkip; $("#td-undo").onclick = tdUndo;
-  $("#td-open").onclick = () => { go("catalogue"); applyCatParams({ q: x.title || "" }); };
+  $("#td-open").onclick = () => openCatWith({ q: x.title || "" });
   tdPlay(x);
 }
 // a still of the scene first (its best moment); click it — or a moment, or P —
@@ -3167,8 +3284,76 @@ const CAT_VIEWS = [
 const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict", "saved", "trim", "passed"]);
 const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
-const CAT_FILTERS = [["performer", "#cat-perf"], ["studio", "#cat-studio"], ["tag", "#cat-tag"],
-  ["date_from", "#cat-from"], ["date_to", "#cat-to"], ["dur_min", "#cat-dmin"], ["dur_max", "#cat-dmax"]];
+// --- Catalogue filters: chips under the search box ---------------------------------
+// One object holds every filter; the API query, the URL (#/catalogue?…), saved
+// views and the chip bar all read and write it through cfParams / cfFromParams.
+const CF_EMPTY = () => ({ performers: [], perfMode: "all", studios: [], tags: [], tagsNot: [], vr: "",
+  saves: "", organized: "", released: ["", ""], added: ["", ""], length: ["", ""], size: ["", ""],
+  minO: "", performer: "" });
+cat.f = CF_EMPTY();
+const CF_TYPES = [
+  ["performers", "Performer", "Scenes with a performer — add several for scenes with all of them (or any)"],
+  ["studios", "Studio", "From a studio — add several for any of them"],
+  ["tags", "Tag", "Scenes with a tag — add several for all of them"],
+  ["tagsNot", "Without tag", "Leave out scenes with a tag"],
+  ["vr", "VR / flat", "VR scenes (a VR tag, a side-by-side frame or a /vr/ folder), or only flat ones"],
+  ["saves", "Saved moments", "Scenes you've saved a moment in — or none yet"],
+  ["released", "Released", "Release date between…"],
+  ["added", "Added", "Added to Stash between…"],
+  ["length", "Length", "Running time in minutes"],
+  ["size", "File size", "File size in GB"],
+  ["minO", "O-count", "At least this many Os"],
+  ["organized", "Organised", "Marked organised in Stash — or not"],
+];
+const CF_LISTS = new Set(["performer_ids", "pnames", "studios", "tags", "tags_not"]);
+const cfArr = (x) => (x == null || x === "" ? [] : Array.isArray(x) ? x : [x]);
+function cfParams(f = cat.f) {
+  const p = {};
+  if (f.performers.length) {
+    p.performer_ids = f.performers.map((x) => x.id); p.pnames = f.performers.map((x) => x.name);
+    if (f.performers.length > 1 && f.perfMode === "any") p.perf_mode = "any";
+  }
+  if (f.performer) p.performer = f.performer;
+  if (f.studios.length) p.studios = [...f.studios];
+  if (f.tags.length) p.tags = [...f.tags];
+  if (f.tagsNot.length) p.tags_not = [...f.tagsNot];
+  for (const k of ["vr", "saves", "organized"]) if (f[k]) p[k] = f[k];
+  const pair = (v, a, b) => { if (v[0] !== "") p[a] = v[0]; if (v[1] !== "") p[b] = v[1]; };
+  pair(f.released, "date_from", "date_to"); pair(f.added, "added_from", "added_to");
+  pair(f.length, "dur_min", "dur_max"); pair(f.size, "size_min", "size_max");
+  if (f.minO !== "") p.min_o = f.minO;
+  return p;
+}
+function cfFromParams(p) {
+  const f = CF_EMPTY(), ids = cfArr(p.performer_ids), names = cfArr(p.pnames);
+  f.performers = ids.map((id, i) => ({ id: String(id), name: names[i] || `Performer ${id}` }));
+  f.perfMode = p.perf_mode === "any" ? "any" : "all";
+  f.performer = p.performer || "";
+  f.studios = [...new Set([...cfArr(p.studios), ...cfArr(p.studio)])];
+  f.tags = [...new Set([...cfArr(p.tags), ...cfArr(p.tag)])];
+  f.tagsNot = cfArr(p.tags_not);
+  for (const k of ["vr", "saves", "organized"]) f[k] = p[k] || "";
+  const g = (k) => (p[k] == null ? "" : String(p[k]));
+  f.released = [g("date_from"), g("date_to")]; f.added = [g("added_from"), g("added_to")];
+  f.length = [g("dur_min"), g("dur_max")]; f.size = [g("size_min"), g("size_max")]; f.minO = g("min_o");
+  return f;
+}
+function cfCount(f = cat.f) { return Object.keys(cfParams(f)).filter((k) => !["pnames", "perf_mode"].includes(k)).length; }
+// params object ⇄ query string (lists as repeated keys)
+function paramsToQS(p) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(p)) {
+    if (v == null || v === "" || v === false) continue;
+    if (Array.isArray(v)) v.forEach((x) => qs.append(k, x)); else qs.set(k, v);
+  }
+  return qs;
+}
+function qsToParams(str) {
+  const qs = new URLSearchParams(str), p = {};
+  for (const k of new Set(qs.keys())) p[k] = CF_LISTS.has(k) ? qs.getAll(k) : qs.get(k);
+  if (p.new) p.new = p.new === "true";
+  return p;
+}
 // Sort: every key both ways. [natural direction, label descending, label ascending]
 const SORT_DIRS = {
   date: ["desc", "Newest first", "Oldest first"], added: ["desc", "Most recently added", "Added longest ago"],
@@ -3196,7 +3381,7 @@ function catParams(offset, refresh) {
   catSyncSort();
   const qs = new URLSearchParams({ offset, limit: CAT_PAGE, sort: $("#cat-sort").value });
   if (cat.sortDir && SORT_DIRS[$("#cat-sort").value]) qs.set("dir", cat.sortDir);
-  for (const [k, sel] of CAT_FILTERS) { const v = ($(sel)?.value || "").trim(); if (v) qs.set(k, v); }
+  for (const [k, v] of paramsToQS(cfParams())) qs.append(k, v);
   if (cat.performerId) qs.set("performer_id", cat.performerId);
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
@@ -3208,7 +3393,7 @@ function catParams(offset, refresh) {
   return qs.toString();
 }
 async function openCatalogue({ append = false, refresh = false } = {}) {
-  if (cat.busy) return;
+  if (cat.busy) { if (!append) cat.again = true; return; }    // filters changed mid-load: load once more after
   cat.busy = true;
   const offset = append ? cat.items.length : 0;
   $("#cat-status").textContent = refresh ? "re-reading grades from Stash…" : "loading…";
@@ -3229,14 +3414,19 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     cat.loaded = true;
     if (!append) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
     renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk(); renderCatStorage(d.storage);
-    const nf = CAT_FILTERS.filter(([, sel]) => ($(sel)?.value || "").trim()).length;
-    $("#btn-cat-filters").textContent = `Filters${nf ? ` (${nf})` : ""} ${$("#cat-filters").hidden ? "▾" : "▴"}`;
+    renderCatFChips();
+    if (!append && !refresh) catSyncUrl();
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
   } catch (e) {
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
     $("#cat-status").textContent = "";
-  } finally { cat.busy = false; }
+  } finally {
+    cat.busy = false;
+    if (cat.again) { cat.again = false; openCatalogue(); }
+  }
 }
+// open the Catalogue on a given list (from a performer, a studio, a statistic…)
+function openCatWith(p) { showView("catalogue"); return applyCatParams(p); }
 // sidebar counts — library-wide, refreshed after every library change (grades,
 // undos, bulk, deletes, duplicates, tag syncs, restores, training, ingest), when a
 // background job finishes, and every 30 s (changes from another tab or device).
@@ -3348,8 +3538,7 @@ function catCurrentParams() {
   if (cat.sortDir) p.dir = cat.sortDir;
   if (cat.view) p.view = cat.view; else if (cat.tier) p.tier = cat.tier;
   if (cat.isNew) p.new = true;
-  for (const [k, sel] of CAT_FILTERS) p[k] = ($(sel)?.value || "").trim();
-  return p;
+  return { ...p, ...cfParams() };
 }
 function applyCatParams(p) {
   setDupeMode(false);
@@ -3357,9 +3546,8 @@ function applyCatParams(p) {
   cat.sortTouched = !!p.sort; cat.sortDir = p.dir || ""; cat.performerId = p.performer_id || "";
   $("#cat-sort").value = p.sort || (p.view ? "suggested" : "date"); $("#cat-q").value = p.q || "";
   $("#cat-res").value = p.res || ""; $("#cat-mbps").value = p.min_mbps || "";
-  for (const [k, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = p[k] || "";
-  if (CAT_FILTERS.some(([k]) => p[k])) $("#cat-filters").hidden = false;
-  openCatalogue();
+  cat.f = cfFromParams(p);
+  return openCatalogue();
 }
 let catSaved = [];
 async function loadSavedViews() {
@@ -3391,26 +3579,200 @@ $("#cat-saved")?.addEventListener("click", async (e) => {
   }
   applyCatParams(v.params);
 });
-let catFacetsLoaded = false;
-async function loadCatFacets() {
-  if (catFacetsLoaded) return;
-  try {
-    const f = await api("/api/catalogue/facets");
-    const fill = (id, list) => { const dl = $(id); if (dl) dl.innerHTML = list.map(([n, c]) => `<option value="${esc(n)}">${c}</option>`).join(""); };
-    fill("#dl-perf", f.performers); fill("#dl-studio", f.studios); fill("#dl-tag", f.tags);
-    catFacetsLoaded = true;
-  } catch { /* typeahead is optional */ }
+$("#btn-cat-clear")?.addEventListener("click", () => { cat.f = CF_EMPTY(); openCatalogue(); });
+// the chips: one per filter value, × removes it, a click edits that filter
+function cfChipText(k, i) {
+  const f = cat.f, rng = (v, unit, fmt = (x) => x) => v[0] !== "" && v[1] !== "" ? `${fmt(v[0])}–${fmt(v[1])}${unit}`
+    : v[0] !== "" ? `≥ ${fmt(v[0])}${unit}` : `≤ ${fmt(v[1])}${unit}`;
+  const day = (d) => d.slice(0, 10);
+  switch (k) {
+    case "performers": return `♀ ${f.performers[i].name}`;
+    case "performer": return `♀ ${f.performer}`;
+    case "studios": return `▣ ${f.studios[i]}`;
+    case "tags": return `# ${f.tags[i]}`;
+    case "tagsNot": return `without # ${f.tagsNot[i]}`;
+    case "vr": return f.vr === "vr" ? "VR" : "Flat (not VR)";
+    case "saves": return f.saves === "yes" ? "★ Has saved moments" : "No saved moments";
+    case "organized": return f.organized === "yes" ? "Organised" : "Not organised";
+    case "released": return `Released ${rng(f.released, "", day)}`;
+    case "added": return `Added ${rng(f.added, "", day)}`;
+    case "length": return `${rng(f.length, " min")}`;
+    case "size": return `${rng(f.size, " GB")}`;
+    case "minO": return `O ≥ ${f.minO}`;
+  }
+  return k;
 }
-$("#btn-cat-filters")?.addEventListener("click", () => {
-  const box = $("#cat-filters"); box.hidden = !box.hidden;
-  if (!box.hidden) loadCatFacets();
-  $("#btn-cat-filters").textContent = $("#btn-cat-filters").textContent.replace(/[▾▴]$/, box.hidden ? "▾" : "▴");
-});
-$("#btn-cat-clear")?.addEventListener("click", () => {
-  for (const [, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = "";
+function renderCatFChips() {
+  const f = cat.f, out = [];
+  const chip = (k, i = "") => `<span class="fchip" data-k="${k}" data-i="${i}" title="Click to change">${esc(cfChipText(k, i))}<b class="fx" title="Remove">×</b></span>`;
+  f.performers.forEach((_, i) => out.push(chip("performers", i)));
+  if (f.performers.length > 1)
+    out.push(`<button class="fchip mode" data-mode title="Scenes with all of them, or with any of them">${f.perfMode === "any" ? "any of them" : "all of them together"} ⇄</button>`);
+  if (f.performer) out.push(chip("performer"));
+  f.studios.forEach((_, i) => out.push(chip("studios", i)));
+  f.tags.forEach((_, i) => out.push(chip("tags", i)));
+  f.tagsNot.forEach((_, i) => out.push(chip("tagsNot", i)));
+  for (const k of ["vr", "saves", "organized", "minO"]) if (f[k] !== "") out.push(chip(k));
+  for (const k of ["released", "added", "length", "size"]) if (f[k][0] !== "" || f[k][1] !== "") out.push(chip(k));
+  $("#cat-fchips").innerHTML = out.join("");
+  $("#btn-cat-clear").hidden = !out.length;
+}
+function cfRemove(k, i) {
+  const f = cat.f;
+  if (Array.isArray(f[k]) && ["performers", "studios", "tags", "tagsNot"].includes(k)) f[k].splice(+i, 1);
+  else if (Array.isArray(f[k])) f[k] = ["", ""];
+  else f[k] = "";
   openCatalogue();
+}
+// the URL follows the list: Back / Forward step through your filters, a view can be bookmarked
+function catSyncUrl() {
+  if (!$("#catalogue")?.classList.contains("active")) return;
+  const p = catCurrentParams();
+  if (p.sort === (cat.view ? "suggested" : "date") && !cat.sortTouched) delete p.sort;
+  const qs = paramsToQS(p).toString(), hash = "#/catalogue" + (qs ? "?" + qs : "");
+  if (location.hash === hash) return;
+  const noQ = (h) => h.replace(/([?&])q=[^&]*&?/, "$1");
+  if (noQ(location.hash) === noQ(hash)) history.replaceState(null, "", hash);   // typing: one entry
+  else history.pushState(null, "", hash);
+}
+window.addEventListener("popstate", () => {
+  const [base, qs] = location.hash.split("?");
+  if (base === "#/catalogue" && $("#catalogue")?.classList.contains("active")) applyCatParams(qsToParams(qs || ""));
 });
-for (const [, sel] of CAT_FILTERS) $(sel)?.addEventListener("change", () => openCatalogue());
+$("#cat-fchips")?.addEventListener("click", (e) => {
+  if (e.target.closest("[data-mode]")) { cat.f.perfMode = cat.f.perfMode === "any" ? "all" : "any"; openCatalogue(); return; }
+  const c = e.target.closest(".fchip"); if (!c) return;
+  if (e.target.closest(".fx")) { cfRemove(c.dataset.k, c.dataset.i); return; }
+  cfEdit(c.dataset.k === "performer" ? "performers" : c.dataset.k, c);
+});
+$("#btn-cat-addf")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const m = $("#cat-fmenu");
+  m.innerHTML = CF_TYPES.map(([k, label, tip]) => `<button data-k="${k}" title="${esc(tip)}">${esc(label)}</button>`).join("");
+  m.hidden = !m.hidden;
+});
+$("#cat-fmenu")?.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-k]"); if (!b) return;
+  $("#cat-fmenu").hidden = true;
+  cfEdit(b.dataset.k, $("#btn-cat-addf"));
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#cat-fmenu, #btn-cat-addf")) { const m = $("#cat-fmenu"); if (m) m.hidden = true; }
+  if (!e.target.closest("#cat-fpop, .fchip, #cat-fmenu")) { const p = $("#cat-fpop"); if (p) p.hidden = true; }
+});
+// the editor for one kind of filter, opened under its chip (or under ＋ Filter)
+const CF_PICK = { performers: "performers", studios: "studios", tags: "tags", tagsNot: "tags" };
+function cfEdit(k, anchor) {
+  const pop = $("#cat-fpop"), f = cat.f, label = (CF_TYPES.find((t) => t[0] === k) || [k, k])[1];
+  const opts = (pairs, cur) => pairs.map(([v, t]) => `<button class="cat-chip ${cur === v ? "on" : ""}" data-set="${v}">${esc(t)}</button>`).join("");
+  const range = (v, type, unit, step = "1") => `<div class="row"><input data-a type="${type}" value="${esc(v[0])}" step="${step}" min="0" class="${type === "number" ? "num-sm" : ""}" placeholder="from" />
+      <span>–</span><input data-b type="${type}" value="${esc(v[1])}" step="${step}" min="0" class="${type === "number" ? "num-sm" : ""}" placeholder="to" /> ${unit}
+      <button class="btn sm pri" data-apply>Apply</button></div>`;
+  let body = "";
+  if (CF_PICK[k]) body = `<input class="search" data-find placeholder="Type a ${k === "studios" ? "studio" : k === "performers" ? "performer (or alias)" : "tag"}…" autocomplete="off" />
+      <div class="fpop-list" data-list></div>`;
+  else if (k === "vr") body = opts([["vr", "VR"], ["flat", "Flat"], ["", "Either"]], f.vr);
+  else if (k === "saves") body = opts([["yes", "Has saved moments"], ["no", "No saved moments"], ["", "Either"]], f.saves);
+  else if (k === "organized") body = opts([["yes", "Organised"], ["no", "Not organised"], ["", "Either"]], f.organized);
+  else if (k === "released" || k === "added") body = range(f[k], "date", "");
+  else if (k === "length") body = range(f.length, "number", "min", "5");
+  else if (k === "size") body = range(f.size, "number", "GB", "0.5");
+  else if (k === "minO") body = `<div class="row">at least <input data-a type="number" min="0" step="1" class="num-sm" value="${esc(f.minO)}" /> Os <button class="btn sm pri" data-apply>Apply</button></div>`;
+  pop.innerHTML = `<div class="fpop-h">${esc(label)}</div>${body}`;
+  pop.hidden = false;
+  const bar = $("#cat-fbar").getBoundingClientRect(), r = anchor.getBoundingClientRect();
+  pop.style.left = Math.max(0, Math.min(r.left - bar.left, bar.width - 300)) + "px";
+  pop.style.top = (r.bottom - bar.top + 6) + "px";
+  const done = () => { pop.hidden = true; openCatalogue(); };
+  pop.querySelectorAll("[data-set]").forEach((b) => b.onclick = () => { f[k] = b.dataset.set; done(); });
+  const ap = pop.querySelector("[data-apply]");
+  if (ap) {
+    const a = pop.querySelector("[data-a]"), b2 = pop.querySelector("[data-b]");
+    const go2 = () => { if (k === "minO") f.minO = a.value; else f[k] = [a.value, b2.value]; done(); };
+    ap.onclick = go2;
+    pop.querySelectorAll("input").forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") go2(); });
+    a.focus();
+  }
+  const find = pop.querySelector("[data-find]");
+  if (find) {
+    const list = pop.querySelector("[data-list]");
+    let t = null, items = [];
+    const pick = (it) => {
+      if (k === "performers") { if (!f.performers.some((x) => x.id === it.id)) f.performers.push({ id: it.id, name: it.name }); }
+      else if (!f[k].includes(it.name)) f[k].push(it.name);
+      done();
+    };
+    const load = async () => {
+      const q = find.value.trim();
+      if (!q) { list.innerHTML = '<div class="faint small">Start typing…</div>'; items = []; return; }
+      let d; try { d = await api("/api/catalogue/suggest?limit=8&q=" + encodeURIComponent(q)); } catch (e) { list.textContent = e.message; return; }
+      items = d[CF_PICK[k]] || [];
+      list.innerHTML = items.length ? items.map((it, i) => `<button class="fpop-it" data-i="${i}">${k === "performers" ? perfMiniPic(it) : ""}<span>${esc(it.name)}${it.alias ? ` <span class="faint small">aka ${esc(it.alias)}</span>` : ""}</span><span class="faint small">${it.n}</span></button>`).join("")
+        : '<div class="faint small">No match</div>';
+      list.querySelectorAll(".fpop-it").forEach((b) => b.onclick = () => pick(items[+b.dataset.i]));
+    };
+    find.oninput = () => { clearTimeout(t); t = setTimeout(load, 120); };
+    find.onkeydown = (e) => { if (e.key === "Enter" && items[0]) pick(items[0]); if (e.key === "Escape") pop.hidden = true; };
+    load(); find.focus();
+  }
+}
+function perfMiniPic(p) {
+  return p.photo ? `<img class="mini-pic" src="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" loading="lazy" />`
+    : `<span class="mini-pic none">${esc((p.name || "?")[0])}</span>`;
+}
+// --- the search box: suggestions while you type -----------------------------------------
+const csg = { items: [], idx: -1, t: null, seq: 0 };
+function sceneHit(x) { return { stream: x.stream, time: 0, scene_id: x.scene_id, key: "", score: 0 }; }
+async function loadCatSuggest() {
+  const q = $("#cat-q").value.trim(), box = $("#cat-suggest"), seq = ++csg.seq;
+  const word = q.split(/\s+/).pop() || "";
+  if (q.length < 2 || word.startsWith("-") || q.includes('"')) { box.hidden = true; csg.items = []; return; }
+  let d; try { d = await api("/api/catalogue/suggest?limit=5&q=" + encodeURIComponent(q)); } catch { return; }
+  if (seq !== csg.seq) return;
+  const items = [
+    ...d.performers.map((x) => ({ kind: "performers", x, html: `${perfMiniPic(x)}<span>${esc(x.name)}${x.alias ? ` <span class="faint small">aka ${esc(x.alias)}</span>` : ""}</span><span class="faint small">${x.n} scenes</span>` })),
+    ...d.studios.map((x) => ({ kind: "studios", x, html: `<span class="sg-ic">▣</span><span>${esc(x.name)}</span><span class="faint small">${x.n} scenes</span>` })),
+    ...d.tags.map((x) => ({ kind: "tags", x, html: `<span class="sg-ic">#</span><span>${esc(x.name)}</span><span class="faint small">${x.n} scenes</span>` })),
+    ...d.scenes.map((x) => ({ kind: "scene", x, html: `<span class="sg-ic">▶</span><span>${esc(x.title)} <span class="faint small">${esc([x.studio, (x.performers || []).join(", ")].filter(Boolean).join(" · "))}</span></span>${tierChip(x.tier)}` })),
+  ];
+  const head = { performers: "Performers — add as a filter", studios: "Studios — add as a filter", tags: "Tags — add as a filter", scene: "Scenes — open" };
+  csg.items = items; csg.idx = -1;
+  let last = "";
+  box.innerHTML = items.map((it, i) => {
+    const h = it.kind !== last ? `<div class="sg-h">${head[it.kind]}</div>` : "";
+    last = it.kind;
+    return `${h}<button class="sg-it" data-i="${i}">${it.html}</button>`;
+  }).join("");
+  box.hidden = !items.length;
+}
+function pickCatSuggest(i) {
+  const it = csg.items[i]; if (!it) return;
+  $("#cat-suggest").hidden = true;
+  if (it.kind === "scene") { if (it.x.stream) openViewer(sceneHit(it.x)); return; }
+  // the typed name becomes a chip: drop the words that were spelling it
+  if (it.kind === "performers") { if (!cat.f.performers.some((p) => p.id === it.x.id)) cat.f.performers.push({ id: it.x.id, name: it.x.name }); }
+  else if (!cat.f[it.kind].includes(it.x.name)) cat.f[it.kind].push(it.x.name);
+  $("#cat-q").value = "";
+  if (!cat.view) cat.tier = "";        // finding: look across every tier (the chips show where they are)
+  openCatalogue();
+}
+$("#cat-q")?.addEventListener("input", () => { clearTimeout(csg.t); csg.t = setTimeout(loadCatSuggest, 150); });
+$("#cat-q")?.addEventListener("keydown", (e) => {
+  const box = $("#cat-suggest");
+  if (box.hidden || !csg.items.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const n = csg.items.length;
+    csg.idx = e.key === "ArrowDown" ? (csg.idx + 1) % n : (csg.idx <= 0 ? n - 1 : csg.idx - 1);
+    box.querySelectorAll(".sg-it").forEach((el, i) => el.classList.toggle("on", i === csg.idx));
+  } else if (e.key === "Enter" && csg.idx >= 0) { e.preventDefault(); pickCatSuggest(csg.idx); }
+  else if (e.key === "Escape") box.hidden = true;
+});
+$("#cat-q")?.addEventListener("blur", () => setTimeout(() => { $("#cat-suggest").hidden = true; }, 200));
+$("#cat-suggest")?.addEventListener("mousedown", (e) => {
+  const b = e.target.closest(".sg-it"); if (!b) return;
+  e.preventDefault(); pickCatSuggest(+b.dataset.i);
+});
 loadSavedViews();
 function qualityLine(q) {
   return [q.res, q.mbps != null ? `${q.mbps} Mbps` : null, (q.codec || "").toUpperCase() || null,
@@ -4206,15 +4568,23 @@ function renderCmdk() {
   const label = (c) => c[0].replace(/^Catalogue: (\w+)/, (_, t) => "Catalogue: " + (TIER_NAMES[t] || t));
   let items = CMDS.filter((c) => !ql || fold(label(c)).includes(ql))
     .map((c) => ({ text: label(c), kind: c[1], run: c[2] }));
+  // the things themselves first: scenes, performers, studios matching what's typed
+  const f = q && cmdk.found && cmdk.found.q === q ? cmdk.found.d : null;
+  if (f) items = [
+    ...f.scenes.map((x) => ({ text: x.title + (x.performers?.length ? ` — ${x.performers.join(", ")}` : ""), kind: "scene", run: () => { if (x.stream) openViewer(sceneHit(x)); } })),
+    ...f.performers.map((x) => ({ text: x.name + (x.alias ? ` (aka ${x.alias})` : "") + ` · ${x.n} scenes`, kind: "perf", run: () => openPerformerDetail(x.id) })),
+    ...f.studios.map((x) => ({ text: `${x.name} · ${x.n} scenes`, kind: "studio", run: () => openStudioDetail(x.name) })),
+    ...items];
   if (q) {
     items.push({ text: `Search moments for “${q}”`, kind: "search", run: () => { go("explore"); $("#q").value = q; $("#btn-text").click(); } });
     items.push({ text: `Find performer “${q}”`, kind: "search", run: () => { go("performers"); $("#perf-search").value = q; $("#btn-perf-search").click(); } });
     items.push({ text: `Filter catalogue by “${q}”`, kind: "search", run: () => { go("catalogue"); $("#cat-q").value = q; openCatalogue(); } });
   }
-  cmdk.items = items.slice(0, 12); cmdk.idx = 0;
-  const icon = { page: "→", run: "▸", tier: "●", search: "⌕" };
+  cmdk.items = items.slice(0, 16); cmdk.idx = 0;
+  const icon = { page: "→", run: "▸", tier: "●", search: "⌕", scene: "▶", perf: "♀", studio: "▣" };
+  const verb = { page: "Go to", run: "Run", tier: "Filter", scene: "Play", perf: "Performer", studio: "Studio" };
   $("#cmdk-list").innerHTML = cmdk.items.map((it, i) =>
-    `<div class="cmdk-it ${i === cmdk.idx ? "on" : ""}" data-i="${i}"><span class="ci">${icon[it.kind]}</span>${esc(it.text)}<span class="ck">${it.kind === "page" ? "Go to" : it.kind === "run" ? "Run" : it.kind === "tier" ? "Filter" : "Search"}</span></div>`).join("")
+    `<div class="cmdk-it ${i === cmdk.idx ? "on" : ""}" data-i="${i}"><span class="ci">${icon[it.kind]}</span>${esc(it.text)}<span class="ck">${verb[it.kind] || "Search"}</span></div>`).join("")
     || '<div class="faint" style="padding:12px">No matches</div>';
 }
 function runCmdk(i) { const it = cmdk.items[i]; if (!it) return; closeCmdk(); it.run(); }
@@ -4223,7 +4593,18 @@ $("#cmdk")?.addEventListener("click", (e) => {
   const it = e.target.closest(".cmdk-it");
   if (it) runCmdk(+it.dataset.i); else if (e.target.id === "cmdk") closeCmdk();
 });
-$("#cmdk-in")?.addEventListener("input", renderCmdk);
+$("#cmdk-in")?.addEventListener("input", () => {
+  renderCmdk();
+  clearTimeout(cmdk.t);
+  const q = $("#cmdk-in").value.trim();
+  if (q.length < 2) return;
+  cmdk.t = setTimeout(async () => {
+    try {
+      const d = await api("/api/catalogue/suggest?limit=4&q=" + encodeURIComponent(q));
+      if ($("#cmdk-in").value.trim() === q) { cmdk.found = { q, d }; renderCmdk(); }
+    } catch { /* Stash down: the commands still work */ }
+  }, 140);
+});
 $("#cmdk-in")?.addEventListener("keydown", (e) => {
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
@@ -4794,7 +5175,7 @@ async function prStart() {
   cat.view = ""; cat.isNew = false; cat.performerId = b.id; cat.tier = PR_TIERS.join(",");
   cat.sortTouched = true; cat.sortDir = ""; $("#cat-sort").value = "tier";
   $("#cat-q").value = ""; $("#cat-res").value = ""; $("#cat-mbps").value = "";
-  for (const [, sel] of CAT_FILTERS) if ($(sel)) $(sel).value = "";
+  cat.f = CF_EMPTY();
   await openCatalogue();
   if (!cat.items.length) return toast("No scenes to review for " + b.name, true);
   pr.active = { pid: b.id, name: b.name, total: cat.total, changes: {} };

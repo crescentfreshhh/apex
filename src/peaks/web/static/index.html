@@ -18,6 +18,7 @@
     <button class="nav tab" data-view="board"><span class="ic">▦</span>Megaboard</button>
     <button class="nav tab" data-view="explore"><span class="ic">⌕</span>Search</button>
     <button class="nav tab" data-view="performers"><span class="ic">♛</span>Performers</button>
+    <button class="nav tab" data-view="studios"><span class="ic">▣</span>Studios</button>
     <div class="grp">Library</div>
     <button class="nav tab" data-view="catalogue"><span class="ic">☰</span>Catalogue<span class="ct" id="nav-ct-cat"></span></button>
     <div id="side-smart" class="side-smart" hidden>
@@ -239,7 +240,11 @@
     <div id="cat-chips" class="seg tiers"></div>
     <div id="cat-viewbar" class="cat-viewbar" hidden></div>
     <div class="toolbar">
-      <input id="cat-q" class="search" placeholder="Filter by title, performer, studio, path…" />
+      <div class="cat-qwrap">
+        <input id="cat-q" class="search" autocomplete="off" spellcheck="false"
+          placeholder="Search — title, performer, studio, tag… (&quot;exact phrase&quot;, -leave out)" />
+        <div id="cat-suggest" class="suggest" hidden></div>
+      </div>
       <select id="cat-res" title="Resolution">
         <option value="">any resolution</option>
         <option value="8K">8K</option>
@@ -253,7 +258,6 @@
         <option value="SD">SD</option>
       </select>
       <label class="muted" title="Only files at or above this bitrate">≥ <input id="cat-mbps" type="number" min="0" step="1" class="num-sm" /> Mbps</label>
-      <button id="btn-cat-filters" class="btn sm ghost" title="Performer, studio, tag, date and length filters">＋ Filter</button>
       <span class="grow"></span>
       <div id="cat-saved" class="cat-saved"></div>
       <label class="muted">Sort <select id="cat-sort">
@@ -271,15 +275,12 @@
         </select></label>
       <button id="cat-dir" class="btn sm ghost" title="Flip the order">↓ Newest first</button>
     </div>
-    <div id="cat-filters" class="toolbar cat-filters" hidden>
-      <label>Performer <input id="cat-perf" list="dl-perf" placeholder="any" /></label>
-      <label>Studio <input id="cat-studio" list="dl-studio" placeholder="any" /></label>
-      <label>Tag <input id="cat-tag" list="dl-tag" placeholder="any" /></label>
-      <label>Released <input id="cat-from" type="date" /> – <input id="cat-to" type="date" /></label>
-      <label>Length <input id="cat-dmin" type="number" min="0" step="5" class="num-sm" placeholder="min" /> –
-        <input id="cat-dmax" type="number" min="0" step="5" class="num-sm" placeholder="max" /> min</label>
-      <button id="btn-cat-clear" class="btn sm ghost">Clear</button>
-      <datalist id="dl-perf"></datalist><datalist id="dl-studio"></datalist><datalist id="dl-tag"></datalist>
+    <div id="cat-fbar" class="cat-fbar">
+      <span id="cat-fchips" class="cat-fchips"></span>
+      <div class="menu-wrap"><button id="btn-cat-addf" class="cat-chip addf" title="Narrow the list: performers, studios, tags, VR, saves, dates, length, size…">＋ Filter</button>
+        <div id="cat-fmenu" class="menu" hidden></div></div>
+      <button id="btn-cat-clear" class="btn sm ghost" hidden>Clear all</button>
+      <div id="cat-fpop" class="fpop" hidden></div>
     </div>
     <div id="cat-storage" class="cat-storage"></div>
     <div id="cat-model" class="cat-model faint"></div>
@@ -692,14 +693,32 @@
     </div>
   </section>
 
+  <!-- STUDIOS: every studio in the library, and a page per studio -->
+  <section id="studios" class="view">
+    <div class="head"><h1>Studios</h1><span class="sub2" id="st-sub"></span><span class="grow"></span></div>
+    <div class="pf-bar" id="st-bar">
+      <input id="st-search" class="search pf-search" type="search" placeholder="Search studios" autocomplete="off" spellcheck="false" />
+      <label class="muted">Sort <select id="st-sort">
+        <option value="scenes">Most scenes</option>
+        <option value="best">Most top-tier scenes</option>
+        <option value="recent">Latest release</option>
+        <option value="name">A–Z</option>
+      </select></label>
+      <span id="st-status" class="dim"></span>
+    </div>
+    <div id="st-grid" class="st-grid"></div>
+    <div id="st-detail" hidden></div>
+  </section>
+
     </div><!-- /content -->
+
   </main>
 </div>
 
   <!-- ⌘K command palette -->
   <div id="cmdk" class="cmdk" hidden>
     <div class="cmdk-box">
-      <input id="cmdk-in" placeholder="Search moments, jump to a page, run a command…" autocomplete="off" />
+      <input id="cmdk-in" placeholder="Find a scene, performer or studio — or jump to a page, run a command…" autocomplete="off" />
       <div id="cmdk-list" class="cmdk-list"></div>
       <div class="cmdk-foot faint"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close</div>
     </div>

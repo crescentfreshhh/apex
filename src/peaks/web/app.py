@@ -1132,10 +1132,20 @@ def create_app(cfg=None):
         date_from: str | None = None, date_to: str | None = None,
         dur_min: float | None = None, dur_max: float | None = None, ids_only: bool = False,
         dir: str | None = Query(None, pattern="^(asc|desc)$"), performer_id: str | None = None,
+        performer_ids: list[str] | None = Query(None), perf_mode: str = Query("all", pattern="^(all|any)$"),
+        studios: list[str] | None = Query(None), tags: list[str] | None = Query(None),
+        tags_not: list[str] | None = Query(None), vr: str | None = Query(None, pattern="^(vr|flat)$"),
+        added_from: str | None = None, added_to: str | None = None,
+        saves: str | None = Query(None, pattern="^(yes|no)$"), min_o: int | None = Query(None, ge=0),
+        size_min: float | None = Query(None, ge=0), size_max: float | None = Query(None, ge=0),
+        organized: str | None = Query(None, pattern="^(yes|no)$"),
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
-                                     performer_id=performer_id,
+                                     performer_id=performer_id, performer_ids=performer_ids,
+                                     perf_mode=perf_mode, studios=studios, tags=tags, tags_not=tags_not,
+                                     vr=vr, added_from=added_from, added_to=added_to, saves=saves,
+                                     min_o=min_o, size_min=size_min, size_max=size_max, organized=organized,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
                                      view=view, new=new, performer=performer, studio=studio,
                                      tag=tag, date_from=date_from, date_to=date_to,
@@ -1240,6 +1250,34 @@ def create_app(cfg=None):
             return service.library_summary()
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, str(exc))
+
+    @app.get("/api/catalogue/suggest")
+    def catalogue_suggest(q: str = "", limit: int = Query(6, ge=1, le=20)):
+        """What's typed so far → matching performers (incl. aliases), studios,
+        tags and scenes, for the search box and the / palette."""
+        try:
+            return service.catalogue_suggest(q, limit=limit)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, f"Stash unreachable: {exc}")
+
+    @app.get("/api/studios")
+    def studios(q: str | None = None, sort: str = Query("scenes", pattern="^(scenes|best|name|recent)$")):
+        try:
+            return service.studios_list(q=q, sort=sort)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, f"Stash unreachable: {exc}")
+
+    @app.get("/api/studio")
+    def studio(name: str):
+        """One studio's page (by name: Stash studio names are unique)."""
+        try:
+            return service.studio_profile(name)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.get("/api/performer/{pid}/costars")
+    def performer_costars(pid: str):
+        return {"costars": service.performer_costars(pid)}
 
     @app.get("/api/catalogue/facets")
     def catalogue_facets():

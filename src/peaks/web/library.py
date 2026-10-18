@@ -1302,8 +1302,11 @@ class LibraryMixin:
         return {k: [[n, c] for n, c in cnt.most_common(limit)]
                 for k, cnt in (("performers", perf), ("studios", stud), ("tags", tags))}
 
-    SAVED_VIEW_KEYS = ("tier", "view", "new", "q", "res", "min_mbps", "sort", "performer",
-                       "studio", "tag", "date_from", "date_to", "dur_min", "dur_max")
+    SAVED_VIEW_KEYS = ("tier", "view", "new", "q", "res", "min_mbps", "sort", "dir", "performer",
+                       "studio", "tag", "date_from", "date_to", "dur_min", "dur_max",
+                       # the filter chips: several performers / studios / tags, and the rest
+                       "performer_ids", "pnames", "perf_mode", "studios", "tags", "tags_not", "vr",
+                       "added_from", "added_to", "saves", "min_o", "size_min", "size_max", "organized")
 
     def saved_views(self) -> list[dict]:
         return list(self._settings().get("saved_views") or [])
@@ -1313,7 +1316,7 @@ class LibraryMixin:
         if not name:
             raise ValueError("a saved view needs a name")
         clean = {k: v for k, v in (params or {}).items()
-                 if k in self.SAVED_VIEW_KEYS and v not in (None, "", False)}
+                 if k in self.SAVED_VIEW_KEYS and v not in (None, "", False) and v != []}
         views = [v for v in self.saved_views() if v.get("name") != name]
         views.append({"name": name, "params": clean})
         return self._write_views(views)

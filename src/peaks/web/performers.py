@@ -236,7 +236,8 @@ class PerformersMixin:
             "fav": info.get("favorite", False), "record": rec, "tiers": tiers,
             "studios": sorted(({"name": k, "n": v} for k, v in studios.items()), key=lambda x: -x["n"])[:10],
             "scenes": [{"scene_id": r["scene_id"], "title": r["title"], "tier": r["tier"],
-                        "date": r.get("date") or "", "studio": r.get("studio") or ""} for r in scenes[:200]],
+                        "date": r.get("date") or "", "studio": r.get("studio") or "",
+                        "stream": self.stream_url(r["scene_id"], start=0)} for r in scenes[:600]],
             "photo": self.performer_photo_version(pid),
         }
 

@@ -734,3 +734,59 @@ html.hide-nums .num { display: none; }
 .pr-resume[hidden] { display: none; }
 .pr-sum { font-size: 15px; line-height: 1.6; }
 .rv-note { color: var(--ano); font-size: 12px; margin-left: 6px; }
+
+/* --- Finding things: search suggestions, filter chips, studios, scene covers --- */
+.cat-qwrap { position: relative; flex: 0 1 420px; min-width: 200px; }
+.cat-qwrap .search { width: 100%; flex: none; }
+.suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel2);
+  border: 1px solid var(--line2); border-radius: 10px; padding: 5px; box-shadow: 0 14px 40px rgba(0,0,0,.55);
+  max-height: 60vh; overflow-y: auto; min-width: 320px; }
+.suggest[hidden] { display: none; }
+.sg-h { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; padding: 7px 8px 3px; }
+.sg-it, .fpop-it { display: flex; align-items: center; gap: 9px; width: 100%; background: none; border: 0; color: var(--fg);
+  text-align: left; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.sg-it > span:nth-child(2), .fpop-it > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sg-it:hover, .sg-it.on, .fpop-it:hover { background: #26262e; }
+.sg-ic { width: 24px; text-align: center; color: var(--dim); flex: none; }
+.mini-pic { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; flex: none; background: var(--line); }
+.mini-pic.none { display: inline-flex; align-items: center; justify-content: center; font-size: 11px; color: var(--dim); }
+.cat-fbar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
+.cat-fchips { display: contents; }
+.fchip, .cat-chip.addf { height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line2);
+  background: var(--panel2); color: var(--fg); display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.fchip .fx { color: var(--dim); font-weight: 400; font-size: 14px; line-height: 1; padding-left: 2px; }
+.fchip .fx:hover { color: var(--bad); }
+.fchip.mode { background: transparent; border-style: dashed; color: var(--dim); }
+.cat-chip.addf { background: transparent; border-style: dashed; color: var(--dim); }
+.cat-chip.addf:hover, .fchip:hover { border-color: var(--accent); }
+.fpop { position: absolute; z-index: 30; width: 300px; max-width: calc(100vw - 32px); background: var(--panel2);
+  border: 1px solid var(--line2); border-radius: 10px; padding: 10px; box-shadow: 0 14px 40px rgba(0,0,0,.55);
+  display: flex; flex-direction: column; gap: 8px; }
+.fpop[hidden] { display: none; }
+.fpop .row { flex-wrap: wrap; gap: 6px; align-items: center; }
+.fpop .search { width: 100%; flex: none; min-width: 0; }
+.fpop-h { font-weight: 600; font-size: 13px; }
+.fpop-list { max-height: 260px; overflow-y: auto; }
+.fpop .cat-chip { cursor: pointer; }
+.st-grid, .scene-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.st-card, .scene-card { display: flex; flex-direction: column; gap: 5px; text-align: left; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; padding: 8px; color: var(--fg); cursor: pointer; min-width: 0; }
+.st-card:hover, .scene-card:hover { border-color: var(--line2); background: var(--panel2); }
+.sc-img { display: block; aspect-ratio: 16/9; border-radius: 8px; overflow: hidden; background: var(--line); }
+.sc-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.st-name { font-weight: 600; }
+.sc-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sc-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.sc-more { grid-column: 1 / -1; justify-self: center; }
+.costars { display: flex; flex-wrap: wrap; gap: 6px; }
+.costar { display: inline-flex; align-items: center; gap: 7px; background: var(--panel); border: 1px solid var(--line2);
+  border-radius: 999px; padding: 3px 4px 3px 4px; color: var(--fg); cursor: pointer; font-size: 13px; }
+.costar:hover { border-color: var(--accent); }
+.costar-go { color: var(--dim); padding: 0 6px; border-left: 1px solid var(--line2); }
+.costar-go:hover { color: var(--accent); }
+@media (max-width: 640px) {
+  .cat-qwrap { flex: 1 1 100%; }
+  .suggest { min-width: 0; }
+  .st-grid, .scene-cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+.st-grid[hidden], #st-detail[hidden], #st-bar[hidden], .cat-fbar [hidden] { display: none; }
