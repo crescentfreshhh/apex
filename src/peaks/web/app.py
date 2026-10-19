@@ -20,7 +20,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 # served for any unauthenticated non-API request when a password is configured.
 _LOGIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Peaks — sign in</title><link rel="icon" href="data:,">
+<title>Peaks — sign in</title><link rel="icon" href="/static/icons/icon-192.png">
+<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0b0b0d">
 <style>
   :root{--bg:#0b0b0d;--panel:#141417;--panel2:#1b1b20;--fg:#e8e8ea;--dim:#8a8a92;
     --line:#2a2a30;--accent:#c8a24a;--bad:#e0604d}
@@ -37,10 +38,13 @@ _LOGIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
     padding:11px;font-size:15px;font-weight:600;cursor:pointer}
   button:hover{filter:brightness(1.06)}
   #err{color:var(--bad);font-size:13px;min-height:18px;margin-top:10px}
+  label{display:flex;gap:8px;align-items:center;justify-content:center;color:var(--dim);font-size:13px;margin:0 0 14px}
+  label input{width:auto;margin:0}
 </style></head><body>
 <form id="f" autocomplete="on">
   <div class="brand">Peaks</div><div class="sub">sign in</div>
   <input id="pw" type="password" placeholder="Password" autofocus autocomplete="current-password">
+  <label><input id="rm" type="checkbox" checked> Keep me signed in on this device</label>
   <button type="submit">Unlock</button>
   <div id="err"></div>
 </form>
@@ -48,7 +52,7 @@ _LOGIN_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
   const f=document.getElementById('f'),pw=document.getElementById('pw'),err=document.getElementById('err');
   f.addEventListener('submit',async e=>{e.preventDefault();err.textContent='';
     try{const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({password:pw.value})});
+      body:JSON.stringify({password:pw.value,remember:document.getElementById('rm').checked})});
       if(r.ok){location.reload();}else{err.textContent='Wrong password';pw.value='';pw.focus();}}
     catch{err.textContent='Something went wrong';}});
 </script></body></html>"""
@@ -205,6 +209,7 @@ def _login_model():
 
     class LoginIn(BaseModel):
         password: str = ""
+        remember: bool = False     # keep me signed in on this device (90 days)
 
     return LoginIn
 
@@ -321,27 +326,55 @@ def create_app(cfg=None):
     _auth_pw = service.cfg.auth.password
     _auth_on = bool(_auth_pw)
     _session_ttl = max(60.0, service.cfg.auth.session_hours * 3600.0)
-    _sessions: dict[str, float] = {}  # token -> expiry epoch (sliding)
+    _remember_ttl = 90 * 86400.0       # "keep me signed in on this device" (the phone app)
+    _revoked: set[str] = set()         # signed out before expiry (until the next restart)
+    # Sessions are signed, not stored: "<expiry>.<lifetime>.<nonce>.<hmac>", keyed on
+    # the password — a restart (every Docker pull) keeps you signed in, and changing
+    # the password signs every device out.
+    import hashlib
+    import hmac
 
-    def _session_valid(token: str | None) -> bool:
-        if not token:
-            return False
-        exp = _sessions.get(token)
-        if exp is None:
-            return False
-        if _time.time() > exp:
-            _sessions.pop(token, None)
-            return False
-        _sessions[token] = _time.time() + _session_ttl  # refresh on activity
-        return True
+    _key = hashlib.sha256(b"peaks-session\0" + (_auth_pw or "").encode()).digest()
+
+    def _sign(body: str) -> str:
+        return hmac.new(_key, body.encode(), hashlib.sha256).hexdigest()
+
+    def _new_token(ttl: float) -> str:
+        body = f"{int(_time.time() + ttl)}.{int(ttl)}.{secrets.token_urlsafe(9)}"
+        return f"{body}.{_sign(body)}"
+
+    def _session(token: str | None) -> tuple[bool, float]:
+        """(valid, lifetime) — lifetime drives the sliding refresh."""
+        try:
+            exp, ttl, nonce, sig = (token or "").split(".")
+            body = f"{exp}.{ttl}.{nonce}"
+            if not hmac.compare_digest(sig, _sign(body)) or nonce in _revoked:
+                return False, 0.0
+            return _time.time() < int(exp), float(ttl)
+        except ValueError:
+            return False, 0.0
+
+    def _set_session(resp, ttl: float) -> None:
+        resp.set_cookie("peaks_session", _new_token(ttl), max_age=int(ttl),
+                        httponly=True, samesite="lax", path="/")
+
+    # the install bits (app manifest, service worker, icons) hold nothing private,
+    # and Chrome fetches the manifest without cookies
+    _PUBLIC = ("/manifest.webmanifest", "/sw.js", "/static/icons/")
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
-        if not _auth_on or request.url.path == "/api/login":
+        p = request.url.path
+        if not _auth_on or p == "/api/login" or p.startswith(_PUBLIC):
             return await call_next(request)
-        if _session_valid(request.cookies.get("peaks_session")):
-            return await call_next(request)
-        if request.url.path.startswith("/api/"):
+        token = request.cookies.get("peaks_session")
+        ok, ttl = _session(token)
+        if ok:
+            resp = await call_next(request)
+            if int(token.split(".")[0]) - _time.time() < ttl / 2:      # past halfway: slide it on
+                _set_session(resp, ttl)
+            return resp
+        if p.startswith("/api/"):
             return JSONResponse({"detail": "authentication required"}, status_code=401)
         return HTMLResponse(_LOGIN_HTML, status_code=200)
 
@@ -361,20 +394,17 @@ def create_app(cfg=None):
         if not _auth_on:
             return {"ok": True}
         if secrets.compare_digest(body.password or "", _auth_pw):
-            token = secrets.token_urlsafe(32)
-            _sessions[token] = _time.time() + _session_ttl
             resp = JSONResponse({"ok": True})
-            resp.set_cookie(
-                "peaks_session", token, max_age=int(_session_ttl),
-                httponly=True, samesite="lax", path="/",
-            )
+            _set_session(resp, _remember_ttl if body.remember else _session_ttl)
             return resp
         _time.sleep(0.5)  # gentle brute-force damper
         raise HTTPException(401, "wrong password")
 
     @app.post("/api/logout")
     def logout(peaks_session: str | None = Cookie(default=None)):
-        _sessions.pop(peaks_session or "", None)
+        parts = (peaks_session or "").split(".")
+        if len(parts) == 4:
+            _revoked.add(parts[2])
         resp = JSONResponse({"ok": True})
         resp.delete_cookie("peaks_session", path="/")
         return resp
@@ -1916,6 +1946,33 @@ def create_app(cfg=None):
         if page.exists():
             return FileResponse(page)
         return JSONResponse({"peaks": "running", "ui": "not built"})
+
+    # --- the phone app: Chrome's "Install app" reads these ------------------------
+    @app.get("/manifest.webmanifest")
+    def manifest():
+        icon = "/static/icons/"
+        return JSONResponse({
+            "name": "Peaks", "short_name": "Peaks", "id": "/", "start_url": "/", "scope": "/",
+            "display": "standalone", "orientation": "any",
+            "background_color": "#0b0b0d", "theme_color": "#0b0b0d",
+            "description": "Your Stash library: review, watch, find.",
+            "icons": [
+                {"src": icon + "icon-192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": icon + "icon-512.png", "sizes": "512x512", "type": "image/png"},
+                {"src": icon + "maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            ],
+            "shortcuts": [
+                {"name": "Review queue", "url": "/#/review"},
+                {"name": "Megaboard", "url": "/megaboard/"},
+                {"name": "Catalogue", "url": "/#/catalogue"},
+            ],
+        }, media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    def service_worker():
+        """Served from the root so it can look after the whole app (scope "/")."""
+        return FileResponse(STATIC_DIR / "sw.js", media_type="text/javascript",
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/memory")
     def memory():

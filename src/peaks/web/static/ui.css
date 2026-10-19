@@ -790,3 +790,34 @@ html.hide-nums .num { display: none; }
   .st-grid, .scene-cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 }
 .st-grid[hidden], #st-detail[hidden], #st-bar[hidden], .cat-fbar [hidden] { display: none; }
+
+/* --- the phone app: bottom tab bar, safe areas, full-height on mobile browsers --- */
+.tabbar { display: none; }
+@supports (height: 100dvh) { .app, .main { height: 100dvh; } }
+@media (max-width: 640px) {
+  .tabbar { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    background: rgba(19, 19, 22, .96); backdrop-filter: blur(10px); border-top: 1px solid var(--line);
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); }
+  .tab-b { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    min-height: 50px; background: none; border: 0; color: var(--dim); font-size: 11px; text-decoration: none; cursor: pointer;
+    border-radius: 10px; -webkit-tap-highlight-color: transparent; }
+  .tab-b .ic { font-size: 19px; line-height: 1; }
+  .tab-b.on { color: var(--gold); }
+  .tab-b:active { background: var(--panel2); }
+  .tab-b .ct { position: absolute; top: 3px; left: calc(50% + 8px); font-size: 10px; line-height: 15px; min-width: 15px;
+    padding: 0 4px; border-radius: 999px; background: var(--gold); color: var(--gold-ink); font-weight: 700; }
+  .tab-b .ct:empty { display: none; }
+  .nav-toggle { display: none; }
+  .top { padding: env(safe-area-inset-top) 12px 0; height: calc(52px + env(safe-area-inset-top)); }
+  .cmd { flex: 1 1 auto; }
+  .content { padding: 14px 12px calc(84px + env(safe-area-inset-bottom)); }
+  .side { padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+  /* tap targets */
+  .btn, button.ghost, .cat-chip, .fchip, select { min-height: 36px; }
+  .head h1 { font-size: 22px; }
+}
+.cat-viewbar[hidden] { display: none; }
+@media (max-width: 640px) {
+  .cmd span { display: inline; }
+  .shelf-h { flex-wrap: wrap; row-gap: 8px; }
+}

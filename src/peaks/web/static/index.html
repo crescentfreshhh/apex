@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Peaks</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#0b0b0d" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
   <link rel="icon" type="image/svg+xml" href="/static/peaks.svg" />
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="stylesheet" href="/static/ui.css" />
@@ -713,6 +717,14 @@
     </div><!-- /content -->
 
   </main>
+  <!-- phones: the main places one tap away, everything else under More -->
+  <nav id="tabbar" class="tabbar">
+    <button class="tab-b" data-tab-view="foryou"><span class="ic">◉</span>For You</button>
+    <a class="tab-b" href="/megaboard/"><span class="ic">▦</span>Board</a>
+    <button class="tab-b" data-tab-view="review"><span class="ic">▶</span>Review<span class="ct" id="tab-ct-review"></span></button>
+    <button class="tab-b" data-tab-view="catalogue"><span class="ic">⌕</span>Find</button>
+    <button class="tab-b" id="tab-more"><span class="ic">☰</span>More</button>
+  </nav>
 </div>
 
   <!-- ⌘K command palette -->

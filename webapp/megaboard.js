@@ -10,6 +10,10 @@
  * if that API isn't there the board still plays, it just hides the stats panel.
  */
 
+// the phone app: same service worker as the rest of Peaks (served by `peaks web` only)
+if ("serviceWorker" in navigator && location.pathname.startsWith("/megaboard"))
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+
 const State = {
   apexes: [],
   tiles: [],

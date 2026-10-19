@@ -132,6 +132,23 @@ A grid of looping clips that cycles in new apexes continuously. See
 Config resolves from environment variables first (`STASH_URL`, `STASH_API_KEY`),
 then `config.toml`, then built-in defaults. Run the test suite with `pytest`.
 
+## Peaks on your phone
+
+Peaks installs as an app on Android (it runs on your server; the phone is a
+window onto it, with its own icon, full screen, and a bottom tab bar). Chrome
+only installs a site that's served over **HTTPS**, so:
+
+1. Install **Tailscale** on the server (the Unraid plugin) and on the phone.
+2. On the server: `tailscale serve --bg <peaks-port>` — Peaks is now at
+   `https://<server>.<your-tailnet>.ts.net`, private to your devices, at home
+   or away. Nothing is opened to the internet.
+3. Open that address in Chrome on the phone → ⋮ → **Install app**.
+
+With a password set (`PEAKS_PASSWORD`), tick **Keep me signed in on this
+device** once: the sign-in lasts 90 days and survives restarts and updates.
+Over plain `http://` the same page can still be added to the home screen, but
+it opens as a Chrome tab rather than an app.
+
 ## A note on the names
 
 - **Opus** — the platform / the whole curated collection of best moments.

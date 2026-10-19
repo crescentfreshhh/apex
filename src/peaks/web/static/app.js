@@ -6,6 +6,20 @@ const W = window.Words, fig = W.num;
 let SCALE = null;
 W.tasteScale().then((x) => { SCALE = x; });
 const $ = (s) => document.querySelector(s);
+// --- the phone app (installed from Chrome): its service worker, and the megaboard
+// opening in the same window — a new tab would pop out of the app into Chrome
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+const INSTALLED = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+document.documentElement.classList.toggle("installed", INSTALLED);
+if (INSTALLED) {
+  const own = (u) => { try { return new URL(u, location.href).pathname.startsWith("/megaboard"); } catch { return false; } };
+  const open = window.open.bind(window);
+  window.open = (u, ...rest) => (own(u) ? (location.href = new URL(u, location.href).href, null) : open(u, ...rest));
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("a[target=_blank]");
+    if (a && own(a.getAttribute("href"))) { e.preventDefault(); location.href = a.href; }
+  }, true);
+}
 // writes that change what the library-management counts show
 const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train|keep)|verdicts\/|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
 const api = async (path, opts) => {
@@ -55,6 +69,8 @@ const VIEWS = ["foryou", "board", "explore", "performers", "studios", "catalogue
 function showView(name) {
   if (!VIEWS.includes(name)) name = "foryou";
   document.querySelectorAll(".nav[data-view]").forEach((x) => x.classList.toggle("active", x.dataset.view === name));
+  document.querySelectorAll(".tab-b[data-tab-view]").forEach((x) => x.classList.toggle("on", x.dataset.tabView === name));
+  $("#tab-more")?.classList.toggle("on", !["foryou", "review", "catalogue"].includes(name));
   document.querySelectorAll(".view").forEach((x) => x.classList.toggle("active", x.id === name));
   const smart = $("#side-smart"); if (smart) smart.hidden = !["catalogue", "review"].includes(name);
   document.body.classList.remove("nav-open");
@@ -83,6 +99,9 @@ function go(name) {
   if (name === "perfreview") openPerfReview();
 }
 document.querySelectorAll(".nav[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
+// phones: the bottom tab bar (More opens the full menu)
+document.querySelectorAll(".tab-b[data-tab-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.tabView)));
+$("#tab-more")?.addEventListener("click", (e) => { e.stopPropagation(); document.body.classList.toggle("nav-open"); });
 // any [data-go] button jumps to a page (optionally a Settings section)
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-go]"); if (!b) return;
@@ -3445,6 +3464,7 @@ async function loadSidebar() {
     const set = (id, v) => { const el = $(id); if (el) el.textContent = v ? (+v).toLocaleString() : ""; };
     set("#nav-ct-cat", d.total);
     set("#nav-ct-review", d.counts.unreviewed);
+    set("#tab-ct-review", d.counts.unreviewed);
     if (d.dupes != null) setDupeCount(d.dupes);
     const nb = $("#btn-cat-new");
     if (nb) {
