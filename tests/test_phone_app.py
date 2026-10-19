@@ -101,3 +101,19 @@ def test_an_active_session_slides_on(cfg, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: real() + 40 * 60)               # past halfway
     r = c.get("/api/stats")
     assert r.status_code == 200 and "max-age=3600" in r.headers["set-cookie"].lower()
+
+
+def test_every_page_file_ships_in_the_package():
+    """The Docker image installs the package (no git, no build leftovers), so a
+    page file the package-data globs miss is missing on the server — that's how
+    the app icons went missing and Chrome refused to install Peaks."""
+    import fnmatch
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    globs = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools"]["package-data"]["peaks.web"]
+    static = root / "src" / "peaks" / "web" / "static"
+    files = [p.relative_to(static.parent).as_posix() for p in static.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+    missed = [f for f in files if not any(fnmatch.fnmatch(f, g) and f.count("/") == g.count("/") for g in globs)]
+    assert files and not missed, f"not in the package: {missed}"
