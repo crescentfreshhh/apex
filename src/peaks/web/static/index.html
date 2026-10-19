@@ -108,8 +108,14 @@
       <span data-tab="labels">Labels</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
     </div>
     <div class="panel" id="pic-panel" data-pane="picture" hidden>
-      <p class="cap">Which picture looks better? Judge the <b>picture</b>, not the scene — detail, blocks, grain, banding. Tap a crop to see the whole frame.
-        <span class="kbd-hint"><kbd>←</kbd> left · <kbd>→</kbd> right · <kbd>↑</kbd> both fine · <kbd>↓</kbd> both bad · <kbd>S</kbd> skip</span></p>
+      <p class="cap">Which picture looks better? Both play the same stretch of their scene — judge the <b>picture</b>, not the scene: detail, smearing in motion, blocks, grain, judder. Tap a video to enlarge it.
+        <span class="kbd-hint"><kbd>Space</kbd> play/pause · <kbd>N</kbd> another spot · <kbd>M</kbd> sound · <kbd>←</kbd> left · <kbd>→</kbd> right · <kbd>↑</kbd> both fine · <kbd>↓</kbd> both bad · <kbd>S</kbd> skip</span></p>
+      <div class="row pic-transport">
+        <button class="btn sm" id="pic-play">❚❚ Pause both</button>
+        <button class="btn sm ghost" id="pic-spot" title="Both jump to another point in their scene (N)">⤳ Another spot</button>
+        <button class="btn sm ghost" id="pic-sound" title="Sound for the side you're on (M)">🔇 Sound off</button>
+        <span class="faint small">two videos stream at once — on mobile data that's a lot at 4K</span>
+      </div>
       <div id="pic-pair" class="pic-pair"><p class="dim">Loading a pair…</p></div>
       <div class="row pic-controls">
         <button class="btn pic-ans" data-ans="a">◀ Left looks better</button>

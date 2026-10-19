@@ -258,19 +258,14 @@ def measure_frames(pairs: list[tuple[np.ndarray, np.ndarray | None]]) -> dict:
             "frozen": round(frozen / len(pairs), 3)}
 
 
-def stills_for_people(path: str, rec: dict, out_full, out_crop, ffmpeg: str = "ffmpeg",
-                      at: float = 0.5, duration: float = 0.0, timeout: float = 90.0) -> None:
-    """The two JPEGs the comparison screen shows: the whole frame (960 px wide)
-    and a 1:1 crop of real picture from its middle (quality differences vanish
-    when a frame is shrunk, so the crop is never scaled)."""
-    x0, y0, x1, y1 = rec.get("box") or [0, 0, rec["w"], rec["h"]]
+def poster_still(path: str, rec: dict, out, ffmpeg: str = "ffmpeg", at: float = 0.5,
+                 duration: float = 0.0, timeout: float = 90.0) -> None:
+    """The whole frame (960 px wide, one eye of VR) shown while a comparison
+    video loads."""
     eye = f"crop={rec['w']}:{rec['h']}:0:0," if rec.get("vr") else ""
-    cw, ch = min(480, x1 - x0), min(480, y1 - y0)            # two fit side by side, unscaled
-    cx, cy = x0 + (x1 - x0 - cw) // 2, y0 + (y1 - y0 - ch) // 2
-    t = f"{max(0.0, duration * at):.3f}"
-    for out, vf in ((out_full, eye + "scale=960:-2"), (out_crop, eye + f"crop={cw}:{ch}:{cx}:{cy}")):
-        subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-ss", t, "-i", path, "-an", "-sn",
-                        "-frames:v", "1", "-vf", vf, "-q:v", "3", str(out)], capture_output=True, timeout=timeout)
+    subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-ss", f"{max(0.0, duration * at):.3f}", "-i", path,
+                    "-an", "-sn", "-frames:v", "1", "-vf", eye + "scale=960:-2", "-q:v", "3", str(out)],
+                   capture_output=True, timeout=timeout)
 
 
 def measure(path: str, ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe", n: int = N_STILLS) -> dict:

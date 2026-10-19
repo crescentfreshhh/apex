@@ -259,9 +259,12 @@ def test_pairs_answers_scores_and_catalogue(svc):
     svc.picture_backfill(True)
     svc.run_picture()
     p = svc.picture_pair(random.Random(0))
-    assert p and p["a"]["key"] != p["b"]["key"] and p["a"]["crop"].startswith("/api/picture/still/")
-    safe, kind = p["a"]["crop"].split("/")[-2:]
-    assert svc.picture_still(safe, kind) is not None and svc.picture_still("../x", "crop") is None
+    assert p and p["a"]["key"] != p["b"]["key"]
+    for side in (p["a"], p["b"]):                                   # both play: a stream, its length, a poster
+        assert side["stream"] and side["duration"] > 0 and side["poster"].startswith("/api/picture/still/")
+    safe, kind = p["a"]["poster"].split("/")[-2:]
+    assert kind == "full" and svc.picture_still(safe, kind) is not None
+    assert svc.picture_still("../x", "full") is None and svc.picture_still(safe, "crop") is None
     with pytest.raises(ValueError):
         svc.picture_answer("a", "b", "maybe")
     pics = svc.picture_scores()
@@ -326,7 +329,7 @@ def test_pair_route_and_learning_end_to_end(svc, monkeypatch):
     api = TestClient(app_mod.create_app(svc.cfg))
     p = api.get("/api/picture/pair").json()["pair"]
     assert p["a"]["key"] != p["b"]["key"]
-    assert api.get(p["a"]["crop"]).headers["content-type"] == "image/jpeg"
+    assert api.get(p["a"]["poster"]).headers["content-type"] == "image/jpeg"
     # you always prefer the native file: the native one ends up scored above the upscale
     keys = {r["scene_id"]: svc._pic_key(r) for r in svc._catalogue_all()}
     for i in range(pq.PictureModel.MIN_PAIRS + 5):
@@ -337,3 +340,12 @@ def test_pair_route_and_learning_end_to_end(svc, monkeypatch):
     assert st["picks"] == 2 * (pq.PictureModel.MIN_PAIRS + 5) and st["model"]["trained"]
     pics = svc.picture_scores()
     assert pics["1"]["score"] > pics["2"]["score"]
+
+
+def test_a_file_without_a_poster_still_pairs(svc):
+    svc.picture_backfill(True)
+    svc.run_picture()
+    for f in (svc._pic_dir() / "stills").iterdir():
+        f.unlink()
+    p = svc.picture_pair(random.Random(1))
+    assert p and p["a"]["poster"] is None and p["a"]["stream"]

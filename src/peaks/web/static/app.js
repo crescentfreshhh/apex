@@ -68,6 +68,7 @@ const VIEWS = ["foryou", "board", "explore", "performers", "studios", "catalogue
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
   if (!VIEWS.includes(name)) name = "foryou";
+  if (name !== "taste" && typeof stopPicVideos === "function") stopPicVideos();   // the comparison's two streams
   document.querySelectorAll(".nav[data-view]").forEach((x) => x.classList.toggle("active", x.dataset.view === name));
   document.querySelectorAll(".tab-b[data-tab-view]").forEach((x) => x.classList.toggle("on", x.dataset.tabView === name));
   $("#tab-more")?.classList.toggle("on", !["foryou", "review", "catalogue"].includes(name));
@@ -2615,10 +2616,10 @@ document.addEventListener("click", async (e) => {
     catch (err) { toast(err.message, true); }
   }
 });
-wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); if (t === "picture") loadPicPair(); });
+wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); if (t === "picture") loadPicPair(); else stopPicVideos(); });
 
 // --- Picture quality: "which looks better?" and the measuring status -----------------------
-const pic = { pair: null, busy: false, poll: null };
+const pic = { pair: null, busy: false, poll: null, playing: true, sound: false, hear: "a", frac: 0.5 };
 function picModelWords(m, picks) {
   if (!m) return "";
   if (!m.trained) {
@@ -2631,21 +2632,54 @@ function picModelWords(m, picks) {
     (m.trusted ? "<b>used</b> for picture scores and duplicate choices." : "not better than bitrate yet, so not used. More picks help.") +
     (m.line != null ? ` Your “good enough” line sits at ${m.line}/100.` : m.fine_bad ? "" : " “Both fine” / “Both bad” answers set your “good enough” line.");
 }
-function picSideHTML(x, side) {
-  const facts = [x.res, x.mbps != null ? `${x.mbps} Mbps` : null, x.codec].filter(Boolean).join(" · ");
-  return `<div class="pic-side" data-side="${side}">
-      <button class="pic-img" title="Tap for the whole frame"><img src="${esc(x.crop)}" data-crop="${esc(x.crop)}" data-full="${esc(x.full)}" alt="" /></button>
-      <div class="pic-meta"><b>${picWord(side)}</b> · ${esc(facts || "?")}<div class="faint small pic-title" title="${esc(x.title)}">${esc(x.title)}</div></div>
-    </div>`;
-}
 // side by side on a computer, one above the other on a phone
 const picStacked = () => matchMedia("(max-width: 640px)").matches;
 const picWord = (side) => (picStacked() ? (side === "a" ? "Top" : "Bottom") : (side === "a" ? "Left" : "Right"));
+// both videos play the same stretch: a shared point (as a share of each scene), looped
+const PIC_LOOP = 20;
+function picSideHTML(x, side) {
+  const facts = [x.res, x.mbps != null ? `${x.mbps} Mbps` : null, x.codec].filter(Boolean).join(" · ");
+  return `<div class="pic-side" data-side="${side}">
+      <div class="pic-vid"><video playsinline muted preload="auto" ${x.poster ? `poster="${esc(x.poster)}"` : ""}></video>
+        <button class="pic-full" title="Fullscreen">⛶</button><button class="pic-ear" title="Hear this side">🔈</button></div>
+      <div class="pic-meta"><b>${picWord(side)}</b> · ${esc(facts || "?")}<div class="faint small pic-title" title="${esc(x.title)}">${esc(x.title)}</div></div>
+    </div>`;
+}
+function picVideos() { return [...document.querySelectorAll("#pic-pair .pic-side video")]; }
+function stopPicVideos() {
+  for (const v of picVideos()) { try { v.pause(); } catch {} v.removeAttribute("src"); v.load(); }
+}
+function picApplySound() {
+  for (const el of document.querySelectorAll("#pic-pair .pic-side")) {
+    const v = el.querySelector("video"), on = pic.sound && el.dataset.side === pic.hear;
+    v.muted = !on; el.classList.toggle("hearing", on);
+  }
+  const b = $("#pic-sound"); if (b) b.textContent = pic.sound ? `🔊 Sound: ${picWord(pic.hear).toLowerCase()}` : "🔇 Sound off";
+}
+function picSeek(frac) {
+  pic.frac = frac;
+  const p = pic.pair; if (!p) return;
+  document.querySelectorAll("#pic-pair .pic-side").forEach((el) => {
+    const v = el.querySelector("video"), x = p[el.dataset.side];
+    const dur = v.duration || x.duration || 0, span = Math.min(PIC_LOOP, dur * 0.9);
+    const at = Math.max(0, Math.min(dur - span, dur * frac));
+    el.dataset.start = at; el.dataset.span = span;
+    const go = () => { try { v.currentTime = at; } catch {} if (pic.playing) v.play().catch(() => {}); };
+    if (v.readyState >= 1) go(); else v.addEventListener("loadedmetadata", go, { once: true });
+  });
+}
+function picSetPlaying(on) {
+  pic.playing = on;
+  for (const v of picVideos()) { if (on) v.play().catch(() => {}); else v.pause(); }
+  const b = $("#pic-play"); if (b) b.textContent = on ? "❚❚ Pause both" : "▶ Play both";
+}
 async function loadPicPair() {
   const box = $("#pic-pair"); if (!box) return;
   const la = document.querySelector('.pic-ans[data-ans="a"]'), lb = document.querySelector('.pic-ans[data-ans="b"]');
   if (la) la.textContent = picStacked() ? "▲ Top looks better" : "◀ Left looks better";
   if (lb) lb.textContent = picStacked() ? "▼ Bottom looks better" : "Right looks better ▶";
+  stopPicVideos();
+  box.classList.remove("enlarged"); box.dataset.big = "";
   let d;
   try { d = await api("/api/picture/pair"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
   pic.pair = d.pair;
@@ -2654,13 +2688,36 @@ async function loadPicPair() {
       <button class="btn sm" data-go="dashboard" data-sec="picture">Measure your library…</button></div>`;
   } else {
     box.innerHTML = picSideHTML(d.pair.a, "a") + picSideHTML(d.pair.b, "b");
-    box.querySelectorAll(".pic-img").forEach((b) => b.onclick = () => {
-      const img = b.querySelector("img"), full = img.src.endsWith(img.dataset.full);
-      img.src = full ? img.dataset.crop : img.dataset.full;
-      b.classList.toggle("whole", !full);
+    box.querySelectorAll(".pic-side").forEach((el) => {
+      const v = el.querySelector("video"), side = el.dataset.side;
+      v.src = sceneStreamUrl(d.pair[side].stream);
+      v.loop = true;                                              // a short file just starts over
+      v.addEventListener("timeupdate", () => {                    // keep watching the same stretch
+        const s0 = +el.dataset.start || 0, span = +el.dataset.span || PIC_LOOP;
+        if (v.currentTime > s0 + span || v.currentTime < s0 - 1) { try { v.currentTime = s0; } catch {} }
+      });
+      el.addEventListener("mouseenter", () => { if (pic.hear !== side) { pic.hear = side; picApplySound(); } });
+      el.querySelector(".pic-ear").onclick = (e) => { e.stopPropagation(); pic.hear = side; pic.sound = true; picApplySound(); };
+      el.querySelector(".pic-full").onclick = (e) => { e.stopPropagation(); (v.requestFullscreen || v.webkitEnterFullscreen || (() => {})).call(v); };
+      el.querySelector(".pic-vid").onclick = () => picEnlarge(side);
     });
+    pic.playing = true;
+    picApplySound();
+    picSeek(0.15 + Math.random() * 0.7);
+    picSetPlaying(true);
   }
   picStatusLine();
+}
+// tap a video: it fills the panel (the other stays small beside it — paused on a phone)
+function picEnlarge(side) {
+  const box = $("#pic-pair"), same = box.dataset.big === side;
+  box.dataset.big = same ? "" : side;
+  box.classList.toggle("enlarged", !same);
+  for (const el of box.querySelectorAll(".pic-side")) {
+    const v = el.querySelector("video");
+    if (!same && picStacked() && el.dataset.side !== side) v.pause();
+    else if (pic.playing) v.play().catch(() => {});
+  }
 }
 async function picStatusLine() {
   try {
@@ -2674,6 +2731,7 @@ async function picAnswer(ans) {
   const p = pic.pair;
   if (ans === "skip" || !p) return loadPicPair();
   pic.busy = true;
+  stopPicVideos();
   try {
     await api("/api/picture/answer", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ a: p.a.key, b: p.b.key, ans }) });
@@ -2682,11 +2740,17 @@ async function picAnswer(ans) {
   loadPicPair();
 }
 $("#pic-panel")?.addEventListener("click", (e) => { const b = e.target.closest(".pic-ans"); if (b) picAnswer(b.dataset.ans); });
+$("#pic-play")?.addEventListener("click", () => picSetPlaying(!pic.playing));
+$("#pic-spot")?.addEventListener("click", () => picSeek(0.15 + Math.random() * 0.7));
+$("#pic-sound")?.addEventListener("click", () => { pic.sound = !pic.sound; picApplySound(); });
 document.addEventListener("keydown", (e) => {
   if (!$("#taste")?.classList.contains("active") || $("#pic-panel")?.hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = { ArrowLeft: "a", ArrowRight: "b", ArrowUp: "fine", ArrowDown: "bad", s: "skip", S: "skip" }[e.key];
-  if (k) { e.preventDefault(); picAnswer(k); }
+  if (k) { e.preventDefault(); picAnswer(k); return; }
+  if (e.key === " ") { e.preventDefault(); picSetPlaying(!pic.playing); }
+  else if (e.key === "n" || e.key === "N") { e.preventDefault(); picSeek(0.15 + Math.random() * 0.7); }
+  else if (e.key === "m" || e.key === "M") { e.preventDefault(); pic.sound = !pic.sound; picApplySound(); }
 });
 // Settings → Picture quality
 async function loadPicSettings() {

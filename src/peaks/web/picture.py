@@ -116,8 +116,7 @@ class PictureMixin:
         stills.mkdir(exist_ok=True)
         safe = self._pic_safe(key)
         try:
-            pq.stills_for_people(path, rec, stills / f"{safe}_full.jpg", stills / f"{safe}_crop.jpg",
-                                 duration=rec.get("duration") or 0.0)
+            pq.poster_still(path, rec, stills / f"{safe}_full.jpg", duration=rec.get("duration") or 0.0)
         except Exception:  # noqa: BLE001 — the measures still count without the pictures
             pass
         self._pic_append("measures.jsonl", rec)
@@ -266,12 +265,7 @@ class PictureMixin:
         the same resolution), and once there's a model, the closest call."""
         rng = rng or random.Random()
         rows = [r for r in self._catalogue_all() if r.get("tier") not in SKIP_TIERS]
-        stills = self._pic_dir() / "stills"
-        cand = []
-        for r in rows:
-            rec = self._pic_rec(r)
-            if rec and (stills / f"{self._pic_safe(self._pic_key(r))}_crop.jpg").exists():
-                cand.append((r, rec))
+        cand = [(r, rec) for r in rows if r.get("path") for rec in [self._pic_rec(r)] if rec]
         if len(cand) < 2:
             return None
         asked = {frozenset((p["a"], p["b"])) for p in self._pic_picks()}
@@ -306,12 +300,15 @@ class PictureMixin:
     def _pic_side(self, row: dict, rec: dict) -> dict:
         safe = self._pic_safe(self._pic_key(row))
         q = row.get("quality") or {}
+        poster = self._pic_dir() / "stills" / f"{safe}_full.jpg"
         return {"key": self._pic_key(row), "scene_id": row["scene_id"], "title": row["title"],
                 "res": q.get("res"), "mbps": q.get("mbps"), "codec": (q.get("codec") or "").upper() or None,
-                "full": f"/api/picture/still/{safe}/full", "crop": f"/api/picture/still/{safe}/crop"}
+                "stream": self.stream_url(row["scene_id"], start=0),
+                "duration": rec.get("duration") or row.get("duration") or 0,
+                "poster": f"/api/picture/still/{safe}/full" if poster.exists() else None}
 
     def picture_still(self, safe: str, kind: str) -> Path | None:
-        if kind not in ("full", "crop") or not safe.isalnum():
+        if kind != "full" or not safe.isalnum():
             return None
         p = self._pic_dir() / "stills" / f"{safe}_{kind}.jpg"
         return p if p.exists() else None

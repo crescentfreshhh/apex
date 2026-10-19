@@ -897,10 +897,18 @@ html.hide-nums .num { display: none; }
 /* --- picture quality: the comparison panel, chips ------------------------------------------- */
 .pic-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
 .pic-side { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.pic-img { padding: 0; border: 1px solid var(--line2); border-radius: 10px; overflow: hidden; background: #000; cursor: zoom-in;
-  display: flex; justify-content: center; width: 100%; }
-.pic-img.whole { cursor: zoom-out; }
-.pic-img img { max-width: 100%; height: auto; display: block; }   /* the crop at its own pixels, never enlarged */
+.pic-vid { position: relative; background: #000; border: 1px solid var(--line2); border-radius: 10px; overflow: hidden;
+  aspect-ratio: 16 / 9; cursor: zoom-in; }
+.pic-vid video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.pic-side.hearing .pic-vid { border-color: var(--gold); }
+.pic-full, .pic-ear { position: absolute; top: 8px; z-index: 2; width: 34px; height: 34px; border-radius: 8px;
+  background: rgba(10,10,12,.7); border: 1px solid var(--line2); color: var(--fg); cursor: pointer; }
+.pic-full { right: 8px; } .pic-ear { right: 48px; }
+.pic-transport { gap: 8px; margin-top: 4px; flex-wrap: wrap; align-items: center; }
+/* tap to enlarge: that side takes the room, the other shrinks beside it */
+.pic-pair.enlarged { grid-template-columns: 4fr 1fr; }
+.pic-pair.enlarged[data-big="b"] { grid-template-columns: 1fr 4fr; }
+.pic-pair.enlarged .pic-vid { cursor: zoom-out; }
 .pic-meta { font-size: 13px; }
 .pic-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pic-controls { flex-wrap: wrap; gap: 8px; justify-content: center; }
@@ -908,7 +916,9 @@ html.hide-nums .num { display: none; }
 .pic-set .bar { max-width: 360px; }
 @media (max-width: 640px) {
   .pic-pair { grid-template-columns: 1fr; gap: 8px; }
-  .pic-img img { max-height: 32dvh; width: auto; }       /* a phone's dense screen still shows every source pixel */
+  .pic-pair.enlarged, .pic-pair.enlarged[data-big="b"] { grid-template-columns: 1fr; }
+  .pic-pair.enlarged[data-big="a"] .pic-side[data-side="b"], .pic-pair.enlarged[data-big="b"] .pic-side[data-side="a"] { display: none; }
+  .pic-transport .faint { flex-basis: 100%; }
   #pic-panel .cap kbd, #pic-panel .cap .kbd-hint { display: none; }
   .pic-controls { display: grid; grid-template-columns: 1fr 1fr; position: sticky; z-index: 5;
     bottom: calc(62px + env(safe-area-inset-bottom)); background: var(--panel); padding: 8px 0; margin: 0; }
@@ -916,3 +926,4 @@ html.hide-nums .num { display: none; }
   .pic-ans[data-ans="a"] { order: 1; } .pic-ans[data-ans="b"] { order: 2; } .pic-ans[data-ans="fine"] { order: 3; }
   .pic-ans[data-ans="bad"] { order: 4; } .pic-ans[data-ans="skip"] { order: 5; }
 }
+.pic-pair.enlarged .pic-vid { max-height: 62vh; }       /* the answer buttons stay in view */
