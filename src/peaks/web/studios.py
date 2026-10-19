@@ -95,3 +95,12 @@ class StudiosMixin:
                       "performers": r["performers"][:3], "stream": self.stream_url(r["scene_id"], start=0)}
                      for r in best[:24]],
         }
+
+    def studio_board(self, name: str, count: int = 3000, per_scene: int = 4) -> dict:
+        """Megaboard supply for a studio: the best moments of each of its scenes
+        (rejects left out), like the tier channels."""
+        rows = [r for r in self._by_studio().get(name, []) if r["tier"] != "rejected"]
+        if not rows:
+            raise LookupError(f"no scenes from studio {name!r} in the library")
+        sids = [r["scene_id"] for r in rows]
+        return {"hits": self._moment_pool_for_scenes(sids, per_scene, count), "scenes": len(sids), "label": name}

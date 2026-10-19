@@ -167,3 +167,17 @@ def test_routes(svc, monkeypatch):
     assert api.get("/api/studio", params={"name": "Nebula"}).json()["scenes"] == 2
     assert api.get("/api/studio", params={"name": "zzz"}).status_code == 404
     assert api.get("/api/performer/p1/costars").json()["costars"][0]["id"] in {"p2", "p3"}
+
+
+def test_studio_megaboard_channel(svc, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    r = svc.studio_board("Sunhouse")
+    assert r["scenes"] == 1 and r["label"] == "Sunhouse"                       # the rejected scene is left out
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(app_mod.create_app(svc.cfg))
+    d = api.get("/api/board/studio", params={"name": "Velvet"}).json()
+    assert d["scenes"] == 2 and d["label"] == "Velvet" and isinstance(d["items"], list)
+    assert api.get("/api/board/studio", params={"name": "Nobody"}).status_code == 404

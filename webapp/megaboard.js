@@ -894,6 +894,7 @@ let fyTotals = null;                       // {scenes, moments, scored_by} for t
 let boardSearch = null;                   // {q,min,per,neg,taste} when replaying a search
 let boardPerformer = null;                // {id,name,query} when playing a performer's best
 let boardStat = null;                     // {metric,id,label} when playing a Statistics-tab stat
+let boardStudio = null;                   // {name} when playing a studio's best moments
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
 function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
@@ -1203,7 +1204,7 @@ function refreshChannel() {
 function channelName() {
   const sel = document.getElementById("source");
   const o = sel && sel.options[sel.selectedIndex];
-  return o ? o.textContent.replace(/^(Tiers?|Playlist|Stat|Performer):\s*/, "").replace(/\s*\(\d+\)$/, "") : "channel";
+  return o ? o.textContent.replace(/^(Tiers?|Playlist|Stat|Performer|Studio):\s*/, "").replace(/\s*\(\d+\)$/, "") : "channel";
 }
 function short(t, n = 24) { return t.length > n ? t.slice(0, n - 1) + "…" : t; }
 function syncNav() {
@@ -1506,6 +1507,16 @@ async function loadSource(src, opts = {}) {
       if (!State.apexes.length) return isStale(tok) ? undefined : showError("No embedded moments for this performer.");
       pickApex = makeQueuePicker(State.apexes);
       setStatus("🎬 " + (d.performer || "performer") + " · best of");
+    } else if (src === "studio") {
+      // the best moments of every scene from one studio (like a tier channel)
+      State.searchMode = true;
+      let d;
+      try { d = await navApi(tok, "/api/board/studio?name=" + encodeURIComponent(boardStudio?.name || "")); }
+      catch (e) { return isStale(tok) ? undefined : showError("Couldn't load this studio.\n\n(" + e.message + ")"); }
+      State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+      if (!State.apexes.length) return isStale(tok) ? undefined : showError(`No embedded moments from ${d.label || "this studio"} yet.`);
+      pickApex = makeQueuePicker(State.apexes);
+      setStatus(`🎬 ${d.label} · ${d.scenes} scenes`);
     } else if (src === "stat") {
       State.searchMode = true;
       const qs = new URLSearchParams({ metric: boardStat?.metric || "fresh" });
@@ -1588,6 +1599,7 @@ async function initSources(initial) {
   } catch {}
   if (initial === "search") opts.push(`<option value="search">Search results</option>`);
   if (initial === "performer") opts.push(`<option value="performer">Performer: ${esc(boardPerformer?.name || "best of")}</option>`);
+  if (initial === "studio") opts.push(`<option value="studio">Studio: ${esc(boardStudio?.name || "")}</option>`);
   if (initial === "stat") opts.push(`<option value="stat">Stat: ${esc(boardStat?.label || "statistic")}</option>`);
   // For You is always available — you can pivot to your taste from any source.
   opts.push(`<option value="foryou">For You — your taste</option>`);
@@ -1628,6 +1640,10 @@ async function main() {
   else if (params.get("src") === "performer") {
     initial = "performer";
     boardPerformer = { id: params.get("id"), name: params.get("name"), query: params.get("pq") };
+  }
+  else if (params.get("src") === "studio" && params.get("name")) {
+    initial = "studio";
+    boardStudio = { name: params.get("name") };
   }
   else if (params.get("src") === "stat") {
     initial = "stat";

@@ -1685,7 +1685,7 @@ function renderPerfDetail(d, prof = {}) {
         <div class="pf-focus"><input id="pd-focus" class="search" placeholder="Her best, focused on… (e.g. lingerie) — optional" />
           <button id="pd-bestof" class="btn pri">⭐ Best of</button></div>
         <div class="perf-actions" style="margin-top:10px">
-          <button id="pd-board" class="ghost">▶ Endless channel</button>
+          <button id="pd-board" class="ghost" title="Her best moments on the megaboard, endlessly">▶ Megaboard</button>
           <button id="pd-best" class="ghost">💾 Save best-of</button>
           <button id="pd-reel" class="ghost" title="Export a single video of her top 300 taste-ranked moments">⬇ Reel</button>
           <button id="pd-compare" class="ghost">⚔ Compare</button>
@@ -1804,6 +1804,7 @@ async function openStudioDetail(name) {
       <div class="pf-tierbars">${tierBarsHTML(d.tiers)}</div><div class="small">${tally}</div>
       <div class="perf-actions" style="margin-top:10px">
         <button id="sd-cat" class="btn pri">☰ Open in Catalogue</button>
+        <button id="sd-board" class="btn" title="The best moments of its scenes on the megaboard">▶ Megaboard</button>
         <button id="sd-review" class="ghost" title="Grade its scenes one at a time, best first">▶ Review its scenes</button>
       </div>
     </div>
@@ -1814,6 +1815,7 @@ async function openStudioDetail(name) {
     <h3 style="margin:18px 0 6px">Best scenes</h3><div class="scene-cards" data-cards></div>`;
   $("#sd-back").onclick = openStudios;
   $("#sd-cat").onclick = () => openCatWith({ studios: [d.name] });
+  $("#sd-board").onclick = () => window.open("/megaboard/?" + new URLSearchParams({ src: "studio", name: d.name }), "_blank");
   $("#sd-review").onclick = async () => {
     await openCatWith({ studios: [d.name], sort: "tier" });
     if (cat.items.length) $("#btn-cat-review")?.click();
@@ -5399,10 +5401,12 @@ async function prBrief(pid) {
     </div>
     <div class="pr-actions">
       <button class="btn pri" id="pr-start">▶ Start review · ${plural(rp.scenes, "scene")}, best first</button>
+      <button class="btn" id="pr-board" title="Her best moments on the megaboard">▶ Megaboard</button>
       <button class="btn" id="pr-other">🎲 Someone else</button>
       <button class="btn ghost" id="pr-back">← Back to performers</button></div>`;
   $("#pr-start").onclick = prStart;
   $("#pr-other").onclick = prRandom;
+  $("#pr-board").onclick = () => playPerformerBoard(b.id, b.name);
   $("#pr-back").onclick = () => { pr.brief = null; openPerfReview(); };
 }
 async function prStart() {

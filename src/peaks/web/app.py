@@ -1346,6 +1346,17 @@ def create_app(cfg=None):
         except LookupError as exc:
             raise HTTPException(404, str(exc))
 
+    @app.get("/api/board/studio")
+    def board_studio(name: str, count: int = Query(3000, ge=1, le=10000), per_scene: int = Query(4, ge=1, le=50)):
+        """Megaboard source: the best moments of every scene from one studio."""
+        try:
+            r = service.studio_board(name, count=count, per_scene=per_scene)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable
+            raise HTTPException(503, str(exc))
+        return {"items": _hit_payload(service, r["hits"]), "scenes": r["scenes"], "label": r["label"]}
+
     @app.get("/api/performer/{pid}/costars")
     def performer_costars(pid: str):
         return {"costars": service.performer_costars(pid)}
