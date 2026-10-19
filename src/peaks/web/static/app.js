@@ -2702,6 +2702,12 @@ const td = { queue: [], answered: [], job: null, progress: null, sinceTeach: 0, 
   moments: [], mi: 0, hop: null, loading: false, board: null, labels: {} };
 const TD_TEACH_EVERY = 6;
 const TD_SHORT = { reject: "Reject", upscale: "Upscale", merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
+// a grade name that fits a phone's five-across row (your own tier names are trimmed)
+function shortGrade(g) {
+  const n = gradeName(g), s = TD_SHORT[g] || "";
+  if (n.length <= 10) return n;
+  return s && n.startsWith(s.replace(/\.$/, "")) ? s : n.slice(0, 7) + ".";
+}
 const TD_QUESTION = {
   saved: "You saved moments here — make it Légendaire?",
   reject: "Let it go?",
@@ -4832,7 +4838,7 @@ function renderReview() {
   const sug = r.suggest ? r.suggest.grade : (r.pred ? r.pred.tier : null);
   $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) =>
     `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}"><span class="k">${k + 1}</span>
-      <span class="n">${esc(gradeName(g))}</span><span class="d">${d}</span></button>`).join("");
+      <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${d}</span></button>`).join("");
   const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "reject"];
   $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
     const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
@@ -4956,6 +4962,28 @@ function rvEngageTick(v) {
   api(`/api/taste/engage?${new URLSearchParams({ scene_id: rvEngage.sid, t: t.toFixed(2) })}`, { method: "POST" }).catch(() => {});
 }
 $("#rv-grades")?.addEventListener("click", (e) => { const b = e.target.closest("[data-g]"); if (b) rvGrade(b.dataset.g); });
+// touch: swipe sideways on a video for the next / previous one, double-tap a half
+// to jump 10 s back or on (the taps' own play/pause clicks cancel each other out)
+function videoGestures(v, { onSwipe }) {
+  if (!v) return;
+  let x0 = 0, y0 = 0, t0 = 0, lastTap = 0, lastSide = 0;
+  v.addEventListener("touchstart", (e) => {
+    const t = e.changedTouches[0]; x0 = t.clientX; y0 = t.clientY; t0 = Date.now();
+  }, { passive: true });
+  v.addEventListener("touchend", (e) => {
+    const t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+    if (Math.abs(dx) > 60 && Math.abs(dy) < 50 && Date.now() - t0 < 600) { onSwipe(dx < 0 ? 1 : -1); lastTap = 0; return; }
+    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) return;
+    const r = v.getBoundingClientRect(), side = t.clientX < r.left + r.width / 2 ? -1 : 1, now = Date.now();
+    if (now - lastTap < 300 && side === lastSide && v.duration) {
+      v.currentTime = Math.max(0, Math.min(v.duration - 0.2, v.currentTime + side * 10));
+      toast(side < 0 ? "⟲ 10 s" : "10 s ⟳");
+      lastTap = 0;
+    } else { lastTap = now; lastSide = side; }
+  }, { passive: true });
+}
+videoGestures($("#rv-v"), { onSwipe: (d) => rvMove(d) });
+videoGestures($("#viewer-v"), { onSwipe: (d) => (d > 0 ? nextViewer() : prevViewer()) });
 $("#rv-queue")?.addEventListener("click", (e) => { const q = e.target.closest("[data-j]"); if (q) { rv.i = +q.dataset.j; renderReview(); } });
 // the whole bottom band of the player — the bar and everything below it — seeks
 // (click or drag); only clicks above it play/pause

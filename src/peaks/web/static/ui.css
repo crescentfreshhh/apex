@@ -821,3 +821,75 @@ html.hide-nums .num { display: none; }
   .cmd span { display: inline; }
   .shelf-h { flex-wrap: wrap; row-gap: 8px; }
 }
+
+/* --- phone screens: Review, the scene viewer -------------------------------------------- */
+@media (max-width: 640px) {
+  /* Review: the five grades in one row, held just above the tab bar */
+  #review .kbdrow, #rv-theater, #review kbd, .rv-vol input { display: none; }
+  #rv .head.tight { gap: 6px; }
+  #rv .head h1 { font-size: 18px; flex: 1 1 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #review .rv-player { border-radius: 10px; margin: 0 -4px; }
+  .rv-grades, .rv.theater .rv-grades { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; position: sticky; z-index: 5;
+    bottom: calc(62px + env(safe-area-inset-bottom)); margin: 8px 0; padding: 8px 0; background: var(--bg); }
+  .rv-grades .g { padding: 10px 2px; text-align: center; min-height: 52px; display: flex; flex-direction: column; justify-content: center; }
+  .rv-grades .k, .rv-grades .d { display: none; }
+  .rv-grades .n { font-size: 11.5px; line-height: 1.2; overflow-wrap: anywhere; }
+  .rv-side { gap: 10px; }
+  /* the scene viewer: video on top, details underneath */
+  .viewer { flex-direction: column; overflow-y: auto; }
+  .viewer-stage { flex: none; padding: calc(8px + env(safe-area-inset-top)) 8px 8px; gap: 8px; }
+  .viewer-video { flex: none; height: auto; }
+  .viewer-video video { width: 100%; max-height: 56vh; }
+  .viewer-transport { flex-wrap: wrap; gap: 8px 10px; }
+  .viewer-seekwrap { flex: 1 1 100%; order: -1; }
+  .viewer-vol { display: none; }
+  .viewer-transport .vbtn { font-size: 20px; min-width: 40px; min-height: 40px; }
+  .viewer-side { width: auto; border-left: 0; border-top: 1px solid var(--line); padding: 14px 14px calc(20px + env(safe-area-inset-bottom)); }
+  .viewer-close { top: calc(8px + env(safe-area-inset-top)); width: 40px; height: 40px; }
+}
+/* a phone turned sideways: the video fills the screen */
+@media (max-height: 500px) and (orientation: landscape) and (pointer: coarse) {
+  .viewer { flex-direction: row; }
+  .viewer-side { display: none; }
+  .viewer-stage { padding: 6px env(safe-area-inset-right) 6px env(safe-area-inset-left); }
+  .viewer-video video { max-height: calc(100dvh - 70px); }
+  .tabbar { display: none; }
+}
+.rv-grades .ns { display: none; }
+@media (max-width: 640px) {
+  .rv-grades .nl { display: none; }
+  .rv-grades .ns { display: inline; }
+  .rv-grades .n { overflow-wrap: normal; white-space: nowrap; }
+  .viewer { background: #000; z-index: 70; }
+}
+
+/* --- phone screens: Catalogue, filters, lists ---------------------------------------------- */
+@media (max-width: 640px) {
+  .cat-card { grid-template-columns: 116px minmax(0, 1fr); gap: 8px 12px; padding: 12px 12px 12px 12px; align-items: start; }
+  .cat-card .cat-coverwrap { grid-column: 1; grid-row: 1; }
+  .cat-card .cat-cover { width: 116px; }
+  .cat-card .cat-body { grid-column: 2; grid-row: 1; min-width: 0; }
+  .cat-card .cat-moments { display: grid; grid-column: 1 / -1; }
+  .cat-card .cat-grades { grid-column: 1 / -1; }
+  .cat-grades .cat-g { height: 46px; }
+  .cat-selbox { top: 16px; left: 16px; }
+  .cat-bulk { bottom: calc(70px + env(safe-area-inset-bottom)); }
+  .cat-fbar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .cat-fbar > * { flex: none; }
+  .cat-fchips { display: flex; gap: 6px; }
+  /* the filter editor becomes a bottom sheet over the tab bar */
+  .fpop { position: fixed; left: 0 !important; right: 0; top: auto !important; bottom: 0; width: auto; max-width: none;
+    z-index: 80; border-radius: 16px 16px 0 0; padding: 14px 14px calc(16px + env(safe-area-inset-bottom)); max-height: 75dvh; }
+  .fpop-list { max-height: 45dvh; }
+  .cat-qwrap { flex: 1 1 100%; }
+  #cat-mbps { width: 64px; }
+  .pf-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .st-grid, .scene-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .costars { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+  .costar { flex: none; }
+}
+@media (max-width: 640px) {
+  #cat-chips { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+  #cat-chips .cat-chip { flex: none; }
+  .cat-card .cat-moments:not(:has(img)) { display: none; }
+}

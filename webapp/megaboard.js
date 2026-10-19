@@ -13,6 +13,8 @@
 // the phone app: same service worker as the rest of Peaks (served by `peaks web` only)
 if ("serviceWorker" in navigator && location.pathname.startsWith("/megaboard"))
   navigator.serviceWorker.register("/sw.js").catch(() => {});
+// phones: the toolbar shows the essentials; ⋯ opens the rest
+document.getElementById("bar-more")?.addEventListener("click", () => document.getElementById("bar").classList.toggle("open"));
 
 const State = {
   apexes: [],
@@ -280,12 +282,42 @@ function makeTile(index) {
     e.preventDefault();
     if (tile.apex && tile.apex.scene_id) openTileMenu(tile, e.clientX, e.clientY);
   });
+  // touch: a long press opens the same menu (Chrome usually sends it as a
+  // contextmenu; this covers a video that swallows it), and the tap that ends
+  // it doesn't also enlarge the tile
+  let lp = null, lpFired = false;
+  el.addEventListener("touchstart", (e) => {
+    lpFired = false;
+    const t = e.touches[0];
+    clearTimeout(lp);
+    lp = setTimeout(() => {
+      if (!tile.apex || !tile.apex.scene_id || document.querySelector(".mb-menu")) return;
+      lpFired = true; openTileMenu(tile, t.clientX, t.clientY);
+    }, 550);
+  }, { passive: true });
+  for (const ev of ["touchmove", "touchend", "touchcancel"]) el.addEventListener(ev, () => clearTimeout(lp), { passive: true });
+  el.addEventListener("click", (e) => { if (lpFired) { lpFired = false; e.stopImmediatePropagation(); } }, true);
   el.addEventListener("mouseenter", () => { State.hover = tile; State.overTile = tile; applyGridAudio(); });
   el.addEventListener("mouseleave", () => { if (State.overTile === tile) State.overTile = null; applyGridAudio(); });
   return tile;
 }
 
 // --- enlarge in place ------------------------------------------------------
+
+// a phone held upright: the same tiles in fewer columns (2 × 2 → four 16:9 tiles
+// stacked), and an enlarged tile fills the board
+function portraitBoard() { return innerWidth < innerHeight && innerWidth <= 700; }
+function boardCols() { return portraitBoard() ? Math.ceil(State.n / 2) : State.n; }
+function layoutBoard() {
+  const board = document.getElementById("board"), n = State.n;
+  if (!board || !n) return;
+  const cols = boardCols();
+  board.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  board.style.gridTemplateRows = `repeat(${Math.ceil((n * n) / cols)}, 1fr)`;
+  if (State.big) layoutBig(State.big, true);
+}
+let _relayout = null;
+addEventListener("resize", () => { clearTimeout(_relayout); _relayout = setTimeout(layoutBoard, 150); });
 
 function bigSpan(n) {
   return Math.min(n, Math.max(2, Math.ceil(n * 0.6)));
@@ -294,7 +326,13 @@ function bigSpan(n) {
 function layoutBig(tile, on) {
   const board = document.getElementById("board");
   const n = State.n;
+  if (on && portraitBoard()) {                       // upright phone: the whole board
+    tile.el.style.gridArea = "1 / 1 / -1 / -1";
+    for (const t of State.tiles) if (t !== tile) t.el.style.display = "none";
+    return;
+  }
   if (on) {
+    for (const t of State.tiles) t.el.style.display = "";
     const s = bigSpan(n);
     const r = Math.floor(tile.index / n);
     const c = tile.index % n;
@@ -507,11 +545,10 @@ function buildBoard(n) {
   for (const t of State.tiles) expoEnd(t);   // bank the old board's showings
   const board = document.getElementById("board");
   board.innerHTML = "";
-  board.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
-  board.style.gridTemplateRows = `repeat(${n}, 1fr)`;
-  board.style.gridAutoFlow = "";
   State.tiles = [];
   State.n = n;
+  layoutBoard();
+  board.style.gridAutoFlow = "";
   const generation = (State.boardGen = (State.boardGen || 0) + 1);
   for (let i = 0; i < n * n; i++) {
     const tile = makeTile(i);
@@ -541,7 +578,9 @@ function reshuffle() {
   State.tiles.forEach((t, i) => setTimeout(() => loadApex(t), i * STAGGER_MS));
 }
 
-const STEER = "right-click, or hover + 1–5 grade · ↑/↓ taste · S save · ⌫ back · U undo";
+const STEER = matchMedia("(pointer: coarse)").matches
+  ? "tap a tile to enlarge · long-press to grade, save or explore"
+  : "right-click, or hover + 1–5 grade · ↑/↓ taste · S save · ⌫ back · U undo";
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
   if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
@@ -684,6 +723,13 @@ function tierBadge(t) {
 // --- grade from the board: your tiers, same keys as the Review queue ------------
 const MB_GRADES = ["reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–5
 function gradeLabel(g) { return g === "reject" ? "Reject" : (MB_TIER_NAMES[g] || g); }
+// a name that fits a phone's five-across row (your own tier names are trimmed)
+const MB_SHORT = { merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
+function gradeShort(g) {
+  const n = gradeLabel(g), s = MB_SHORT[g] || "";
+  if (n.length <= 10) return n;
+  return s && n.startsWith(s.replace(/\.$/, "")) ? s : n.slice(0, 7) + ".";
+}
 async function gradeScene(sid, grade) {
   sid = String(sid);
   expoRespond(sid, grade !== "reject");
@@ -1079,7 +1125,7 @@ function openTileMenu(tile, x, y) {
   MB_GRADES.forEach((g, i) => {
     const b = document.createElement("button");
     b.className = `g-${g}` + ((curTier === g || (g === "reject" && curTier === "rejected")) ? " cur" : "");
-    b.innerHTML = `<span class="k">${i + 1}</span>${esc(gradeLabel(g))}`;
+    b.innerHTML = `<span class="k">${i + 1}</span><span class="nl">${esc(gradeLabel(g))}</span><span class="ns">${esc(gradeShort(g))}</span>`;
     b.title = `Grade this scene ${gradeLabel(g)} (${i + 1})`;
     b.addEventListener("click", (e) => { e.stopPropagation(); closeTileMenu(); gradeScene(apex.scene_id, g); });
     grades.appendChild(b);
