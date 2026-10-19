@@ -265,7 +265,7 @@ def stills_for_people(path: str, rec: dict, out_full, out_crop, ffmpeg: str = "f
     when a frame is shrunk, so the crop is never scaled)."""
     x0, y0, x1, y1 = rec.get("box") or [0, 0, rec["w"], rec["h"]]
     eye = f"crop={rec['w']}:{rec['h']}:0:0," if rec.get("vr") else ""
-    cw, ch = min(640, x1 - x0), min(640, y1 - y0)
+    cw, ch = min(480, x1 - x0), min(480, y1 - y0)            # two fit side by side, unscaled
     cx, cy = x0 + (x1 - x0 - cw) // 2, y0 + (y1 - y0 - ch) // 2
     t = f"{max(0.0, duration * at):.3f}"
     for out, vf in ((out_full, eye + "scale=960:-2"), (out_crop, eye + f"crop={cw}:{ch}:{cx}:{cy}")):
@@ -388,7 +388,7 @@ class PictureModel:
         ranked = [p for p in picks if p.get("ans") in ("a", "b") and p["a"] in feats and p["b"] in feats]
         rep = {"trained": False, "pairs": len(ranked),
                "fine_bad": sum(1 for p in picks if p.get("ans") in ("fine", "bad")), "need": self.MIN_PAIRS}
-        if len(ranked) < self.MIN_PAIRS or len(keys) < 4:
+        if len(ranked) < self.MIN_PAIRS or len(keys) < 2:
             self.w, self.report = None, rep
             return rep
         self.mu = allx.mean(axis=0)

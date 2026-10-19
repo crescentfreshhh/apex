@@ -893,3 +893,26 @@ html.hide-nums .num { display: none; }
   #cat-chips .cat-chip { flex: none; }
   .cat-card .cat-moments:not(:has(img)) { display: none; }
 }
+
+/* --- picture quality: the comparison panel, chips ------------------------------------------- */
+.pic-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+.pic-side { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pic-img { padding: 0; border: 1px solid var(--line2); border-radius: 10px; overflow: hidden; background: #000; cursor: zoom-in;
+  display: flex; justify-content: center; width: 100%; }
+.pic-img.whole { cursor: zoom-out; }
+.pic-img img { max-width: 100%; height: auto; display: block; }   /* the crop at its own pixels, never enlarged */
+.pic-meta { font-size: 13px; }
+.pic-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pic-controls { flex-wrap: wrap; gap: 8px; justify-content: center; }
+.q.pic { white-space: normal; }
+.pic-set .bar { max-width: 360px; }
+@media (max-width: 640px) {
+  .pic-pair { grid-template-columns: 1fr; gap: 8px; }
+  .pic-img img { max-height: 32dvh; width: auto; }       /* a phone's dense screen still shows every source pixel */
+  #pic-panel .cap kbd, #pic-panel .cap .kbd-hint { display: none; }
+  .pic-controls { display: grid; grid-template-columns: 1fr 1fr; position: sticky; z-index: 5;
+    bottom: calc(62px + env(safe-area-inset-bottom)); background: var(--panel); padding: 8px 0; margin: 0; }
+  .pic-controls .pic-ans[data-ans="skip"] { grid-column: 1 / -1; }
+  .pic-ans[data-ans="a"] { order: 1; } .pic-ans[data-ans="b"] { order: 2; } .pic-ans[data-ans="fine"] { order: 3; }
+  .pic-ans[data-ans="bad"] { order: 4; } .pic-ans[data-ans="skip"] { order: 5; }
+}

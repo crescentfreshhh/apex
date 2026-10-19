@@ -846,17 +846,22 @@ class LibraryMixin:
         return max(rows, key=key)["scene_id"]
 
     def _dupe_keeper(self, rows: list[dict]) -> str:
-        """The copy to keep — by your learned picture score once it's trusted
-        and every copy is measured; otherwise `dupe_keeper`'s file-facts rule."""
+        return self._dupe_keeper_by(rows)[0]
+
+    def _dupe_keeper_by(self, rows: list[dict]) -> tuple[str, str]:
+        """The copy to keep and why ('picture' / 'file'): by your learned picture
+        score once it's trusted and every copy is measured; otherwise
+        `dupe_keeper`'s file-facts rule."""
         try:
             if self.picture_trusted():
                 pics = self.picture_scores()
                 got = [pics.get(r["scene_id"]) for r in rows]
                 if all(p and p.get("score") is not None for p in got):
-                    return max(zip(rows, got), key=lambda t: (t[1]["score"], int(t[0].get("size") or 0)))[0]["scene_id"]
+                    best = max(zip(rows, got), key=lambda t: (t[1]["score"], int(t[0].get("size") or 0)))
+                    return best[0]["scene_id"], "picture"
         except Exception:  # noqa: BLE001 — fall back to the file facts
             pass
-        return self.dupe_keeper(rows)
+        return self.dupe_keeper(rows), "file"
 
     @staticmethod
     def dupe_best_grade(rows: list[dict]) -> str | None:
@@ -914,9 +919,9 @@ class LibraryMixin:
             rows = [known[s] for s in g if s in known]
             if len(rows) < 2:
                 continue
-            keep = self._dupe_keeper(rows)
+            keep, keep_by = self._dupe_keeper_by(rows)
             size = {r["scene_id"]: int(r.get("size") or 0) for r in rows}
-            out.append({"scenes": rows, "keep": keep, "best_grade": self.dupe_best_grade(rows),
+            out.append({"scenes": rows, "keep": keep, "keep_by": keep_by, "best_grade": self.dupe_best_grade(rows),
                         "reclaim": sum(size.values()) - size[keep],
                         "picture": {r["scene_id"]: pics[r["scene_id"]] for r in rows if r["scene_id"] in pics}})
         out.sort(key=lambda g: -g["reclaim"])

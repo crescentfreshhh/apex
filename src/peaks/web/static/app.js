@@ -182,6 +182,7 @@ $("#bk-upload")?.addEventListener("change", async (e) => {
 });
 function showSettingsSection(sec) {
   if (sec === "backup") loadBackup();
+  if (sec === "picture") loadPicSettings();
   document.querySelectorAll("#set-nav [data-sec]").forEach((b) => b.classList.toggle("on", b.dataset.sec === sec));
   document.querySelectorAll(".sets .sec").forEach((p) => { p.hidden = p.dataset.sec !== sec; });
 }
@@ -2614,7 +2615,115 @@ document.addEventListener("click", async (e) => {
     catch (err) { toast(err.message, true); }
   }
 });
-wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); });
+wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); if (t === "picture") loadPicPair(); });
+
+// --- Picture quality: "which looks better?" and the measuring status -----------------------
+const pic = { pair: null, busy: false, poll: null };
+function picModelWords(m, picks) {
+  if (!m) return "";
+  if (!m.trained) {
+    const left = Math.max(0, (m.need || 25) - (m.pairs || 0));
+    return left ? `${plural(m.pairs || 0, "pick")} so far — ${left} more and Peaks can start judging pictures your way.`
+      : "Enough picks — Peaks learns from them as soon as more files are measured.";
+  }
+  const pct = (x) => Math.round(x * 100) + "%";
+  return `Agrees with your picks ${pct(m.agree)} of the time (bitrate alone: ${pct(m.baseline)}) — ` +
+    (m.trusted ? "<b>used</b> for picture scores and duplicate choices." : "not better than bitrate yet, so not used. More picks help.") +
+    (m.line != null ? ` Your “good enough” line sits at ${m.line}/100.` : m.fine_bad ? "" : " “Both fine” / “Both bad” answers set your “good enough” line.");
+}
+function picSideHTML(x, side) {
+  const facts = [x.res, x.mbps != null ? `${x.mbps} Mbps` : null, x.codec].filter(Boolean).join(" · ");
+  return `<div class="pic-side" data-side="${side}">
+      <button class="pic-img" title="Tap for the whole frame"><img src="${esc(x.crop)}" data-crop="${esc(x.crop)}" data-full="${esc(x.full)}" alt="" /></button>
+      <div class="pic-meta"><b>${picWord(side)}</b> · ${esc(facts || "?")}<div class="faint small pic-title" title="${esc(x.title)}">${esc(x.title)}</div></div>
+    </div>`;
+}
+// side by side on a computer, one above the other on a phone
+const picStacked = () => matchMedia("(max-width: 640px)").matches;
+const picWord = (side) => (picStacked() ? (side === "a" ? "Top" : "Bottom") : (side === "a" ? "Left" : "Right"));
+async function loadPicPair() {
+  const box = $("#pic-pair"); if (!box) return;
+  const la = document.querySelector('.pic-ans[data-ans="a"]'), lb = document.querySelector('.pic-ans[data-ans="b"]');
+  if (la) la.textContent = picStacked() ? "▲ Top looks better" : "◀ Left looks better";
+  if (lb) lb.textContent = picStacked() ? "▼ Bottom looks better" : "Right looks better ▶";
+  let d;
+  try { d = await api("/api/picture/pair"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  pic.pair = d.pair;
+  if (!d.pair) {
+    box.innerHTML = `<div class="empty">Nothing to compare yet — Peaks needs at least two measured files.<br>
+      <button class="btn sm" data-go="dashboard" data-sec="picture">Measure your library…</button></div>`;
+  } else {
+    box.innerHTML = picSideHTML(d.pair.a, "a") + picSideHTML(d.pair.b, "b");
+    box.querySelectorAll(".pic-img").forEach((b) => b.onclick = () => {
+      const img = b.querySelector("img"), full = img.src.endsWith(img.dataset.full);
+      img.src = full ? img.dataset.crop : img.dataset.full;
+      b.classList.toggle("whole", !full);
+    });
+  }
+  picStatusLine();
+}
+async function picStatusLine() {
+  try {
+    const st = await api("/api/picture/status");
+    $("#pic-status").innerHTML = picModelWords(st.model) +
+      ` <span class="faint">· ${st.measured.toLocaleString()} of ${st.total.toLocaleString()} files measured</span>`;
+  } catch { /* the pair still works */ }
+}
+async function picAnswer(ans) {
+  if (pic.busy) return;
+  const p = pic.pair;
+  if (ans === "skip" || !p) return loadPicPair();
+  pic.busy = true;
+  try {
+    await api("/api/picture/answer", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ a: p.a.key, b: p.b.key, ans }) });
+  } catch (e) { toast(e.message, true); }
+  pic.busy = false;
+  loadPicPair();
+}
+$("#pic-panel")?.addEventListener("click", (e) => { const b = e.target.closest(".pic-ans"); if (b) picAnswer(b.dataset.ans); });
+document.addEventListener("keydown", (e) => {
+  if (!$("#taste")?.classList.contains("active") || $("#pic-panel")?.hidden) return;
+  if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = { ArrowLeft: "a", ArrowRight: "b", ArrowUp: "fine", ArrowDown: "bad", s: "skip", S: "skip" }[e.key];
+  if (k) { e.preventDefault(); picAnswer(k); }
+});
+// Settings → Picture quality
+async function loadPicSettings() {
+  const box = $("#pic-set"); if (!box) return;
+  clearTimeout(pic.poll);
+  let st;
+  try { st = await api("/api/picture/status"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  const run = st.running, pr = (run && run.progress) || {};
+  const eta = pr.eta_s != null ? (pr.eta_s > 5400 ? `${(pr.eta_s / 3600).toFixed(1)} h left` : `${Math.max(1, Math.round(pr.eta_s / 60))} min left`) : "";
+  const pct = st.total ? Math.round(100 * st.measured / st.total) : 0;
+  box.innerHTML = `
+    <div class="field"><div class="l"><b>Measured</b><span>files Peaks has looked at</span></div>
+      <div><b>${st.measured.toLocaleString()}</b> of ${st.total.toLocaleString()} (${pct}%)${st.failed ? ` · <span class="warn">${st.failed} unreadable</span>` : ""}
+        <div class="bar"><i style="width:${pct}%"></i></div>
+        ${run ? `<div class="small">Measuring now — ${pr.done || 0} of ${pr.total || "?"} this pass${eta ? ` · ${eta}` : ""}</div>` : ""}</div></div>
+    <div class="field"><div class="l"><b>Your library</b><span>only when you ask; idle time only</span></div>
+      <div>${st.backfill
+        ? `<button class="btn" id="pic-stop">Stop measuring the library</button> <span class="dim small">it carries on whenever nothing heavier is running</span>`
+        : `<button class="btn pri" id="pic-start">${st.finished ? "Measure what's new" : "Measure the library"}</button> <span class="dim small">${st.finished
+          ? `last full pass finished ${esc(new Date(st.finished * 1000).toLocaleDateString())}; new files are measured after each ingest anyway`
+          : "a few seconds per file, unreviewed scenes first; you can stop any time"}</span>`}</div></div>
+    <div class="field"><div class="l"><b>Your bar</b><span>learned from your picks</span></div>
+      <div>${picModelWords(st.model)}<div class="small" style="margin-top:6px">${plural(st.picks, "pick")} in Taste → Picture${st.from_duplicates ? ` · ${st.from_duplicates} from duplicates you resolved` : ""}
+        · <button class="btn sm ghost" data-go="taste" id="pic-go-teach">Compare pictures…</button></div></div></div>`;
+  $("#pic-start")?.addEventListener("click", async () => { await api("/api/picture/backfill?on=true", { method: "POST" }); loadPicSettings(); });
+  $("#pic-stop")?.addEventListener("click", async () => { await api("/api/picture/backfill?on=false", { method: "POST" }); loadPicSettings(); });
+  $("#pic-go-teach")?.addEventListener("click", () => setTimeout(() => document.querySelector('#taste-tabs [data-tab="picture"]')?.click(), 0));
+  if (run && !$("#pic-set").closest(".sec").hidden) pic.poll = setTimeout(loadPicSettings, 5000);
+}
+// a file's picture in a few words: the score once Peaks has learned your bar, else what's wrong
+function picChipHTML(p, { long = false } = {}) {
+  if (!p) return "";
+  const bad = p.ok === false, words = (p.reasons || []).slice(0, long ? 3 : 1).join(" · ");
+  if (p.score == null && !words) return long ? '<span class="faint">measured — nothing wrong found</span>' : "";
+  const head = p.score != null ? `Picture ${p.score}` : "Picture";
+  return `<span class="q pic ${bad ? "warn" : p.score != null && p.score >= 70 ? "hi" : ""}" title="${esc((p.reasons || []).join(" · ") || "no problems found")}">${esc(head)}${words ? ` · ${esc(words)}` : ""}${bad ? " · below your line" : ""}</span>`;
+}
 wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); if (t === "health") openHealth(); });
 
 // --- Library health: saves, the model's view of each tier, the trim pool -------------
@@ -3314,7 +3423,7 @@ const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 // views and the chip bar all read and write it through cfParams / cfFromParams.
 const CF_EMPTY = () => ({ performers: [], perfMode: "all", studios: [], tags: [], tagsNot: [], vr: "",
   saves: "", organized: "", released: ["", ""], added: ["", ""], length: ["", ""], size: ["", ""],
-  minO: "", performer: "" });
+  minO: "", performer: "", pic: "", picMin: "" });
 cat.f = CF_EMPTY();
 const CF_TYPES = [
   ["performers", "Performer", "Scenes with a performer — add several for scenes with all of them (or any)"],
@@ -3329,6 +3438,7 @@ const CF_TYPES = [
   ["size", "File size", "File size in GB"],
   ["minO", "O-count", "At least this many Os"],
   ["organized", "Organised", "Marked organised in Stash — or not"],
+  ["pic", "Picture", "Picture quality: below your line, upscaled, not measured yet, or a minimum score"],
 ];
 const CF_LISTS = new Set(["performer_ids", "pnames", "studios", "tags", "tags_not"]);
 const cfArr = (x) => (x == null || x === "" ? [] : Array.isArray(x) ? x : [x]);
@@ -3347,6 +3457,8 @@ function cfParams(f = cat.f) {
   pair(f.released, "date_from", "date_to"); pair(f.added, "added_from", "added_to");
   pair(f.length, "dur_min", "dur_max"); pair(f.size, "size_min", "size_max");
   if (f.minO !== "") p.min_o = f.minO;
+  if (f.pic) p.pic = f.pic;
+  if (f.picMin !== "") p.pic_min = f.picMin;
   return p;
 }
 function cfFromParams(p) {
@@ -3361,6 +3473,7 @@ function cfFromParams(p) {
   const g = (k) => (p[k] == null ? "" : String(p[k]));
   f.released = [g("date_from"), g("date_to")]; f.added = [g("added_from"), g("added_to")];
   f.length = [g("dur_min"), g("dur_max")]; f.size = [g("size_min"), g("size_max")]; f.minO = g("min_o");
+  f.pic = p.pic || ""; f.picMin = g("pic_min");
   return f;
 }
 function cfCount(f = cat.f) { return Object.keys(cfParams(f)).filter((k) => !["pnames", "perf_mode"].includes(k)).length; }
@@ -3387,6 +3500,7 @@ const SORT_DIRS = {
   predicted: ["desc", "Highest tier first", "Lowest tier first"], quality: ["desc", "Best first", "Worst first"],
   bitrate: ["desc", "Highest first", "Lowest first"], duration: ["desc", "Longest first", "Shortest first"],
   size: ["desc", "Largest first", "Smallest first"],
+  picture: ["desc", "Best picture first", "Worst picture first"],
 };
 // a suggestion list opens in its own order, a tier list newest-first — until you pick a sort
 function catSyncSort() {
@@ -3625,6 +3739,8 @@ function cfChipText(k, i) {
     case "length": return `${rng(f.length, " min")}`;
     case "size": return `${rng(f.size, " GB")}`;
     case "minO": return `O ≥ ${f.minO}`;
+    case "pic": return { low: "Picture below your line", upscaled: "Upscaled picture", unmeasured: "Picture not measured yet" }[f.pic] || "Picture";
+    case "picMin": return `Picture ≥ ${f.picMin}`;
   }
   return k;
 }
@@ -3638,7 +3754,7 @@ function renderCatFChips() {
   f.studios.forEach((_, i) => out.push(chip("studios", i)));
   f.tags.forEach((_, i) => out.push(chip("tags", i)));
   f.tagsNot.forEach((_, i) => out.push(chip("tagsNot", i)));
-  for (const k of ["vr", "saves", "organized", "minO"]) if (f[k] !== "") out.push(chip(k));
+  for (const k of ["vr", "saves", "organized", "minO", "pic", "picMin"]) if (f[k] !== "") out.push(chip(k));
   for (const k of ["released", "added", "length", "size"]) if (f[k][0] !== "" || f[k][1] !== "") out.push(chip(k));
   $("#cat-fchips").innerHTML = out.join("");
   $("#btn-cat-clear").hidden = !out.length;
@@ -3669,7 +3785,7 @@ $("#cat-fchips")?.addEventListener("click", (e) => {
   if (e.target.closest("[data-mode]")) { cat.f.perfMode = cat.f.perfMode === "any" ? "all" : "any"; openCatalogue(); return; }
   const c = e.target.closest(".fchip"); if (!c) return;
   if (e.target.closest(".fx")) { cfRemove(c.dataset.k, c.dataset.i); return; }
-  cfEdit(c.dataset.k === "performer" ? "performers" : c.dataset.k, c);
+  cfEdit({ performer: "performers", picMin: "pic" }[c.dataset.k] || c.dataset.k, c);
 });
 $("#btn-cat-addf")?.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -3703,6 +3819,8 @@ function cfEdit(k, anchor) {
   else if (k === "released" || k === "added") body = range(f[k], "date", "");
   else if (k === "length") body = range(f.length, "number", "min", "5");
   else if (k === "size") body = range(f.size, "number", "GB", "0.5");
+  else if (k === "pic" || k === "picMin") body = opts([["low", "Below your line"], ["upscaled", "Upscaled"], ["unmeasured", "Not measured yet"], ["", "Any"]], f.pic) +
+      `<div class="row">or a score of at least <input data-a type="number" min="0" max="100" step="5" class="num-sm" value="${esc(f.picMin)}" /> <button class="btn sm pri" data-apply>Apply</button></div>`;
   else if (k === "minO") body = `<div class="row">at least <input data-a type="number" min="0" step="1" class="num-sm" value="${esc(f.minO)}" /> Os <button class="btn sm pri" data-apply>Apply</button></div>`;
   pop.innerHTML = `<div class="fpop-h">${esc(label)}</div>${body}`;
   pop.hidden = false;
@@ -3714,7 +3832,12 @@ function cfEdit(k, anchor) {
   const ap = pop.querySelector("[data-apply]");
   if (ap) {
     const a = pop.querySelector("[data-a]"), b2 = pop.querySelector("[data-b]");
-    const go2 = () => { if (k === "minO") f.minO = a.value; else f[k] = [a.value, b2.value]; done(); };
+    const go2 = () => {
+      if (k === "minO") f.minO = a.value;
+      else if (k === "pic") f.picMin = a.value;
+      else f[k] = [a.value, b2.value];
+      done();
+    };
     ap.onclick = go2;
     pop.querySelectorAll("input").forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") go2(); });
     a.focus();
@@ -3942,7 +4065,7 @@ function catCardHTML(r, i) {
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="cat-who">${esc(who)}</div>
-      <div class="qual">${qualityChips(r)}</div>
+      <div class="qual">${qualityChips(r)}${picChipHTML(r.picture)}</div>
       ${sigLine(r)}${predLine}${whoLines(r)}${flag}${suggest}${tagLine(r)}
     </div>
     <div class="cat-moments">${moments || '<span class="faint small">moments appear once embedded</span>'}</div>
@@ -4262,7 +4385,8 @@ function dupeCopyHTML(r, g) {
   return `<div class="dupe-copy ${rec ? "rec" : ""}" data-sid="${esc(r.scene_id)}">
     <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
     <div class="dupe-facts">
-      <div>${rec ? '<span class="dupe-rec">★ Recommended</span> ' : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
+      <div>${rec ? `<span class="dupe-rec" title="${g.keep_by === "picture" ? "Best picture by your learned bar" : "Most pixels, then bitrate, then size"}">★ Recommended${g.keep_by === "picture" ? " — best picture" : ""}</span> ` : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
+      ${(g.picture || {})[r.scene_id] ? `<div>${picChipHTML(g.picture[r.scene_id], { long: true })}</div>` : ""}
       <div class="dupe-q"><b>${esc(q.res || "?")}</b>${q.w ? ` <span class="muted">${q.w}×${q.h}</span>` : ""} · <b>${q.mbps != null ? q.mbps + " Mbps" : "? Mbps"}</b> · ${esc((q.codec || "").toUpperCase())} ${q.fps ? Math.round(q.fps) + "fps" : ""}</div>
       <div class="dim">${r.size ? fmtBytes(r.size) : "size ?"} · ${r.duration ? fmt(r.duration) : "?"}${added ? " · added " + esc(added) : ""}</div>
       <div class="dim dupe-path" title="${esc(r.path)}">${esc(r.path)}</div>
@@ -4861,6 +4985,7 @@ function renderReview() {
     ${sg.showings ? `<span>Megaboard</span><span>${sg.passed ? `shown often — you never saved or explored it${fig(`${Math.round(sg.showings)}× on ${sg.shown_days} days`)}`
       : `shown${fig(`${Math.round(sg.showings)}× on ${sg.shown_days} day${sg.shown_days === 1 ? "" : "s"}`)}`}</span>` : ""}` : "")
     + `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
+    ${r.picture ? `<span>Picture</span><span>${picChipHTML(r.picture, { long: true })}</span>` : ""}
     <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
     <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>
     ${r.tags && r.tags.length ? `<span>Tags</span><span>${esc(r.tags.slice(0, 8).join(", "))}</span>` : ""}

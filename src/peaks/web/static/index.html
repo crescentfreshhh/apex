@@ -105,7 +105,20 @@
     <div class="card pad tq" id="taste-quality"></div>
     <div class="seg tabs" id="taste-tabs">
       <span class="on" data-tab="teach">Teach</span><span data-tab="picker">Picker</span>
-      <span data-tab="labels">Labels</span><span data-tab="manage">Undo &amp; reset</span>
+      <span data-tab="labels">Labels</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
+    </div>
+    <div class="panel" id="pic-panel" data-pane="picture" hidden>
+      <p class="cap">Which picture looks better? Judge the <b>picture</b>, not the scene — detail, blocks, grain, banding. Tap a crop to see the whole frame.
+        <span class="kbd-hint"><kbd>←</kbd> left · <kbd>→</kbd> right · <kbd>↑</kbd> both fine · <kbd>↓</kbd> both bad · <kbd>S</kbd> skip</span></p>
+      <div id="pic-pair" class="pic-pair"><p class="dim">Loading a pair…</p></div>
+      <div class="row pic-controls">
+        <button class="btn pic-ans" data-ans="a">◀ Left looks better</button>
+        <button class="btn ghost pic-ans" data-ans="fine" title="Both are good enough for you (↑)">Both fine</button>
+        <button class="btn ghost pic-ans" data-ans="bad" title="Neither is good enough (↓)">Both bad</button>
+        <button class="btn pic-ans" data-ans="b">Right looks better ▶</button>
+        <button class="ghost pic-ans" data-ans="skip" title="Can't tell — next pair (S)">Skip</button>
+      </div>
+      <div id="pic-status" class="dim small"></div>
     </div>
     <div class="panel" id="swipe-panel" data-pane="teach">
       <p class="cap">Frames Peaks is <em>least sure</em> about — rating these teaches it fastest. <kbd>←</kbd> pass · <kbd>↓</kbd> skip · <kbd>→</kbd> love.</p>
@@ -276,6 +289,7 @@
           <option value="bitrate">Bitrate</option>
           <option value="duration">Duration</option>
           <option value="size">File size</option>
+          <option value="picture">Picture quality</option>
         </select></label>
       <button id="cat-dir" class="btn sm ghost" title="Flip the order">↓ Newest first</button>
     </div>
@@ -575,6 +589,7 @@
         <button data-sec="ingest">Ingest</button>
         <button data-sec="display">Display</button>
         <button data-sec="backup">Backup &amp; restore</button>
+        <button data-sec="picture">Picture quality</button>
       </nav>
       <div class="sets">
         <div class="sec" data-sec="tiers">
@@ -648,6 +663,11 @@
             <div class="row"><select id="sel-clip">
               <option value="ViT-H-14">largest</option>
             </select><span id="models-status" class="dim"></span></div></div>
+        </div>
+        <div class="sec" data-sec="picture" hidden>
+          <h2>Picture quality</h2>
+          <p class="lead">Peaks looks at a few full-resolution stills of each file — real detail (upscales read as what they came from), compression blocks, grain, banding, interlacing, letterboxing — and learns which pictures <b>you</b> find good enough from your picks in Taste → Picture. New files are measured after each ingest; the rest of the library only when you start it here.</p>
+          <div id="pic-set" class="pic-set"><p class="dim">Loading…</p></div>
         </div>
         <div class="sec" data-sec="backup" hidden>
           <h2>Backup &amp; restore</h2>

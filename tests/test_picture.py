@@ -305,3 +305,35 @@ def test_routes(svc, monkeypatch):
     assert api.get("/api/picture/still/abc/crop").status_code == 404
     assert api.get("/api/catalogue", params={"pic": "bogus"}).status_code == 422
     assert api.post("/api/picture/backfill", params={"on": "true"}).json()["backfill"] is True
+
+
+def test_duplicate_recommendation_says_why(svc, monkeypatch):
+    rows = [r for r in svc._catalogue_all() if r["scene_id"] in ("1", "2")]
+    assert svc._dupe_keeper_by(rows)[1] == "file"
+    monkeypatch.setattr(type(svc), "picture_trusted", lambda self: True)
+    monkeypatch.setattr(type(svc), "picture_scores", lambda self: {"1": {"score": 90}, "2": {"score": 10}})
+    assert svc._dupe_keeper_by(rows) == ("1", "picture")
+
+
+def test_pair_route_and_learning_end_to_end(svc, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc.picture_backfill(True)
+    svc.run_picture()
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(app_mod.create_app(svc.cfg))
+    p = api.get("/api/picture/pair").json()["pair"]
+    assert p["a"]["key"] != p["b"]["key"]
+    assert api.get(p["a"]["crop"]).headers["content-type"] == "image/jpeg"
+    # you always prefer the native file: the native one ends up scored above the upscale
+    keys = {r["scene_id"]: svc._pic_key(r) for r in svc._catalogue_all()}
+    for i in range(pq.PictureModel.MIN_PAIRS + 5):
+        a, b = (keys["1"], keys["2"]) if i % 2 else (keys["2"], keys["1"])
+        api.post("/api/picture/answer", json={"a": a, "b": b, "ans": "a" if a == keys["1"] else "b"})
+        api.post("/api/picture/answer", json={"a": keys["3"], "b": keys["2"], "ans": "a" if i % 3 else "b"})
+    st = api.get("/api/picture/status").json()
+    assert st["picks"] == 2 * (pq.PictureModel.MIN_PAIRS + 5) and st["model"]["trained"]
+    pics = svc.picture_scores()
+    assert pics["1"]["score"] > pics["2"]["score"]
