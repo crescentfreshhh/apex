@@ -845,6 +845,19 @@ class LibraryMixin:
                     int(r.get("size") or 0), grade.get(r["tier"], 0))
         return max(rows, key=key)["scene_id"]
 
+    def _dupe_keeper(self, rows: list[dict]) -> str:
+        """The copy to keep — by your learned picture score once it's trusted
+        and every copy is measured; otherwise `dupe_keeper`'s file-facts rule."""
+        try:
+            if self.picture_trusted():
+                pics = self.picture_scores()
+                got = [pics.get(r["scene_id"]) for r in rows]
+                if all(p and p.get("score") is not None for p in got):
+                    return max(zip(rows, got), key=lambda t: (t[1]["score"], int(t[0].get("size") or 0)))[0]["scene_id"]
+        except Exception:  # noqa: BLE001 — fall back to the file facts
+            pass
+        return self.dupe_keeper(rows)
+
     @staticmethod
     def dupe_best_grade(rows: list[dict]) -> str | None:
         return LibraryMixin.dupe_best_tier(rows)[0]
@@ -893,14 +906,19 @@ class LibraryMixin:
             for sid, m in client.scene_details(missing).items():
                 known[sid] = self._cat_row(sid, m)
         out = []
+        try:
+            pics = self.picture_scores()
+        except Exception:  # noqa: BLE001 — picture quality is extra
+            pics = {}
         for g in groups:
             rows = [known[s] for s in g if s in known]
             if len(rows) < 2:
                 continue
-            keep = self.dupe_keeper(rows)
+            keep = self._dupe_keeper(rows)
             size = {r["scene_id"]: int(r.get("size") or 0) for r in rows}
             out.append({"scenes": rows, "keep": keep, "best_grade": self.dupe_best_grade(rows),
-                        "reclaim": sum(size.values()) - size[keep]})
+                        "reclaim": sum(size.values()) - size[keep],
+                        "picture": {r["scene_id"]: pics[r["scene_id"]] for r in rows if r["scene_id"] in pics}})
         out.sort(key=lambda g: -g["reclaim"])
         out = self.dupe_queue_hide(out)            # already waiting in the delete queue
         result = {"groups": out, "accuracy": accuracy, "duration_diff": duration_diff,
@@ -1302,7 +1320,7 @@ class LibraryMixin:
         return {k: [[n, c] for n, c in cnt.most_common(limit)]
                 for k, cnt in (("performers", perf), ("studios", stud), ("tags", tags))}
 
-    SAVED_VIEW_KEYS = ("tier", "view", "new", "q", "res", "min_mbps", "sort", "dir", "performer",
+    SAVED_VIEW_KEYS = ("tier", "view", "new", "q", "res", "min_mbps", "sort", "dir", "performer", "pic", "pic_min",
                        "studio", "tag", "date_from", "date_to", "dur_min", "dur_max",
                        # the filter chips: several performers / studios / tags, and the rest
                        "performer_ids", "pnames", "perf_mode", "studios", "tags", "tags_not", "vr",

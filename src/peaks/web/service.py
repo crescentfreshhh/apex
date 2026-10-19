@@ -28,6 +28,7 @@ from .seedbox import SeedboxMixin
 from .perfreview import PerfReviewMixin
 from .find import FindMixin
 from .studios import StudiosMixin
+from .picture import PictureMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -40,7 +41,8 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upsc
 
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
-              VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin):
+              VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
+              PictureMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -4915,7 +4917,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     # sort key → (value of a row or None when it has none, natural order is descending?)
     SORT_DESC_DEFAULT = {"date": True, "duration": True, "title": False, "bitrate": True,
                          "quality": True, "predicted": True, "size": True, "added": True,
-                         "performer": False, "tier": True}
+                         "performer": False, "tier": True, "picture": True}
 
     @staticmethod
     def _fold(text: str) -> str:
@@ -4925,7 +4927,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                        if not unicodedata.combining(c)).casefold().strip()
 
     def _sort_rows(self, pool: list[dict], sort: str | None, direction: str | None, *,
-                   in_view: bool, preds: dict, res_rank: dict) -> list[dict]:
+                   in_view: bool, preds: dict, res_rank: dict, pics: dict | None = None) -> list[dict]:
         """Order a list. No sort (or 'suggested') keeps a suggestion view's own
         order, and is Newest elsewhere. `direction` 'asc' / 'desc' flips any key
         (absent = its natural direction). Rows missing the value go last either
@@ -4961,6 +4963,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "performer": perf,
             # best → worst (ties: newest first, via the date tiebreak below)
             "tier": lambda r: TIER_RANK_SORT.get(r.get("tier"), 0),
+            # your learned picture score; before there is one, how much real detail it has
+            "picture": lambda r: (lambda p: None if not p else (p["score"] if p["score"] is not None else p["real"]))(
+                (pics or {}).get(r["scene_id"])),
         }[sort]
         keyed = [(value(r), r) for r in pool]
         have = [x for x in keyed if x[0] is not None]
@@ -4987,7 +4992,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                   added_from: str | None = None, added_to: str | None = None,
                   saves: str | None = None, min_o: int | None = None,
                   size_min: float | None = None, size_max: float | None = None,
-                  organized: str | None = None) -> dict:
+                  organized: str | None = None, pic: str | None = None,
+                  pic_min: int | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -5011,6 +5017,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         tagnot = {x.strip().lower() for x in (tags_not or []) if x and x.strip()}
         saved = self._saved_scene_ids() if saves in ("yes", "no") else None
         gb = 1e9
+        want_pic = bool(pic or pic_min or sort == "picture")
+        pics = self.picture_scores() if want_pic else {}
 
         def keep(r) -> bool:
             if fresh is not None and r["scene_id"] not in fresh:
@@ -5043,6 +5051,18 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 return False
             if organized in ("yes", "no") and bool(r.get("organized")) != (organized == "yes"):
                 return False
+            if pic or pic_min:
+                p = pics.get(r["scene_id"])
+                if p is None:                                   # not measured yet
+                    return pic == "unmeasured"
+                if pic == "unmeasured":
+                    return False
+                if pic == "upscaled" and not p["upscaled"]:
+                    return False
+                if pic == "low" and p["ok"] is not False:
+                    return False
+                if pic_min and (p["score"] is None or p["score"] < int(pic_min)):
+                    return False
             if date_from and (r["date"] or "") < date_from:
                 return False
             if date_to and (not r["date"] or r["date"] > date_to):
@@ -5086,10 +5106,15 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             pool = [r for r in pool if r["tier"] in tiers]
 
         pool = self._sort_rows(pool, sort, dir, in_view=in_view, preds=preds,
-                               res_rank={c: i for i, c in enumerate(RES_CLASSES)})
+                               res_rank={c: i for i, c in enumerate(RES_CLASSES)}, pics=pics)
         if ids_only:        # a bulk action over the whole list (no cards, no thumbnails)
             return {"ids": [r["scene_id"] for r in pool], "total": len(pool)}
         page = pool[offset: offset + limit]
+        if not pics:
+            try:
+                pics = self.picture_scores()
+            except Exception:  # noqa: BLE001 — picture quality is extra, never in the way
+                pics = {}
         names = self.tier_display_names()
         moments = self._scene_moment_strips([r["scene_id"] for r in page])
         who_enc = self._who_records(rows)
@@ -5106,6 +5131,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "suggest": self._recommend(r, pred, signals.get(r["scene_id"]), names),
                 "who": self._who_reasons(r, who_enc, names),
                 "dupe": r["scene_id"] in dupe_ids,
+                "picture": pics.get(r["scene_id"]),
             })
         grace_new = sum(1 for r in pool_all if (signals.get(r["scene_id"]) or {}).get("new")
                         and r["tier"] not in ("legendaire", "rejected")

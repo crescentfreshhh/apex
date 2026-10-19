@@ -1169,6 +1169,8 @@ def create_app(cfg=None):
         saves: str | None = Query(None, pattern="^(yes|no)$"), min_o: int | None = Query(None, ge=0),
         size_min: float | None = Query(None, ge=0), size_max: float | None = Query(None, ge=0),
         organized: str | None = Query(None, pattern="^(yes|no)$"),
+        pic: str | None = Query(None, pattern="^(low|upscaled|unmeasured)$"),
+        pic_min: int | None = Query(None, ge=0, le=100),
     ):
         try:
             return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
@@ -1176,6 +1178,7 @@ def create_app(cfg=None):
                                      perf_mode=perf_mode, studios=studios, tags=tags, tags_not=tags_not,
                                      vr=vr, added_from=added_from, added_to=added_to, saves=saves,
                                      min_o=min_o, size_min=size_min, size_max=size_max, organized=organized,
+                                     pic=pic, pic_min=pic_min,
                                      offset=max(0, offset), limit=limit, refresh=refresh,
                                      view=view, new=new, performer=performer, studio=studio,
                                      tag=tag, date_from=date_from, date_to=date_to,
@@ -1280,6 +1283,44 @@ def create_app(cfg=None):
             return service.library_summary()
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, str(exc))
+
+    # --- picture quality ----------------------------------------------------------
+    @app.get("/api/picture/status")
+    def picture_status():
+        st = service.picture_status()
+        j = jobs.running("picture")
+        st["running"] = j.as_dict() if j is not None else None
+        return st
+
+    @app.post("/api/picture/backfill")
+    def picture_backfill(on: bool = True):
+        """Measure the whole library when idle (resumable) — or stop that."""
+        st = service.picture_backfill(on)
+        if on:
+            _start_picture(service, jobs)
+        else:
+            j = jobs.running("picture")
+            if j is not None:
+                j.request_cancel()
+        return st
+
+    @app.get("/api/picture/pair")
+    def picture_pair():
+        return {"pair": service.picture_pair()}
+
+    @app.post("/api/picture/answer")
+    def picture_answer(body: dict = Body(...)):
+        try:
+            return service.picture_answer(str(body.get("a")), str(body.get("b")), str(body.get("ans")))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/picture/still/{safe}/{kind}")
+    def picture_still(safe: str, kind: str):
+        p = service.picture_still(safe, kind)
+        if p is None:
+            raise HTTPException(404, "no such still")
+        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
     @app.get("/api/catalogue/suggest")
     def catalogue_suggest(q: str = "", limit: int = Query(6, ge=1, le=20)):
@@ -1474,6 +1515,7 @@ def create_app(cfg=None):
             raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
         try:
             item = service.dupe_queue_add(body.keep, body.delete, delete_file=body.delete_file)
+            service.picture_note_keep(body.keep, body.delete)      # your choice teaches picture quality
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         _dupe_drain()
@@ -2150,6 +2192,18 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
 
 
 _WARM_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library")
+_PICTURE_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library", "picture")
+
+
+def _start_picture(service: Service, jobs: JobManager):
+    """Measure picture quality — new files from the last ingest, plus the library
+    if you switched that on — when nothing heavy is running."""
+    if any(jobs.running(k) for k in _PICTURE_WAIT_FOR) or not service.picture_due():
+        return None
+    try:
+        return jobs.start("picture", service.run_picture)
+    except RuntimeError:
+        return None
 
 
 def _rewarm(service: Service, jobs: JobManager):
@@ -2245,6 +2299,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
                 service.watch_check_failed(exc)
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
+            try:   # picture quality: new files, and the library once you've started it
+                _start_picture(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
             try:   # anything that dropped the index: reload it before anyone opens a page
                 _rewarm(service, jobs)
             except Exception:  # noqa: BLE001
