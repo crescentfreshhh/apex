@@ -317,17 +317,37 @@ def features(rec: dict, q: dict | None = None) -> np.ndarray:
     ], dtype=np.float32)
 
 
-class PictureModel:
-    """Your bar for picture quality, learned from "which looks better?" picks.
+BANDS = ("Poor", "Watchable", "Good", "Excellent", "Reference")      # your ratings 1–5
+CUT_SCORES = (30.0, 50.0, 70.0, 85.0)                                 # where each band starts (50 = just good enough)
 
-    Pairwise logistic regression (Bradley–Terry) on standardised feature
-    differences: P(a looks better than b) = σ(w·(za − zb)). A file's score is
-    w·z, shown as a 0–100 percentile across the measured library. "Both fine" /
-    "Both bad" answers set the acceptable line. It's only trusted once its
-    cross-validated agreement with your picks beats bitrate alone."""
+
+def band_of(score: float | None) -> str | None:
+    if score is None:
+        return None
+    return BANDS[sum(score >= c for c in CUT_SCORES)]
+
+
+class PictureModel:
+    """Your bar for picture quality, learned from your picks and ratings.
+
+    The ordering: pairwise logistic regression (Bradley–Terry) on standardised
+    feature differences, P(a looks better than b) = σ(w·(za − zb)), from your
+    "which looks better?" picks plus the ones implied by your single-file
+    ratings (a file you rated Good beats one you rated Watchable).
+
+    The scale: your ratings fix where each band starts on that rating — the
+    cut-points — so a file's 0–100 means the same thing whatever else is in
+    the library (50 = just good enough, 70 Excellent, 85 Reference). Until
+    there are enough ratings there's no score, only the ordering.
+
+    It's only *trusted* (for duplicate choices) once its cross-validated
+    agreement with your picks beats bitrate alone."""
 
     MIN_PAIRS = 25
     MARGIN = 0.03                      # must beat the bitrate-only baseline by this much
+    MIN_RATED = 20                     # ratings before there's a score…
+    MIN_BANDS = 3                      # …spread over at least this many bands
+    MAX_IMPLIED = 600                  # picks drawn from ratings (pairs of differently rated files)
 
     def __init__(self):
         self.w = None
@@ -335,7 +355,12 @@ class PictureModel:
         self.sd = None
         self.lib = np.zeros(0, np.float32)
         self.line = None
+        self.cuts = None                   # raw rating where Watchable, Good, Excellent, Reference start
         self.report: dict = {"trained": False}
+
+    @property
+    def calibrated(self) -> bool:
+        return self.w is not None and self.cuts is not None
 
     @property
     def trained(self) -> bool:
@@ -375,14 +400,32 @@ class PictureModel:
             hits += int(((d[test] @ w > 0).astype(int) == y[test]).sum())
         return hits / max(1, len(y))
 
-    def train(self, feats: dict[str, np.ndarray], picks: list[dict]) -> dict:
+    @classmethod
+    def implied_picks(cls, ratings: dict[str, int], seed: int = 0) -> list[dict]:
+        """Picks your ratings imply: each differently rated pair, higher band wins
+        (sampled when there are many)."""
+        import random as _r
+
+        keys = sorted(ratings)
+        pairs = [(a, b) for i, a in enumerate(keys) for b in keys[i + 1:] if ratings[a] != ratings[b]]
+        if len(pairs) > cls.MAX_IMPLIED:
+            pairs = _r.Random(seed).sample(pairs, cls.MAX_IMPLIED)
+        return [{"a": a, "b": b, "ans": "a" if ratings[a] > ratings[b] else "b", "src": "rating"} for a, b in pairs]
+
+    def train(self, feats: dict[str, np.ndarray], picks: list[dict], ratings: dict[str, int] | None = None) -> dict:
         """`feats`: file key → feature vector (every measured file);
-        `picks`: [{a, b, ans: "a"|"b"|"fine"|"bad"}]."""
+        `picks`: [{a, b, ans: "a"|"b"|"fine"|"bad"}]; `ratings`: key → band 1–5."""
+        ratings = {k: int(v) for k, v in (ratings or {}).items() if k in feats and 1 <= int(v) <= 5}
         keys = list(feats)
         allx = np.stack([feats[k] for k in keys]) if keys else np.zeros((0, len(FEATURES)), np.float32)
         ranked = [p for p in picks if p.get("ans") in ("a", "b") and p["a"] in feats and p["b"] in feats]
-        rep = {"trained": False, "pairs": len(ranked),
-               "fine_bad": sum(1 for p in picks if p.get("ans") in ("fine", "bad")), "need": self.MIN_PAIRS}
+        own = len(ranked)
+        ranked += self.implied_picks(ratings)
+        rep = {"trained": False, "pairs": own, "implied": len(ranked) - own,
+               "fine_bad": sum(1 for p in picks if p.get("ans") in ("fine", "bad")), "need": self.MIN_PAIRS,
+               "rated": len(ratings), "bands_rated": len(set(ratings.values())),
+               "need_rated": self.MIN_RATED, "need_bands": self.MIN_BANDS, "calibrated": False}
+        self.cuts = None
         if len(ranked) < self.MIN_PAIRS or len(keys) < 2:
             self.w, self.report = None, rep
             return rep
@@ -405,10 +448,59 @@ class PictureModel:
             cands = sorted(good + bad)
             acc = [(np.mean([g >= t for g in good]) + np.mean([b < t for b in bad])) / 2 for t in cands]
             self.line = float(cands[int(np.argmax(acc))])
+        self.cuts = self._calibrate({k: float(z[k] @ self.w) for k in ratings}, ratings)
         rep.update(trained=True, agree=round(agree, 3), baseline=round(base, 3),
-                   trusted=agree >= base + self.MARGIN, line=self.percentile(self.line) if self.line is not None else None)
+                   trusted=agree >= base + self.MARGIN, calibrated=self.cuts is not None,
+                   line=self.percentile(self.line) if self.line is not None else None)
         self.report = rep
         return rep
+
+    def _calibrate(self, raws: dict[str, float], ratings: dict[str, int]) -> list[float] | None:
+        """The raw rating where each band starts, from your single-file ratings:
+        for each boundary the cut that best separates the files you rated below
+        it from those above (balanced), then put in order; a boundary nobody's
+        ratings reach is spaced like its neighbours."""
+        if len(ratings) < self.MIN_RATED or len(set(ratings.values())) < self.MIN_BANDS:
+            return None
+        cuts: list[float | None] = []
+        for j in range(1, 5):                       # between band j and j+1
+            lo = [raws[k] for k, b in ratings.items() if b <= j]
+            hi = [raws[k] for k, b in ratings.items() if b > j]
+            if not lo or not hi:
+                cuts.append(None)
+                continue
+            cand = sorted(set(lo + hi))
+            mids = [(a + b) / 2 for a, b in zip(cand, cand[1:])] or cand
+            acc = [(np.mean([x < t for x in lo]) + np.mean([x >= t for x in hi])) / 2 for t in mids]
+            best = max(acc)
+            ties = [t for t, a in zip(mids, acc) if a == best]
+            cuts.append(float(np.median(ties)))
+        known = [(i, c) for i, c in enumerate(cuts) if c is not None]
+        if len(known) < 2:
+            return None
+        gap = max((known[-1][1] - known[0][1]) / max(1, known[-1][0] - known[0][0]), 1e-3)
+        for i in range(4):                            # fill the ends from the neighbours' spacing
+            if cuts[i] is None:
+                left = next(((j, c) for j, c in reversed(known) if j < i), None)
+                right = next(((j, c) for j, c in known if j > i), None)
+                cuts[i] = (left[1] + gap * (i - left[0])) if left else (right[1] - gap * (right[0] - i))
+        for i in range(1, 4):                         # in order, never touching
+            cuts[i] = max(cuts[i], cuts[i - 1] + gap * 0.25)
+        return [float(c) for c in cuts]
+
+    def scale(self, raw: float) -> float | None:
+        """Raw rating → 0–100 anchored to your bands (None before calibration)."""
+        if self.cuts is None:
+            return None
+        c, v = self.cuts, CUT_SCORES
+        if raw < c[0]:
+            s = v[0] - (c[0] - raw) * (v[1] - v[0]) / (c[1] - c[0])
+        elif raw >= c[3]:
+            s = v[3] + (raw - c[3]) * (v[3] - v[2]) / (c[3] - c[2])
+        else:
+            i = max(j for j in range(4) if raw >= c[j])
+            s = v[i] + (raw - c[i]) * (v[i + 1] - v[i]) / (c[i + 1] - c[i])
+        return float(min(100.0, max(0.0, s)))
 
     def raw(self, x: np.ndarray) -> float:
         return float(self._z(x) @ self.w)
@@ -418,10 +510,18 @@ class PictureModel:
             return 50
         return int(round(100 * np.searchsorted(self.lib, raw) / len(self.lib)))
 
-    def score(self, x: np.ndarray) -> int:
+    def rank(self, x: np.ndarray) -> int:
+        """Where it sits in your library (percentile) — for ordering only."""
         return self.percentile(self.raw(x))
 
+    def score(self, x: np.ndarray) -> int | None:
+        """The 0–100 anchored to your bands, once calibrated."""
+        s = self.scale(self.raw(x))
+        return None if s is None else int(round(s))
+
     def acceptable(self, x: np.ndarray) -> bool | None:
+        if self.calibrated:
+            return self.scale(self.raw(x)) >= CUT_SCORES[1]
         return None if self.line is None else self.raw(x) >= self.line
 
     def pulls(self, x: np.ndarray) -> list[tuple[str, float]]:
@@ -433,7 +533,7 @@ class PictureModel:
         return {"w": None if self.w is None else self.w.tolist(),
                 "mu": None if self.mu is None else self.mu.tolist(),
                 "sd": None if self.sd is None else self.sd.tolist(),
-                "lib": self.lib.tolist(), "line": self.line, "report": self.report}
+                "lib": self.lib.tolist(), "line": self.line, "cuts": self.cuts, "report": self.report}
 
     @classmethod
     def from_state(cls, d: dict) -> "PictureModel":
@@ -442,7 +542,27 @@ class PictureModel:
             m.w, m.mu, m.sd = (np.asarray(d[k], np.float32) for k in ("w", "mu", "sd"))
         m.lib = np.asarray(d.get("lib") or [], np.float32)
         m.line, m.report = d.get("line"), d.get("report") or {"trained": False}
+        m.cuts = d.get("cuts")
         return m
+
+
+def subscores(rec: dict) -> dict[str, int | None]:
+    """Five 0–10 marks that explain a file's picture (fixed rules from the
+    measurements — they explain the score; your learned bar decides it)."""
+    def clip(v, lo=0.0, hi=1.0):
+        return max(lo, min(hi, v))
+
+    eff = rec.get("eff_factor")
+    detail = None if not eff else round(10 * clip((1.0 / eff - 0.4) / 0.6))
+    block, band = rec.get("block"), rec.get("band") or 0.0
+    comp = None if block is None else round(10 - clip((block - 1.0) * 20, 0, 7) - clip(band * 10, 0, 3))
+    noise = rec.get("noise")
+    grain = None if noise is None else round(10 - clip((noise - 1.5) * 1.25, 0, 10))
+    comb, frozen = rec.get("comb") or 0.0, rec.get("frozen") or 0.0
+    motion = round(10 - (6 if comb >= 0.03 else comb * 200) - clip(frozen * 16, 0, 4))
+    active = rec.get("active")
+    framing = None if active is None else round(10 * clip((active - 0.5) / 0.45))
+    return {"detail": detail, "compression": comp, "noise": grain, "motion": int(clip(motion, 0, 10)), "framing": framing}
 
 
 def res_words(h: float | None) -> str:

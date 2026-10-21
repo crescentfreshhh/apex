@@ -108,13 +108,13 @@
       <span data-tab="labels">Labels</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
     </div>
     <div class="panel" id="pic-panel" data-pane="picture" hidden>
-      <p class="cap">Which picture looks better? Both play the same stretch of their scene — judge the <b>picture</b>, not the scene: detail, smearing in motion, blocks, grain, judder. Tap a video to enlarge it.
-        <span class="kbd-hint"><kbd>Space</kbd> play/pause · <kbd>N</kbd> another spot · <kbd>M</kbd> sound · <kbd>←</kbd> left · <kbd>→</kbd> right · <kbd>↑</kbd> both fine · <kbd>↓</kbd> both bad · <kbd>S</kbd> skip</span></p>
+      <div class="seg pic-mode" id="pic-mode"><span class="on" data-mode="pair">Compare two</span><span data-mode="one">Rate one</span></div>
+      <p class="cap" id="pic-cap"></p>
       <div class="row pic-transport">
         <button class="btn sm" id="pic-play">❚❚ Pause both</button>
         <button class="btn sm ghost" id="pic-spot" title="Both jump to another point in their scene (N)">⤳ Another spot</button>
         <button class="btn sm ghost" id="pic-sound" title="Sound for the side you're on (M)">🔇 Sound off</button>
-        <span class="faint small">two videos stream at once — on mobile data that's a lot at 4K</span>
+        <span class="faint small" id="pic-two-note">two videos stream at once — on mobile data that's a lot at 4K</span>
       </div>
       <div id="pic-pair" class="pic-pair"><p class="dim">Loading a pair…</p></div>
       <div class="row pic-controls">
@@ -123,6 +123,14 @@
         <button class="btn ghost pic-ans" data-ans="bad" title="Neither is good enough (↓)">Both bad</button>
         <button class="btn pic-ans" data-ans="b">Right looks better ▶</button>
         <button class="ghost pic-ans" data-ans="skip" title="Can't tell — next pair (S)">Skip</button>
+      </div>
+      <div class="row pic-rate" id="pic-rate" hidden>
+        <button class="btn pic-band b5" data-band="5" title="As good as it gets (5)">Reference</button>
+        <button class="btn pic-band b4" data-band="4" title="(4)">Excellent</button>
+        <button class="btn pic-band b3" data-band="3" title="Good enough for you (3)">Good</button>
+        <button class="btn pic-band b2" data-band="2" title="Below your bar, but watchable (2)">Watchable</button>
+        <button class="btn pic-band b1" data-band="1" title="You'd replace it (1)">Poor</button>
+        <button class="ghost pic-band" data-band="skip" title="Can't tell — next file (S)">Skip</button>
       </div>
       <div id="pic-status" class="dim small"></div>
     </div>

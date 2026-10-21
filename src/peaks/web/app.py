@@ -1169,7 +1169,7 @@ def create_app(cfg=None):
         saves: str | None = Query(None, pattern="^(yes|no)$"), min_o: int | None = Query(None, ge=0),
         size_min: float | None = Query(None, ge=0), size_max: float | None = Query(None, ge=0),
         organized: str | None = Query(None, pattern="^(yes|no)$"),
-        pic: str | None = Query(None, pattern="^(low|upscaled|unmeasured)$"),
+        pic: str | None = Query(None, pattern="^(low|good|excellent|noscore|upscaled|unmeasured)$"),
         pic_min: int | None = Query(None, ge=0, le=100),
     ):
         try:
@@ -1313,6 +1313,18 @@ def create_app(cfg=None):
         try:
             return service.picture_answer(str(body.get("a")), str(body.get("b")), str(body.get("ans")))
         except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/picture/one")
+    def picture_one():
+        """The next file to rate on its own (unrated, not VR, least sure first)."""
+        return service.picture_one() or {"one": None}
+
+    @app.post("/api/picture/rate")
+    def picture_rate(body: dict = Body(...)):
+        try:
+            return service.picture_rate(str(body.get("key")), int(body.get("band")))
+        except (ValueError, TypeError) as exc:
             raise HTTPException(400, str(exc))
 
     @app.get("/api/picture/still/{safe}/{kind}")

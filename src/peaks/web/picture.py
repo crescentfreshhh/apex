@@ -8,6 +8,7 @@ On disk, under <models>/picture/:
                    measured again; failures are recorded too (not retried until
                    the file changes)
   pairs.jsonl      your picks: {a, b, ans: a|b|fine|bad, src, t}
+  ratings.jsonl    your single-file ratings: {key, band 1–5 (Poor…Reference), t}; the last one wins
   model.json       the trained model
   state.json       whether the library backfill is on
   stills/          two small JPEGs per file for the comparison screen
@@ -209,13 +210,41 @@ class PictureMixin:
             pass
         return out
 
+    def _pic_ratings(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        try:
+            with open(self._pic_dir() / "ratings.jsonl", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                        out[str(r["key"])] = int(r["band"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+        except OSError:
+            pass
+        return out
+
+    def picture_rate(self, key: str, band: int) -> dict:
+        """Your rating of one file's picture: 1 Poor … 5 Reference."""
+        band = int(band)
+        if not 1 <= band <= 5:
+            raise ValueError("band is 1 (Poor) to 5 (Reference)")
+        self._pic_append("ratings.jsonl", {"key": str(key), "band": band, "t": time.time()})
+        self._pic_dirty = True
+        return {"rated": len(self._pic_ratings())}
+
+    @staticmethod
+    def _pic_scored(rec: dict | None) -> bool:
+        """Measured, current, and not VR (VR isn't rated or scored)."""
+        return bool(rec) and not rec.get("error") and rec.get("v") == pq.VERSION and not rec.get("vr")
+
     def _pic_rows_by_key(self) -> dict[str, dict]:
         return {self._pic_key(r): r for r in self._catalogue_all()}
 
     def _pic_feats(self) -> dict[str, "pq.np.ndarray"]:
         by_key = self._pic_rows_by_key()
         return {k: pq.features(r, (by_key.get(k) or {}).get("quality"))
-                for k, r in self._pic_measures().items() if not r.get("error") and r.get("v") == pq.VERSION}
+                for k, r in self._pic_measures().items() if self._pic_scored(r)}
 
     def _pic_model(self) -> pq.PictureModel:
         """The trained model — retrained when picks or measures changed."""
@@ -231,7 +260,7 @@ class PictureMixin:
                 except (OSError, ValueError):
                     pass
             m = pq.PictureModel()
-            m.train(self._pic_feats(), self._pic_picks())
+            m.train(self._pic_feats(), self._pic_picks(), self._pic_ratings())
             (self._pic_dir() / "model.json").write_text(json.dumps(m.state()))
             self._pic_model_obj, self._pic_dirty = m, False
             self.__dict__.pop("_pic_scores_cache", None)
@@ -265,17 +294,20 @@ class PictureMixin:
         the same resolution), and once there's a model, the closest call."""
         rng = rng or random.Random()
         rows = [r for r in self._catalogue_all() if r.get("tier") not in SKIP_TIERS]
-        cand = [(r, rec) for r in rows if r.get("path") for rec in [self._pic_rec(r)] if rec]
+        cand = [(r, rec) for r in rows if r.get("path") for rec in [self._pic_rec(r)] if self._pic_scored(rec)]
         if len(cand) < 2:
             return None
         asked = {frozenset((p["a"], p["b"])) for p in self._pic_picks()}
         m = self._pic_model()
+        # the files Peaks is least sure about come up more often
+        conf = {sid: v.get("conf") for sid, v in self.picture_scores().items()} if m.trained else {}
+        weight = [{"guess": 3, "fairly sure": 2, "sure": 1}.get(conf.get(r["scene_id"]), 2) for r, _ in cand]
         by_perf: dict[str, list[int]] = {}
         for i, (r, _) in enumerate(cand):
             for pid in r.get("performer_ids") or []:
                 by_perf.setdefault(pid, []).append(i)
         for _ in range(60):
-            i = rng.randrange(len(cand))
+            i = rng.choices(range(len(cand)), weights=weight, k=1)[0]
             ra, ka = cand[i][0], self._pic_key(cand[i][0])
             pool = [j for pid in ra.get("performer_ids") or [] for j in by_perf.get(pid, []) if j != i]
             if not pool or rng.random() < 0.4:
@@ -297,6 +329,41 @@ class PictureMixin:
             return {"a": self._pic_side(*a), "b": self._pic_side(*b)}
         return None
 
+    def picture_one(self, rng: random.Random | None = None) -> dict | None:
+        """The next file to rate on its own: unrated, not VR, the least sure
+        first — and spread over the bands, so your ratings cover the whole scale."""
+        rng = rng or random.Random()
+        rated = self._pic_ratings()
+        rows = [r for r in self._catalogue_all() if r.get("tier") not in SKIP_TIERS and r.get("path")]
+        cand = [(r, rec) for r in rows for rec in [self._pic_rec(r)]
+                if self._pic_scored(rec) and self._pic_key(r) not in rated]
+        if not cand:
+            return None
+        m = self._pic_model()
+        pics = self.picture_scores() if m.trained else {}
+        if m.trained:
+            # aim for the stretch of the scale with the fewest ratings so far (fifths of your library)
+            def slot(r):
+                p = pics.get(r["scene_id"]) or {}
+                return min(4, int((p.get("rank") or 50) / 20))
+            by_key = self._pic_rows_by_key()
+            have = [0] * 5
+            for k in rated:
+                if k in by_key and by_key[k]["scene_id"] in pics:
+                    have[slot(by_key[k])] += 1
+            slots: dict[int, list] = {}
+            for c in cand:
+                slots.setdefault(slot(c[0]), []).append(c)
+            target = min(slots, key=lambda s: (have[s], rng.random()))
+            order = {"guess": 0, "fairly sure": 1, "sure": 2}
+            pool = slots[target]
+            least = min(order.get((pics.get(r["scene_id"]) or {}).get("conf"), 0) for r, _ in pool)
+            pool = [c for c in pool if order.get((pics.get(c[0]["scene_id"]) or {}).get("conf"), 0) == least]
+        else:
+            pool = cand
+        r, rec = rng.choice(pool)
+        return {"one": self._pic_side(r, rec), "rated": len(rated)}
+
     def _pic_side(self, row: dict, rec: dict) -> dict:
         safe = self._pic_safe(self._pic_key(row))
         q = row.get("quality") or {}
@@ -316,25 +383,66 @@ class PictureMixin:
     # --- the score where it's used ------------------------------------------------------------
 
     def picture_scores(self) -> dict[str, dict]:
-        """scene_id → {score (0–100, once the model is trained), ok (above your
-        line, once there is one), reasons, real (real-detail height)}."""
+        """scene_id → {score (0–100 on your scale, once calibrated), band,
+        conf (how sure: you judged it / close to files you judged / a guess),
+        rank (percentile, for ordering before calibration), ok (good enough),
+        subs (five 0–10 marks), reasons, real (real-detail height), upscaled,
+        vr (VR isn't scored)}."""
         m = self._pic_model()
         c = self.__dict__.get("_pic_scores_cache")
         meas = self._pic_measures()
         sig = (id(m), id(meas))
         if c and c[0] == sig:
             return c[1]
-        out = {}
+        rows = []
         for r in self._catalogue_all():
             rec = meas.get(self._pic_key(r))
-            if not rec or rec.get("error") or rec.get("v") != pq.VERSION:
-                continue
-            x = pq.features(rec, r.get("quality"))
-            out[r["scene_id"]] = {"score": m.score(x) if m.trained else None,
-                                  "ok": m.acceptable(x) if m.trained else None,
-                                  "reasons": pq.reasons(rec, m, x), "real": rec.get("eff_h"),
-                                  "upscaled": (rec.get("eff_factor") or 1) >= 1.3}
+            if rec and not rec.get("error") and rec.get("v") == pq.VERSION:
+                rows.append((r, rec))
+        conf = self._pic_confidence(m, [(r, rec) for r, rec in rows if not rec.get("vr")]) if m.trained else {}
+        out = {}
+        for r, rec in rows:
+            base = {"reasons": pq.reasons(rec), "real": rec.get("eff_h"), "subs": pq.subscores(rec),
+                    "upscaled": (rec.get("eff_factor") or 1) >= 1.3, "vr": bool(rec.get("vr")),
+                    "score": None, "band": None, "conf": None, "rank": None, "ok": None}
+            if not rec.get("vr") and m.trained:
+                x = pq.features(rec, r.get("quality"))
+                sc = m.score(x)
+                base.update(score=sc, band=pq.band_of(sc), rank=m.rank(x), ok=m.acceptable(x),
+                            conf=conf.get(self._pic_key(r)), reasons=pq.reasons(rec, m, x))
+            out[r["scene_id"]] = base
         self._pic_scores_cache = (sig, out)
+        return out
+
+    def _pic_confidence(self, m: pq.PictureModel, rows: list) -> dict[str, str]:
+        """key → "sure" (you rated it, or it's been in 3+ of your picks),
+        "fairly sure" (close to files you've judged — nearer than half the
+        library is) or "guess"."""
+        import numpy as np
+
+        rated = self._pic_ratings()
+        seen: dict[str, int] = {}
+        for p in self._pic_picks():
+            if p.get("ans") in ("a", "b", "fine", "bad"):
+                for k in (p.get("a"), p.get("b")):
+                    seen[k] = seen.get(k, 0) + 1
+        keys = [self._pic_key(r) for r, _ in rows]
+        if not keys:
+            return {}
+        Z = np.stack([m._z(pq.features(rec, r.get("quality"))) for r, rec in rows]).astype(np.float32)
+        judged = [i for i, k in enumerate(keys) if k in rated or k in seen]
+        out = {k: ("sure" if k in rated or seen.get(k, 0) >= 3 else "guess") for k in keys}
+        if not judged:
+            return out
+        J = Z[judged]
+        near = np.empty(len(keys), np.float32)
+        for s0 in range(0, len(keys), 2048):                     # nearest judged file, in chunks
+            d = ((Z[s0:s0 + 2048, None, :] - J[None, :, :]) ** 2).sum(axis=2)
+            near[s0:s0 + 2048] = np.sqrt(d.min(axis=1))
+        cut = float(np.median(near))
+        for i, k in enumerate(keys):
+            if out[k] == "guess" and near[i] <= cut:
+                out[k] = "fairly sure"
         return out
 
     def picture_trusted(self) -> bool:
@@ -352,8 +460,16 @@ class PictureMixin:
         picks = self._pic_picks()
         m = self._pic_model()
         st = self._pic_state()
+        bands = {b: 0 for b in pq.BANDS}
+        vr = 0
+        for v in self.picture_scores().values():
+            if v.get("vr"):
+                vr += 1
+            elif v.get("band"):
+                bands[v["band"]] += 1
         return {"measured": measured, "total": len(rows), "failed": failed,
                 "backfill": bool(st.get("backfill")), "finished": st.get("finished"),
                 "picks": sum(1 for p in picks if p.get("src") == "you"),
                 "from_duplicates": sum(1 for p in picks if p.get("src") == "duplicate"),
+                "rated": len(self._pic_ratings()), "bands": bands, "vr": vr,
                 "model": m.report}

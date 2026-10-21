@@ -2618,33 +2618,42 @@ document.addEventListener("click", async (e) => {
     catch (err) { toast(err.message, true); }
   }
 });
-wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); if (t === "picture") loadPicPair(); else stopPicVideos(); });
+wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); if (t === "picture") loadPic(); else stopPicVideos(); });
 
 // --- Picture quality: "which looks better?" and the measuring status -----------------------
-const pic = { pair: null, busy: false, poll: null, playing: true, sound: false, hear: "a", frac: 0.5 };
+const pic = { pair: null, busy: false, poll: null, playing: true, sound: false, hear: "a", frac: 0.5, mode: "pair" };
+// how far your ratings are from switching on real scores
+function picCalibWords(m) {
+  if (!m) return "";
+  if (m.calibrated) return `Scores are on — calibrated by ${plural(m.rated, "rating")} across ${m.bands_rated} bands.`;
+  const more = Math.max(0, (m.need_rated || 20) - (m.rated || 0)), bands = Math.max(0, (m.need_bands || 3) - (m.bands_rated || 0));
+  return `Rate one: ${m.rated || 0} of ${m.need_rated || 20} files rated` + (m.rated ? `, ${m.bands_rated} band${m.bands_rated === 1 ? "" : "s"} so far` : "") +
+    ` — ${more ? `${more} more` : ""}${more && bands ? " and " : ""}${bands ? `at least ${bands} more band${bands === 1 ? "" : "s"}` : ""} to switch on scores.`;
+}
 function picModelWords(m, picks) {
   if (!m) return "";
   if (!m.trained) {
     const left = Math.max(0, (m.need || 25) - (m.pairs || 0));
-    return left ? `${plural(m.pairs || 0, "pick")} so far — ${left} more and Peaks can start judging pictures your way.`
-      : "Enough picks — Peaks learns from them as soon as more files are measured.";
+    const own = (m.pairs || 0) + (m.implied || 0);
+    return (Math.max(0, (m.need || 25) - own) ? `${plural(m.pairs || 0, "pick")} so far — ${Math.max(0, (m.need || 25) - own)} more (or a few ratings) and Peaks can start judging pictures your way.`
+      : "Enough picks — Peaks learns from them as soon as more files are measured.") + " " + picCalibWords(m);
   }
   const pct = (x) => Math.round(x * 100) + "%";
   return `Agrees with your picks ${pct(m.agree)} of the time (bitrate alone: ${pct(m.baseline)}) — ` +
-    (m.trusted ? "<b>used</b> for picture scores and duplicate choices." : "not better than bitrate yet, so not used. More picks help.") +
-    (m.line != null ? ` Your “good enough” line sits at ${m.line}/100.` : m.fine_bad ? "" : " “Both fine” / “Both bad” answers set your “good enough” line.");
+    (m.trusted ? "<b>used</b> for duplicate choices." : "not better than bitrate yet, so duplicates still go by file facts. More picks help.") +
+    " " + picCalibWords(m);
 }
 // side by side on a computer, one above the other on a phone
 const picStacked = () => matchMedia("(max-width: 640px)").matches;
 const picWord = (side) => (picStacked() ? (side === "a" ? "Top" : "Bottom") : (side === "a" ? "Left" : "Right"));
 // both videos play the same stretch: a shared point (as a share of each scene), looped
 const PIC_LOOP = 20;
-function picSideHTML(x, side) {
+function picSideHTML(x, side, label) {
   const facts = [x.res, x.mbps != null ? `${x.mbps} Mbps` : null, x.codec].filter(Boolean).join(" · ");
   return `<div class="pic-side" data-side="${side}">
       <div class="pic-vid"><video playsinline muted preload="auto" ${x.poster ? `poster="${esc(x.poster)}"` : ""}></video>
         <button class="pic-full" title="Fullscreen">⛶</button><button class="pic-ear" title="Hear this side">🔈</button></div>
-      <div class="pic-meta"><b>${picWord(side)}</b> · ${esc(facts || "?")}<div class="faint small pic-title" title="${esc(x.title)}">${esc(x.title)}</div></div>
+      <div class="pic-meta"><b>${esc(label || picWord(side))}</b> · ${esc(facts || "?")}<div class="faint small pic-title" title="${esc(x.title)}">${esc(x.title)}</div></div>
     </div>`;
 }
 function picVideos() { return [...document.querySelectorAll("#pic-pair .pic-side video")]; }
@@ -2673,7 +2682,8 @@ function picSeek(frac) {
 function picSetPlaying(on) {
   pic.playing = on;
   for (const v of picVideos()) { if (on) v.play().catch(() => {}); else v.pause(); }
-  const b = $("#pic-play"); if (b) b.textContent = on ? "❚❚ Pause both" : "▶ Play both";
+  const both = pic.mode === "one" ? "" : " both";
+  const b = $("#pic-play"); if (b) b.textContent = on ? `❚❚ Pause${both}` : `▶ Play${both}`;
 }
 async function loadPicPair() {
   const box = $("#pic-pair"); if (!box) return;
@@ -2690,19 +2700,7 @@ async function loadPicPair() {
       <button class="btn sm" data-go="dashboard" data-sec="picture">Measure your library…</button></div>`;
   } else {
     box.innerHTML = picSideHTML(d.pair.a, "a") + picSideHTML(d.pair.b, "b");
-    box.querySelectorAll(".pic-side").forEach((el) => {
-      const v = el.querySelector("video"), side = el.dataset.side;
-      v.src = sceneStreamUrl(d.pair[side].stream);
-      v.loop = true;                                              // a short file just starts over
-      v.addEventListener("timeupdate", () => {                    // keep watching the same stretch
-        const s0 = +el.dataset.start || 0, span = +el.dataset.span || PIC_LOOP;
-        if (v.currentTime > s0 + span || v.currentTime < s0 - 1) { try { v.currentTime = s0; } catch {} }
-      });
-      el.addEventListener("mouseenter", () => { if (pic.hear !== side) { pic.hear = side; picApplySound(); } });
-      el.querySelector(".pic-ear").onclick = (e) => { e.stopPropagation(); pic.hear = side; pic.sound = true; picApplySound(); };
-      el.querySelector(".pic-full").onclick = (e) => { e.stopPropagation(); (v.requestFullscreen || v.webkitEnterFullscreen || (() => {})).call(v); };
-      el.querySelector(".pic-vid").onclick = () => picEnlarge(side);
-    });
+    wirePicSides(box);
     pic.playing = true;
     picApplySound();
     picSeek(0.15 + Math.random() * 0.7);
@@ -2710,6 +2708,76 @@ async function loadPicPair() {
   }
   picStatusLine();
 }
+function wirePicSides(box) {
+  box.querySelectorAll(".pic-side").forEach((el) => {
+    const v = el.querySelector("video"), side = el.dataset.side;
+    v.src = sceneStreamUrl(pic.pair[side].stream);
+    v.loop = true;                                              // a short file just starts over
+    v.addEventListener("timeupdate", () => {                    // keep watching the same stretch
+      const s0 = +el.dataset.start || 0, span = +el.dataset.span || PIC_LOOP;
+      if (v.currentTime > s0 + span || v.currentTime < s0 - 1) { try { v.currentTime = s0; } catch {} }
+    });
+    el.addEventListener("mouseenter", () => { if (pic.hear !== side) { pic.hear = side; picApplySound(); } });
+    el.querySelector(".pic-ear").onclick = (e) => { e.stopPropagation(); pic.hear = side; pic.sound = true; picApplySound(); };
+    el.querySelector(".pic-full").onclick = (e) => { e.stopPropagation(); (v.requestFullscreen || v.webkitEnterFullscreen || (() => {})).call(v); };
+    el.querySelector(".pic-vid").onclick = () => picEnlarge(side);
+  });
+}
+// one file at a time: rate its picture on your scale (this is what pins the scores to your eye)
+async function loadPicOne() {
+  const box = $("#pic-pair"); if (!box) return;
+  stopPicVideos();
+  box.classList.remove("enlarged"); box.dataset.big = "";
+  let d;
+  try { d = await api("/api/picture/one"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  if (!d.one) {
+    pic.pair = null;
+    box.innerHTML = `<div class="empty">Every measured file is rated — VR files aren't rated. Measure more of the library to rate more.</div>`;
+  } else {
+    pic.pair = { a: d.one };
+    box.innerHTML = picSideHTML(d.one, "a", "Rate this picture");
+    wirePicSides(box);
+    pic.playing = true; pic.hear = "a";
+    picApplySound();
+    picSeek(0.15 + Math.random() * 0.7);
+    picSetPlaying(true);
+  }
+  picStatusLine();
+}
+async function picRate(band) {
+  if (pic.busy) return;
+  const p = pic.pair;
+  if (band === "skip" || !p) return loadPicOne();
+  pic.busy = true;
+  stopPicVideos();
+  try {
+    await api("/api/picture/rate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: p.a.key, band: +band }) });
+  } catch (e) { toast(e.message, true); }
+  pic.busy = false;
+  loadPicOne();
+}
+const PIC_CAPS = {
+  pair: `Which picture looks better? Both play the same stretch of their scene — judge the <b>picture</b>, not the scene: detail, smearing in motion, blocks, grain, judder. Tap a video to enlarge it.
+    <span class="kbd-hint"><kbd>Space</kbd> play/pause · <kbd>N</kbd> another spot · <kbd>M</kbd> sound · <kbd>←</kbd> left · <kbd>→</kbd> right · <kbd>↑</kbd> both fine · <kbd>↓</kbd> both bad · <kbd>S</kbd> skip</span>`,
+  one: `How good is this picture, to you? <b>Good</b> = just good enough; <b>Poor</b> = you'd replace it; <b>Reference</b> = as good as it gets. Your ratings set the scale every file's score is measured on.
+    <span class="kbd-hint"><kbd>5</kbd>–<kbd>1</kbd> Reference … Poor · <kbd>Space</kbd> play/pause · <kbd>N</kbd> another spot · <kbd>M</kbd> sound · <kbd>S</kbd> skip</span>`,
+};
+function loadPic() {
+  const one = pic.mode === "one";
+  $("#pic-cap").innerHTML = PIC_CAPS[pic.mode];
+  document.querySelector("#pic-panel .pic-controls").hidden = one;
+  $("#pic-rate").hidden = !one;
+  document.querySelectorAll("#pic-mode [data-mode]").forEach((x) => x.classList.toggle("on", x.dataset.mode === pic.mode));
+  $("#pic-play").textContent = one ? "❚❚ Pause" : "❚❚ Pause both";
+  $("#pic-pair").classList.toggle("solo", one);
+  const note = $("#pic-two-note"); if (note) note.hidden = one;
+  return one ? loadPicOne() : loadPicPair();
+}
+$("#pic-mode")?.addEventListener("click", (e) => {
+  const m = e.target.closest("[data-mode]"); if (!m || m.dataset.mode === pic.mode) return;
+  pic.mode = m.dataset.mode; loadPic();
+});
+$("#pic-rate")?.addEventListener("click", (e) => { const b = e.target.closest("[data-band]"); if (b) picRate(b.dataset.band); });
 // tap a video: it fills the panel (the other stays small beside it — paused on a phone)
 function picEnlarge(side) {
   const box = $("#pic-pair"), same = box.dataset.big === side;
@@ -2748,8 +2816,13 @@ $("#pic-sound")?.addEventListener("click", () => { pic.sound = !pic.sound; picAp
 document.addEventListener("keydown", (e) => {
   if (!$("#taste")?.classList.contains("active") || $("#pic-panel")?.hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-  const k = { ArrowLeft: "a", ArrowRight: "b", ArrowUp: "fine", ArrowDown: "bad", s: "skip", S: "skip" }[e.key];
-  if (k) { e.preventDefault(); picAnswer(k); return; }
+  if (pic.mode === "one") {
+    const band = { 1: "1", 2: "2", 3: "3", 4: "4", 5: "5", s: "skip", S: "skip" }[e.key];
+    if (band) { e.preventDefault(); picRate(band); return; }
+  } else {
+    const k = { ArrowLeft: "a", ArrowRight: "b", ArrowUp: "fine", ArrowDown: "bad", s: "skip", S: "skip" }[e.key];
+    if (k) { e.preventDefault(); picAnswer(k); return; }
+  }
   if (e.key === " ") { e.preventDefault(); picSetPlaying(!pic.playing); }
   else if (e.key === "n" || e.key === "N") { e.preventDefault(); picSeek(0.15 + Math.random() * 0.7); }
   else if (e.key === "m" || e.key === "M") { e.preventDefault(); pic.sound = !pic.sound; picApplySound(); }
@@ -2774,8 +2847,11 @@ async function loadPicSettings() {
         : `<button class="btn pri" id="pic-start">${st.finished ? "Measure what's new" : "Measure the library"}</button> <span class="dim small">${st.finished
           ? `last full pass finished ${esc(new Date(st.finished * 1000).toLocaleDateString())}; new files are measured after each ingest anyway`
           : "a few seconds per file, unreviewed scenes first; you can stop any time"}</span>`}</div></div>
-    <div class="field"><div class="l"><b>Your bar</b><span>learned from your picks</span></div>
-      <div>${picModelWords(st.model)}<div class="small" style="margin-top:6px">${plural(st.picks, "pick")} in Taste → Picture${st.from_duplicates ? ` · ${st.from_duplicates} from duplicates you resolved` : ""}
+    ${Object.values(st.bands || {}).some(Boolean) ? `<div class="field"><div class="l"><b>Across your library</b><span>scored files by band</span></div>
+      <div class="pic-bands">${Object.entries(st.bands).reverse().map(([b, n]) => `<span class="pic-bandc b-${b.toLowerCase()}">${esc(b)} <b>${n.toLocaleString()}</b></span>`).join("")}
+        ${st.vr ? `<span class="faint small">· ${st.vr.toLocaleString()} VR not scored</span>` : ""}</div></div>` : ""}
+    <div class="field"><div class="l"><b>Your bar</b><span>learned from your picks and ratings</span></div>
+      <div>${picModelWords(st.model)}<div class="small" style="margin-top:6px">${plural(st.picks, "pick")} and ${plural(st.rated || 0, "rating")} in Taste → Picture${st.from_duplicates ? ` · ${st.from_duplicates} from duplicates you resolved` : ""}
         · <button class="btn sm ghost" data-go="taste" id="pic-go-teach">Compare pictures…</button></div></div></div>`;
   $("#pic-start")?.addEventListener("click", async () => { await api("/api/picture/backfill?on=true", { method: "POST" }); loadPicSettings(); });
   $("#pic-stop")?.addEventListener("click", async () => { await api("/api/picture/backfill?on=false", { method: "POST" }); loadPicSettings(); });
@@ -2783,12 +2859,24 @@ async function loadPicSettings() {
   if (run && !$("#pic-set").closest(".sec").hidden) pic.poll = setTimeout(loadPicSettings, 5000);
 }
 // a file's picture in a few words: the score once Peaks has learned your bar, else what's wrong
+const PIC_SUBS = [["detail", "Detail"], ["compression", "Compression"], ["noise", "Noise"], ["motion", "Motion"], ["framing", "Framing"]];
+function picSubsText(p) {
+  const s = p.subs || {};
+  return PIC_SUBS.filter(([k]) => s[k] != null).map(([k, n]) => `${n} ${s[k]}`).join(" · ");
+}
 function picChipHTML(p, { long = false } = {}) {
   if (!p) return "";
-  const bad = p.ok === false, words = (p.reasons || []).slice(0, long ? 3 : 1).join(" · ");
-  if (p.score == null && !words) return long ? '<span class="faint">measured — nothing wrong found</span>' : "";
-  const head = p.score != null ? `Picture ${p.score}` : "Picture";
-  return `<span class="q pic ${bad ? "warn" : p.score != null && p.score >= 70 ? "hi" : ""}" title="${esc((p.reasons || []).join(" · ") || "no problems found")}">${esc(head)}${words ? ` · ${esc(words)}` : ""}${bad ? " · below your line" : ""}</span>`;
+  if (p.vr) return long ? `<span class="faint">VR — not scored</span>` : "";
+  const words = (p.reasons || []).slice(0, long ? 3 : 1).join(" · ");
+  const tip = [p.score != null ? `Picture ${p.score}/100 — ${p.band}${p.conf ? ` (${p.conf})` : ""}` : "", picSubsText(p), (p.reasons || []).join(" · ")].filter(Boolean).join("\n");
+  if (p.score == null) {
+    if (!words) return long ? `<span class="faint">measured — nothing wrong found · ${esc(picSubsText(p))}</span>` : "";
+    return `<span class="q qpic ${long ? "long" : ""}" title="${esc(tip)}">Picture · ${esc(words)}</span>`;
+  }
+  const cls = p.score < 50 ? "warn" : p.score >= 70 ? "hi" : "";
+  const head = `Picture ${p.score} · ${p.band}${p.conf && p.conf !== "sure" ? ` · ${p.conf}` : ""}`;
+  return `<span class="q qpic ${cls} ${long ? "long" : ""}" title="${esc(tip)}">${esc(head)}${words && long ? ` · ${esc(words)}` : ""}</span>` +
+    (long ? `<div class="faint small pic-subs">${esc(picSubsText(p))}</div>` : "");
 }
 wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); if (t === "health") openHealth(); });
 
@@ -3805,7 +3893,8 @@ function cfChipText(k, i) {
     case "length": return `${rng(f.length, " min")}`;
     case "size": return `${rng(f.size, " GB")}`;
     case "minO": return `O ≥ ${f.minO}`;
-    case "pic": return { low: "Picture below your line", upscaled: "Upscaled picture", unmeasured: "Picture not measured yet" }[f.pic] || "Picture";
+    case "pic": return { low: "Picture below Good", good: "Picture Good or better", excellent: "Picture Excellent or better",
+      noscore: "Picture: no score yet", upscaled: "Upscaled picture", unmeasured: "Picture not measured yet" }[f.pic] || "Picture";
     case "picMin": return `Picture ≥ ${f.picMin}`;
   }
   return k;
@@ -3885,7 +3974,8 @@ function cfEdit(k, anchor) {
   else if (k === "released" || k === "added") body = range(f[k], "date", "");
   else if (k === "length") body = range(f.length, "number", "min", "5");
   else if (k === "size") body = range(f.size, "number", "GB", "0.5");
-  else if (k === "pic" || k === "picMin") body = opts([["low", "Below your line"], ["upscaled", "Upscaled"], ["unmeasured", "Not measured yet"], ["", "Any"]], f.pic) +
+  else if (k === "pic" || k === "picMin") body = opts([["excellent", "Excellent or better"], ["good", "Good or better"], ["low", "Below Good"],
+      ["upscaled", "Upscaled"], ["noscore", "No score yet"], ["unmeasured", "Not measured yet"], ["", "Any"]], f.pic) +
       `<div class="row">or a score of at least <input data-a type="number" min="0" max="100" step="5" class="num-sm" value="${esc(f.picMin)}" /> <button class="btn sm pri" data-apply>Apply</button></div>`;
   else if (k === "minO") body = `<div class="row">at least <input data-a type="number" min="0" step="1" class="num-sm" value="${esc(f.minO)}" /> Os <button class="btn sm pri" data-apply>Apply</button></div>`;
   pop.innerHTML = `<div class="fpop-h">${esc(label)}</div>${body}`;

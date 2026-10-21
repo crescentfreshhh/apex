@@ -4963,8 +4963,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "performer": perf,
             # best → worst (ties: newest first, via the date tiebreak below)
             "tier": lambda r: TIER_RANK_SORT.get(r.get("tier"), 0),
-            # your learned picture score; before there is one, how much real detail it has
-            "picture": lambda r: (lambda p: None if not p else (p["score"] if p["score"] is not None else p["real"]))(
+            # your picture score; before calibration where it ranks; before any picks, its real detail
+            "picture": lambda r: (lambda p: None if not p or p.get("vr") else
+                                  next((v for v in (p.get("score"), p.get("rank"), p.get("real")) if v is not None), None))(
                 (pics or {}).get(r["scene_id"])),
         }[sort]
         keyed = [(value(r), r) for r in pool]
@@ -5059,7 +5060,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     return False
                 if pic == "upscaled" and not p["upscaled"]:
                     return False
-                if pic == "low" and p["ok"] is not False:
+                if pic == "low" and p["ok"] is not False:          # below Good (or your line, before calibration)
+                    return False
+                if pic == "good" and (p.get("score") is None or p["score"] < 50):
+                    return False
+                if pic == "excellent" and (p.get("score") is None or p["score"] < 70):
+                    return False
+                if pic == "noscore" and p.get("score") is not None:
                     return False
                 if pic_min and (p["score"] is None or p["score"] < int(pic_min)):
                     return False

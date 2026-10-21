@@ -159,8 +159,9 @@ def test_model_learns_real_detail_and_beats_bitrate():
     assert rep["trained"] and rep["agree"] > 0.85 and rep["trusted"]
     best = max(feats, key=real)
     worst = min(feats, key=real)
-    assert m.score(feats[best]) > m.score(feats[worst]) and 0 <= m.score(feats[worst]) <= 100
-    assert pq.PictureModel.from_state(m.state()).score(feats[best]) == m.score(feats[best])
+    assert m.rank(feats[best]) > m.rank(feats[worst]) and 0 <= m.rank(feats[worst]) <= 100
+    assert m.score(feats[best]) is None and not m.calibrated          # no ratings yet: an order, not a score
+    assert pq.PictureModel.from_state(m.state()).rank(feats[best]) == m.rank(feats[best])
 
 
 def test_a_bitrate_only_taste_isnt_trusted_and_few_picks_wait():
@@ -339,7 +340,7 @@ def test_pair_route_and_learning_end_to_end(svc, monkeypatch):
     st = api.get("/api/picture/status").json()
     assert st["picks"] == 2 * (pq.PictureModel.MIN_PAIRS + 5) and st["model"]["trained"]
     pics = svc.picture_scores()
-    assert pics["1"]["score"] > pics["2"]["score"]
+    assert pics["1"]["rank"] > pics["2"]["rank"] and pics["1"]["score"] is None   # ranked, not yet scored
 
 
 def test_a_file_without_a_poster_still_pairs(svc):
@@ -349,3 +350,108 @@ def test_a_file_without_a_poster_still_pairs(svc):
         f.unlink()
     p = svc.picture_pair(random.Random(1))
     assert p and p["a"]["poster"] is None and p["a"]["stream"]
+
+
+# --- a real score: calibrated by your ratings ------------------------------------------------
+
+def _rated(feats, facts, n=30, seed=4):
+    """Rate n files by a hidden quality (real detail), as bands 1–5."""
+    rng = random.Random(seed)
+    keys = rng.sample(sorted(feats), n)
+    q = {k: 1 / facts[k][0]["eff_factor"] for k in keys}
+    order = sorted(keys, key=q.get)
+    return {k: 1 + min(4, i * 5 // n) for i, k in enumerate(order)}
+
+
+def test_ratings_calibrate_a_score_that_means_the_same_thing():
+    feats, facts = _library()
+    real = lambda k: 1 / facts[k][0]["eff_factor"] + 0.05 * facts[k][0]["sharp"]          # noqa: E731
+    ratings = _rated(feats, facts)
+    m = pq.PictureModel()
+    rep = m.train(feats, _picks(feats, real), ratings)
+    assert rep["calibrated"] and m.calibrated and rep["rated"] == 30
+    cuts = m.cuts
+    assert cuts == sorted(cuts)
+    good = [k for k, b in ratings.items() if b == 3]
+    assert sum(50 <= m.score(feats[k]) < 70 for k in good) >= len(good) * 0.6      # Good lands in Good, mostly
+    by_band = {b: np.mean([m.score(feats[k]) for k, v in ratings.items() if v == b]) for b in set(ratings.values())}
+    assert [by_band[b] for b in sorted(by_band)] == sorted(by_band.values())        # bands in order
+    assert pq.band_of(m.score(feats[good[0]])) in pq.BANDS
+    # an absolute scale: the same file keeps its score when the library around it changes
+    k0 = good[0]
+    before = m.score(feats[k0])
+    more = dict(feats)
+    more.update({f"x{i}": feats[k] * 1.0 for i, k in enumerate(list(feats)[:40])})
+    m2 = pq.PictureModel()
+    m2.train(more, _picks(feats, real), ratings)
+    assert abs(m2.score(feats[k0]) - before) <= 8                                  # not a percentile any more
+    assert pq.PictureModel.from_state(m.state()).score(feats[k0]) == before
+
+
+def test_too_few_ratings_means_no_score_yet():
+    feats, facts = _library()
+    real = lambda k: 1 / facts[k][0]["eff_factor"]                                    # noqa: E731
+    few = dict(list(_rated(feats, facts).items())[:10])
+    m = pq.PictureModel()
+    rep = m.train(feats, _picks(feats, real), few)
+    assert rep["trained"] and not rep["calibrated"] and rep["need_rated"] == pq.PictureModel.MIN_RATED
+    one_band = {k: 3 for k in list(feats)[:25]}
+    m.train(feats, _picks(feats, real), one_band)
+    assert not m.calibrated                                                          # needs 3+ different bands
+
+
+def test_ratings_alone_train_the_order():
+    feats, facts = _library()
+    ratings = _rated(feats, facts, n=40)
+    m = pq.PictureModel()
+    rep = m.train(feats, [], ratings)
+    assert rep["trained"] and rep["pairs"] == 0 and rep["implied"] > 0 and m.calibrated
+    best = max(feats, key=lambda k: 1 / facts[k][0]["eff_factor"])
+    worst = min(feats, key=lambda k: 1 / facts[k][0]["eff_factor"])
+    assert m.score(feats[best]) > m.score(feats[worst])
+
+
+def test_subscores_explain():
+    up = pq.subscores({"eff_factor": 2.0, "block": 1.0, "noise": 1, "comb": 0, "frozen": 0, "active": 1.0})
+    blocky = pq.subscores({"eff_factor": 1.0, "block": 1.6, "band": 0.4, "noise": 1, "active": 1.0})
+    boxed = pq.subscores({"eff_factor": 1.0, "block": 1.0, "noise": 1, "active": 0.7})
+    clean = pq.subscores({"eff_factor": 1.0, "block": 1.0, "band": 0, "noise": 1, "comb": 0, "frozen": 0, "active": 1.0})
+    assert clean == {"detail": 10, "compression": 10, "noise": 10, "motion": 10, "framing": 10}
+    assert up["detail"] <= 2 and blocky["compression"] <= 3 and boxed["framing"] <= 5
+    assert pq.subscores({"comb": 0.1})["motion"] <= 4 and pq.subscores({})["detail"] is None
+
+
+def test_rate_one_confidence_and_vr_left_out(svc, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc.picture_backfill(True)
+    svc.run_picture()
+    keys = {r["scene_id"]: svc._pic_key(r) for r in svc._catalogue_all()}
+    # make scene 3 a VR file: never offered, never scored
+    meas = svc._pic_measures()
+    rec = dict(meas[keys["3"]], vr=True)
+    svc._pic_append("measures.jsonl", rec)
+    svc._pic_dirty = True
+    for _ in range(10):
+        one = svc.picture_one(random.Random(_))
+        assert one and one["one"]["key"] != keys["3"]
+        p = svc.picture_pair(random.Random(_))
+        assert p and keys["3"] not in (p["a"]["key"], p["b"]["key"])
+    monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
+    api = TestClient(app_mod.create_app(svc.cfg))
+    assert api.post("/api/picture/rate", json={"key": keys["1"], "band": 9}).status_code == 400
+    assert api.post("/api/picture/rate", json={"key": keys["1"], "band": 5}).json()["rated"] == 1
+    assert api.post("/api/picture/rate", json={"key": keys["1"], "band": 4}).json()["rated"] == 1   # last one wins
+    assert svc._pic_ratings()[keys["1"]] == 4
+    assert api.get("/api/picture/one").json()["one"]["key"] == keys["2"]          # the only unrated, non-VR file
+    for i in range(pq.PictureModel.MIN_PAIRS):
+        api.post("/api/picture/answer", json={"a": keys["1"], "b": keys["2"], "ans": "a"})
+    pics = svc.picture_scores()
+    assert pics["3"]["vr"] and pics["3"]["score"] is None and pics["3"]["subs"]["framing"] is not None
+    assert pics["1"]["conf"] == "sure" and pics["2"]["conf"] == "sure"
+    st = api.get("/api/picture/status").json()
+    assert st["vr"] == 1 and st["rated"] == 1 and set(st["bands"]) == set(pq.BANDS)
+    assert api.get("/api/catalogue", params={"pic": "noscore"}).status_code == 200
+    assert api.get("/api/catalogue", params={"pic": "good"}).status_code == 200
