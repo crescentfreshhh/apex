@@ -2081,12 +2081,18 @@ def create_app(cfg=None):
     @app.get("/api/crash-report")
     def crash_report():
         """How the previous run ended, if it didn't shut down cleanly."""
+        from .. import atomic
+
         return {**(forensics.report() or {"abrupt": False}),
-                "log": bool(forensics.log_path() and forensics.log_path().exists())}
+                "log": bool(forensics.log_path() and forensics.log_path().exists()),
+                "repairs": atomic.repairs()}
 
     @app.post("/api/crash-report/dismiss")
     def crash_report_dismiss():
+        from .. import atomic
+
         forensics._state["report"] = None
+        atomic.clear_repairs()
         return {"ok": True}
 
     @app.get("/api/crashlog")

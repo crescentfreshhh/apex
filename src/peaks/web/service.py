@@ -7,6 +7,8 @@ thumbnails. The web layer stays thin glue over this.
 
 from __future__ import annotations
 
+from .. import atomic
+
 import threading
 from io import BytesIO
 
@@ -131,12 +133,15 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """GUI-saved settings (currently the active DINOv2 backbone + CLIP
         variant). Cached; save_models() clears the cache."""
         if self._settings_cache is None:
-            import json
+
+            from .. import atomic
 
             path = self._settings_path()
             try:
-                self._settings_cache = json.loads(path.read_text()) if path.is_file() else {}
-            except (OSError, ValueError):
+                # a damaged file is repaired, or set aside (kept as settings.json.damaged-…) —
+                # never read as {} and then saved over your settings
+                self._settings_cache = atomic.read_json(path, default={}, set_aside=True) or {}
+            except OSError:
                 self._settings_cache = {}
         return self._settings_cache
 
@@ -198,7 +203,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         megaboard) uses them — no container restart, no env vars.
         Validates against the known model lists; a blank value clears the
         override back to the container default."""
-        import json
 
         from ..embedding import DINO_BACKBONES
 
@@ -226,7 +230,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             s["peak_pool"] = bool(peak_pool)  # query-time matching mode (no re-embed)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         # a changed backbone means a different cache namespace / vector space,
         # so drop any built search indexes to force a clean rebuild. (A peak-pool
@@ -256,7 +260,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def save_export_settings(self, res=None, fps=None, codec=None) -> dict:
         """Persist reel export quality to settings.json (no re-embed / no index
         rebuild — it only affects export time)."""
-        import json
 
         s = dict(self._settings())
         if res is not None:
@@ -273,7 +276,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             s["export_codec"] = codec
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.get_export_settings()
 
@@ -319,7 +322,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """Persist the library's sampling. Changing it makes every cached scene
         at other settings 'pending' — callers must confirm that (see
         `sampling_change_impact`)."""
-        import json
 
         s = dict(self._settings())
         if mode is not None:
@@ -333,7 +335,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             s["sampling_interval"] = iv
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.get_sampling_settings()
 
@@ -379,7 +381,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def save_clip_settings(self, similarity=None) -> dict:
         """Persist the moment-length drift threshold to settings.json. Applies to
         the next feed / board / reel build — no re-embed, no restart."""
-        import json
 
         s = dict(self._settings())
         if similarity is not None:
@@ -389,7 +390,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             s["clip_similarity"] = round(sim, 3)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.get_clip_settings()
 
@@ -443,7 +444,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     def save_schedule(self, embed_hours=None, sync=None, prune=None) -> dict:
         """Persist recurring-embed settings to /config/settings.json."""
-        import json
 
         s = dict(self._settings())
         if embed_hours is not None:
@@ -454,7 +454,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             s["prune"] = bool(prune)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.schedule_settings()
 
@@ -504,13 +504,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return sorted(profs, key=lambda p: (p != default, p.lower()))
 
     def _write_profile_registry(self, names: list[str]) -> None:
-        import json
-
         s = dict(self._settings())
         s["profiles"] = names
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
 
     def create_profile(self, name: str) -> list[str]:
@@ -1293,7 +1291,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if live and source:                # a live playlist re-derives from its source
             data["live"] = True
             data["source"] = source
-        (d / f"{safe}.json").write_text(json.dumps(data))
+        atomic.write_text((d / f"{safe}.json"), json.dumps(data))
         return {"name": name, "safe": safe, "count": len(apexes), "live": bool(live and source)}
 
     def derive_collection(self, name: str):
@@ -1410,7 +1408,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             raise FileNotFoundError(name)
         data = json.loads(p.read_text())
         data["name"] = new_name
-        p.write_text(json.dumps(data))
+        atomic.write_text(p, json.dumps(data))
         return {"name": new_name, "safe": p.stem, "count": data.get("count", 0)}
 
     # --- megaboard sources (shuffle-all / apex tag / collection) -------------
@@ -1968,6 +1966,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         if getattr(self, "_ingest_stash_busy", False):
             return {"skipped": "ingest running"}
+        say("Checking your ratings file", 0.01)
+        try:
+            self._label_store()      # repairs a damaged labels.json now, not mid-measure
+        except Exception:  # noqa: BLE001 — reported where it's used
+            pass
         say("Loading your scene list", 0.02)
         try:
             rows = self._catalogue_all()
@@ -2249,14 +2252,25 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         return LabelStore(self.cfg.modeling.labels_path)
 
+    def _label_lock(self):
+        """Hold the labels file (for changes that save only when something changed)."""
+        from .. import atomic
+
+        return atomic.edit_lock(self.cfg.modeling.labels_path)
+
+    def _label_edit(self):
+        """Hold the labels file across load → change → save (see LabelStore.editing)."""
+        from ..labels import LabelStore
+
+        return LabelStore.editing(self.cfg.modeling.labels_path)
+
     def add_label(
         self, key: str, time: float, label: int,
         profile: str | None = None, scene_id: str | None = None,
     ) -> dict:
         profile = profile or self.cfg.markers.tag_name
-        store = self._label_store()
-        store.add(key, float(time), int(label), profile, scene_id=scene_id)
-        store.save()
+        with self._label_edit() as store:
+            store.add(key, float(time), int(label), profile, scene_id=scene_id)
         self._labels_since_train += 1
         self._measure_state_update(add=1)
         # Reflect the new rating immediately: without this the cached taste
@@ -2302,20 +2316,22 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if not key:
             return {"kept": False, "reason": "not embedded"}
         profile = self.cfg.markers.tag_name
-        store = self._label_store()
-        if any(lab.key == key and abs(lab.time - float(t)) < 10.0 for lab in store.for_profile(profile)):
-            return {"kept": False, "reason": "already known"}
-        store.add(key, float(t), 1, profile, scene_id=sid, source="engage", weight=self.ENGAGE_WEIGHT)
-        store.save()
+        with self._label_lock():
+            store = self._label_store()
+            if any(lab.key == key and abs(lab.time - float(t)) < 10.0 for lab in store.for_profile(profile)):
+                return {"kept": False, "reason": "already known"}
+            store.add(key, float(t), 1, profile, scene_id=sid, source="engage", weight=self.ENGAGE_WEIGHT)
+            store.save()
         return {"kept": True, "kind": kind}
 
     def _drop_engagement(self, scene_id: str) -> int:
         sid = str(scene_id)
         try:
-            store = self._label_store()
-            n = store.remove_where(lambda lab: lab.source == "engage" and str(lab.scene_id) == sid)
-            if n:
-                store.save()
+            with self._label_lock():
+                store = self._label_store()
+                n = store.remove_where(lambda lab: lab.source == "engage" and str(lab.scene_id) == sid)
+                if n:
+                    store.save()
             return n
         except Exception:  # noqa: BLE001 — never block a grade
             return 0
@@ -2333,14 +2349,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         `purge_apexes` is set on a full wipe, which also deletes every apex marker
         for the profile (a true scorched-earth reset)."""
         profile = profile or self.cfg.markers.tag_name
-        store = self._label_store()
-        if within_minutes and within_minutes > 0:
-            from time import time as _now
+        with self._label_edit() as store:
+            if within_minutes and within_minutes > 0:
+                from time import time as _now
 
-            removed = store.remove(profile, newer_than=_now() - within_minutes * 60.0)
-        else:
-            removed = store.remove(profile)  # everything for this profile
-        store.save()
+                removed = store.remove(profile, newer_than=_now() - within_minutes * 60.0)
+            else:
+                removed = store.remove(profile)  # everything for this profile
         self._invalidate_taste_caches()
         self.reset_labels_since_train()
         pos, neg = store.counts(profile)
@@ -2663,7 +2678,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             try:
                 p = self._measure_state_path()
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(json.dumps(st))
+                atomic.write_text(p, json.dumps(st))
             except OSError:
                 pass
 
@@ -2964,7 +2979,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         p = self._hidden_path()
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(sorted(ids)))
+            atomic.write_text(p, json.dumps(sorted(ids)))
         except Exception:  # noqa: BLE001 — persistence best-effort
             pass
 
@@ -3250,10 +3265,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         p = self._scores_path(profile, model)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_name(p.name + ".tmp.npy")
-            np.save(tmp, np.asarray(scores, dtype=np.float32))
-            tmp.replace(p)
-            p.with_suffix(".json").write_text(json.dumps(
+            with atomic.temp_for(p) as tmp, open(tmp, "wb") as fh:
+                np.save(fh, np.asarray(scores, dtype=np.float32))
+            atomic.write_text(p.with_suffix(".json"), json.dumps(
                 {"model_sig": meta["model_sig"], "rows_sig": meta["rows_sig"],
                  "key_rows": {k: list(v) for k, v in meta["key_rows"].items()}}))
         except OSError:
@@ -4404,10 +4418,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """Delete one taste label (the editor's ×). Invalidates the taste caches
         so the centroid/visual refresh; the model updates on the next retrain."""
         profile = profile or self.cfg.markers.tag_name
-        store = self._label_store()
-        removed = store.remove_one(key, float(time), profile)
+        with self._label_lock():
+            store = self._label_store()
+            removed = store.remove_one(key, float(time), profile)
+            if removed:
+                store.save()
         if removed:
-            store.save()
             self._invalidate_taste_caches()
         pos, neg = store.counts(profile)
         return {"removed": bool(removed), "positive": pos, "negative": neg}
@@ -4717,8 +4733,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return tier_names(self._settings().get("tier_names"))
 
     def save_tier_names(self, names: dict) -> dict[str, str]:
-        import json
-
         from ..tiers import DEFAULT_NAMES
 
         s = dict(self._settings())
@@ -4732,7 +4746,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         s["tier_names"] = cur
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.tier_display_names()
 
@@ -4812,11 +4826,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         def run():
             try:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                tmp = p.with_name(p.name + ".tmp")
-                with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                from .. import atomic
+
+                with atomic.temp_for(p) as tmp, gzip.open(tmp, "wt", encoding="utf-8") as fh:
                     json.dump({"ts": _t.time(), "ids": ids, "meta": meta}, fh)
-                tmp.replace(p)
             except (OSError, TypeError, ValueError):
                 pass
         threading.Thread(target=run, daemon=True, name="peaks-catalogue-save").start()
@@ -4891,7 +4904,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         try:
             p = self._hidden_path()
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(sorted(new)))
+            atomic.write_text(p, json.dumps(sorted(new)))
         except Exception:  # noqa: BLE001 — persistence best-effort
             pass
 
@@ -5250,7 +5263,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     def save_curation_settings(self, auto_legendaire_on_save: bool | None = None,
                                follow_renamer: bool | None = None, today_goal: int | None = None) -> dict:
-        import json
 
         s = dict(self._settings())
         if today_goal is not None:
@@ -5261,7 +5273,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             s["follow_renamer"] = bool(follow_renamer)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.curation_settings()
 
@@ -5590,7 +5602,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                       "n": len(keep), "fallback": fb_rep,
                       "trained_at": _t.strftime("%Y-%m-%d %H:%M")}
             path = model.save(self._tier_model_path())
-            path.with_suffix(".json").write_text(json.dumps(report, indent=2))
+            atomic.write_text(path.with_suffix(".json"), json.dumps(report, indent=2))
             self._tier_state = {"model": model, "report": report}
             self._tier_preds = None
             self._grades_since_train = 0

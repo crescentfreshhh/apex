@@ -16,7 +16,6 @@ as "no longer in Stash").
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import uuid
@@ -52,10 +51,9 @@ class DupeQueueMixin:
 
     def _dq_save(self) -> None:
         p = self._dq_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._dq()))
-        os.replace(tmp, p)
+        from .. import atomic
+
+        atomic.write_json(p, self._dq())
 
     def _dq_open_ids(self) -> set[str]:
         """Scene ids in queued / running items (keepers and copies)."""

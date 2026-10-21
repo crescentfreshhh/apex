@@ -4,6 +4,8 @@ embedding/search code so the management surface stays readable."""
 
 from __future__ import annotations
 
+from .. import atomic
+
 import re
 import threading
 import time
@@ -139,8 +141,6 @@ class LibraryMixin:
         return tier_tags(self._settings().get("tier_tags"))
 
     def save_tier_tags(self, tags: dict) -> dict[str, str]:
-        import json
-
         from ..tiers import TIER_TAGS
 
         s = dict(self._settings())
@@ -154,7 +154,7 @@ class LibraryMixin:
         s["tier_tags"] = cur
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         self._tag_id_cache = {}
         self._cat_cache = None                 # rows carry tag states
@@ -367,8 +367,6 @@ class LibraryMixin:
                 "root": str(self._cleanup_root())}
 
     def save_cleanup_settings(self, on: bool | None = None, approved: bool | None = None) -> dict:
-        import json
-
         s = dict(self._settings())
         if on is not None:
             s["cleanup_on_sync"] = bool(on)
@@ -376,7 +374,7 @@ class LibraryMixin:
             s["cleanup_approved"] = bool(approved)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.cleanup_settings()
 
@@ -482,8 +480,6 @@ class LibraryMixin:
         return {"on": bool(s.get("copies_on", True)), "approved": bool(s.get("copies_approved", False))}
 
     def save_copies_settings(self, on: bool | None = None, approved: bool | None = None) -> dict:
-        import json
-
         s = dict(self._settings())
         if on is not None:
             s["copies_on"] = bool(on)
@@ -491,7 +487,7 @@ class LibraryMixin:
             s["copies_approved"] = bool(approved)
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.copies_settings()
 
@@ -821,7 +817,7 @@ class LibraryMixin:
         groups = self._dupe_ignored() | {ids}
         p = self._dupe_ignore_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(sorted(sorted(g) for g in groups)))
+        atomic.write_text(p, json.dumps(sorted(sorted(g) for g in groups)))
         cached = getattr(self, "_dupe_cache", None)
         if cached:
             cached["groups"] = [g for g in cached["groups"]
@@ -1048,25 +1044,20 @@ class LibraryMixin:
         return opts
 
     def save_ingest_scan(self, opts: dict) -> dict[str, bool]:
-        import json
-
         s = dict(self._settings())
         s["ingest_scan"] = {k: bool(v) for k, v in (opts or {}).items()
                             if k in self.INGEST_SCAN_FIELDS and isinstance(v, bool)}
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.ingest_scan_options()
 
     def _write_ingest(self, record: dict) -> None:
-        import json
-
         try:
-            self._ingest_path().parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._ingest_path().with_suffix(".tmp")
-            tmp.write_text(json.dumps(record, indent=1))
-            tmp.replace(self._ingest_path())
+            from .. import atomic
+
+            atomic.write_json(self._ingest_path(), record, indent=1)
         except OSError:
             pass
 
@@ -1348,12 +1339,10 @@ class LibraryMixin:
         return self._write_views([v for v in self.saved_views() if v.get("name") != name])
 
     def _write_views(self, views: list[dict]) -> list[dict]:
-        import json
-
         s = dict(self._settings())
         s["saved_views"] = views
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return views

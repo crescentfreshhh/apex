@@ -11,7 +11,6 @@ database: restoring matches files by fingerprint and re-applies their grades.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections import deque
@@ -83,12 +82,12 @@ def write_backup(folder: str | Path, rows: list[dict], stamp: str | None = None,
     scenes = {r["fingerprint"]: backup_entry(r) for r in rows
               if r.get("fingerprint") and graded(r)}
     path = folder / f"grades-backup-{stamp}.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({
+    from . import atomic
+
+    atomic.write_text(path, json.dumps({
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "count": len(scenes), "scenes": scenes,
     }, ensure_ascii=False, indent=1))
-    os.replace(tmp, path)
     for old in list_backups(folder)[keep:]:
         try:
             (folder / old["name"]).unlink()

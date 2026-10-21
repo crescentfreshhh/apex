@@ -17,6 +17,8 @@ records what's already there as handled — only what arrives afterwards counts.
 
 from __future__ import annotations
 
+from .. import atomic
+
 import json
 import os
 import time
@@ -68,7 +70,7 @@ class WatchMixin:
             s["watch_quiet"] = max(0, min(3600, int(quiet)))
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         self.watch_tick()                          # turned on / new folders: baseline right now
         return self.watch_status()
@@ -93,10 +95,9 @@ class WatchMixin:
 
     def _watch_save(self) -> None:
         p = self._watch_file()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._watch_state()))
-        os.replace(tmp, p)
+        from .. import atomic
+
+        atomic.write_json(p, self._watch_state())
 
     # --- the minute tick ----------------------------------------------------------
 
@@ -229,10 +230,9 @@ class WatchMixin:
 
     def _save_followup(self, ids) -> None:
         p = self._followup_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(sorted(set(ids))))
-        os.replace(tmp, p)
+        from .. import atomic
+
+        atomic.write_json(p, sorted(set(ids)))
 
     def add_embed_followup(self, ids) -> None:
         with self._folder_watch_lock():

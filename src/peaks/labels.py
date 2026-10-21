@@ -11,7 +11,7 @@ overwrites rather than duplicates.
 
 from __future__ import annotations
 
-import json
+import contextlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import time as _now
@@ -40,22 +40,34 @@ class LabelStore:
         return (key, round(float(time), 2), profile)
 
     def load(self) -> None:
+        from . import atomic
+
         self._labels = {}
-        if self.path.exists():
-            for d in json.loads(self.path.read_text()):
-                lab = Label(**d)
-                self._labels[self._id(lab.key, lab.time, lab.profile)] = lab
+        # a file two overlapping saves left damaged is repaired here (the first
+        # complete snapshot is kept); anything else raises rather than reading as empty
+        for d in atomic.read_json(self.path, default=[]):
+            lab = Label(**d)
+            self._labels[self._id(lab.key, lab.time, lab.profile)] = lab
 
     def save(self) -> Path:
-        # atomic: write to a temp file, then replace — a crash mid-save must
-        # not corrupt an existing labels file (it's hand-collected work)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(
-            json.dumps([asdict(l) for l in self._labels.values()], indent=2)
-        )
-        tmp.replace(self.path)
-        return self.path
+        # its own temp file, flushed, then swapped in — hand-collected work must
+        # survive a crash *and* two saves at once
+        from . import atomic
+
+        return atomic.write_json(self.path, [asdict(l) for l in self._labels.values()], indent=2)
+
+    @classmethod
+    @contextlib.contextmanager
+    def editing(cls, path: str | Path):
+        """Load → change → save with the file held, so two changes arriving
+        together can't drop each other: `with LabelStore.editing(p) as s: s.add(…)`.
+        Saves on a clean exit."""
+        from . import atomic
+
+        with atomic.edit_lock(path):
+            store = cls(path)
+            yield store
+            store.save()
 
     def add(
         self,

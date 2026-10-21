@@ -19,7 +19,6 @@ One small JSON file (`models/board_exposure.json`), a row per scene seen:
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -50,10 +49,9 @@ class ExposureStore:
         return self._rows
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps({"scenes": self._rows}, separators=(",", ":")))
-        os.replace(tmp, self.path)
+        from . import atomic
+
+        atomic.write_text(self.path, json.dumps({"scenes": self._rows}, separators=(",", ":")))
         self._mtime = self.path.stat().st_mtime
 
     def record(self, shows: dict | None = None, pos: dict | None = None, neg: dict | None = None,

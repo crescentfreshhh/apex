@@ -115,17 +115,17 @@ class EmbeddingCache:
             raise ValueError("times and vecs must have matching first dimension")
         dest = self._file(key, model_name)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # atomic-ish: write to a temp file then replace. Pass an open handle so
-        # numpy doesn't "helpfully" append .npz to the temp filename.
-        tmp = dest.with_name(dest.name + ".tmp")
-        with open(tmp, "wb") as fh:
+        # its own temp file, then swapped in. Pass an open handle so numpy
+        # doesn't "helpfully" append .npz to the temp filename.
+        from . import atomic
+
+        with atomic.temp_for(dest) as tmp, open(tmp, "wb") as fh:
             np.savez(
                 fh,
                 times=times,
                 vecs=vecs,
                 meta=np.array(json.dumps(meta or {})),
             )
-        tmp.replace(dest)
         return dest
 
     def load(self, key: str, model_name: str) -> tuple[np.ndarray, np.ndarray, dict]:

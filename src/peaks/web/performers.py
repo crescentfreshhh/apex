@@ -18,6 +18,8 @@ reads Stash again.
 
 from __future__ import annotations
 
+from .. import atomic
+
 import gzip
 import json
 import threading
@@ -63,11 +65,10 @@ class PerformersMixin:
         self.__dict__.pop("_perf_by_id", None)
         try:
             p = self._perf_dir_path()
-            p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_name(p.name + ".tmp")
-            with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            from .. import atomic
+
+            with atomic.temp_for(p) as tmp, gzip.open(tmp, "wt", encoding="utf-8") as fh:
                 json.dump({"ts": time.time(), "performers": perfs}, fh)
-            tmp.replace(p)
         except OSError:
             pass
         return perfs
@@ -338,10 +339,10 @@ class PerformersMixin:
                 img = img.convert("RGB")
                 img.thumbnail(self._PHOTO_BOX)
                 out = self._photo_path(pid)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                tmp = out.with_name(out.name + ".tmp")
-                img.save(tmp, format="JPEG", quality=85)
-                tmp.replace(out)
+                from .. import atomic
+
+                with atomic.temp_for(out) as tmp:
+                    img.save(tmp, format="JPEG", quality=85)
                 return True
             except Exception:  # noqa: BLE001 — unreadable image: try the next source
                 continue
@@ -391,7 +392,7 @@ class PerformersMixin:
             choices.pop(pid, None)
         p = self._photo_choices_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(choices, indent=1))
+        atomic.write_text(p, json.dumps(choices, indent=1))
         self._photo_path(pid).unlink(missing_ok=True)
         self._build_performer_photo(pid)
         return {"photo": self.performer_photo_version(pid)}

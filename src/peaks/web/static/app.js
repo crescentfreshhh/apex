@@ -5773,9 +5773,18 @@ async function loadCrashReport() {
   const card = $("#crash-card"); if (!card) return;
   let d;
   try { d = await api("/api/crash-report"); } catch { return; }
-  card.hidden = !d.abrupt;
-  if (!d.abrupt) return;
-  card.innerHTML = `<div class="row between"><h3 class="warn">⚠ The previous run ended abruptly</h3>
+  const fixes = d.repairs || [];
+  card.hidden = !d.abrupt && !fixes.length;
+  if (card.hidden) return;
+  const fixNote = fixes.map(r => r.kept != null
+      ? `Repaired <b>${esc(r.file)}</b> — two saves had overlapped; kept ${r.kept.toLocaleString()} ${r.file.startsWith("labels") ? "ratings" : "entries"} (the last complete save). The damaged copy is <code>${esc(r.damaged_copy)}</code> beside it.`
+      : `<b>${esc(r.file)}</b> couldn't be read, so it was set aside as <code>${esc(r.damaged_copy)}</code> and Peaks started fresh for that file.`)
+    .map(t => `<p class="cap">🩹 ${t}</p>`).join("");
+  if (!d.abrupt) {
+    card.innerHTML = `<div class="row between"><h3>Damaged file repaired</h3>
+        <button class="btn sm ghost" id="btn-crash-dismiss">Dismiss</button></div>${fixNote}`;
+  } else
+  card.innerHTML = `${fixNote}<div class="row between"><h3 class="warn">⚠ The previous run ended abruptly</h3>
       <span class="row"><a class="btn sm ghost" href="/api/crashlog" download>⬇ crash.log</a>
       <button class="btn sm ghost" id="btn-crash-dismiss">Dismiss</button></span></div>
     <p class="cap">Started ${esc(d.started || "?")} · last sign of life ${esc(d.ended_after || "?")} · <b>${esc(d.kind)}</b>.

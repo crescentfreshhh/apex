@@ -17,7 +17,6 @@ evidence. A tier changed outside Peaks voids the verdict.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -48,10 +47,9 @@ class VerdictMixin:
 
     def _vd_save(self) -> None:
         p = self._vd_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._vd()))
-        os.replace(tmp, p)
+        from .. import atomic
+
+        atomic.write_json(p, self._vd())
 
     # --- recording ------------------------------------------------------------------
 

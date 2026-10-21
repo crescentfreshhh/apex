@@ -113,10 +113,9 @@ class TodayMixin:
 
     def _save_today(self, d: dict) -> None:
         p = self._today_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps(d))
-        tmp.replace(p)
+        from .. import atomic
+
+        atomic.write_json(p, d)
 
     def _mix(self, queues: dict[str, list[dict]], n: int, exclude: set[str]) -> list[dict]:
         """Take up to `n` items across the jobs in the MIX rhythm (a job with

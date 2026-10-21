@@ -131,10 +131,9 @@ class PictureMixin:
             return {}
 
     def _pic_save_state(self, d: dict) -> None:
-        p = self._pic_dir() / "state.json"
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(d))
-        os.replace(tmp, p)
+        from .. import atomic
+
+        atomic.write_json(self._pic_dir() / "state.json", d)
 
     def picture_backfill(self, on: bool) -> dict:
         """Measure the whole library (when idle, resumable) — or stop."""
@@ -261,7 +260,9 @@ class PictureMixin:
                     pass
             m = pq.PictureModel()
             m.train(self._pic_feats(), self._pic_picks(), self._pic_ratings())
-            (self._pic_dir() / "model.json").write_text(json.dumps(m.state()))
+            from .. import atomic
+
+            atomic.write_json(self._pic_dir() / "model.json", m.state())
             self._pic_model_obj, self._pic_dirty = m, False
             self.__dict__.pop("_pic_scores_cache", None)
             return m

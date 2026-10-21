@@ -162,8 +162,9 @@ class TasteClassifier:
         path.parent.mkdir(parents=True, exist_ok=True)
         # atomic write: a background retrain must never leave a reader (the
         # swipe trainer / rerank) seeing a half-written pickle.
-        tmp = path.with_name(path.name + ".tmp")
-        with open(tmp, "wb") as fh:
+        from . import atomic
+
+        with atomic.temp_for(path) as tmp, open(tmp, "wb") as fh:
             pickle.dump(
                 {
                     "kind": self.kind,
@@ -176,7 +177,6 @@ class TasteClassifier:
                 },
                 fh,
             )
-        tmp.replace(path)
         return path
 
     @classmethod

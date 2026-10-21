@@ -18,6 +18,8 @@ back and reloads Peaks — no restart.
 
 from __future__ import annotations
 
+from .. import atomic
+
 import hashlib
 import json
 import os
@@ -33,6 +35,11 @@ SMALL_PARTS = tuple(p for p in PARTS if p != "embeddings")
 # rebuildable caches in the models folder — not worth keeping
 _MODEL_SKIP = re.compile(r"(\.scores\.(npy|json)$|^performer_directory\.json\.gz$|\.tmp(\.npz)?$|\.partial$)")
 DEFAULTS = {"backup_on": True, "backup_day": 6, "backup_hour": 4, "backup_minute": 10, "backup_keep": 4}
+
+
+def _scratch(name: str) -> bool:
+    """Half-written saves and set-aside damaged copies — never backed up."""
+    return name.endswith(".tmp") or ".damaged-" in name
 
 
 def _sha(path: Path) -> str:
@@ -63,7 +70,7 @@ class BackupMixin:
         s["backup_keep"] = max(1, int(s.get("backup_keep", 4)))
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(s, indent=2) + "\n")
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
         self._settings_cache = s
         return self.backup_status()
 
@@ -94,7 +101,7 @@ class BackupMixin:
                 # (labels.json / failures.json often live here too — they're their own parts)
                 others = {Path(p).resolve() for part_, (p, k) in self._part_sources().items() if k == "file"}
                 for f in sorted(src.iterdir()):
-                    if f.is_file() and not f.name.endswith(".tmp") and f.resolve() not in others:
+                    if f.is_file() and not _scratch(f.name) and f.resolve() not in others:
                         out.append((f, f.name))
                 gb = src / "backups"
                 if gb.is_dir():
@@ -103,7 +110,7 @@ class BackupMixin:
                             out.append((f, str(f.relative_to(src))))
         elif src.is_dir():
             for f in sorted(src.rglob("*")):
-                if not f.is_file() or f.name.endswith(".tmp"):
+                if not f.is_file() or _scratch(f.name):
                     continue
                 if part == "models" and _MODEL_SKIP.search(f.name):
                     continue
@@ -222,9 +229,10 @@ class BackupMixin:
                 if did_link:
                     linked += 1
                 else:
-                    tmp = dest.with_name(dest.name + ".tmp")
-                    shutil.copy2(src, tmp)
-                    os.replace(tmp, dest)
+                    from .. import atomic
+
+                    with atomic.temp_for(dest) as tmp:
+                        shutil.copy2(src, tmp)
                     copied += 1
                     new_bytes += st.st_size
                 pb += st.st_size

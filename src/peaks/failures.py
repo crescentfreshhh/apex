@@ -44,10 +44,9 @@ class FailureLog:
             return {}  # corrupt/half-written log: treat as empty, don't crash a run
 
     def _write(self, data: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-        tmp.replace(self.path)
+        from . import atomic
+
+        atomic.write_text(self.path, json.dumps(data, indent=2, sort_keys=True))
 
     def entries(self) -> list[dict]:
         """All recorded failures (newest-recorded last)."""

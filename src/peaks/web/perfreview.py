@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import random
 import time
 from pathlib import Path
@@ -39,10 +38,9 @@ class PerfReviewMixin:
 
     def _pr_save(self, d: dict) -> None:
         p = self._pr_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(d))
-        os.replace(tmp, p)
+        from .. import atomic
+
+        atomic.write_json(p, d)
 
     @staticmethod
     def _pr_days(last_at: float | None, now: float) -> int | None:

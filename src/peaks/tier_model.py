@@ -312,11 +312,10 @@ class TierModel:
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        with open(tmp, "wb") as fh:
+        from . import atomic
+
+        with atomic.temp_for(path) as tmp, open(tmp, "wb") as fh:
             pickle.dump(self, fh)
-        tmp.replace(path)
         return path
 
     @classmethod
