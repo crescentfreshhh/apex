@@ -2618,7 +2618,8 @@ document.addEventListener("click", async (e) => {
     catch (err) { toast(err.message, true); }
   }
 });
-wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); if (t === "picture") loadPic(); else stopPicVideos(); });
+wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); $("#taste")?.classList.toggle("pic-wide", t === "picture");   // the players get the whole width
+  if (t === "picture") { loadPic(); picToTop(); } else stopPicVideos(); });
 
 // --- Picture quality: "which looks better?" and the measuring status -----------------------
 const pic = { pair: null, busy: false, poll: null, playing: true, sound: false, hear: "a", frac: 0.5, mode: "pair" };
@@ -2643,8 +2644,8 @@ function picModelWords(m, picks) {
     (m.trusted ? "<b>used</b> for duplicate choices." : "not better than bitrate yet, so duplicates still go by file facts. More picks help.") +
     " " + picCalibWords(m);
 }
-// side by side on a computer, one above the other on a phone
-const picStacked = () => matchMedia("(max-width: 640px)").matches;
+// the two videos are stacked: Top and Bottom
+const picStacked = () => true;              // one above the other, everywhere (largest on a widescreen too)
 const picWord = (side) => (picStacked() ? (side === "a" ? "Top" : "Bottom") : (side === "a" ? "Left" : "Right"));
 // both videos play the same stretch: a shared point (as a share of each scene), looped
 const PIC_LOOP = 20;
@@ -2762,9 +2763,14 @@ const PIC_CAPS = {
   one: `How good is this picture, to you? <b>Good</b> = just good enough; <b>Poor</b> = you'd replace it; <b>Reference</b> = as good as it gets. Your ratings set the scale every file's score is measured on.
     <span class="kbd-hint"><kbd>5</kbd>–<kbd>1</kbd> Reference … Poor · <kbd>Space</kbd> play/pause · <kbd>N</kbd> another spot · <kbd>M</kbd> sound · <kbd>S</kbd> skip</span>`,
 };
+// the big players fit under the controls only with the panel at the top of the page
+function picToTop() { requestAnimationFrame(() => $("#pic-panel")?.scrollIntoView({ block: "start" })); }
 function loadPic() {
   const one = pic.mode === "one";
   $("#pic-cap").innerHTML = PIC_CAPS[pic.mode];
+  $("#pic-cap").hidden = !one;                            // compare: the help lives in a tooltip, the videos get the room
+  $("#pic-mode").title = one ? "" : PIC_CAPS.pair.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  $("#pic-panel").classList.toggle("pic-compare", !one);
   document.querySelector("#pic-panel .pic-controls").hidden = one;
   $("#pic-rate").hidden = !one;
   document.querySelectorAll("#pic-mode [data-mode]").forEach((x) => x.classList.toggle("on", x.dataset.mode === pic.mode));
@@ -2776,6 +2782,7 @@ function loadPic() {
 $("#pic-mode")?.addEventListener("click", (e) => {
   const m = e.target.closest("[data-mode]"); if (!m || m.dataset.mode === pic.mode) return;
   pic.mode = m.dataset.mode; loadPic();
+  picToTop();
 });
 $("#pic-rate")?.addEventListener("click", (e) => { const b = e.target.closest("[data-band]"); if (b) picRate(b.dataset.band); });
 // tap a video: it fills the panel (the other stays small beside it — paused on a phone)
@@ -2785,7 +2792,7 @@ function picEnlarge(side) {
   box.classList.toggle("enlarged", !same);
   for (const el of box.querySelectorAll(".pic-side")) {
     const v = el.querySelector("video");
-    if (!same && picStacked() && el.dataset.side !== side) v.pause();
+    if (!same && el.dataset.side !== side) v.pause();     // the other one waits while you study this one
     else if (pic.playing) v.play().catch(() => {});
   }
 }
