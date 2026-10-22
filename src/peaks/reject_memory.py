@@ -17,7 +17,6 @@ memory instead of mixing the two.
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 
@@ -62,6 +61,12 @@ class RejectMemory:
         """Remember {fingerprint: (visual, quality[, who])} for scenes not
         already stored — `who` is {performers: [ids], studio}. Feature sizes
         must match what's stored (same model). Returns how many were added."""
+        from . import atomic
+
+        with atomic.edit_lock(self.path):       # two adds at once can't drop each other's
+            return self._add(items)
+
+    def _add(self, items: dict[str, tuple]) -> int:
         data = self._load()
         have = set(data["fp"])
         new = [(fp, it[0], it[1], it[2] if len(it) > 2 else None)
@@ -78,13 +83,16 @@ class RejectMemory:
         fps = data["fp"] + [n[0] for n in new]
         ts = data["ts"] + [time.time()] * len(new)
         who = data["who"] + [n[3] for n in new]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp.npz")
-        np.savez(tmp, fp=np.array(fps), vis=vis, qual=qual, ts=np.array(ts),
-                 who=np.array([json.dumps(w) if w is not None else "" for w in who]))
-        os.replace(tmp, self.path)
-        self._data = None
+        self._write(fps, vis, qual, ts, who)
         return len(new)
+
+    def _write(self, fps, vis, qual, ts, who) -> None:
+        from . import atomic
+
+        with atomic.temp_for(self.path) as tmp, open(tmp, "wb") as fh:
+            np.savez(fh, fp=np.array(fps), vis=vis, qual=qual, ts=np.array(ts),
+                     who=np.array([json.dumps(w) if w is not None else "" for w in who]))
+        self._data = None
 
     def rows(self, exclude: set[str] | None = None) -> tuple[list[str], np.ndarray | None, np.ndarray | None]:
         """(fingerprints, visual, quality) of remembered rejects, minus any in
@@ -100,6 +108,12 @@ class RejectMemory:
     def fill_who(self, items: dict[str, dict]) -> int:
         """Add performers/studio to remembered rejects stored without them
         (still in the library, so still knowable). Returns how many changed."""
+        from . import atomic
+
+        with atomic.edit_lock(self.path):
+            return self._fill_who(items)
+
+    def _fill_who(self, items: dict[str, dict]) -> int:
         data = self._load()
         who = list(data["who"])
         n = 0
@@ -108,12 +122,7 @@ class RejectMemory:
                 who[i] = items[fp]
                 n += 1
         if n:
-            tmp = self.path.with_name(self.path.name + ".tmp.npz")
-            np.savez(tmp, fp=np.array(data["fp"]), vis=data["vis"], qual=data["qual"],
-                     ts=np.array(data["ts"]),
-                     who=np.array([json.dumps(w) if w is not None else "" for w in who]))
-            os.replace(tmp, self.path)
-            self._data = None
+            self._write(data["fp"], data["vis"], data["qual"], data["ts"], who)
         return n
 
     def who(self, fps: list[str]) -> list[dict | None]:

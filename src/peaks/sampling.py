@@ -380,11 +380,13 @@ class FrameSampler:
 
     # --- single frame (labeler) ---------------------------------------------------
 
-    def grab_frame(self, path: str, time: float) -> "Image":
+    def grab_frame(self, path: str, time: float, width: int | None = None) -> "Image":
         """Decode a single frame at `time` seconds (used by the labeler).
 
         `-ss` before `-i` with re-encoding is frame-accurate in modern ffmpeg
         (it seeks to the prior keyframe, then decodes forward to the target).
+        `width` scales it inside ffmpeg — a thumbnail of a 4K file then never
+        encodes a full 4K JPEG just to shrink it.
         """
         from PIL import Image as PILImage  # lazy
 
@@ -395,6 +397,7 @@ class FrameSampler:
             "-ss", f"{time:g}",
             "-i", path,
             "-frames:v", "1",
+            *(["-vf", f"scale='min({int(width)},iw)':-2"] if width else []),
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
             "-",

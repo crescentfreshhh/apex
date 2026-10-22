@@ -651,9 +651,16 @@ class LibraryMixin:
     # --- deleting rejects (and remembering what they looked like) --------------
 
     def reject_memory(self):
+        """One store per model, kept — it re-reads its file only when it changes
+        (a new store each call meant a disk read on every Catalogue click)."""
         from ..reject_memory import RejectMemory
 
-        return RejectMemory(self.cfg.modeling.dir, self._model_name())
+        key = (str(self.cfg.modeling.dir), self._model_name())
+        cache = self.__dict__.setdefault("_reject_mem", {})
+        mem = cache.get(key)
+        if mem is None:
+            mem = cache[key] = RejectMemory(*key)
+        return mem
 
     def _remember_rejects(self, rows: list[dict], feats: dict | None = None) -> int:
         """Store triage features (and performers/studio) of 1★ scenes that are

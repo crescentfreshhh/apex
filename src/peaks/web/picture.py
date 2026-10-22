@@ -383,17 +383,27 @@ class PictureMixin:
 
     # --- the score where it's used ------------------------------------------------------------
 
+    _PIC_SCORES_FRESH = 60.0
+
     def picture_scores(self) -> dict[str, dict]:
         """scene_id → {score (0–100 on your scale, once calibrated), band,
         conf (how sure: you judged it / close to files you judged / a guess),
         rank (percentile, for ordering before calibration), ok (good enough),
         subs (five 0–10 marks), reasons, real (real-detail height), upscaled,
         vr (VR isn't scored)}."""
+        import time as _t
+
         m = self._pic_model()
         c = self.__dict__.get("_pic_scores_cache")
+        # while a measuring job appends to the file every few seconds, every
+        # Catalogue click used to re-read it and re-score the library: within a
+        # minute the last scores stand (a new rating/model still counts at once)
+        if c and c[0][0] == id(m) and _t.monotonic() - c[2] < self._PIC_SCORES_FRESH:
+            return c[1]
         meas = self._pic_measures()
         sig = (id(m), id(meas))
         if c and c[0] == sig:
+            self._pic_scores_cache = (sig, c[1], _t.monotonic())
             return c[1]
         rows = []
         for r in self._catalogue_all():
@@ -412,7 +422,7 @@ class PictureMixin:
                 base.update(score=sc, band=pq.band_of(sc), rank=m.rank(x), ok=m.acceptable(x),
                             conf=conf.get(self._pic_key(r)), reasons=pq.reasons(rec, m, x))
             out[r["scene_id"]] = base
-        self._pic_scores_cache = (sig, out)
+        self._pic_scores_cache = (sig, out, _t.monotonic())
         return out
 
     def _pic_confidence(self, m: pq.PictureModel, rows: list) -> dict[str, str]:

@@ -3693,19 +3693,23 @@ function catParams(offset, refresh) {
   return qs.toString();
 }
 async function openCatalogue({ append = false, refresh = false } = {}) {
-  if (cat.busy) { if (!append) cat.again = true; return; }    // filters changed mid-load: load once more after
+  // only the latest click is drawn: a new list cancels the one still loading, and
+  // a response that isn't the latest is dropped (it used to land under the new chip)
+  if (append && cat.busy) return;               // a list is loading — its first page comes first
+  if (!append) cat.ctl?.abort();
+  const ctl = cat.ctl = new AbortController(), seq = cat.seq = (cat.seq || 0) + 1;
   cat.busy = true;
   const offset = append ? cat.items.length : 0;
   $("#cat-status").textContent = refresh ? "re-reading grades from Stash…" : "loading…";
   if (!append) $("#cat-list").innerHTML = '<p class="dim">Reading your library…</p>';
   try {
-    const d = await api("/api/catalogue?" + catParams(offset, refresh));
+    const d = await api("/api/catalogue?" + catParams(offset, refresh), { signal: ctl.signal });
+    if (seq !== cat.seq) return;                // another section was picked meanwhile
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     cat.items = append ? cat.items.concat(d.items) : d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
     cat.grace = d.grace || cat.grace;
     renderCatViewbar();
-    setNavCounts(d);
     const nb = $("#btn-cat-new"), ing = d.ingest || {};
     if (nb) {
       nb.classList.toggle("on", cat.isNew);
@@ -3718,11 +3722,11 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     if (!append && !refresh) catSyncUrl();
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
   } catch (e) {
+    if (seq !== cat.seq || e.name === "AbortError") return;
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
     $("#cat-status").textContent = "";
   } finally {
-    cat.busy = false;
-    if (cat.again) { cat.again = false; openCatalogue(); }
+    if (seq === cat.seq) cat.busy = false;
   }
 }
 // open the Catalogue on a given list (from a performer, a studio, a statistic…)

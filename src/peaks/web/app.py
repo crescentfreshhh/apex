@@ -1973,8 +1973,10 @@ def create_app(cfg=None):
 
     # --- thumbnails ---------------------------------------------------------
 
-    @app.get("/api/frame")
-    def frame(key: str, t: float, size: int = 320):
+    _FRAME_HEADERS = {"Cache-Control": "private, max-age=604800"}   # same key + time = same picture
+    _frame_gate: dict = {}
+
+    def _frame_decode(key: str, t: float, size: int) -> bytes:
         path = service.path_for_key(key)
         if not path:
             raise HTTPException(404, "unknown scene key")
@@ -1990,7 +1992,30 @@ def create_app(cfg=None):
                 data = service.frame_jpeg(healed, t, size=size)
             except Exception as exc2:  # noqa: BLE001
                 raise HTTPException(500, f"could not decode frame: {exc2}")
-        return Response(content=data, media_type="image/jpeg")
+        service.frame_store(key, t, size, data)
+        return data
+
+    async def frame(request: Request, key: str, t: float, size: int = 320):
+        """A thumbnail: from the disk cache, else decoded — at most a few at once,
+        in their own lane, so a page of thumbnails (or several, after quick
+        clicks around the Catalogue) can't hold up the requests behind it."""
+        import anyio
+
+        size = max(32, min(int(size), 1280))
+        hit = await anyio.to_thread.run_sync(service.frame_cached, key, t, size)
+        if hit:
+            return Response(content=hit, media_type="image/jpeg", headers=_FRAME_HEADERS)
+        gate = _frame_gate.get("lim")
+        if gate is None:
+            gate = _frame_gate["lim"] = anyio.CapacityLimiter(_FRAME_DECODES)
+        async with gate:
+            if await request.is_disconnected():          # the page moved on: skip the decode
+                return Response(status_code=499)
+            data = await anyio.to_thread.run_sync(_frame_decode, key, t, size)
+        return Response(content=data, media_type="image/jpeg", headers=_FRAME_HEADERS)
+
+    frame.__annotations__["request"] = Request      # (string annotations can't see this local import)
+    app.get("/api/frame")(frame)
 
     # --- frontend -----------------------------------------------------------
 
@@ -2220,6 +2245,17 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
     return None
 
 
+def _env_int(name: str, default: int) -> int:
+    import os
+
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+# thumbnails decoded at once (each is an ffmpeg seek into a video file)
+_FRAME_DECODES = _env_int("PEAKS_FRAME_DECODES", 3)
 _WARM_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library")
 _PICTURE_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library", "picture")
 

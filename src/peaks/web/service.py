@@ -2165,6 +2165,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         hit = self.__dict__.setdefault("_marker_cache", {}).get(profile)
         if hit is None:
             return
+        edits = self.__dict__.setdefault("_marker_edits", {})
+        edits[profile] = edits.get(profile, 0) + 1     # a background re-read started before this is stale
         if mk is not None:
             hit[1].append(mk)
         if remove_id is not None:
@@ -3070,11 +3072,40 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         cache = self.__dict__.setdefault("_marker_cache", {})
         hit = cache.get(profile)
-        if hit is not None and _t.monotonic() - hit[0] < self._MARKER_TTL:
+        if hit is not None:
+            if _t.monotonic() - hit[0] >= self._MARKER_TTL:
+                self._refresh_markers_bg(profile)     # past its freshness: answer now, re-read behind
             return hit[1]
         markers = list(self.client().iter_markers_by_tag(profile))
         cache[profile] = (_t.monotonic(), markers)
         return markers
+
+    def _refresh_markers_bg(self, profile: str) -> None:
+        """Re-page the saved moments from Stash in the background (once at a
+        time per profile). A save/unsave made meanwhile wins: the fresh list is
+        only installed if the cached one wasn't changed while it was read."""
+        import time as _t
+
+        busy = self.__dict__.setdefault("_marker_refreshing", set())
+        with self.__dict__.setdefault("_marker_gate", threading.Lock()):
+            if profile in busy:
+                return
+            busy.add(profile)
+        edits = self.__dict__.setdefault("_marker_edits", {})
+        seen = edits.get(profile, 0)
+
+        def run():
+            try:
+                markers = list(self.client().iter_markers_by_tag(profile))
+                cache = self.__dict__.setdefault("_marker_cache", {})
+                if edits.get(profile, 0) == seen and profile in cache:
+                    cache[profile] = (_t.monotonic(), markers)
+            except Exception:  # noqa: BLE001 — Stash blip: keep the list we have
+                pass
+            finally:
+                busy.discard(profile)
+
+        threading.Thread(target=run, daemon=True, name="peaks-markers").start()
 
     def _saved_markers(self, profile: str) -> list:
         """The moments you saved — the tag's markers minus the ones the legacy
@@ -5974,11 +6005,70 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..sampling import FrameSampler
 
         sampler = FrameSampler(hwaccel=self.cfg.sampling.hwaccel)
-        img: Image.Image = sampler.grab_frame(path, time)
+        img: Image.Image = sampler.grab_frame(path, time, width=size)
         img.thumbnail((size, size))
         buf = BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=82)
         return buf.getvalue()
+
+    # --- thumbnails kept on disk: a file's fingerprint + a time is always the same
+    # picture, so each one is decoded once instead of on every Catalogue visit
+    _FRAME_PRUNE_EVERY = 200
+
+    def _frame_cache_path(self, key: str, time: float, size: int):
+        from pathlib import Path
+
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(key))[:120] or "_"
+        return Path(self.cfg.embedding.cache_dir) / "_frames" / safe / f"{float(time):g}-{int(size)}.jpg"
+
+    def frame_cached(self, key: str, time: float, size: int) -> bytes | None:
+        try:
+            return self._frame_cache_path(key, time, size).read_bytes() or None
+        except OSError:
+            return None
+
+    def frame_store(self, key: str, time: float, size: int, data: bytes) -> None:
+        from .. import atomic
+
+        try:
+            atomic.write_bytes(self._frame_cache_path(key, time, size), data, fsync=False)
+        except OSError:
+            return                       # a full disk only costs the cache
+        n = self.__dict__["_frame_writes"] = self.__dict__.get("_frame_writes", 0) + 1
+        if n % self._FRAME_PRUNE_EVERY == 0:
+            threading.Thread(target=self.prune_frame_cache, daemon=True, name="peaks-frame-prune").start()
+
+    def prune_frame_cache(self, cap_bytes: int | None = None) -> int:
+        """Keep the thumbnail cache under PEAKS_FRAME_CACHE_MB (default 1 GB),
+        dropping the least recently written first. Returns files removed."""
+        import os
+        from pathlib import Path
+
+        if cap_bytes is None:
+            try:
+                cap_bytes = int(float(os.environ.get("PEAKS_FRAME_CACHE_MB", "1024")) * 1e6)
+            except ValueError:
+                cap_bytes = int(1024e6)
+        root = Path(self.cfg.embedding.cache_dir) / "_frames"
+        files = []
+        for f in root.rglob("*.jpg"):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, f))
+        total = sum(sz for _, sz, _ in files)
+        removed = 0
+        for _, sz, f in sorted(files, key=lambda x: x[0]):
+            if total <= cap_bytes:
+                break
+            try:
+                f.unlink()
+                total -= sz
+                removed += 1
+            except OSError:
+                pass
+        return removed
 
     def path_for_key(self, key: str) -> str | None:
         meta = self.index().key_meta.get(key)
