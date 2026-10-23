@@ -875,20 +875,71 @@ class LibraryMixin:
     def _dupe_keeper(self, rows: list[dict]) -> str:
         return self._dupe_keeper_by(rows)[0]
 
+    DUPE_PIC_TIE = 5          # picture scores this close are a tie: the file facts decide
+
     def _dupe_keeper_by(self, rows: list[dict]) -> tuple[str, str]:
-        """The copy to keep and why ('picture' / 'file'): by your learned picture
-        score once it's trusted and every copy is measured; otherwise
-        `dupe_keeper`'s file-facts rule."""
+        """The copy to keep and on what grounds ('picture' / 'tie' / 'file')."""
+        return self._dupe_keeper_why(rows)[:2]
+
+    def _dupe_keeper_why(self, rows: list[dict]) -> tuple[str, str, str]:
+        """(copy to keep, 'picture' | 'tie' | 'file', the reason in words). By
+        your learned picture score once it's trusted and every copy is measured
+        — unless the best two are within DUPE_PIC_TIE points, a difference you
+        wouldn't see; then (and otherwise) by `dupe_keeper`'s file facts."""
+        file_why = "most pixels, then bitrate, then file size"
         try:
             if self.picture_trusted():
                 pics = self.picture_scores()
                 got = [pics.get(r["scene_id"]) for r in rows]
                 if all(p and p.get("score") is not None for p in got):
-                    best = max(zip(rows, got), key=lambda t: (t[1]["score"], int(t[0].get("size") or 0)))
-                    return best[0]["scene_id"], "picture"
+                    ranked = sorted(zip(rows, got), key=lambda t: (t[1]["score"], int(t[0].get("size") or 0)),
+                                    reverse=True)
+                    (best, bp), (_, nxt) = ranked[0], ranked[1]
+                    if bp["score"] - nxt["score"] < self.DUPE_PIC_TIE:
+                        return (self.dupe_keeper(rows), "tie",
+                                f"pictures are a tie ({bp['score']} vs {nxt['score']}) — kept by {file_why}")
+                    why = f"best picture: {bp['score']} vs {nxt['score']}"
+                    lead = [x for x in (bp.get("reasons") or [])[:1] if isinstance(x, str)]
+                    return best["scene_id"], "picture", why + (f" — {lead[0]}" if lead else "")
         except Exception:  # noqa: BLE001 — fall back to the file facts
             pass
-        return self.dupe_keeper(rows), "file"
+        return self.dupe_keeper(rows), "file", file_why
+
+    def _dupe_group(self, rows: list[dict], pics: dict) -> dict:
+        """One duplicate group as the page shows it: the copies (each with a
+        stream to watch it), the recommended copy and why, what deleting the
+        others frees, and each copy's picture."""
+        keep, keep_by, keep_why = self._dupe_keeper_why(rows)
+        size = {r["scene_id"]: int(r.get("size") or 0) for r in rows}
+        scenes = [{**r, "stream": self.stream_url(r["scene_id"], start=0)} for r in rows]
+        return {"scenes": scenes, "keep": keep, "keep_by": keep_by, "keep_why": keep_why,
+                "best_grade": self.dupe_best_grade(rows),
+                "reclaim": sum(size.values()) - size[keep],
+                "picture": {r["scene_id"]: pics[r["scene_id"]] for r in rows if r["scene_id"] in pics},
+                "unmeasured": [r["scene_id"] for r in rows if self._pic_wanted(r)]}
+
+    def _pic_wanted(self, row: dict) -> bool:
+        try:
+            return self._pic_needs(row)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def refresh_duplicate_picks(self) -> dict | None:
+        """The cached groups with their recommendation re-judged on the current
+        picture scores (copies measured since the scan count at once)."""
+        d = self.cached_duplicates()
+        if not d or not d.get("groups"):
+            return d
+        try:
+            pics = self.picture_scores()
+        except Exception:  # noqa: BLE001
+            pics = {}
+        groups = [self._dupe_group([{k: v for k, v in r.items() if k != "stream"} for r in g["scenes"]], pics)
+                  for g in d["groups"]]
+        groups = self.dupe_queue_hide(groups)          # decided since the scan
+        d = {**d, "groups": groups, "reclaim": sum(g["reclaim"] for g in groups)}
+        self._dupe_cache = d
+        return d
 
     @staticmethod
     def dupe_best_grade(rows: list[dict]) -> str | None:
@@ -946,11 +997,7 @@ class LibraryMixin:
             rows = [known[s] for s in g if s in known]
             if len(rows) < 2:
                 continue
-            keep, keep_by = self._dupe_keeper_by(rows)
-            size = {r["scene_id"]: int(r.get("size") or 0) for r in rows}
-            out.append({"scenes": rows, "keep": keep, "keep_by": keep_by, "best_grade": self.dupe_best_grade(rows),
-                        "reclaim": sum(size.values()) - size[keep],
-                        "picture": {r["scene_id"]: pics[r["scene_id"]] for r in rows if r["scene_id"] in pics}})
+            out.append(self._dupe_group(rows, pics))
         out.sort(key=lambda g: -g["reclaim"])
         out = self.dupe_queue_hide(out)            # already waiting in the delete queue
         result = {"groups": out, "accuracy": accuracy, "duration_diff": duration_diff,

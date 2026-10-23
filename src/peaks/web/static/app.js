@@ -3807,7 +3807,7 @@ function renderCatTriage() {
     const pts = (g) => `${g >= 0 ? "+" : ""}${Math.round(g * 100)} pts`;
     const qg = rep.quality_gain || 0;
     txt = `Tier guesses are <b>${W.accuracy(rep.cv.exact)}</b>${fig(pct(rep.cv.exact) + " exact")} and ${W.withinOne(rep.cv.within_one)}${fig(pct(rep.cv.within_one))}` +
-      ` · file quality ${qg > 0 ? W.gain(qg) : "no clear help"}${fig(pts(qg))}` + whoGainText(rep) +
+      ` · file quality ${qg > 0 ? W.gain(qg) : "no clear help"}${fig(pts(qg))}` + whoGainText(rep) + picGainText(rep) +
       ` · learned from ${rep.n.toLocaleString()} graded scenes (${esc(rep.trained_at)})` +
       (m.grades_since_train ? ` · ${m.grades_since_train} grades since` : "") +
       (rep.remembered_rejects ? ` · incl. ${plural(rep.remembered_rejects, "deleted reject")} remembered` : "");
@@ -3819,6 +3819,13 @@ function renderCatTriage() {
     txt = "Not trained yet — learns your tiers from the scenes you've graded.";
   }
   $("#cat-model").innerHTML = txt;
+}
+// did the measured picture quality earn its place (tested like performer history)?
+function picGainText(rep) {
+  if (rep.picture_gain == null) return "";
+  const g = rep.picture_gain, sg = `${g >= 0 ? "+" : ""}${Math.round(g * 100)} pts`;
+  return rep.use_picture ? ` · picture quality ${W.gain(g)}${fig(sg)}`
+    : ` · picture quality not used yet — no clear help${fig(sg)}`;
 }
 // did performer/studio history earn its place in the model (measured, not assumed)?
 function whoGainText(rep) {
@@ -4545,15 +4552,21 @@ function setDupeMode(on) {
   dupe.on = on;
   if (on) go("dupes");
 }
+function dupeRecTitle(g) {
+  return g.keep_why ? `Why: ${g.keep_why}` : g.keep_by === "picture" ? "Best picture by your learned bar" : "Most pixels, then bitrate, then size";
+}
 function dupeCopyHTML(r, g) {
   const q = r.quality || {};
   const rec = r.scene_id === g.keep;
   const added = (r.created_at || "").slice(0, 10);
+  const measuring = (g.unmeasured || []).includes(r.scene_id);
   return `<div class="dupe-copy ${rec ? "rec" : ""}" data-sid="${esc(r.scene_id)}">
-    <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
+    <div class="dupe-media"><img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
+      <button class="dupe-play" title="Play this copy">▶</button></div>
     <div class="dupe-facts">
-      <div>${rec ? `<span class="dupe-rec" title="${g.keep_by === "picture" ? "Best picture by your learned bar" : "Most pixels, then bitrate, then size"}">★ Recommended${g.keep_by === "picture" ? " — best picture" : ""}</span> ` : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
-      ${(g.picture || {})[r.scene_id] ? `<div>${picChipHTML(g.picture[r.scene_id], { long: true })}</div>` : ""}
+      <div>${rec ? `<span class="dupe-rec" title="${esc(dupeRecTitle(g))}">★ Recommended${g.keep_by === "picture" ? " — best picture" : g.keep_by === "tie" ? " — pictures tie" : ""}</span> ` : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
+      ${rec && g.keep_why ? `<div class="dupe-why dim">${esc(g.keep_why)}</div>` : ""}
+      ${(g.picture || {})[r.scene_id] ? `<div>${picChipHTML(g.picture[r.scene_id], { long: true })}</div>` : measuring ? '<div class="faint small">picture not measured yet</div>' : ""}
       <div class="dupe-q"><b>${esc(q.res || "?")}</b>${q.w ? ` <span class="muted">${q.w}×${q.h}</span>` : ""} · <b>${q.mbps != null ? q.mbps + " Mbps" : "? Mbps"}</b> · ${esc((q.codec || "").toUpperCase())} ${q.fps ? Math.round(q.fps) + "fps" : ""}</div>
       <div class="dim">${r.size ? fmtBytes(r.size) : "size ?"} · ${r.duration ? fmt(r.duration) : "?"}${added ? " · added " + esc(added) : ""}</div>
       <div class="dim dupe-path" title="${esc(r.path)}">${esc(r.path)}</div>
@@ -4570,7 +4583,9 @@ function renderDupes() {
   box.innerHTML = d.groups.length ? d.groups.map((g, gi) => `<div class="dupe-group" data-g="${gi}">
       <div class="dupe-head"><b>${esc(g.scenes[0].title)}</b>
         <span class="dim">${g.scenes.length} copies · ${fmtBytes(g.reclaim)} to reclaim${g.best_grade ? " · graded " + esc(TIER_NAMES[g.best_grade]) : ""}</span>
-        <span class="grow"></span><button class="ghost dupe-ignore">Not duplicates</button></div>
+        <span class="grow"></span>${(g.unmeasured || []).length ? `<button class="ghost dupe-measure" title="Measure the picture of the copies that aren't yet, so the recommendation can go by it">◎ Measure ${plural(g.unmeasured.length, "copy", "copies")}</button>` : ""}
+        <button class="ghost dupe-compare" title="Watch the copies side by side, at the same moment">⧉ Compare copies</button>
+        <button class="ghost dupe-ignore">Not duplicates</button></div>
       <div class="dupe-copies">${g.scenes.map((r) => dupeCopyHTML(r, g)).join("")}</div></div>`).join("")
     : '<p class="dim">No duplicates at this accuracy. 🎉</p>';
 }
@@ -4684,27 +4699,159 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
     } catch (err) { toast(err.message, true); }
     return;
   }
+  if (e.target.closest(".dupe-compare")) { openDupeCompare(g); return; }
+  if (e.target.closest(".dupe-measure")) { measureDupeGroup(g, e.target.closest(".dupe-measure")); return; }
   const copy = e.target.closest(".dupe-copy");
+  if (e.target.closest(".dupe-play") && copy) { playDupeCopy(copy, g); return; }
   if (e.target.closest(".dupe-keep") && copy) {
     // no dialog, no waiting: the decision is queued and the group leaves the list
-    const keep = copy.dataset.sid;
-    const others = g.scenes.filter((r) => r.scene_id !== keep).map((r) => r.scene_id);
-    const df = dupeDeleteFiles();
-    dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
-    dupe.data.reclaim -= g.reclaim;
-    renderDupes();
-    try {
-      const r = await api("/api/duplicates/queue", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keep, delete: others, delete_file: df }) });
-      renderDupeQueue(r);
-      toast(`Queued: keeping 1, ${df ? "deleting" : "removing"} ${plural(others.length, "copy", "copies")} — Undo in the bar for 5 s`);
-    } catch (err) {
-      toast(err.message, true);
-      dupe.data.groups.push(g); dupe.data.groups.sort((x, y) => y.reclaim - x.reclaim);
-      dupe.data.reclaim += g.reclaim; renderDupes();
-    }
+    dupeKeep(g, copy.dataset.sid);
   }
 });
+// one copy, playing in its own card (a second click on another copy stops this one)
+function stopDupeCopies() {
+  document.querySelectorAll("#dupe-list .dupe-media video").forEach((v) => {
+    v.pause(); v.removeAttribute("src"); v.load(); v.remove();
+  });
+}
+function playDupeCopy(copy, g) {
+  stopDupeCopies();
+  const r = g.scenes.find((x) => x.scene_id === copy.dataset.sid); if (!r || !r.stream) return;
+  const media = copy.querySelector(".dupe-media");
+  const v = document.createElement("video");
+  v.controls = true; v.playsInline = true; v.className = "dupe-video";
+  v.src = sceneStreamUrl(r.stream);
+  v.addEventListener("loadedmetadata", () => {
+    try { v.currentTime = (v.duration || 0) * 0.2; } catch {}
+    // with sound if the browser allows it, else muted (the controls unmute)
+    v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
+  }, { once: true });
+  media.appendChild(v);
+}
+async function measureDupeGroup(g, btn) {
+  btn.disabled = true; btn.textContent = "Measuring…";
+  try {
+    const job = await api("/api/duplicates/measure", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_ids: g.unmeasured }) });
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {};
+      btn.textContent = `Measuring ${p.done ?? 0}/${p.total ?? g.unmeasured.length}…`;
+    }, 1500);
+    if (j.status === "error") throw new Error(j.error);
+    const d = j.result && j.result.duplicates;
+    if (d && d.groups) { dupe.data = d; renderDupes(); }
+    toast(`Measured ${plural(j.result.measured, "copy", "copies")}${j.result.failed ? ` · ${j.result.failed} couldn't be read` : ""}`);
+  } catch (err) { toast(err.message, true); btn.disabled = false; btn.textContent = "◎ Measure again"; }
+}
+async function dupeKeep(g, keep) {
+  const others = g.scenes.filter((r) => r.scene_id !== keep).map((r) => r.scene_id);
+  const df = dupeDeleteFiles();
+  dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
+  dupe.data.reclaim -= g.reclaim;
+  renderDupes();
+  try {
+    const r = await api("/api/duplicates/queue", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep, delete: others, delete_file: df }) });
+    renderDupeQueue(r);
+    toast(`Queued: keeping 1, ${df ? "deleting" : "removing"} ${plural(others.length, "copy", "copies")} — Undo in the bar for 5 s`);
+  } catch (err) {
+    toast(err.message, true);
+    dupe.data.groups.push(g); dupe.data.groups.sort((x, y) => y.reclaim - x.reclaim);
+    dupe.data.reclaim += g.reclaim; renderDupes();
+  }
+}
+// --- compare a duplicate group's copies: large, together, at the same moment ---------
+// The copies are the same scene, so they play the same timestamp — a 20 s stretch on
+// a loop, kept in step — and you judge the picture with your own eyes before keeping one.
+const dcmp = { g: null, t: 0, span: 20, playing: true, hear: null };
+function dcmpVideos() { return [...document.querySelectorAll("#dupe-cmp video")]; }
+function dcmpDur() {
+  const ds = dcmpVideos().map((v) => v.duration).filter((d) => d > 0);
+  const known = dcmp.g.scenes.map((r) => r.duration).filter((d) => d > 0);
+  return Math.min(...(ds.length ? ds : known.length ? known : [0]));
+}
+function dcmpSeek(t) {
+  const dur = dcmpDur();
+  dcmp.span = Math.min(20, dur * 0.9 || 20);
+  dcmp.t = Math.max(0, Math.min(t, Math.max(0, dur - dcmp.span)));
+  for (const v of dcmpVideos()) {
+    const go = () => { try { v.currentTime = dcmp.t; } catch {} if (dcmp.playing) v.play().catch(() => {}); };
+    if (v.readyState >= 1) go(); else v.addEventListener("loadedmetadata", go, { once: true });
+  }
+  const sc = $("#dcmp-scrub"); if (sc && dur) sc.value = Math.round(1000 * dcmp.t / dur);
+}
+function dcmpPlay(on) {
+  dcmp.playing = on;
+  for (const v of dcmpVideos()) { if (on) v.play().catch(() => {}); else v.pause(); }
+  const b = $("#dcmp-play"); if (b) b.textContent = on ? "❚❚ Pause all" : "▶ Play all";
+}
+function dcmpSound() {
+  document.querySelectorAll("#dupe-cmp .dcmp-side").forEach((el) => {
+    const on = el.dataset.sid === dcmp.hear;
+    el.querySelector("video").muted = !on; el.classList.toggle("hearing", on);
+  });
+}
+function closeDupeCompare() {
+  const box = $("#dupe-cmp"); if (!box) return;
+  for (const v of dcmpVideos()) { try { v.pause(); } catch {} v.removeAttribute("src"); v.load(); }
+  box.remove(); dcmp.g = null;
+  document.removeEventListener("keydown", dcmpKeys, true);
+}
+function dcmpKeys(e) {
+  if (!dcmp.g || e.target.closest("input, select, textarea")) return;
+  const k = e.key.toLowerCase();
+  if (k === "escape") { e.preventDefault(); e.stopPropagation(); closeDupeCompare(); }
+  else if (k === " ") { e.preventDefault(); e.stopPropagation(); dcmpPlay(!dcmp.playing); }
+  else if (k === "n") { e.preventDefault(); e.stopPropagation(); dcmpSeek(dcmpDur() * (0.1 + Math.random() * 0.75)); }
+}
+function openDupeCompare(g) {
+  closeDupeCompare();
+  stopDupeCopies();                                          // one copy playing in its card stops
+  dcmp.g = g; dcmp.playing = true; dcmp.hear = null;
+  const side = (r) => {
+    const q = r.quality || {}, rec = r.scene_id === g.keep, pic = (g.picture || {})[r.scene_id];
+    const facts = [q.res, q.w ? `${q.w}×${q.h}` : null, q.mbps != null ? `${q.mbps} Mbps` : null,
+      (q.codec || "").toUpperCase() || null, r.size ? fmtBytes(r.size) : null].filter(Boolean).join(" · ");
+    return `<div class="dcmp-side ${rec ? "rec" : ""}" data-sid="${esc(r.scene_id)}">
+      <div class="dcmp-vid"><video playsinline muted preload="auto"></video>
+        <button class="dcmp-full" title="Fullscreen">⛶</button><button class="dcmp-ear" title="Hear this copy">🔈</button></div>
+      <div class="dcmp-meta">${rec ? `<span class="dupe-rec" title="${esc(dupeRecTitle(g))}">★ Recommended</span> ` : ""}<b>${esc(facts || "?")}</b>
+        ${pic ? picChipHTML(pic, { long: true }) : '<span class="faint small">picture not measured</span>'}
+        <span class="grow"></span><button class="${rec ? "primary" : "ghost"} dcmp-keep">Keep this</button></div>
+      <div class="faint small dupe-path" title="${esc(r.path)}">${esc(r.path)}</div>
+    </div>`;
+  };
+  const box = document.createElement("div");
+  box.id = "dupe-cmp"; box.className = "dcmp";
+  box.innerHTML = `<div class="dcmp-bar"><b>${esc(g.scenes[0].title || "Compare copies")}</b>
+      <span class="dim small">${g.scenes.length} copies · same moment in each${g.keep_why ? " · Peaks: " + esc(g.keep_why) : ""}</span><span class="grow"></span>
+      <button class="btn sm" id="dcmp-play">❚❚ Pause all</button>
+      <button class="btn sm ghost" id="dcmp-spot" title="Another spot (N)">↻ Another spot</button>
+      <input type="range" id="dcmp-scrub" min="0" max="1000" value="0" title="Where in the scene" />
+      <button class="btn sm ghost" id="dcmp-close" title="Close (Esc)">✕</button></div>
+    <div class="dcmp-grid n${Math.min(g.scenes.length, 4)}">${g.scenes.map(side).join("")}</div>`;
+  document.body.appendChild(box);
+  box.querySelectorAll(".dcmp-side").forEach((el) => {
+    const r = g.scenes.find((x) => x.scene_id === el.dataset.sid), v = el.querySelector("video");
+    v.src = sceneStreamUrl(r.stream); v.loop = true;
+    v.addEventListener("timeupdate", () => {                 // keep every copy on the same stretch
+      if (v.currentTime > dcmp.t + dcmp.span || v.currentTime < dcmp.t - 1) { try { v.currentTime = dcmp.t; } catch {} }
+      const lead = dcmpVideos()[0];
+      if (lead && v !== lead && Math.abs(v.currentTime - lead.currentTime) > 0.4) { try { v.currentTime = lead.currentTime; } catch {} }
+    });
+    el.addEventListener("mouseenter", () => { if (dcmp.hear) { dcmp.hear = el.dataset.sid; dcmpSound(); } });
+    el.querySelector(".dcmp-ear").onclick = () => { dcmp.hear = el.dataset.sid; dcmpSound(); };
+    el.querySelector(".dcmp-full").onclick = () => (v.requestFullscreen || v.webkitEnterFullscreen || (() => {})).call(v);
+    el.querySelector(".dcmp-keep").onclick = () => { closeDupeCompare(); dupeKeep(g, el.dataset.sid); };
+  });
+  $("#dcmp-play").onclick = () => dcmpPlay(!dcmp.playing);
+  $("#dcmp-spot").onclick = () => dcmpSeek(dcmpDur() * (0.1 + Math.random() * 0.75));
+  $("#dcmp-close").onclick = closeDupeCompare;
+  $("#dcmp-scrub").oninput = (e) => dcmpSeek(dcmpDur() * (+e.target.value / 1000));
+  document.addEventListener("keydown", dcmpKeys, true);
+  dcmpSound();
+  dcmpSeek(dcmpDur() * 0.25 || (g.scenes[0].duration || 0) * 0.25);
+}
 // --- the delete queue: decisions go in, a background worker works through them ---
 function dupeDeleteFiles() {
   const el = $("#dupe-files"); return el ? el.checked : true;

@@ -5591,7 +5591,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         import time as _t
 
         from ..tier_model import (
-            CLASSES, TIER_CLASS, fit_best, fit_fallback, quality_features, usable_classes, who_of,
+            CLASSES, TIER_CLASS, fit_best, fit_fallback, picture_features, quality_features,
+            usable_classes, who_of,
         )
         from . import forensics
 
@@ -5605,6 +5606,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             vis = [feats[r["scene_id"]][0] for r in train]
             qual = [feats[r["scene_id"]][1] for r in train]
             who = [who_of(r) for r in train]
+            pics = self._picture_entries()
+            pic = [picture_features(pics.get(r["scene_id"])) for r in train]
             y = [TIER_CLASS[r["tier"]] for r in train]
             # rejects deleted from the library live on as remembered features
             live = {r["fingerprint"] for r in everything if r.get("fingerprint")}
@@ -5616,6 +5619,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 vis += list(mv)
                 qual += list(mq)
                 who += mwho
+                pic += [picture_features(None)] * remembered     # deleted: no picture to measure
                 y += ["reject"] * remembered
             counts = {c: y.count(c) for c in CLASSES}
             ok, short = usable_classes(y)
@@ -5630,16 +5634,19 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             # the fallback learns from every graded scene, embedded or not
             fb_q = [quality_features(r["quality"]) for r in rows]
             fb_w = [who_of(r) for r in rows]
+            fb_p = [picture_features(pics.get(r["scene_id"])) for r in rows]
             fb_y = [TIER_CLASS[r["tier"]] for r in rows]
             for q, w in zip([] if mq is None else list(mq), mwho):
                 if w is not None:
                     fb_q.append(q)
                     fb_w.append(w)
+                    fb_p.append(picture_features(None))
                     fb_y.append("reject")
             # one heavy fit at a time, process-wide (taste training shares it)
             with self._train_lock, forensics.busy("tier-train"):
-                model, rep = fit_best(Xv, Xq, [y[i] for i in keep], who=[who[i] for i in keep])
-                fallback, fb_rep = (fit_fallback(np.stack(fb_q), fb_y, fb_w) if fb_q
+                model, rep = fit_best(Xv, Xq, [y[i] for i in keep], who=[who[i] for i in keep],
+                                      pic=np.stack([pic[i] for i in keep]))
+                fallback, fb_rep = (fit_fallback(np.stack(fb_q), fb_y, fb_w, pic=np.stack(fb_p)) if fb_q
                                     else (None, {"trained": False, "n": 0}))
             model.fallback = fallback
             report = {"trained": True, **base, **rep, "classes": model.classes_,
@@ -5654,6 +5661,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         finally:
             self._tier_training = False
 
+    def _picture_entries(self) -> dict:
+        """scene_id → its picture-quality entry (empty when nothing's measured);
+        cached by picture_scores, so the same object until scores change."""
+        try:
+            return self.picture_scores()
+        except Exception:  # noqa: BLE001 — picture quality is extra, never in the way
+            return self.__dict__.setdefault("_no_pictures", {})
+
     def tier_model_status(self) -> dict:
         st = self._tier_model_state()
         return {"report": st["report"], "trained": st["model"] is not None,
@@ -5666,7 +5681,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         performer/studio fallback when there is one (marked `"from": "who"`).
         A graded scene's own grade is left out of its performers'/studio's
         records, so a second opinion isn't just its grade echoed back."""
-        from ..tier_model import TIER_CLASS, quality_features, who_of
+        from ..tier_model import TIER_CLASS, picture_features, quality_features, who_of
 
         st = self._tier_model_state()
         if st["model"] is None:
@@ -5676,7 +5691,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             cached = getattr(self, "_tier_preds", None)
             return cached[1] if cached else {}
         # valid for this model + this index build (new embeds → new index → re-score)
-        key = (id(st["model"]), id(self.index(self._model_name())), len(rows))
+        pics = self._picture_entries()
+        key = (id(st["model"]), id(self.index(self._model_name())), len(rows), id(pics))
         cached = getattr(self, "_tier_preds", None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -5689,7 +5705,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             rs = [by_id[s] for s in sids]
             who = [who_of(r) for r in rs]
             own = [TIER_CLASS.get(r["tier"]) for r in rs]
-            for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own))):
+            pic = np.stack([picture_features(pics.get(s)) for s in sids])
+            for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own, pic=pic))):
                 if source:
                     summ["from"] = source
                 preds[s] = summ
@@ -5863,6 +5880,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             expo = self.exposure().all()
         except Exception:  # noqa: BLE001 — unreadable record: no board evidence
             expo = {}
+        pics = self._picture_entries()
         now = _dt.datetime.now(_dt.timezone.utc)
         out: dict[str, dict] = {}
         for r in rows:
@@ -5882,6 +5900,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         # the megaboard: shown a lot, never responded to (and no saves)
                         "passed": bool(ex and ex["passed"] and not saves.get(sid, 0)),
                         "showings": ex["showings"] if ex else 0, "shown_days": ex["days"] if ex else 0}
+            pe = pics.get(sid)
+            if pe and pe.get("score") is not None and not pe.get("vr"):
+                out[sid]["pic"] = {"score": pe["score"], "band": pe["band"]}
         vals = [v["best"] for v in out.values() if v["best"] is not None]
         self._best_q25 = float(np.percentile(vals, 25)) if vals else None
         self._best_q50 = float(np.percentile(vals, 50)) if vals else None
@@ -5917,6 +5938,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         eligible = (tier not in ("legendaire", "rejected") and not n and not sig.get("new")
                     and not self._answered("reject", row, pred, sig))
         weak = (b is not None and q25 is not None and b <= q25 and (keeper is None or keeper < 0.5))
+        pic = sig.get("pic")              # measured + calibrated picture (not VR), or None
+        pic_txt = f"picture {pic['band']} {pic['score']}" if pic else None
+        # content wins: a good picture doesn't save weak content, but you see what you'd give up
+        good_pic = f" (picture is {pic['band']} · {pic['score']})" if pic and pic["band"] not in ("Poor", "Watchable") else ""
         if eligible and sig.get("passed"):
             # the megaboard keeps showing it and you never bite — with a so-so
             # picture or an unconvinced tier model, that's worth a Reject suggestion
@@ -5925,17 +5950,25 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             if weak:
                 return {"grade": "reject",
                         "why": "no saved moments, its best moment is among your library's weakest, "
-                               "and you keep passing it over on the megaboard",
-                        "detail": f"best moment {round(b * 100)}% · {shown}"}
+                               "and you keep passing it over on the megaboard" + good_pic,
+                        "detail": " · ".join(x for x in (f"best moment {round(b * 100)}%", shown, pic_txt) if x)}
             if (b is not None and q50 is not None and b <= q50) or (keeper is not None and keeper < 0.5):
                 return {"grade": "reject",
-                        "why": "you keep passing it over on the megaboard — never saved or explored",
-                        "detail": shown}
+                        "why": "you keep passing it over on the megaboard — never saved or explored" + good_pic,
+                        "detail": " · ".join(x for x in (shown, pic_txt) if x)}
             # a strong picture the model rates a keeper: the card just notes it
         if eligible and weak:
             return {"grade": "reject",
-                    "why": "no saved moments, and even its best moment is among your library's weakest",
-                    "detail": f"best moment {round(b * 100)}% · bottom quarter"}
+                    "why": "no saved moments, and even its best moment is among your library's weakest" + good_pic,
+                    "detail": " · ".join(x for x in (f"best moment {round(b * 100)}% · bottom quarter", pic_txt) if x)}
+        q50 = getattr(self, "_best_q50", None)
+        if (eligible and pic and pic["band"] == "Poor" and b is not None and q50 is not None and b <= q50
+                and (keeper is None or keeper < 0.5)):
+            # so-so content AND a picture you'd replace: worth a Reject nudge too
+            return {"grade": "reject",
+                    "why": "so-so content and a poor picture — no saved moments, its best moment is "
+                           "below your library's middle",
+                    "detail": f"best moment {round(b * 100)}% · {pic_txt}"}
         return None
 
     def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict,
@@ -5963,9 +5996,18 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 sg = signals.get(r["scene_id"]) or {}
                 return (r["tier"] not in ("legendaire", "rejected") and sg.get("saves", 0) == 0
                         and not sg.get("new") and sg.get("best") is not None)
-            # scenes the megaboard keeps showing you without a response come first
+            # scenes the megaboard keeps showing you without a response come first; then
+            # weakest first — taste, nudged down by a picture you'd replace (a Poor
+            # picture counts like dropping from the middle to the bottom quarter)
+            q25, q50 = getattr(self, "_best_q25", None), getattr(self, "_best_q50", None)
+            step = max(0.0, (q50 - q25)) if q25 is not None and q50 is not None else 0.0
+            cut = {"Poor": step, "Watchable": step / 2}
+
+            def weakest(r):
+                sg = signals[r["scene_id"]]
+                return sg["best"] - cut.get((sg.get("pic") or {}).get("band"), 0.0)
             return sorted([r for r in pool if ok(r)],
-                          key=lambda r: (not signals[r["scene_id"]].get("passed"), signals[r["scene_id"]]["best"]))
+                          key=lambda r: (not signals[r["scene_id"]].get("passed"), weakest(r)))
         if view == "passed":
             # often passed over on the megaboard: same scope as the trim list, most-ignored first
             out = [r for r in pool if r["tier"] not in ("legendaire", "rejected")

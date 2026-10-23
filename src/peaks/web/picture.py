@@ -149,13 +149,38 @@ class PictureMixin:
         first, then best tiers first) still needing a measure."""
         rows = self._catalogue_all()
         fresh = set(self.last_ingest().get("new") or [])
-        owed = [r for r in rows if r["scene_id"] in fresh and self._pic_needs(r)]
+        # copies in a duplicate group come first: until every copy is measured,
+        # the keep/delete recommendation can't go by the picture
+        dupes = {r["scene_id"] for g in ((self.cached_duplicates() or {}).get("groups") or [])
+                 for r in g["scenes"]}
+        fresh |= dupes
+        owed = sorted((r for r in rows if r["scene_id"] in fresh and self._pic_needs(r)),
+                      key=lambda r: r["scene_id"] not in dupes)
         if not self._pic_state().get("backfill"):
             return owed, []
         order = {"unreviewed": 0, "legendaire": 1, "exceptionnelle": 2, "merveilleuse": 3, "anomaly": 4}
         rest = sorted((r for r in rows if r["scene_id"] not in fresh and self._pic_needs(r)),
                       key=lambda r: order.get(r["tier"], 9))
         return owed, rest
+
+    def picture_measure_scenes(self, scene_ids: list[str], job=None) -> dict:
+        """Measure these scenes now (a duplicate group's copies), whatever the
+        backfill setting; already-measured ones are skipped."""
+        want = {str(s) for s in scene_ids}
+        rows = [r for r in self._catalogue_all() if r["scene_id"] in want and self._pic_needs(r)]
+        done = failed = 0
+        if job is not None:
+            job.progress = {"total": len(rows), "done": 0}
+        for i, row in enumerate(rows):
+            if job is not None and job.cancelled:
+                break
+            rec = self.picture_measure_row(row)
+            failed += bool(rec.get("error"))
+            done += not rec.get("error")
+            if job is not None:
+                job.progress = {"total": len(rows), "done": i + 1}
+                job.log(f"{row.get('title') or row['scene_id']}: {'failed — ' + rec['error'] if rec.get('error') else 'measured'}")
+        return {"measured": done, "failed": failed, "duplicates": self.refresh_duplicate_picks()}
 
     def picture_due(self) -> bool:
         try:

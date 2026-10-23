@@ -1508,7 +1508,19 @@ def create_app(cfg=None):
 
     @app.get("/api/duplicates")
     def duplicates():
-        return service.cached_duplicates() or {"groups": None}
+        return service.refresh_duplicate_picks() or {"groups": None}
+
+    @app.post("/api/duplicates/measure")
+    def duplicates_measure(body: dict = Body(...)):
+        """Measure a group's copies' picture now, so the recommendation can go by it."""
+        ids = [str(s) for s in (body.get("scene_ids") or [])][:20]
+        if not ids:
+            raise HTTPException(400, "no scenes to measure")
+        try:
+            job = jobs.start("picture-dupes", lambda j: service.picture_measure_scenes(ids, j))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return job.as_dict()
 
     @app.post("/api/duplicates/resolve")
     def duplicates_resolve(body: DupeResolveIn):

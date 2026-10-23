@@ -94,6 +94,33 @@ def quality_features(q: dict) -> np.ndarray:
     return np.asarray(feats, dtype=np.float32)
 
 
+# --- picture: the measured picture quality (peaks.picture) ------------------
+
+_PIC_SUBS = ("detail", "compression", "noise", "motion", "framing")
+PIC_FEATURES: tuple[str, ...] = ("pic_score", *(f"pic_{k}" for k in _PIC_SUBS),
+                                 "pic_real", "pic_upscaled", "pic_missing")
+
+
+def picture_features(p: dict | None) -> np.ndarray:
+    """A scene's picture-quality entry (Service.picture_scores) → a fixed vector:
+    the score (or, before your ratings calibrate it, the library percentile),
+    the five sub-marks, how much real detail there is, the upscale flag — and
+    a 'missing' flag for VR and not-yet-measured files, whose values are 0, so
+    an unmeasured file isn't mistaken for a bad one."""
+    if not p or p.get("vr"):
+        return np.asarray([0.0] * (len(PIC_FEATURES) - 1) + [1.0], dtype=np.float32)
+    score = p.get("score")
+    if score is None:
+        score = p.get("rank")
+    subs = p.get("subs") or {}
+    real = p.get("real")
+    feats = [float(score) / 100.0 if score is not None else 0.5]
+    feats += [float(subs[k]) / 10.0 if subs.get(k) is not None else 0.5 for k in _PIC_SUBS]
+    feats += [min(float(real), 4320.0) / 2160.0 if real else 0.5,
+              1.0 if p.get("upscaled") else 0.0, 0.0]
+    return np.asarray(feats, dtype=np.float32)
+
+
 # --- who: performer & studio track records ---------------------------------
 
 WHO_PRIOR = 3.0        # smoothing weight: a record of n grades is n/(n+3) its own
@@ -236,9 +263,10 @@ class TierModel:
     `use_visual=False` gives the fallback for scenes not embedded yet."""
 
     def __init__(self, use_quality: bool = True, pca_dim: int = 48, C: float = 0.5,
-                 use_who: bool = False, use_visual: bool = True):
+                 use_who: bool = False, use_visual: bool = True, use_picture: bool = False):
         self.use_quality = use_quality
         self.use_who = use_who
+        self.use_picture = use_picture
         self.use_visual = use_visual
         self.pca_dim = pca_dim
         self.C = C
@@ -246,7 +274,7 @@ class TierModel:
         self.who_enc: WhoEncoder | None = None
         self._pca = self._scaler = self._clf = None
 
-    def _design(self, Xv, Xq, Xw, fit: bool) -> np.ndarray:
+    def _design(self, Xv, Xq, Xw, fit: bool, Xp=None) -> np.ndarray:
         from sklearn.decomposition import PCA
         from sklearn.preprocessing import StandardScaler
 
@@ -260,6 +288,8 @@ class TierModel:
             parts.append(Xq)
         if getattr(self, "use_who", False):
             parts.append(Xw)
+        if getattr(self, "use_picture", False):       # (older pickles: never)
+            parts.append(Xp)
         X = np.hstack(parts)
         if fit:
             self._scaler = StandardScaler().fit(X)
@@ -269,7 +299,7 @@ class TierModel:
     def _arr(X):
         return None if X is None else np.asarray(X, np.float32)
 
-    def fit(self, Xv, Xq, y: list[str], who: list | None = None) -> "TierModel":
+    def fit(self, Xv, Xq, y: list[str], who: list | None = None, pic=None) -> "TierModel":
         from sklearn.linear_model import LogisticRegression
 
         Xw = None
@@ -278,20 +308,27 @@ class TierModel:
                 raise ValueError("use_who needs each scene's performers/studio")
             self.who_enc = WhoEncoder().fit(who, list(y))
             Xw = _oof_who(who, list(y))
-        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=True)
+        if self.use_picture and pic is None:
+            raise ValueError("use_picture needs each scene's picture features")
+        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=True, Xp=self._arr(pic))
         self._clf = LogisticRegression(C=self.C, class_weight="balanced", max_iter=3000)
         self._clf.fit(X, np.asarray(y))
         self.classes_ = [str(c) for c in self._clf.classes_]
         return self
 
-    def predict_proba(self, Xv, Xq, who: list | None = None, own: list | None = None) -> np.ndarray:
+    def predict_proba(self, Xv, Xq, who: list | None = None, own: list | None = None,
+                      pic=None) -> np.ndarray:
         """`own[i]`: scene i's current grade when it's one the records were
-        built from (so its own grade is left out of its encoding), else None."""
+        built from (so its own grade is left out of its encoding), else None.
+        `pic`: picture features (rows of picture_features); missing → all unknown."""
         Xw = None
         if getattr(self, "use_who", False):
             n = len(Xq)
             Xw = self.who_enc.encode(who if who is not None else [None] * n, own)
-        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False)
+        Xp = None
+        if getattr(self, "use_picture", False):
+            Xp = self._arr(pic) if pic is not None else np.stack([picture_features(None)] * len(Xq))
+        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False, Xp=Xp)
         return self._clf.predict_proba(X)
 
     def summarize(self, proba: np.ndarray) -> list[dict]:
@@ -337,7 +374,8 @@ def usable_classes(y: list[str], min_per_class: int = MIN_PER_CLASS) -> tuple[li
 
 def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bool,
                    folds: int = 5, pca_dim: int = 48, use_who: bool = False,
-                   who: list | None = None, use_visual: bool = True) -> dict:
+                   who: list | None = None, use_visual: bool = True,
+                   use_picture: bool = False, pic: np.ndarray | None = None) -> dict:
     """Stratified k-fold: exact accuracy and 'within one tier' accuracy (the
     predicted tier is at most one step from the real one on the ordinal).
     Performer/studio records are rebuilt inside each fold from its training
@@ -349,11 +387,13 @@ def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bo
     exact = near = 0
     for tr, te in StratifiedKFold(n_splits=k, shuffle=True, random_state=0).split(Xq, y_arr):
         m = TierModel(use_quality=use_quality, pca_dim=pca_dim, use_who=use_who,
-                      use_visual=use_visual)
+                      use_visual=use_visual, use_picture=use_picture)
         m.fit(None if Xv is None else Xv[tr], Xq[tr], list(y_arr[tr]),
-              who=[who[i] for i in tr] if use_who else None)
+              who=[who[i] for i in tr] if use_who else None,
+              pic=pic[tr] if use_picture else None)
         proba = m.predict_proba(None if Xv is None else Xv[te], Xq[te],
-                                who=[who[i] for i in te] if use_who else None)
+                                who=[who[i] for i in te] if use_who else None,
+                                pic=pic[te] if use_picture else None)
         pred = [m.classes_[int(i)] for i in np.argmax(proba, axis=1)]
         for p, t in zip(pred, y_arr[te]):
             exact += p == t
@@ -407,7 +447,7 @@ PCA_GRID: tuple[int, ...] = (8, 16, 32, 48)
 
 
 def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
-             who: list | None = None) -> tuple[TierModel, dict]:
+             who: list | None = None, pic: np.ndarray | None = None) -> tuple[TierModel, dict]:
     """Pick the visual PCA size by cross-validation, then fit on everything.
 
     The right size depends on how many scenes are graded and how much the
@@ -422,7 +462,9 @@ def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
     With `who` (each scene's performers/studio, None where unknown), the
     performer/studio records are cross-validated too and kept only when they
     raise exact accuracy (`who_gain`) by more than WHO_MARGIN — never assumed
-    to help.
+    to help. Measured picture quality (`pic`, rows of picture_features) gets
+    the same test on top (`picture_gain`): the look of a scene and its file
+    facts already say a lot about its picture, so it's kept only when it adds.
     """
     n = len(y)
     grid = [k for k in PCA_GRID if k <= max(PCA_GRID[0], n // 4)] or [PCA_GRID[0]]
@@ -443,12 +485,30 @@ def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
         if use_who:
             rep["cv_without_who"] = best
             rep["cv"] = with_who
-    model = TierModel(use_quality=True, pca_dim=best_k, use_who=use_who)
-    model.fit(Xv, Xq, y, who=who if use_who else None)
+    use_pic = False
+    if pic is not None and _has_pictures(pic):
+        cur = rep["cv"]
+        with_pic = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=best_k, use_who=use_who,
+                                  who=who if use_who else None, use_picture=True, pic=pic)
+        gain = round(with_pic["exact"] - cur["exact"], 3)
+        use_pic = gain > WHO_MARGIN
+        rep.update({"cv_with_picture": with_pic, "picture_gain": gain, "use_picture": use_pic})
+        if use_pic:
+            rep["cv_without_picture"] = cur
+            rep["cv"] = with_pic
+    model = TierModel(use_quality=True, pca_dim=best_k, use_who=use_who, use_picture=use_pic)
+    model.fit(Xv, Xq, y, who=who if use_who else None, pic=pic if use_pic else None)
     return model, rep
 
 
-def fit_fallback(Xq: np.ndarray, y: list[str], who: list) -> tuple[TierModel | None, dict]:
+def _has_pictures(pic: np.ndarray, min_share: float = 0.2) -> bool:
+    """Enough measured files for the picture to be worth testing."""
+    pic = np.asarray(pic)
+    return pic.ndim == 2 and len(pic) > 0 and float((pic[:, -1] == 0).mean()) >= min_share
+
+
+def fit_fallback(Xq: np.ndarray, y: list[str], who: list,
+                 pic: np.ndarray | None = None) -> tuple[TierModel | None, dict]:
     """The performer/studio + file-quality model for scenes that aren't embedded
     yet (so there's no picture to judge). Trained on every graded scene with
     known performers/studio, embedded or not. Returns (None, report) when the
@@ -457,16 +517,27 @@ def fit_fallback(Xq: np.ndarray, y: list[str], who: list) -> tuple[TierModel | N
     if len(ok) < 2 * MIN_PER_CLASS:
         return None, {"trained": False, "n": len(ok)}
     Xq2, y2, w2 = Xq[ok], [y[i] for i in ok], [who[i] for i in ok]
+    p2 = None if pic is None else np.asarray(pic)[ok]
     classes, _ = usable_classes(y2)
     keep = [i for i, c in enumerate(y2) if c in classes]
     if len(classes) < 2:
         return None, {"trained": False, "n": len(ok)}
     Xq2, y2, w2 = Xq2[keep], [y2[i] for i in keep], [w2[i] for i in keep]
+    p2 = None if p2 is None else p2[keep]
     with_who = cross_validate(None, Xq2, y2, use_quality=True, use_who=True, who=w2, use_visual=False)
     base = cross_validate(None, Xq2, y2, use_quality=True, use_visual=False)
     rep = {"n": len(y2), "cv": with_who, "cv_quality_only": base,
            "who_gain": round(with_who["exact"] - base["exact"], 3)}
     if rep["who_gain"] <= WHO_MARGIN:
         return None, {"trained": False, **rep}
-    m = TierModel(use_quality=True, use_who=True, use_visual=False).fit(None, Xq2, y2, who=w2)
+    use_pic = False
+    if p2 is not None and _has_pictures(p2):
+        with_pic = cross_validate(None, Xq2, y2, use_quality=True, use_who=True, who=w2, use_visual=False,
+                                  use_picture=True, pic=p2)
+        rep["picture_gain"] = round(with_pic["exact"] - with_who["exact"], 3)
+        use_pic = rep["use_picture"] = rep["picture_gain"] > WHO_MARGIN
+        if use_pic:
+            rep["cv"] = with_pic
+    m = TierModel(use_quality=True, use_who=True, use_visual=False, use_picture=use_pic).fit(
+        None, Xq2, y2, who=w2, pic=p2 if use_pic else None)
     return m, {"trained": True, **rep}
