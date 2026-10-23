@@ -15,7 +15,7 @@ def stash():
     return FakeStash({
         "1": {"rating100": 100, "o_counter": 16},     # Merveilleuse — a promotion candidate
         "2": {"rating100": 100, "o_counter": 17},     # Exceptionnelle — a second-look candidate
-        "3": {"rating100": 100, "o_counter": 0},      # 5★ O 0 (an anomaly) with saves — saved → Légendaire
+        "3": {"rating100": 100, "o_counter": 17},     # Exceptionnelle with saves — saved → Légendaire
         "4": {"rating100": 100, "o_counter": 16},     # passed over on the megaboard — trim / Reject
     })
 
@@ -42,7 +42,7 @@ def _pred(tier):
 
 def _state(svc, guess1="exceptionnelle", guess2="merveilleuse", saves3=2, shows4=10, passed4=True):
     rows = [svc._cat_update_row(s) for s in ("1", "2", "3", "4")]
-    preds = {"1": _pred(guess1), "2": _pred(guess2), "3": _pred("merveilleuse"), "4": _pred("merveilleuse")}
+    preds = {"1": _pred(guess1), "2": _pred(guess2), "3": _pred("exceptionnelle"), "4": _pred("merveilleuse")}
     sig = {"1": {"saves": 0}, "2": {"saves": 0}, "3": {"saves": saves3},
            "4": {"saves": 0, "best": 0.2, "passed": passed4, "showings": shows4, "shown_days": 4}}
     return rows, preds, sig
