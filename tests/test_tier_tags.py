@@ -63,7 +63,10 @@ def test_tag_state_rules():
     assert tag_state("legendaire", ["Merveilleuse"], True)["conflict"] == "tier tag disagrees with the grade"
     assert tag_state("exceptionnelle", ["legendaire", "exceptionnelle"], True)["conflict"] == "several tier tags"
     assert tag_state("rejected", ["merveilleuse"], True)["needs_sync"] is False     # rejects never synced
-    assert tag_state("upscale", ["personal upscale"], True)["conflict"] is None
+    # the retired Upscale tier's tag: a conflict whatever the grade, fixed by the sync
+    st = tag_state("anomaly", ["Personal Upscale"], False)
+    assert st["conflict"].startswith("carries a retired tier tag") and st["needs_sync"]
+    assert tag_state("merveilleuse", ["merveilleuse", "personal upscale"], True)["needs_sync"]
 
 
 def test_grade_is_o_first_then_one_update_with_full_tag_list(svc, stash):
@@ -75,13 +78,14 @@ def test_grade_is_o_first_then_one_update_with_full_tag_list(svc, stash):
 
 
 def test_grade_creates_a_missing_tier_tag_once(svc, stash):
-    svc.grade_scene("1", "upscale")
-    assert ("tag_create", "personal upscale") in stash.calls
-    new = stash.find_tag_by_name("personal upscale").id
+    del stash.tags["11"]                        # no "legendaire" tag in Stash yet
+    svc.grade_scene("1", "legendaire")
+    assert ("tag_create", "legendaire") in stash.calls
+    new = stash.find_tag_by_name("legendaire").id
     upd = [c for c in stash.calls if c[0] == "update"]
     assert len(upd) == 1 and upd[0][2]["tag_ids"] == ["7", new] and upd[0][2]["organized"]
     stash.calls.clear()
-    svc.grade_scene("5", "upscale")
+    svc.grade_scene("5", "legendaire")
     assert not [c for c in stash.calls if c[0] == "tag_create"]                  # reused
     assert stash.s["5"]["tag_ids"] == [new]                                    # merveilleuse removed
 
@@ -148,3 +152,30 @@ def test_custom_tier_tag_names(svc, stash, monkeypatch):
     assert got["legendaire"] == "Tier 18" and "bogus" not in got
     svc.grade_scene("1", "legendaire")
     assert "Tier 18" in [stash.tags[t] for t in stash.s["1"]["tag_ids"]]
+
+
+def test_grading_takes_off_the_retired_upscale_tag(svc, stash):
+    stash.tags["20"] = "personal upscale"
+    stash.s["1"]["tag_ids"] = ["7", "20"]
+    svc.grade_scene("1", "merveilleuse")
+    assert stash.s["1"]["tag_ids"] == ["7", "13"]
+
+
+def test_tag_sync_takes_the_retired_tag_off_an_untagged_tier(svc, stash, monkeypatch):
+    stash.tags["20"] = "personal upscale"
+    stash.s["6"] = {"rating100": 100, "o_counter": 0, "tag_ids": ["7", "20"], "organized": True,
+                    "fingerprint": "fp6"}                  # an old Upscale: now an anomaly
+    client = _api(svc, monkeypatch)
+    row = next(r for r in client.get("/api/catalogue/tag-sync").json()["items"] if r["scene_id"] == "6")
+    assert row["tier"] == "anomaly"
+    j = _wait(client, client.post("/api/catalogue/tag-sync", json={"confirm": True}).json())
+    assert j["status"] == "done"
+    assert stash.s["6"]["tag_ids"] == ["7"]
+    upd = [c for c in stash.calls if c[0] == "update" and c[1] == "6"]
+    assert upd and "organized" not in upd[-1][2]           # only the tag comes off
+
+
+def test_the_retired_grade_is_refused(svc, monkeypatch):
+    client = _api(svc, monkeypatch)
+    r = client.post("/api/catalogue/grade", json={"scene_id": "1", "grade": "upscale"})
+    assert r.status_code == 400 and "unknown grade" in r.json()["detail"]

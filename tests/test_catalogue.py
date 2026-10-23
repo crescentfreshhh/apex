@@ -18,7 +18,7 @@ from peaks.tiers import GRADES, quality_of, res_class, tier_names, tier_of  # no
     (None, 0, "unreviewed"), (0, 18, "unreviewed"),
     (20, 18, "rejected"), (20, 0, "rejected"),
     (60, 17, "unreviewed"), (80, 18, "unreviewed"),      # 2-4★ = not reviewed yet
-    (100, 0, "upscale"),
+    (100, 0, "anomaly"),                                 # was Upscale (retired): revalidate
     (100, 1, "anomaly"), (100, 15, "anomaly"), (100, 19, "anomaly"),
     (100, 16, "merveilleuse"), (100, 17, "exceptionnelle"), (100, 18, "legendaire"),
 ])
@@ -229,9 +229,9 @@ def _triage_svc(tmp_path, monkeypatch):
     rng = np.random.default_rng(7)
     D = 24
     unit = lambda v: v / np.linalg.norm(v)  # noqa: E731
-    look = {t: unit(rng.standard_normal(D)) for t in ("upscale", "merveilleuse", "legendaire")}
+    look = {t: unit(rng.standard_normal(D)) for t in ("exceptionnelle", "merveilleuse", "legendaire")}
     scenes, embed = {}, {}
-    grade = {"upscale": (100, 0, 30e6), "merveilleuse": (100, 16, 12e6), "legendaire": (100, 18, 45e6)}
+    grade = {"exceptionnelle": (100, 17, 30e6), "merveilleuse": (100, 16, 12e6), "legendaire": (100, 18, 45e6)}
     n = 0
     for t, (r, o, br) in grade.items():
         for _ in range(12):
@@ -240,8 +240,8 @@ def _triage_svc(tmp_path, monkeypatch):
             scenes[sid] = {"rating100": r, "o_counter": o, "width": 3840, "height": 2160,
                            "bit_rate": br, "frame_rate": 30, "video_codec": "hevc", "date": "2020-01-01"}
             embed[sid] = look[t]
-    # unreviewed: one that looks legendary, one that looks like an upscale, one low-bitrate 4K
-    for sid, t, br in (("u1", "legendaire", 40e6), ("u2", "upscale", 30e6), ("u3", "merveilleuse", 4e6)):
+    # unreviewed: one that looks legendary, one that looks exceptionnelle, one low-bitrate 4K
+    for sid, t, br in (("u1", "legendaire", 40e6), ("u2", "exceptionnelle", 30e6), ("u3", "merveilleuse", 4e6)):
         scenes[sid] = {"rating100": None, "o_counter": 0, "width": 3840, "height": 2160,
                        "bit_rate": br, "frame_rate": 30, "video_codec": "hevc", "date": "2025-01-01"}
         embed[sid] = look[t]
@@ -269,7 +269,7 @@ def test_triage_train_views_and_suggestions(tmp_path, monkeypatch):
     svc, stash = _triage_svc(tmp_path, monkeypatch)
     rep = svc.train_tier_model()
     assert rep["trained"] and rep["n"] == 36
-    assert set(rep["classes"]) == {"upscale", "merveilleuse", "legendaire"}
+    assert set(rep["classes"]) == {"exceptionnelle", "merveilleuse", "legendaire"}
     assert rep["cv"]["exact"] >= 0.9
     assert rep["short"] == {} and rep["counts"]["reject"] == 0
 
@@ -288,9 +288,9 @@ def test_triage_train_views_and_suggestions(tmp_path, monkeypatch):
     a = svc.catalogue(view="anomaly")
     assert a["items"][0]["suggest"]["grade"] == "legendaire"    # O=5 anomaly that looks legendary
     assert "your Légendaire scenes" in a["items"][0]["suggest"]["why"]   # display name, not key
-    stash.s["a1"]["tags"] = ["Upscale"]                         # an explicit tag wins
+    stash.s["a1"]["tags"] = ["Upscale"]                         # the retired tier: no longer a suggestion
     a2 = svc.catalogue(view="anomaly", refresh=True)
-    assert a2["items"][0]["suggest"] == {"grade": "upscale", "why": "tagged 'upscale' in Stash"}
+    assert a2["items"][0]["suggest"]["grade"] == "legendaire"
 
     # a persisted model survives a restart
     from peaks.web.service import Service
@@ -414,3 +414,26 @@ def test_api_rejects_a_bad_direction(svc, monkeypatch):
     assert api.get("/api/catalogue", params={"sort": "title", "dir": "sideways"}).status_code == 422
     r = api.get("/api/catalogue", params={"sort": "title", "dir": "desc"}).json()
     assert [x["scene_id"] for x in r["items"]] == sorted([x["scene_id"] for x in r["items"]], reverse=True)
+
+
+def test_a_model_trained_with_the_retired_upscale_tier_is_retrained(tmp_path, monkeypatch):
+    """A tier model saved while Upscale existed has a class the scale no longer
+    has: it's treated as untrained and replaced by one background retrain."""
+    import time
+
+    from peaks.tier_model import TierModel
+    from peaks.web.service import Service
+
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    svc.train_tier_model()
+    path = svc._tier_model_path()
+    old = TierModel.load(path)
+    old.classes_ = ["upscale", *old.classes_[1:]]
+    old.save(path)
+    again = Service(svc.cfg)
+    assert again.tier_model_status()["trained"] is False         # never used with the old scale
+    end = time.time() + 30
+    while time.time() < end and getattr(again, "_tier_training", False):
+        time.sleep(0.05)
+    st = again.tier_model_status()
+    assert st["trained"] and "upscale" not in TierModel.load(path).classes_

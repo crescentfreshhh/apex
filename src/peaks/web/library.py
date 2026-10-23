@@ -178,10 +178,26 @@ class LibraryMixin:
             out[tier] = cache.get(key)
         return out
 
+    def _retired_tag_ids(self) -> set[str]:
+        """Stash ids of retired tiers' tags (e.g. "personal upscale") that exist."""
+        from ..tiers import RETIRED_TIER_TAGS
+
+        cache = self.__dict__.setdefault("_tag_id_cache", {})
+        out = set()
+        for name in RETIRED_TIER_TAGS.values():
+            key = name.lower()
+            if key not in cache:
+                t = self.client().find_tag_by_name(name)
+                if t is not None:
+                    cache[key] = str(t.id)
+            if cache.get(key):
+                out.add(cache[key])
+        return out
+
     def _tier_tag_list(self, current: list[str], tier: str) -> list[str] | None:
         """The complete tag list a scene should carry in `tier`: its current tags
-        minus every tier tag, plus this tier's (created if missing). None for a
-        tier without a tag (reject etc. — tags are left alone)."""
+        minus every tier tag (retired ones too), plus this tier's (created if
+        missing). None for a tier without a tag (reject etc. — tags are left alone)."""
         names = self.tier_tag_names()
         if tier not in names:
             return None
@@ -190,7 +206,7 @@ class LibraryMixin:
         if this is None:
             this = str(self.client().find_or_create_tag(names[tier]).id)
             self._tag_id_cache[names[tier].lower()] = this
-        tier_ids = {i for i in ids.values() if i} | {this}
+        tier_ids = {i for i in ids.values() if i} | {this} | self._retired_tag_ids()
         return [str(t) for t in current if str(t) not in tier_ids] + [this]
 
     def tag_sync_preview(self) -> dict:
@@ -218,12 +234,20 @@ class LibraryMixin:
             try:
                 cur = self._meta_client().scene_details([sid]).get(sid) or {}
                 tags = self._tier_tag_list(cur.get("tag_ids") or [], r["tier"])
-                self.client().update_scene(sid, tag_ids=tags, organized=True)
+                if tags is None:
+                    # an untagged tier (unreviewed, anomaly…) still carrying a
+                    # retired tier tag: just take that tag off
+                    old = self._retired_tag_ids()
+                    self.client().update_scene(sid, tag_ids=[str(t) for t in cur.get("tag_ids") or []
+                                                             if str(t) not in old])
+                    detail = "retired tier tag removed"
+                else:
+                    self.client().update_scene(sid, tag_ids=tags, organized=True)
+                    detail = f"tag '{self.tier_tag_names()[r['tier']]}' + organized"
                 self.invalidate_meta(sid)
                 row = self._cat_update_row(sid)
                 self._watch_path(sid, row.get("path"))      # the renamer will move it
-                self._log_scene("tag-sync", row, after={"tier": row["tier"]},
-                                detail=f"tag '{self.tier_tag_names()[row['tier']]}' + organized")
+                self._log_scene("tag-sync", row, after={"tier": row["tier"]}, detail=detail)
                 done += 1
             except Exception as exc:  # noqa: BLE001
                 failed.append({"scene_id": sid, "error": str(exc)})
@@ -839,7 +863,7 @@ class LibraryMixin:
         from ..tiers import RES_CLASSES
 
         rank = {c: i for i, c in enumerate(RES_CLASSES)}
-        grade = {"legendaire": 4, "exceptionnelle": 3, "merveilleuse": 2, "upscale": 1}
+        grade = {"legendaire": 4, "exceptionnelle": 3, "merveilleuse": 2}
 
         def key(r):
             q = r["quality"]
@@ -875,7 +899,7 @@ class LibraryMixin:
         """The highest keeper tier anywhere in a duplicate group — from a copy's
         grade OR any tier tag it carries — and where it came from ('grade' /
         'tag'). Rejected / unreviewed never count."""
-        for t in ("legendaire", "exceptionnelle", "merveilleuse", "upscale"):
+        for t in ("legendaire", "exceptionnelle", "merveilleuse"):
             if any(r.get("tier") == t for r in rows):
                 return t, "grade"
             if any(t in ((r.get("tag_state") or {}).get("present") or []) for r in rows):
@@ -959,7 +983,7 @@ class LibraryMixin:
             raise LookupError(f"the copy to keep (scene {keep_id}) is no longer in Stash")
         rows = {s: self._cat_row(s, m) for s, m in fresh.items()}
         best, best_from = self.dupe_best_tier(list(rows.values()))
-        order = ["upscale", "merveilleuse", "exceptionnelle", "legendaire"]
+        order = ["merveilleuse", "exceptionnelle", "legendaire"]
         kept_tier = tier_of(fresh[keep_id].get("rating100"), fresh[keep_id].get("o_counter"))
         kept_tags = (rows[keep_id].get("tag_state") or {}).get("present") or []
         carried = None
@@ -1297,7 +1321,7 @@ class LibraryMixin:
             t["bytes"] += int(r.get("size") or 0)
         return out
 
-    LOW_TIERS = ("rejected", "unreviewed", "anomaly", "upscale")
+    LOW_TIERS = ("rejected", "unreviewed", "anomaly")
 
     def storage(self, largest: int = 20) -> dict:
         rows = self._catalogue_all()

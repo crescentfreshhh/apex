@@ -15,7 +15,7 @@ def stash():
     return FakeStash({
         "1": {"rating100": 100, "o_counter": 16},     # Merveilleuse — a promotion candidate
         "2": {"rating100": 100, "o_counter": 17},     # Exceptionnelle — a second-look candidate
-        "3": {"rating100": 100, "o_counter": 0},      # Upscale with saves — saved → Légendaire
+        "3": {"rating100": 100, "o_counter": 0},      # 5★ O 0 (an anomaly) with saves — saved → Légendaire
         "4": {"rating100": 100, "o_counter": 16},     # passed over on the megaboard — trim / Reject
     })
 
@@ -35,14 +35,14 @@ def svc(tmp_path, stash, monkeypatch):
 
 
 def _pred(tier):
-    probs = {t: 0.0 for t in ("reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire")}
+    probs = {t: 0.0 for t in ("reject", "merveilleuse", "exceptionnelle", "legendaire")}
     probs[tier] = 0.9
     return {"tier": tier, "probs": probs, "expected": 2.0, "keeper": 0.3, "conf": 0.9}
 
 
 def _state(svc, guess1="exceptionnelle", guess2="merveilleuse", saves3=2, shows4=10, passed4=True):
     rows = [svc._cat_update_row(s) for s in ("1", "2", "3", "4")]
-    preds = {"1": _pred(guess1), "2": _pred(guess2), "3": _pred("upscale"), "4": _pred("merveilleuse")}
+    preds = {"1": _pred(guess1), "2": _pred(guess2), "3": _pred("merveilleuse"), "4": _pred("merveilleuse")}
     sig = {"1": {"saves": 0}, "2": {"saves": 0}, "3": {"saves": saves3},
            "4": {"saves": 0, "best": 0.2, "passed": passed4, "showings": shows4, "shown_days": 4}}
     return rows, preds, sig
@@ -69,7 +69,7 @@ def test_regrading_at_the_same_tier_answers_promotion_until_the_guess_moves_up(s
 def test_second_look_comes_back_only_if_the_guess_drops_further(svc):
     svc.keep_as_is("2")
     assert _ids(svc, "second", _state(svc)) == []
-    assert _ids(svc, "second", _state(svc, guess2="upscale")) == ["2"]
+    assert _ids(svc, "second", _state(svc, guess2="reject")) == ["2"]
 
 
 def test_saved_comes_back_only_after_a_new_save(svc):

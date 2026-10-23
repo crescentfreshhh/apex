@@ -104,7 +104,7 @@ def test_brief_has_the_lead_in(svc):
 
 
 def test_catalogue_by_performer_id_best_first(svc):
-    r = svc.catalogue(performer_id="p1", tier="legendaire,exceptionnelle,merveilleuse,upscale,anomaly,unreviewed",
+    r = svc.catalogue(performer_id="p1", tier="legendaire,exceptionnelle,merveilleuse,anomaly,unreviewed",
                       sort="tier", limit=50)
     assert [x["scene_id"] for x in r["items"]] == ["1", "2", "3", "4"]          # best first, no reject
     assert [x["scene_id"] for x in svc.catalogue(performer_id="p3", limit=50)["items"]] == ["7"]   # the other Anna

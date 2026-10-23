@@ -403,7 +403,7 @@ def test_each_tier_channel_plays_only_its_own_tier(svc):
     svc.invalidate_meta()
     svc._cat_cache = None
     keys = [t["key"] for t in svc.board_sources()["tiers"]]
-    assert keys == ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "unreviewed", "unsaved"]
+    assert keys == ["legendaire", "exceptionnelle", "merveilleuse", "unreviewed", "unsaved"]
     exc = svc.tier_board("exceptionnelle", per_scene=2)
     assert exc["scenes"] == 1 and {h.scene_id for h in exc["hits"]} == {"12"}
     mer = svc.tier_board("merveilleuse", per_scene=2)
@@ -690,7 +690,7 @@ def test_fast_context_matches_the_running_sum():
 
 def _curated(svc):
     """Ages + saves on the fixture library: scene 30 is new (added 5 days ago),
-    everything else was added in 2024; saves on 0 (unreviewed), 15 (upscale),
+    everything else was added in 2024; saves on 0 (unreviewed), 15 (5★ O 0 — an anomaly),
     1 (rejected) and 3 (already Légendaire); an auto marker on 18."""
     import datetime as dt
 
@@ -699,7 +699,7 @@ def _curated(svc):
     fresh = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=5)).isoformat()
     for sid, v in st.s.items():
         v["created_at"] = fresh if sid == "30" else "2024-03-01T10:00:00Z"
-    st.s["15"].update(rating100=100, o_counter=0)            # Upscale
+    st.s["15"].update(rating100=100, o_counter=0)            # 5★ O 0: an anomaly
     st.markers = [
         {"marker_id": "m0", "scene_id": "0", "seconds": 4.0, "end_seconds": None, "title": f"{tag} (saved)"},
         {"marker_id": "m0b", "scene_id": "0", "seconds": 9.0, "end_seconds": None, "title": f"{tag} (saved)"},
@@ -763,8 +763,8 @@ def test_saving_promotes_the_scene(svc, monkeypatch):
     import peaks.web.app as app_mod
     monkeypatch.setattr(app_mod, "Service", lambda cfg=None: svc)
     api = TestClient(create_app(svc.cfg))
-    r = api.post("/api/scene/15/apex", params={"t": 12.0}).json()      # Upscale → Légendaire
-    assert r["promoted_from"] == "upscale"
+    r = api.post("/api/scene/15/apex", params={"t": 12.0}).json()      # anomaly → Légendaire
+    assert r["promoted_from"] == "anomaly"
     assert st.s["15"]["rating100"] == 100 and st.s["15"]["o_counter"] == 18
     r = api.post("/api/scene/1/apex", params={"t": 12.0}).json()       # a 1★ stays yours
     assert r["promoted_from"] is None and st.s["1"]["rating100"] == 20
@@ -1030,8 +1030,8 @@ def test_unmoved_scenes_stop_being_watched_and_hidden_moves_are_listed(svc, monk
     _no_worker(svc, monkeypatch)
     st = svc.client()
     st.s["22"]["path"] = str(tmp_path / "moved-behind-stash.mp4")   # folder visible, file gone
-    svc.grade_scene("21", "upscale")                               # a renamer that leaves it put
-    svc.grade_scene("22", "upscale")
+    svc.grade_scene("21", "merveilleuse")                          # a renamer that leaves it put
+    svc.grade_scene("22", "merveilleuse")
     far = __import__("time").monotonic() + 1000
     for _ in range(len(svc._WATCH_STEPS)):
         svc._path_watch_tick(now=far)

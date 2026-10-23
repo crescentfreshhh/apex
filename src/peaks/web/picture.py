@@ -152,7 +152,7 @@ class PictureMixin:
         owed = [r for r in rows if r["scene_id"] in fresh and self._pic_needs(r)]
         if not self._pic_state().get("backfill"):
             return owed, []
-        order = {"unreviewed": 0, "legendaire": 1, "exceptionnelle": 2, "merveilleuse": 3, "anomaly": 4, "upscale": 5}
+        order = {"unreviewed": 0, "legendaire": 1, "exceptionnelle": 2, "merveilleuse": 3, "anomaly": 4}
         rest = sorted((r for r in rows if r["scene_id"] not in fresh and self._pic_needs(r)),
                       key=lambda r: order.get(r["tier"], 9))
         return owed, rest

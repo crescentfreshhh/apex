@@ -38,8 +38,7 @@ class IndexMemoryError(RuntimeError):
 
 
 # the Catalogue's "Tier" sort: best → worst
-TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upscale": 3,
-                  "anomaly": 2, "unreviewed": 1, "rejected": 0}
+TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anomaly": 2, "unreviewed": 1, "rejected": 0}
 
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
@@ -1445,7 +1444,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         # no Stash call; the board loads the scenes on pick). A combined key
         # ("exceptionnelle,legendaire") still works from a link.
         tiers = [{"key": t, "label": names[t]}
-                 for t in ("legendaire", "exceptionnelle", "merveilleuse", "upscale")]
+                 for t in ("legendaire", "exceptionnelle", "merveilleuse")]
         tiers.append({"key": "unreviewed", "label": "Unreviewed — best moments"})
         tiers.append({"key": "unsaved", "label": "No saved moments yet"})
         return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections(),
@@ -5405,10 +5404,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def grade_scene(self, scene_id: str, grade: str, source: str = "catalogue") -> dict:
         """Apply one of the user's grades (peaks.tiers.GRADES) in Stash.
 
-        Renamer-safe write order for the tagged tiers (16/17/18 + Upscale):
+        Renamer-safe write order for the tagged tiers (16/17/18):
         1) move the O-count to the grade's value, then 2) ONE sceneUpdate with
         the rating, the complete tag list (every tier tag removed, this tier's
-        added) and organized = true — so a plugin hooked on scene updates fires
+        added, any retired tier tag dropped) and organized = true — so a plugin hooked on scene updates fires
         once and only ever sees the final state. A reject changes the rating
         only (tags, organized and O-count stay as they are).
 
@@ -5525,16 +5524,30 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         from ..tier_model import TierModel
 
+        from ..tier_model import CLASSES
+
         st = {"model": None, "report": None}
         path = self._tier_model_path()
+        retired = False
         try:
             if path.exists():
                 st["model"] = TierModel.load(path)
                 rp = path.with_suffix(".json")
                 st["report"] = json.loads(rp.read_text()) if rp.exists() else None
+                # trained with a tier that's since been retired (Upscale): its
+                # scale no longer matches — untrained until one retrain replaces it
+                if any(c not in CLASSES for c in getattr(st["model"], "classes_", [])):
+                    st, retired = {"model": None, "report": None}, True
         except Exception:  # noqa: BLE001 — unreadable model → untrained
             st = {"model": None, "report": None}
         self._tier_state = st
+        if retired:
+            with self._train_gate:
+                if getattr(self, "_tier_training", False):
+                    return st
+                self._tier_training = True
+            threading.Thread(target=self._train_tier_quietly, daemon=True,
+                             name="peaks-tier-retrain").start()
         return st
 
     def _scene_features(self, rows: list[dict]) -> dict[str, tuple]:
@@ -5793,12 +5806,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     @staticmethod
     def _suggest_for_anomaly(row: dict, pred: dict | None, names: dict | None = None) -> dict | None:
-        """An anomaly is a 5★ keeper, so suggest among the keeper tiers: an
-        explicit 'upscale' tag/performer wins; otherwise the model's best keeper
-        tier."""
-        marks = [x.lower() for x in (row.get("tags") or []) + (row.get("performers") or [])]
-        if any("upscale" in x for x in marks):
-            return {"grade": "upscale", "why": "tagged 'upscale' in Stash"}
+        """An anomaly is a 5★ keeper, so suggest the model's best keeper tier."""
         if not pred:
             return None
         keepers = {c: p for c, p in pred["probs"].items() if c != "reject"}
@@ -5817,7 +5825,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim",
                     "passed")
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
-    PROMOTABLE = ("unreviewed", "upscale", "merveilleuse", "exceptionnelle", "anomaly")
+    PROMOTABLE = ("unreviewed", "merveilleuse", "exceptionnelle", "anomaly")
 
     def _scene_signals(self, rows: list[dict]) -> dict:
         """Per scene: {saves, best, age_days, new} — your saved moments (legacy

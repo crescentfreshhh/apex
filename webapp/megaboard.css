@@ -210,7 +210,6 @@ html, body {
 .mb-tier.tier-legendaire { color: #e6c15a; }
 .mb-tier.tier-exceptionnelle { color: #b889ff; }
 .mb-tier.tier-merveilleuse { color: #6ea8fe; }
-.mb-tier.tier-upscale { color: #7fb3aa; }
 .mb-tier.tier-anomaly { color: #e8a14d; }
 .mb-tier.tier-rejected { color: #e0604d; }
 
@@ -253,7 +252,7 @@ html, body { font: 14px/1.45 "Inter", system-ui, -apple-system, "Segoe UI", Robo
 .mb-g .k, .mb-menu-grades .k { font-size: 10px; color: #7a7a82; border: 1px solid #3a3a44; border-radius: 4px; padding: 0 4px; }
 .mb-g:hover, .mb-menu-grades button:hover { border-color: currentColor; }
 .g-legendaire { color: #e6c15a; } .g-exceptionnelle { color: #b889ff; } .g-merveilleuse { color: #6ea8fe; }
-.g-upscale { color: #7fb3aa; } .g-reject { color: #e0604d; }
+.g-reject { color: #e0604d; }
 .mb-g.cur, .mb-menu-grades button.cur { border-color: currentColor; background: rgba(255,255,255,.07); font-weight: 600; }
 .mb-menu-grades { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 4px 7px; margin-bottom: 3px; border-bottom: 1px solid #2c2c33; }
 .mb-menu .mb-menu-grades button { padding: 3px 8px; font-size: 12px; text-align: center; }
@@ -300,7 +299,7 @@ html, body { height: 100dvh; }
   .mb-menu { left: 0 !important; right: 0; top: auto !important; bottom: 0; max-height: 75dvh; overflow-y: auto;
     border-radius: 16px 16px 0 0; padding: 8px 8px calc(10px + env(safe-area-inset-bottom)); }
   .mb-menu button { padding: 12px 12px; font-size: 15px; }
-  .mb-menu .mb-menu-grades { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .mb-menu .mb-menu-grades { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .mb-menu .mb-menu-grades button { flex-direction: column; padding: 10px 2px; font-size: 11.5px; border-radius: 12px; }
   .mb-menu-grades .nl { display: none; }
   .mb-menu-grades .ns { display: inline; white-space: nowrap; }

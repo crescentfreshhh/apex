@@ -7,15 +7,15 @@ Each graded scene becomes one example with two kinds of features:
   compressed with PCA so ~300 examples aren't drowned in 2k dimensions;
 * **quality** — log bitrate, bits-per-pixel-per-frame, resolution class, frame
   rate and codec. Learned jointly with the visual side rather than hand-set,
-  because high bitrate isn't simply "better": AI upscales (the Upscale tier) are
-  often 4K and high-bitrate too, and only the picture tells them apart;
+  because high bitrate isn't simply "better": AI upscales are often 4K and
+  high-bitrate too, and only the picture tells them apart;
 * **who** (optional, kept only when cross-validation says it helps) — the track
   record of the scene's performers and studio in your grades: average grade,
   keep rate and share graded Exceptionnelle or better, each shrunk toward the
   library average so one or two grades count for little (`WhoEncoder`).
 
 A multinomial logistic regression over the grades
-(reject < upscale < merveilleuse < exceptionnelle < legendaire) produces, for
+(reject < merveilleuse < exceptionnelle < legendaire) produces, for
 any scene, a probability per tier, an expected tier (ordinal mean) and a keeper
 probability (1 − P(reject)). Everything here is suggestion only — nothing is
 graded without a click.
@@ -33,11 +33,11 @@ import numpy as np
 
 from .tiers import RES_CLASSES
 
-CLASSES: tuple[str, ...] = ("reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire")
+CLASSES: tuple[str, ...] = ("reject", "merveilleuse", "exceptionnelle", "legendaire")
 ORDINAL: dict[str, int] = {c: i for i, c in enumerate(CLASSES)}
 # catalogue tier → training class (anomaly / unreviewed are not training data)
 TIER_CLASS: dict[str, str] = {
-    "rejected": "reject", "upscale": "upscale", "merveilleuse": "merveilleuse",
+    "rejected": "reject", "merveilleuse": "merveilleuse",
     "exceptionnelle": "exceptionnelle", "legendaire": "legendaire",
 }
 MIN_PER_CLASS = 10
@@ -102,6 +102,7 @@ WHO_PRIOR = 3.0        # smoothing weight: a record of n grades is n/(n+3) its o
 # points by chance
 WHO_MARGIN = 0.02
 _TOP = ORDINAL["exceptionnelle"]
+_MAX = ORDINAL[CLASSES[-1]]          # grades are scaled to 0–1 by the top of the scale
 WHO_FEATURES: tuple[str, ...] = (
     "perf_grade_max", "perf_grade_mean", "perf_keep_mean", "perf_top_max",
     "perf_graded_log", "perf_known_frac", "no_performers",
@@ -178,19 +179,19 @@ class WhoEncoder:
             recs = [self.record(self.perf.get(p), me) for p in dict.fromkeys(w.get("performers") or [])]
             if recs:
                 gr = [r[1] for r in recs]
-                out[i, 0:7] = [max(gr) / 4, float(np.mean(gr)) / 4, float(np.mean([r[2] for r in recs])),
+                out[i, 0:7] = [max(gr) / _MAX, float(np.mean(gr)) / _MAX, float(np.mean([r[2] for r in recs])),
                                max(r[3] for r in recs), math.log1p(sum(r[0] for r in recs)),
                                sum(1 for r in recs if r[0] > 0) / len(recs), 0.0]
             else:
                 g0, k0, t0 = self.base
-                out[i, 0:7] = [g0 / 4, g0 / 4, k0, t0, 0.0, 0.0, 1.0]
+                out[i, 0:7] = [g0 / _MAX, g0 / _MAX, k0, t0, 0.0, 0.0, 1.0]
             st = w.get("studio")
             if st:
                 n, g, kp, tp = self.record(self.studio.get(st), me)
-                out[i, 7:12] = [g / 4, kp, tp, math.log1p(n), 0.0]
+                out[i, 7:12] = [g / _MAX, kp, tp, math.log1p(n), 0.0]
             else:
                 g0, k0, t0 = self.base
-                out[i, 7:12] = [g0 / 4, k0, t0, 0.0, 1.0]
+                out[i, 7:12] = [g0 / _MAX, k0, t0, 0.0, 1.0]
         return out
 
     def explain(self, w: dict | None, own: str | None = None) -> dict:

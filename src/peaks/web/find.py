@@ -16,8 +16,7 @@ import re
 
 VR_TAGS = ("vr", "virtual reality", "vr porn", "6dof", "180°", "180 vr", "360 vr")
 _TERM = re.compile(r'(-?)"([^"]+)"|(\S+)')
-TIER_RANK = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upscale": 3,
-             "anomaly": 2, "unreviewed": 1, "rejected": 0}
+TIER_RANK = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anomaly": 2, "unreviewed": 1, "rejected": 0}
 
 
 class FindMixin:

@@ -20,8 +20,8 @@ from pathlib import Path
 MIN_SCENES = 3            # random only picks performers with at least this many scenes
 RECENT_DAYS = 7           # …and not ones reviewed this recently (unless that's everyone)
 NEVER_DAYS = 365          # "never reviewed" weighs like a year ago
-TIER_ORDER = ("legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected")
-LOW_TIERS = ("unreviewed", "upscale")
+TIER_ORDER = ("legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected")
+LOW_TIERS = ("unreviewed",)
 
 
 class PerfReviewMixin:

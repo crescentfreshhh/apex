@@ -1,7 +1,7 @@
 """Keeper-triage model on synthetic libraries built to test specific claims:
 it learns tiers from the picture, learns a bitrate preference only when quality
-features are on, and tells a high-bitrate upscale from a real 4K master by the
-picture — plus the transparent quality floor."""
+features are on, and tells a high-bitrate reject (an AI upscale, say) from a real
+4K master by the picture — plus the transparent quality floor."""
 
 import numpy as np
 import pytest
@@ -20,9 +20,10 @@ def _unit(v):
     return v / np.linalg.norm(v)
 
 
-def _library(rng, n_per=24, visual_sep=True, quality_sep=False, upscale_mbps=45):
+def _library(rng, n_per=24, visual_sep=True, quality_sep=False, reject_mbps=3):
     """Scenes for every class; `visual_sep` gives each class its own look,
-    `quality_sep` makes bitrate rise with the tier (upscale excepted)."""
+    `quality_sep` makes bitrate rise with the tier (`reject_mbps` can put the
+    rejects up with the best)."""
     centers = {c: _unit(rng.standard_normal(D)) for c in CLASSES}
     Xv, Xq, y = [], [], []
     for c in CLASSES:
@@ -32,7 +33,7 @@ def _library(rng, n_per=24, visual_sep=True, quality_sep=False, upscale_mbps=45)
             Xv.append(visual_features(frames, rng.random(12)))
             mbps = 8.0
             if quality_sep:
-                mbps = {"reject": 3, "upscale": upscale_mbps, "merveilleuse": 12,
+                mbps = {"reject": reject_mbps, "merveilleuse": 12,
                         "exceptionnelle": 25, "legendaire": 50}[c] * float(rng.uniform(0.85, 1.15))
             Xq.append(quality_features({"mbps": mbps, "res": "4K", "fps": 30, "codec": "hevc",
                                         "bpp": mbps * 1e6 / (3840 * 2160 * 30)}))
@@ -48,11 +49,10 @@ def test_learns_tiers_from_the_picture():
 
 def test_bitrate_preference_needs_quality_features():
     # the picture carries NO tier signal; each tier has its own bitrate band
-    Xv, Xq, y = _library(np.random.default_rng(1), visual_sep=False, quality_sep=True,
-                         upscale_mbps=35)
+    Xv, Xq, y = _library(np.random.default_rng(1), visual_sep=False, quality_sep=True)
     model, rep = fit_best(Xv, Xq, y)
     assert rep["cv"]["exact"] >= 0.8
-    assert rep["cv_without_quality"]["exact"] <= 0.4        # ~chance over 5 classes
+    assert rep["cv_without_quality"]["exact"] <= 0.4        # ~chance over 4 classes
     assert rep["quality_gain"] >= 0.4
     assert rep["pca_dim"] <= 16                              # small: the picture is noise here
 
@@ -60,20 +60,19 @@ def test_bitrate_preference_needs_quality_features():
 def test_fixed_large_pca_would_drown_quality():
     """Why the PCA size is chosen by CV: fixed at 48 on 120 scenes, noise
     dimensions swamp the real bitrate signal."""
-    Xv, Xq, y = _library(np.random.default_rng(1), visual_sep=False, quality_sep=True,
-                         upscale_mbps=35)
+    Xv, Xq, y = _library(np.random.default_rng(1), visual_sep=False, quality_sep=True)
     big = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=48)
     small = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=8)
     assert small["exact"] - big["exact"] >= 0.3
 
 
-def test_high_bitrate_upscale_separated_by_picture():
-    # upscale and legendaire are BOTH 4K at ~45-50 Mbps — only the picture differs
+def test_high_bitrate_reject_separated_by_picture():
+    # the rejects (AI upscales) and legendaire are BOTH 4K at ~45-50 Mbps — only the picture differs
     rng = np.random.default_rng(2)
-    Xv, Xq, y = _library(rng, visual_sep=True, quality_sep=True)
+    Xv, Xq, y = _library(rng, visual_sep=True, quality_sep=True, reject_mbps=45)
     m = TierModel().fit(Xv, Xq, y)
     pred = [m.classes_[i] for i in np.argmax(m.predict_proba(Xv, Xq), axis=1)]
-    for c in ("upscale", "legendaire"):
+    for c in ("reject", "legendaire"):
         rows = [p for p, t in zip(pred, y) if t == c]
         assert sum(p == c for p in rows) / len(rows) >= 0.9
 
@@ -115,7 +114,7 @@ def _row(tier, res, mbps):
 def test_quality_floor_and_flag():
     rows = ([_row("legendaire", "4K", m) for m in (40, 55, 30, 22, 60)]
             + [_row("merveilleuse", "1080p", m) for m in (9, 12, 15, 10, 8)]
-            + [_row("upscale", "4K", 5), _row("unreviewed", "4K", 3)])   # not tiered: ignored
+            + [_row("anomaly", "4K", 5), _row("unreviewed", "4K", 3)])   # not tiered: ignored
     floor = quality_floor(rows)
     assert floor["by_res"]["4K"] == {"mbps": 22, "n": 5}
     assert floor["by_res"]["1080p"]["mbps"] == 8 and floor["lowest_res"] == "1080p"
@@ -144,10 +143,11 @@ def test_records_are_smoothed_toward_the_library_mean():
     y = ["merveilleuse"] * 40
     one = WhoEncoder().fit(who + [{"performers": ["star"], "studio": ""}], y + ["legendaire"])
     ten = WhoEncoder().fit(who + [{"performers": ["star"], "studio": ""}] * 10, y + ["legendaire"] * 10)
-    base1 = one.base[0] / 4
+    top = len(CLASSES) - 1                      # grades are scaled by the top of the scale
+    base1 = one.base[0] / top
     g1 = _feat(one, {"performers": ["star"], "studio": ""})["perf_grade_max"]
     g10 = _feat(ten, {"performers": ["star"], "studio": ""})["perf_grade_max"]
-    assert g1 - base1 < 0.2                     # one grade barely moves the record
+    assert (g1 - base1) * top < 0.8             # one grade moves the record less than a tier
     assert g10 > 0.85                           # ten grades make it (nearly) Légendaire
     new = _feat(ten, {"performers": ["nobody"], "studio": ""})
     assert new["perf_known_frac"] == 0 and new["perf_graded_log"] == 0
@@ -160,15 +160,15 @@ def test_a_scenes_own_grade_never_feeds_its_record():
     enc = WhoEncoder().fit(who, ["legendaire"])
     loo = _feat(enc, who[0], own="legendaire")
     assert loo["perf_graded_log"] == 0 and loo["studio_graded_log"] == 0
-    assert loo["perf_grade_max"] == pytest.approx(enc.base[0] / 4)
+    assert loo["perf_grade_max"] == pytest.approx(enc.base[0] / (len(CLASSES) - 1))
     # out-of-fold training encodings: a lone performer's only scene knows nothing of itself
     oof = _oof_who(who * 1 + [{"performers": ["q"], "studio": "t"}] * 9, ["legendaire"] + ["reject"] * 9)
     assert oof[0, WHO_FEATURES.index("perf_known_frac")] == 0
     ex = enc.explain(who[0], own="legendaire")
     assert ex["performers"][0]["n"] == 0 and ex["studio"]["n"] == 0
     assert enc.explain(who[0])["performers"][0] == {
-        "id": "p", "n": 1, "grade": 4.0, "keep": 1.0, "top": 1.0,
-        "shrunk": pytest.approx((4 + 3 * enc.base[0]) / 4, abs=1e-3)}
+        "id": "p", "n": 1, "grade": 3.0, "keep": 1.0, "top": 1.0,
+        "shrunk": pytest.approx((3 + 3 * enc.base[0]) / 4, abs=1e-3)}
 
 
 def _who_library(rng, who_matters=True, n=200):
@@ -180,7 +180,7 @@ def _who_library(rng, who_matters=True, n=200):
     y, who = [], []
     others = [f"p{i}" for i in range(12)]
     for i in range(n):
-        c = CLASSES[i % 5]
+        c = CLASSES[i % len(CLASSES)]
         if who_matters and c == "legendaire":
             w = {"performers": [["A", "B"][i % 2], str(rng.choice(others))], "studio": "Good"}
         elif who_matters and c == "reject":

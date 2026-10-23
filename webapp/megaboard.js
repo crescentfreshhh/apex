@@ -580,7 +580,7 @@ function reshuffle() {
 
 const STEER = matchMedia("(pointer: coarse)").matches
   ? "tap a tile to enlarge · long-press to grade, save or explore"
-  : "right-click, or hover + 1–5 grade · ↑/↓ taste · S save · ⌫ back · U undo";
+  : "right-click, or hover + 1–4 grade · ↑/↓ taste · S save · ⌫ back · U undo";
 function updateStatus() {
   const pivot = State.pivot ? `${State.pivot} · ` : "";
   if (State.pivot) {   // a "more like this"/performer pivot — show ITS count, not For You coverage
@@ -683,7 +683,7 @@ function onKey(e) {
     case "]": nudgeFloor(0.05); break;
     case "Backspace": case "b": e.preventDefault(); goBack(); break;
     case "u": undoGrade(); break;
-    case "1": case "2": case "3": case "4": case "5":
+    case "1": case "2": case "3": case "4":
       if (ft) gradeScene(ft.apex.scene_id, MB_GRADES[+e.key - 1]); break;
     default: break;
   }
@@ -705,7 +705,7 @@ function tileTime(t) {
 const SHUFFLE_MIN = 7, SHUFFLE_MAX = 22; // random clip length (s) => random intervals
 // Tier badge — the O-count is the user's grade above 5★ (see peaks/tiers.py), so
 // it's shown read-only here; grading happens in the app's Catalogue / viewer.
-let MB_TIER_NAMES = { rejected: "Rejected", anomaly: "Anomaly", upscale: "Upscale",
+let MB_TIER_NAMES = { rejected: "Rejected", anomaly: "Anomaly",
   merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire" };
 fetch("/api/catalogue/names").then((r) => (r.ok ? r.json() : null))
   .then((n) => { if (n) MB_TIER_NAMES = { ...MB_TIER_NAMES, ...n }; }).catch(() => {});
@@ -714,16 +714,16 @@ function tierKey(rating100, o) {
   const r = +rating100 || 0;
   if (r <= 0 || (r > 20 && r < 100)) return "unreviewed";
   if (r <= 20) return "rejected";
-  return ({ 0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  return ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
 }
 function tierBadge(t) {
   return t && t !== "unreviewed" ? `<span class="mb-tier tier-${t}">${esc(MB_TIER_NAMES[t] || t)}</span>` : "";
 }
 
 // --- grade from the board: your tiers, same keys as the Review queue ------------
-const MB_GRADES = ["reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–5
+const MB_GRADES = ["reject", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–4
 function gradeLabel(g) { return g === "reject" ? "Reject" : (MB_TIER_NAMES[g] || g); }
-// a name that fits a phone's five-across row (your own tier names are trimmed)
+// a name that fits a phone's four-across row (your own tier names are trimmed)
 const MB_SHORT = { merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
 function gradeShort(g) {
   const n = gradeLabel(g), s = MB_SHORT[g] || "";

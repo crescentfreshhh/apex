@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from .find import TIER_RANK
 
-TIER_ORDER = ("legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected")
+TIER_ORDER = ("legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected")
 
 
 class StudiosMixin:

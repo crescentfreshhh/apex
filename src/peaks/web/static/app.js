@@ -417,7 +417,7 @@ loadExportSettings();
 
 // --- tier display names (Settings) --------------------------------------------
 const TIER_NAME_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["merveilleuse", "16"],
-  ["upscale", "0"], ["anomaly", "other O"], ["unreviewed", "unrated"], ["rejected", "1★"]];
+  ["anomaly", "other O"], ["unreviewed", "unrated"], ["rejected", "1★"]];
 async function loadCuration() {
   const cb = $("#cur-auto-leg"); if (!cb) return;
   try {
@@ -494,8 +494,8 @@ $("#btn-tier-names-save")?.addEventListener("click", async () => {
 
 // --- tier tags for the renamer (Settings) ---------------------------------------
 let TIER_TAGS = { legendaire: "legendaire", exceptionnelle: "exceptionnelle",
-  merveilleuse: "merveilleuse", upscale: "personal upscale" };
-const TIER_TAG_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["merveilleuse", "16"], ["upscale", "5★ O 0"]];
+  merveilleuse: "merveilleuse" };
+const TIER_TAG_KEYS = [["legendaire", "18"], ["exceptionnelle", "17"], ["merveilleuse", "16"]];
 async function loadTierTags() {
   try { TIER_TAGS = { ...TIER_TAGS, ...(await api("/api/catalogue/tier-tags")) }; } catch {}
   const box = $("#tier-tags"); if (!box) return;
@@ -523,11 +523,11 @@ $("#btn-tag-sync")?.addEventListener("click", async () => {
     $("#tier-tags-status").textContent = "";
     box.hidden = false;
     if (!d.count) {
-      box.innerHTML = `<div class="backup-diff"><p>Every Légendaire / Exceptionnelle / Merveilleuse / Upscale scene already carries its one tier tag and is organized. Nothing to do.</p>
+      box.innerHTML = `<div class="backup-diff"><p>Every Légendaire / Exceptionnelle / Merveilleuse scene already carries its one tier tag and is organized, and no scene still carries a retired tier tag. Nothing to do.</p>
         <button class="ghost" id="btn-tag-sync-close">Close</button></div>`;
     } else {
       const rows = d.items.map((r) => `<div class="hist-row"><span class="hist-what" title="${esc(r.path)}">${esc(r.title || r.path)}</span>
-        <span>${r.present.length ? esc(r.present.map((t) => d.tags[t]).join(" + ")) + " → " : ""}<b>${esc(d.tags[r.tier])}</b>${r.organized ? "" : " + organized"}</span></div>`).join("");
+        <span>${r.present.length ? esc(r.present.map((t) => d.tags[t]).join(" + ")) + " → " : ""}${d.tags[r.tier] ? `<b>${esc(d.tags[r.tier])}</b>${r.organized ? "" : " + organized"}` : "remove the retired tier tag"}</span></div>`).join("");
       box.innerHTML = `<div class="backup-diff">
         <p><b>${plural(d.count, "scene")}</b> would change · the renamer will move about <b>${plural(d.moves, "file")}</b>.
           Grades are not touched — only the tier tag (other tier tags removed) and organized.</p>
@@ -864,18 +864,18 @@ function stars(rating100) {
 
 // --- tiers: the O-count is a GRADE above 5★, not an event count --------------
 // Mirrors peaks/tiers.py (tier_of) — keep the two in sync.
-const TIER_ORDER = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
+const TIER_ORDER = ["unreviewed", "anomaly", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
 let TIER_NAMES = {
-  unreviewed: "Unreviewed", rejected: "Rejected", anomaly: "Anomaly", upscale: "Upscale",
+  unreviewed: "Unreviewed", rejected: "Rejected", anomaly: "Anomaly",
   merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire",
 };
-const GRADES = ["reject", "upscale", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–5, worst → best
+const GRADES = ["reject", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–4, worst → best
 function tierOf(rating100, o) {
   const r = +rating100 || 0;
   if (r <= 0) return "unreviewed";
   if (r <= 20) return "rejected";
   if (r < 100) return "unreviewed";
-  return ({ 0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  return ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
 }
 function gradeName(g) { return g === "reject" ? "Reject (1★)" : TIER_NAMES[g]; }
 function tierBadge(rating100, o, { showUnreviewed = false } = {}) {
@@ -1639,7 +1639,7 @@ async function openPerformerDetail(id) {
   if (!prof && !det) { box.innerHTML = '<p class="dim">Couldn\'t load this performer.</p>'; return; }
   renderPerfDetail(det || { id, performer: prof.name, items: [], stats: {} }, prof || {});
 }
-const PF_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];   // best first
+const PF_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];   // best first
 function renderPerfDetail(d, prof = {}) {
   const box = $("#perf-detail");
   const items = d.items || [];
@@ -2300,7 +2300,7 @@ function renderStatistics(st, metrics, storage) {
 // disk space by tier, and the biggest files in tiers you might trim
 function storageCard(d) {
   if (!d) return "";
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];
   const tot = d.total.bytes || 1;
   const bars = order.filter((t) => d.tiers[t]).map((t) => {
     const x = d.tiers[t];
@@ -2895,7 +2895,7 @@ async function openHealth() {
   try { h = await api("/api/library/health"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
   const n = (x) => (x ?? 0).toLocaleString();
   const pct = (a, b) => (b ? Math.round(100 * a / b) + "%" : "—");
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];
   const rows = order.filter((t) => h.per_tier[t]).map((t) => {
     const x = h.per_tier[t];
     const w = x.scenes ? 100 * x.with_saves / x.scenes : 0;
@@ -2966,13 +2966,13 @@ async function openForYou() {
 // --- For You: today's decisions -------------------------------------------------
 // One decision at a time from Peaks' suggestions (saves → Légendaire, let-go
 // suggestions, new scenes, second opinions…), a fixed mixed set of 20 per day.
-// The video autoplays the scene's best moments; 1–5 grade, Enter accepts Peaks'
+// The video autoplays the scene's best moments; 1–4 grade, Enter accepts Peaks'
 // pick, S skips, U undoes. Every ~6 answers, a quick "teach Peaks" 👍/👎.
 const td = { queue: [], answered: [], job: null, progress: null, sinceTeach: 0, teach: null,
   moments: [], mi: 0, hop: null, loading: false, board: null, labels: {} };
 const TD_TEACH_EVERY = 6;
-const TD_SHORT = { reject: "Reject", upscale: "Upscale", merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
-// a grade name that fits a phone's five-across row (your own tier names are trimmed)
+const TD_SHORT = { reject: "Reject", merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
+// a grade name that fits a phone's four-across row (your own tier names are trimmed)
 function shortGrade(g) {
   const n = gradeName(g), s = TD_SHORT[g] || "";
   if (n.length <= 10) return n;
@@ -3052,7 +3052,7 @@ function tdShow() {
       <button class="btn sm ghost" id="td-undo" ${td.answered.length ? "" : "disabled"}>Undo <kbd>U</kbd></button>
       <button class="btn sm ghost" id="td-open" title="Open in the Review player">Open in Review</button>
     </div>
-    <div class="td-keys">1–5 grade · Enter accept · 0 keep as is · S skip · U undo · P / click the still: play peaks · Space pause · M sound · ←/→ moments</div>`;
+    <div class="td-keys">1–4 grade · Enter accept · 0 keep as is · S skip · U undo · P / click the still: play peaks · Space pause · M sound · ←/→ moments</div>`;
   $("#td-body").querySelectorAll(".td-grades button").forEach((b) => b.onclick = () => tdAnswer(b.dataset.g));
   $("#td-accept")?.addEventListener("click", () => tdAnswer(x.pick));
   $("#td-keep")?.addEventListener("click", () => tdAnswer(null, true));
@@ -3235,7 +3235,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const x = td.queue[0];
-  if (k >= "1" && k <= "5") { e.preventDefault(); tdAnswer(RV_GRADES[+k - 1][0]); }
+  if (k >= "1" && k <= "4") { e.preventDefault(); tdAnswer(RV_GRADES[+k - 1][0]); }
   else if (k === "enter" && x && x.pick) { e.preventDefault(); tdAnswer(x.pick); }
   else if (k === "s") { e.preventDefault(); tdSkip(); }
   else if (k === "u") { e.preventDefault(); tdUndo(); }
@@ -3561,7 +3561,7 @@ $("#btn-exp-refresh")?.addEventListener("click", () => openExperimental());
 
 // --- Catalogue: grade & filter the library with your tiers -------------------
 const CAT_PAGE = 60;
-const CAT_CHIPS = ["unreviewed", "anomaly", "upscale", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
+const CAT_CHIPS = ["unreviewed", "anomaly", "merveilleuse", "exceptionnelle", "legendaire", "rejected"];
 const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, views: {}, model: null,
               focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false,
               isNew: false, sortTouched: false, sortDir: "" };
@@ -3775,7 +3775,7 @@ function renderCatChips() {
     `<button class="cat-chip ${!cat.view && cat.tier === t ? "on" : ""} ${t ? "tier-" + t : ""}" data-t="${t}">${esc(label)} <span class="n">${(n || 0).toLocaleString()}</span></button>`;
   $("#cat-chips").innerHTML = chip("", "All", all) + CAT_CHIPS.map((t) => chip(t, TIER_NAMES[t], cat.counts[t])).join("");
   // ▶ Board / ⬇ Reel act on one keeper tier (the selected chip)
-  const tierOk = !cat.view && ["legendaire", "exceptionnelle", "merveilleuse", "upscale"].includes(cat.tier);
+  const tierOk = !cat.view && ["legendaire", "exceptionnelle", "merveilleuse"].includes(cat.tier);
   const del = $("#btn-cat-delete");
   if (del) {
     const n = cat.counts.rejected || 0;
@@ -3832,7 +3832,7 @@ function whoGainText(rep) {
 }
 function renderCatStorage(st) {
   const el = $("#cat-storage"); if (!el || !st) return;
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed", "rejected"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];
   el.innerHTML = order.filter((t) => st[t] && st[t].bytes).map((t) =>
     `<span class="stor-chip"><span class="tier-dot tier-bg-${t}"></span>${esc(TIER_NAMES[t])} <b>${fmtBytes(st[t].bytes)}</b>${t === "rejected" ? " awaiting delete" : ""}</span>`).join("");
 }
@@ -4211,7 +4211,7 @@ function catCardHTML(r, i) {
   const cur = r.tier === "rejected" ? "reject" : r.tier;   // highlight the grade it already has
   const p = r.pred;
   const sug = r.suggest ? r.suggest.grade : (p && r.tier === "unreviewed" ? p.tier : null);
-  const short = { legendaire: "Lég", exceptionnelle: "Exc", merveilleuse: "Mer", upscale: "Ups", reject: "Rej" };
+  const short = { legendaire: "Lég", exceptionnelle: "Exc", merveilleuse: "Mer", reject: "Rej" };
   const grades = GRADES.map((g, k) =>
     `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
   const predLine = p
@@ -4393,7 +4393,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("#catalogue")?.classList.contains("active") || !$("#viewer").hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  if (k >= "1" && k <= "5") { e.preventDefault(); gradeCat(cat.focus, GRADES[+k - 1]); }
+  if (k >= "1" && k <= "4") { e.preventDefault(); gradeCat(cat.focus, GRADES[+k - 1]); }
   else if (k === "j" || k === "arrowdown") { e.preventDefault(); focusCat(cat.focus + 1); }
   else if (k === "k" || k === "arrowup") { e.preventDefault(); focusCat(cat.focus - 1); }
   else if (k === "enter") { e.preventDefault(); watchCat(cat.focus); }
@@ -4870,7 +4870,7 @@ const CMDS = [
   ["Check tier tags…", "run", () => { go("dashboard"); showSettingsSection("tiers"); $("#btn-tag-sync").click(); }],
   ["Back up grades now", "run", () => { go("activity"); $("#btn-backup-now").click(); }],
   ["Delete rejected scenes…", "run", () => openDeleteDialog(null)],
-  ...["legendaire", "exceptionnelle", "merveilleuse", "upscale", "unreviewed", "anomaly", "rejected"].map((t) =>
+  ...["legendaire", "exceptionnelle", "merveilleuse", "unreviewed", "anomaly", "rejected"].map((t) =>
     [`Catalogue: ${t}`, "tier", () => { cat.tier = t; cat.view = ""; cat.isNew = false; go("catalogue"); openCatalogue(); }]),
 ];
 const cmdk = { items: [], idx: 0 };
@@ -4935,12 +4935,12 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "/" && !e.target.closest("input, textarea, select") && $("#cmdk").hidden && $("#viewer").hidden) { e.preventDefault(); openCmdk(); }
 });
 
-// --- Review queue: one scene at a time, big player, 1–5 to grade -------------------
+// --- Review queue: one scene at a time, big player, 1–4 to grade -------------------
 const rv = { items: [], i: 0, label: "", fromCatalogue: false, peaks: [], source: "",
   graded: new Set(), live: null, forceIngest: false };
-// same order as GRADES: key 1 = Reject … key 5 = Légendaire
+// same order as GRADES: key 1 = Reject … key 4 = Légendaire
 const RV_GRADES = [
-  ["reject", "1★ · queued for deletion"], ["upscale", "5★ · O 0 · tag + organize"],
+  ["reject", "1★ · queued for deletion"],
   ["merveilleuse", "5★ · O 16 · tag + organize"], ["exceptionnelle", "5★ · O 17 · tag + organize"],
   ["legendaire", "5★ · O 18 · tag + organize"],
 ];
@@ -5130,7 +5130,7 @@ function renderReview() {
   $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) =>
     `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}"><span class="k">${k + 1}</span>
       <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${d}</span></button>`).join("");
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "reject"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "reject"];
   $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
     const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
     return `<div class="pb" title="${esc(className(c))} ${p}%"><span>${esc(className(c))}</span><div class="b"><i class="tier-bg-${t}" style="width:${p}%"></i></div><span class="muted num">${p}%</span></div>`;
@@ -5346,7 +5346,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("#review")?.classList.contains("active") || !$("#viewer").hidden || !$("#cmdk").hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase(), v = $("#rv-v");
-  if (k >= "1" && k <= "5") { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
+  if (k >= "1" && k <= "4") { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
   else if (k === "0") { e.preventDefault(); rvKeep(); }
   else if (k === "j") { e.preventDefault(); rvMove(1); }
   else if (k === "k") { e.preventDefault(); rvMove(-1); }
@@ -5420,9 +5420,9 @@ loadScanOptions();
 
 // --- Performer review: pick her, read her repertoire, then her scenes best first --------
 const pr = { active: null, brief: null };      // active: {pid, name, total, changes: {sid: {from, to, size}}}
-const PR_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "upscale", "anomaly", "unreviewed"];
+const PR_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed"];
 const PR_COLOR = { legendaire: "var(--leg)", exceptionnelle: "var(--exc)", merveilleuse: "var(--mer)",
-  upscale: "var(--ups)", anomaly: "var(--ano)", unreviewed: "var(--unr)", rejected: "var(--rej)" };
+  anomaly: "var(--ano)", unreviewed: "var(--unr)", rejected: "var(--rej)" };
 const prPhoto = (p) => p.photo ? `<img src="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" loading="lazy" />`
   : `<div class="pr-photo-ph"></div>`;
 function prTierBar(tiers) {
@@ -5494,7 +5494,7 @@ async function prBrief(pid) {
         ${t.best ? `<div class="dim small" style="margin-top:6px">Her strongest: <b>${esc(t.best.title || "scene " + t.best.scene_id)}</b> · ${esc(TIER_NAMES[t.best.tier] || t.best.tier)}</div>` : ""}</div>
       <div class="panel"><h3>Open questions</h3>${openBits.length ? `<div>${openBits.join(" · ")}</div>` : '<div class="dim">Nothing pending — every scene is graded and no suggestions are open.</div>'}</div>
       <div class="panel"><h3>Footprint</h3><div class="pr-big">${f.gb.toLocaleString()} GB</div>
-        <div class="dim">${f.low_gb ? `${f.low_gb} GB in Unreviewed / Upscale · ` : ""}4K or better: ${esc(f.hi_res_share)} (${f.hi_res})</div></div>
+        <div class="dim">${f.low_gb ? `${f.low_gb} GB in Unreviewed · ` : ""}4K or better: ${esc(f.hi_res_share)} (${f.hi_res})</div></div>
       <div class="panel"><h3>Last review</h3>${lr ? `<div class="pr-big">${lr.days === 0 ? "today" : lr.days + " days ago"}</div>
         <div class="dim">${lr.seen} seen · ${lr.regraded} re-graded · ${lr.rejected} rejected${lr.times > 1 ? ` · ${lr.times} reviews so far` : ""}</div>`
         : '<div class="dim">First review.</div>'}</div>

@@ -27,8 +27,7 @@ import time
 from io import BytesIO
 from pathlib import Path
 
-TIER_RANK = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "upscale": 3,
-             "anomaly": 3, "unreviewed": 2, "rejected": 0}
+TIER_RANK = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anomaly": 3, "unreviewed": 2, "rejected": 0}
 
 
 class PerformersMixin:

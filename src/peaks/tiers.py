@@ -5,11 +5,15 @@ used as the grade *above* 5 stars — not as an event count:
 
     unrated / 2-4 stars        → unreviewed
     1 star  (rating100 <= 20)  → rejected (Peaks hides these everywhere)
-    5 stars, O = 0             → upscale        (lower-tier keeper)
     5 stars, O = 16            → merveilleuse
     5 stars, O = 17            → exceptionnelle
     5 stars, O = 18            → legendaire
     5 stars, any other O       → anomaly        (to revalidate)
+
+There used to be an Upscale tier (5 stars, O = 0, tag "personal upscale"); it
+was retired once every one of those scenes was re-graded. A 5★ scene with O 0
+now reads as an anomaly, and a scene still carrying the old tag as a tag
+conflict — stragglers surface instead of being filed silently.
 
 Tier keys are stable ASCII ids; display names are configurable (settings.json
 `tier_names`) and default to the user's own names.
@@ -20,16 +24,15 @@ from __future__ import annotations
 # ordered worst → best among graded keepers, with the review states around them
 TIERS: tuple[str, ...] = (
     "unreviewed", "rejected", "anomaly",
-    "upscale", "merveilleuse", "exceptionnelle", "legendaire",
+    "merveilleuse", "exceptionnelle", "legendaire",
 )
 
-KEEPER_TIERS: tuple[str, ...] = ("upscale", "merveilleuse", "exceptionnelle", "legendaire")
+KEEPER_TIERS: tuple[str, ...] = ("merveilleuse", "exceptionnelle", "legendaire")
 
 DEFAULT_NAMES: dict[str, str] = {
     "unreviewed": "Unreviewed",
     "rejected": "Rejected",
     "anomaly": "Anomaly",
-    "upscale": "Upscale",
     "merveilleuse": "Merveilleuse",
     "exceptionnelle": "Exceptionnelle",
     "legendaire": "Légendaire",
@@ -40,11 +43,10 @@ GRADES: dict[str, tuple[int, int | None]] = {
     "legendaire": (100, 18),
     "exceptionnelle": (100, 17),
     "merveilleuse": (100, 16),
-    "upscale": (100, 0),
     "reject": (20, None),
 }
 
-_O_TIER = {0: "upscale", 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire"}
+_O_TIER = {16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire"}
 
 # weights for ranking by tier (performer leaderboard, statistics)
 TIER_WEIGHT: dict[str, int] = {"merveilleuse": 1, "exceptionnelle": 2, "legendaire": 3}
@@ -89,6 +91,11 @@ TIER_TAGS: dict[str, str] = {
     "legendaire": "legendaire",
     "exceptionnelle": "exceptionnelle",
     "merveilleuse": "merveilleuse",
+}
+
+# tags of retired tiers: grading still strips them (the renamer may have a rule
+# for them), and a scene carrying one is a tag conflict until it's re-graded
+RETIRED_TIER_TAGS: dict[str, str] = {
     "upscale": "personal upscale",
 }
 
@@ -112,12 +119,15 @@ def tag_state(tier: str, tag_names: list[str], organized: bool,
     tags = tags or TIER_TAGS
     have = {n.strip().lower() for n in tag_names or []}
     present = [t for t, name in tags.items() if name.lower() in have]
+    retired = [t for t, name in RETIRED_TIER_TAGS.items() if name.lower() in have]
     conflict = None
-    if len(present) >= 2:
+    if retired:
+        conflict = "carries a retired tier tag (" + ", ".join(RETIRED_TIER_TAGS[t] for t in retired) + ")"
+    elif len(present) >= 2:
         conflict = "several tier tags"
     elif present and present[0] != tier:
         conflict = "tier tag disagrees with the grade"
-    needs_sync = tier in tags and (present != [tier] or not organized)
+    needs_sync = (tier in tags and (present != [tier] or not organized)) or bool(retired)
     return {"present": present, "conflict": conflict, "needs_sync": needs_sync}
 
 

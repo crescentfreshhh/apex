@@ -95,7 +95,7 @@ def share(p: float) -> str:
 
 def verdict(n: float, shrunk: float | None, keep: float | None, base: float) -> tuple[str, str]:
     """(word, tone) for a performer's / studio's record against your library
-    average grade (`shrunk` and `base` on the 0–4 tier scale)."""
+    average grade (`shrunk` and `base` on the 0–3 tier scale: Reject … Légendaire)."""
     if not n:
         return "new to you", "new"
     if n < 3:
