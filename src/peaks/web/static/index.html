@@ -33,6 +33,7 @@
     <button class="nav tab" data-view="perfreview"><span class="ic">♀</span>Performer review</button>
     <button class="nav tab" data-view="review"><span class="ic">▶</span>Review queue<span class="ct" id="nav-ct-review"></span></button>
     <button class="nav tab" data-view="dupes"><span class="ic">⧉</span>Duplicates<span class="ct hot" id="nav-ct-dupes" hidden></span></button>
+    <button class="nav tab" data-view="upgrades"><span class="ic">⬆</span>Upgrades<span class="ct hot" id="nav-ct-upg" hidden></span></button>
     <button class="nav tab" data-view="statistics"><span class="ic">◔</span>Insights</button>
     <div class="grp">Taste</div>
     <button class="nav tab" data-view="taste"><span class="ic">✦</span>Taste</button>
@@ -368,6 +369,21 @@
   </section>
 
   <!-- DUPLICATES -->
+  <!-- UPGRADES: better copies of your keepers, found through Prowlarr -->
+  <section id="upgrades" class="view">
+    <div class="head"><h1>Upgrades</h1><span id="upg-status" class="sub2"></span><span class="grow"></span>
+      <button id="btn-upg-run" class="btn ghost" title="Search Prowlarr for the next Wanted scenes now">⌕ Search now</button>
+      <button class="btn ghost" data-go="dashboard" data-sec="upgrades">⚙ Settings</button></div>
+    <p class="faint small">Keepers whose copy isn't good enough — picture below Good, an upscale, or under 4K. Peaks searches Prowlarr for healthy releases that are this scene and beat your copy; nothing downloads until you press <b>Grab</b>. The new copy comes in through your seedbox pull, and Duplicates lets you compare and keep the better one.</p>
+    <div class="seg" id="upg-tabs">
+      <button data-t="found" class="on">Found <span class="n" id="upg-n-found"></span></button>
+      <button data-t="wanted">Wanted <span class="n" id="upg-n-wanted"></span></button>
+      <button data-t="grabbed">Grabbed <span class="n" id="upg-n-grabbed"></span></button>
+      <button data-t="arrived">Arrived <span class="n" id="upg-n-arrived"></span></button>
+    </div>
+    <div id="upg-list" class="upg-list"></div>
+  </section>
+
   <section id="dupes" class="view">
     <div id="dupe-box">
       <div class="head"><h1>Duplicates</h1><span id="dupe-status" class="sub2"></span></div>
@@ -604,6 +620,7 @@
         <button data-sec="display">Display</button>
         <button data-sec="backup">Backup &amp; restore</button>
         <button data-sec="picture">Picture quality</button>
+        <button data-sec="upgrades">Upgrades (Prowlarr)</button>
       </nav>
       <div class="sets">
         <div class="sec" data-sec="tiers">
@@ -682,6 +699,25 @@
           <h2>Picture quality</h2>
           <p class="lead">Peaks looks at a few full-resolution stills of each file — real detail (upscales read as what they came from), compression blocks, grain, banding, interlacing, letterboxing — and learns which pictures <b>you</b> find good enough from your picks in Taste → Picture. New files are measured after each ingest; the rest of the library only when you start it here.</p>
           <div id="pic-set" class="pic-set"><p class="dim">Loading…</p></div>
+        </div>
+        <div class="sec" data-sec="upgrades" hidden>
+          <h2>Upgrades (Prowlarr)</h2>
+          <p class="lead">Peaks searches your Prowlarr indexers for better copies of keepers that need one, and keeps only healthy torrents of the same scene that beat your copy. It never downloads on its own: <b>Grab</b> asks Prowlarr to send that one release to the download client set up in Prowlarr. Peaks still never talks to qBittorrent except to read.</p>
+          <div class="field"><div class="l"><b>Prowlarr</b><span>URL and API key (Prowlarr → Settings → General)</span></div>
+            <div><div class="row"><input id="upg-url" placeholder="http://prowlarr:9696" style="min-width:260px" />
+              <input id="upg-key" type="password" placeholder="API key" autocomplete="off" style="min-width:220px" />
+              <button id="upg-test" class="btn sm">Test connection</button></div>
+              <div id="upg-test-out" class="small dim"></div></div></div>
+          <div class="field"><div class="l"><b>Healthy</b><span>torrents worth grabbing</span></div>
+            <div class="row"><span class="muted">at least</span><input id="upg-seed" type="number" min="1" class="num-sm" /><span class="muted">seeders, and at least as many seeders as leechers</span></div></div>
+          <div class="field"><div class="l"><b>Never upgrade</b><span>studios whose "4K" isn't worth it</span></div>
+            <div><div id="upg-ex" class="cat-fchips"></div>
+              <div class="row"><input id="upg-ex-add" placeholder="Add a studio…" /><button id="upg-ex-btn" class="btn sm ghost">Add</button></div></div></div>
+          <div class="field"><div class="l"><b>Search automatically</b><span>once a day, spaced out</span></div>
+            <div class="row"><label class="check"><input type="checkbox" id="upg-auto" /> Search</label>
+              <input id="upg-per" type="number" min="1" max="500" class="num-sm" /><span class="muted">scenes a day · each again after</span>
+              <input id="upg-days" type="number" min="1" class="num-sm" /><span class="muted">days</span></div></div>
+          <div class="row"><button id="upg-save" class="btn pri sm">Save</button><span id="upg-save-status" class="dim small"></span></div>
         </div>
         <div class="sec" data-sec="backup" hidden>
           <h2>Backup &amp; restore</h2>

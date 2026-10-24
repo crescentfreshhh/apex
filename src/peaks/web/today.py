@@ -241,7 +241,17 @@ class TodayMixin:
             "quality": sum(1 for r in rows if r["tier"] == "unreviewed" and quality_flag(r["quality"], floor)),
             "dupes": len(dupes["groups"]) if dupes else None,
             "rejected": {"count": len(rejected), "bytes": sum(int(r.get("size") or 0) for r in rejected)},
+            "upgrades": self._today_upgrades(),
         }
+
+    def _today_upgrades(self) -> int | None:
+        """Better copies found and waiting for you (None until Prowlarr is set up)."""
+        try:
+            if not self.upgrade_settings(reveal=True)["url"]:
+                return None
+            return self.upgrade_counts()["found"]
+        except Exception:  # noqa: BLE001
+            return None
 
     def week_tally(self) -> dict:
         """This week's decisions from the action log (every screen, not just this one)."""

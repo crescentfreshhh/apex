@@ -1510,6 +1510,71 @@ def create_app(cfg=None):
     def duplicates():
         return service.refresh_duplicate_picks() or {"groups": None}
 
+    # --- upgrades: better copies of your keepers, through Prowlarr -----------------
+
+    @app.get("/api/upgrades")
+    def upgrades_list():
+        return service.upgrades()
+
+    @app.get("/api/upgrades/settings")
+    def upgrades_settings():
+        return service.upgrade_settings()
+
+    @app.post("/api/upgrades/settings")
+    def upgrades_save_settings(body: dict = Body(...)):
+        try:
+            return service.save_upgrade_settings(body)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"bad setting: {exc}")
+
+    @app.post("/api/upgrades/test")
+    def upgrades_test():
+        return service.upgrade_test()
+
+    @app.post("/api/upgrades/search/{scene_id}")
+    def upgrades_search(scene_id: str):
+        from ..prowlarr import ProwlarrError
+
+        try:
+            return service.upgrade_search(scene_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ProwlarrError as exc:
+            raise HTTPException(502, str(exc))
+
+    @app.post("/api/upgrades/grab")
+    def upgrades_grab(body: dict = Body(...)):
+        from ..prowlarr import ProwlarrError
+
+        try:
+            return service.upgrade_grab(str(body.get("scene_id") or ""), str(body.get("guid") or ""))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ProwlarrError as exc:
+            raise HTTPException(502, str(exc))
+
+    @app.post("/api/upgrades/dismiss/{scene_id}")
+    def upgrades_dismiss(scene_id: str):
+        return service.upgrade_dismiss(scene_id)
+
+    @app.post("/api/upgrades/retry/{scene_id}")
+    def upgrades_retry(scene_id: str):
+        return service.upgrade_retry(scene_id)
+
+    @app.post("/api/upgrades/exclude-studio")
+    def upgrades_exclude(body: dict = Body(...)):
+        studio = str(body.get("studio") or "").strip()
+        if not studio:
+            raise HTTPException(400, "no studio")
+        return service.exclude_upgrade_studio(studio)
+
+    @app.post("/api/upgrades/run")
+    def upgrades_run():
+        try:
+            return jobs.start("upgrades", service.run_upgrade_pass).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
     @app.post("/api/duplicates/measure")
     def duplicates_measure(body: dict = Body(...)):
         """Measure a group's copies' picture now, so the recommendation can go by it."""
@@ -2378,6 +2443,11 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
             try:   # picture quality: new files, and the library once you've started it
                 _start_picture(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # upgrades: the daily Prowlarr search, when you've switched it on
+                if not any(jobs.running(k) for k in ("ingest", "upgrades", "restore")) and service.upgrade_due():
+                    jobs.start("upgrades", service.run_upgrade_pass)
             except Exception:  # noqa: BLE001
                 pass
             try:   # anything that dropped the index: reload it before anyone opens a page

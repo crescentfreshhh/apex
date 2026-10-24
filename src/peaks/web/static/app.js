@@ -63,7 +63,7 @@ function pparam(extra = {}) {
 function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
-const VIEWS = ["foryou", "board", "explore", "performers", "studios", "catalogue", "review", "dupes",
+const VIEWS = ["foryou", "board", "explore", "performers", "studios", "upgrades", "catalogue", "review", "dupes",
   "statistics", "taste", "activity", "seedbox", "dashboard", "perfreview"];
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
@@ -85,6 +85,7 @@ function go(name) {
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
   if (name === "studios") openStudios();
+  if (name === "upgrades") openUpgrades();
   if (name === "catalogue") {
     const qs = location.hash.split("?")[1];
     if (qs) applyCatParams(qsToParams(qs));       // a bookmarked / shared list
@@ -184,6 +185,7 @@ $("#bk-upload")?.addEventListener("change", async (e) => {
 function showSettingsSection(sec) {
   if (sec === "backup") loadBackup();
   if (sec === "picture") loadPicSettings();
+  if (sec === "upgrades") loadUpgSettings();
   document.querySelectorAll("#set-nav [data-sec]").forEach((b) => b.classList.toggle("on", b.dataset.sec === sec));
   document.querySelectorAll(".sets .sec").forEach((p) => { p.hidden = p.dataset.sec !== sec; });
 }
@@ -3209,6 +3211,7 @@ function tdBoard() {
     card("Upkeep", "rejected", "Rejected, awaiting delete", b.rejected.count, b.rejected.bytes ? `free ${fmtBytes(b.rejected.bytes)}` : "nothing to free", "rejected"),
     card("Upkeep", "conflict", "Tag conflicts", b.conflicts, "tier tags your renamer can't act on", "view"),
     card("Upkeep", "quality", "Quality check", b.quality, "below the quality you usually keep", "view"),
+    ...(b.upgrades != null ? [card("Upkeep", "upgrades", "Upgrades found", b.upgrades, "better copies of your keepers — grab or skip", "upgrades")] : []),
     card("Teach", "teach", "Teach Peaks", 1, "a quick 👍/👎 on what it's unsure of", "teach"),
   ].join("");
 }
@@ -3217,6 +3220,7 @@ $("#td-board")?.addEventListener("click", (e) => {
   const { act, key } = c.dataset;
   if (act === "job") { td.job = td.job === key ? null : key; td.queue = []; tdLoad(); window.scrollTo(0, 0); $("#content")?.scrollTo(0, 0); }
   else if (act === "dupes") go("dupes");
+  else if (act === "upgrades") go("upgrades");
   else if (act === "rejected") { cat.view = ""; cat.tier = "rejected"; go("catalogue"); openCatalogue(); }
   else if (act === "view") { cat.view = key; cat.tier = ""; go("catalogue"); openCatalogue(); }
   else if (act === "teach") { td.sinceTeach = TD_TEACH_EVERY; tdShow(); }
@@ -3751,6 +3755,7 @@ async function loadSidebar() {
     set("#nav-ct-review", d.counts.unreviewed);
     set("#tab-ct-review", d.counts.unreviewed);
     if (d.dupes != null) setDupeCount(d.dupes);
+    const un = $("#nav-ct-upg"); if (un) { un.hidden = !d.upgrades; un.textContent = d.upgrades || ""; }
     const nb = $("#btn-cat-new");
     if (nb) {
       nb.hidden = !d.new && !cat.isNew;
@@ -4230,7 +4235,8 @@ function catCardHTML(r, i) {
   const keepable = r.tier !== "unreviewed" && r.tier !== "anomaly"
     && (r.suggest || ["promote", "second", "saved", "trim", "passed"].includes(cat.view));
   const suggest = (r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "")
-    + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "");
+    + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "")
+    + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "");
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
@@ -4368,6 +4374,8 @@ $("#btn-cat-train")?.addEventListener("click", async () => {
 $("#cat-list")?.addEventListener("click", (e) => {
   const card = e.target.closest(".cat-card"); if (!card) return;
   const i = +card.dataset.i;
+  const ub = e.target.closest(".cat-upg");
+  if (ub) { searchUpgrade(cat.items[i], ub); return; }
   if (e.target.closest(".cat-selbox")) {
     e.preventDefault();
     toggleCatSel(i, e.shiftKey);
@@ -5948,4 +5956,179 @@ async function loadCrashReport() {
     try { await api("/api/crash-report/dismiss", { method: "POST" }); } catch {}
     card.hidden = true;
   };
+}
+
+
+// --- Upgrades: better copies of your keepers, found through Prowlarr ---------------
+const upg = { data: null, tab: "found", open: new Set() };
+async function openUpgrades() {
+  $("#upg-status").textContent = "loading…";
+  try { upg.data = await api("/api/upgrades"); } catch (e) { $("#upg-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  renderUpgrades();
+}
+function upgSize(b) { return b ? fmtBytes(b) : "size ?"; }
+function upgRelHTML(c, r, best) {
+  const age = c.age != null ? ` · ${c.age} d old` : "";
+  return `<div class="upg-rel ${best ? "best" : ""}">
+    <div class="upg-rel-t" title="${esc(c.title)}">${esc(c.title)}</div>
+    <div class="small"><b>${c.height ? c.height + "p" : "?"}</b> · ${upgSize(c.size)}${r.size && c.size ? ` <span class="muted">(${(c.size / r.size).toFixed(1)}× yours)</span>` : ""} ·
+      <span class="upg-seed" title="seeders / leechers">▲ ${c.seeders} / ▼ ${c.leechers ?? 0}</span> · ${esc(c.indexer || "?")}${age}
+      ${c.info_url ? ` · <a href="${esc(c.info_url)}" target="_blank" rel="noopener">details</a>` : ""}</div>
+    <button class="${best ? "primary" : "ghost"} sm upg-grab" data-guid="${esc(c.guid)}">⬇ Grab</button>
+  </div>`;
+}
+function upgCardHTML(r) {
+  const q = r.quality || {};
+  const yours = `<div class="upg-yours">
+      <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
+      <div><div><b>${esc(r.title || "Scene " + r.scene_id)}</b> ${tierBadge(r.rating100, r.o_counter)}</div>
+        <div class="dim small">${esc(r.studio || "")}${r.date ? " · " + esc(r.date) : ""}</div>
+        <div class="small">Yours: <b>${esc(q.res || "?")}</b> · ${q.mbps != null ? q.mbps + " Mbps · " : ""}${upgSize(r.size)}</div>
+        ${r.picture ? `<div>${picChipHTML(r.picture, { long: true })}</div>` : ""}
+        <div class="upg-why">${(r.reasons || []).map((x) => `<span class="upg-reason">${esc(x)}</span>`).join("")}</div></div></div>`;
+  let side = "";
+  if (r.state === "found" && r.found.length) {
+    const more = r.found.length - 1, open = upg.open.has(r.scene_id);
+    side = upgRelHTML(r.found[0], r, true) +
+      (more ? (open ? r.found.slice(1).map((c) => upgRelHTML(c, r, false)).join("")
+        : `<button class="ghost sm upg-more">+${more} more release${more > 1 ? "s" : ""}</button>`) : "");
+  } else if (r.state === "grabbed" || r.state === "stalled") {
+    const g = r.grabbed || {};
+    side = `<div class="upg-rel"><div class="upg-rel-t" title="${esc(g.title || "")}">${esc(g.title || "")}</div>
+      <div class="small">${r.state === "stalled" ? '<b class="warn">Hasn\'t arrived after 14 days</b>' : "Grabbed"} ${g.at ? new Date(g.at * 1000).toLocaleDateString() : ""} · ${g.height ? g.height + "p" : ""} · ${upgSize(g.size)}</div>
+      ${r.state === "stalled" ? '<button class="ghost sm upg-retry">↻ Pick another release</button>' : '<div class="faint small">Comes in through the seedbox pull; then Duplicates pairs it with your copy.</div>'}</div>`;
+  } else if (r.state === "arrived") {
+    side = `<div class="upg-rel"><b>✓ Arrived</b><div class="small dim">The new copy is in your library next to the old one.</div>
+      <button class="primary sm" data-go="dupes">⧉ Compare and keep the better copy</button></div>`;
+  } else {
+    side = `<div class="upg-rel"><div class="small dim">${r.searched_at ? `Searched ${new Date(r.searched_at * 1000).toLocaleDateString()} — nothing healthy and better yet.` : "Not searched yet."}</div>
+      <button class="ghost sm upg-search">⌕ Search now</button></div>`;
+  }
+  return `<div class="upg-card" data-sid="${esc(r.scene_id)}">${yours}<div class="upg-side">${side}</div>
+    <div class="upg-acts">${r.state === "arrived" ? "" : `<button class="ghost sm upg-dismiss" title="Leave this scene as it is">Not interested</button>`}
+      ${r.studio ? `<button class="ghost sm upg-exclude" title="Some studios' 4K isn't worth it">Never upgrade ${esc(r.studio)}</button>` : ""}</div></div>`;
+}
+function renderUpgrades() {
+  const d = upg.data; if (!d) return;
+  for (const t of ["found", "wanted", "grabbed", "arrived"]) { const n = $("#upg-n-" + t); if (n) n.textContent = (d[t] || []).length || ""; }
+  document.querySelectorAll("#upg-tabs [data-t]").forEach((b) => b.classList.toggle("on", b.dataset.t === upg.tab));
+  $("#upg-status").textContent = d.configured
+    ? (d.settings.auto ? `searching ${d.settings.per_day} a day` : "automatic search off") +
+      (d.last_pass ? ` · last search ${new Date(d.last_pass * 1000).toLocaleString()}` : "")
+    : "Prowlarr isn't set up yet";
+  const list = d[upg.tab] || [];
+  const empty = {
+    found: d.configured ? "No upgrades found yet. Peaks searches a few Wanted scenes a day — or press <b>Search now</b>."
+      : 'Connect Prowlarr first: <button class="btn sm" data-go="dashboard" data-sec="upgrades">⚙ Settings → Upgrades</button>',
+    wanted: "Every keeper has a good enough copy. 🎉", grabbed: "Nothing grabbed and on its way.", arrived: "Nothing arrived yet.",
+  }[upg.tab];
+  $("#upg-list").innerHTML = list.length ? list.map(upgCardHTML).join("") : `<div class="empty">${empty}</div>`;
+}
+$("#upg-tabs")?.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-t]"); if (!b) return;
+  upg.tab = b.dataset.t; renderUpgrades();
+});
+$("#upg-list")?.addEventListener("click", async (e) => {
+  const card = e.target.closest(".upg-card"); if (!card) return;
+  const sid = card.dataset.sid, all = ["found", "wanted", "grabbed", "arrived"].flatMap((t) => upg.data[t]);
+  const r = all.find((x) => x.scene_id === sid); if (!r) return;
+  const btn = e.target.closest("button"); if (!btn) return;
+  try {
+    if (btn.classList.contains("upg-more")) { upg.open.add(sid); renderUpgrades(); return; }
+    if (btn.classList.contains("upg-grab")) {
+      const c = r.found.find((x) => x.guid === btn.dataset.guid);
+      if (!confirm(`Grab this release?\n\n${c.title}\n${c.height || "?"}p · ${upgSize(c.size)} · ${c.seeders} seeders · ${c.indexer}\n\nProwlarr sends it to its download client.`)) return;
+      btn.disabled = true; btn.textContent = "Grabbing…";
+      await api("/api/upgrades/grab", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scene_id: sid, guid: c.guid }) });
+      toast("Sent to Prowlarr — it'll come in through your seedbox pull");
+    } else if (btn.classList.contains("upg-search")) {
+      btn.disabled = true; btn.textContent = "Searching…";
+      const out = await api(`/api/upgrades/search/${encodeURIComponent(sid)}`, { method: "POST" });
+      toast(out.found.length ? `Found ${plural(out.found.length, "healthy upgrade")}` : "Nothing healthy and better yet");
+      if (out.found.length) upg.tab = "found";
+    } else if (btn.classList.contains("upg-dismiss")) {
+      await api(`/api/upgrades/dismiss/${encodeURIComponent(sid)}`, { method: "POST" });
+    } else if (btn.classList.contains("upg-retry")) {
+      await api(`/api/upgrades/retry/${encodeURIComponent(sid)}`, { method: "POST" });
+    } else if (btn.classList.contains("upg-exclude")) {
+      if (!confirm(`Never look for upgrades of ${r.studio} scenes?\n\n(You can undo this in Settings → Upgrades.)`)) return;
+      await api("/api/upgrades/exclude-studio", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ studio: r.studio }) });
+      toast(`${r.studio} won't be upgraded`);
+    } else return;
+  } catch (err) { toast(err.message, true); }
+  openUpgrades(); refreshSidebar();
+});
+$("#btn-upg-run")?.addEventListener("click", async () => {
+  const b = $("#btn-upg-run"); b.disabled = true;
+  try {
+    const job = await api("/api/upgrades/run", { method: "POST" });
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {};
+      $("#upg-status").textContent = `searching ${p.done ?? 0}/${p.total ?? "?"}…`;
+    }, 2000);
+    if (j.status === "error") throw new Error(j.error);
+    toast(`Searched ${plural(j.result.searched, "scene")} · ${plural(j.result.found, "upgrade")} found`);
+  } catch (err) { toast(err.message, true); }
+  b.disabled = false; openUpgrades(); refreshSidebar();
+});
+// --- Settings → Upgrades ---
+let upgEx = [];
+async function loadUpgSettings() {
+  let s;
+  try { s = await api("/api/upgrades/settings"); } catch { return; }
+  $("#upg-url").value = s.url || ""; $("#upg-key").value = s.api_key || "";
+  $("#upg-seed").value = s.min_seeders; $("#upg-auto").checked = !!s.auto;
+  $("#upg-per").value = s.per_day; $("#upg-days").value = s.research_days;
+  upgEx = s.excluded_studios || []; renderUpgEx();
+}
+function renderUpgEx() {
+  $("#upg-ex").innerHTML = upgEx.length ? upgEx.map((x, i) => `<span class="cat-chip">${esc(x)} <button class="x" data-i="${i}" title="Remove">✕</button></span>`).join("")
+    : '<span class="faint small">None — every studio is searched.</span>';
+}
+$("#upg-ex")?.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-i]"); if (!b) return;
+  upgEx.splice(+b.dataset.i, 1); renderUpgEx();
+});
+$("#upg-ex-btn")?.addEventListener("click", () => {
+  const v = $("#upg-ex-add").value.trim(); if (!v) return;
+  if (!upgEx.some((x) => x.toLowerCase() === v.toLowerCase())) upgEx.push(v);
+  $("#upg-ex-add").value = ""; renderUpgEx();
+});
+async function saveUpgSettings() {
+  return api("/api/upgrades/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: $("#upg-url").value.trim(), api_key: $("#upg-key").value,
+      min_seeders: +$("#upg-seed").value || 5, auto: $("#upg-auto").checked, per_day: +$("#upg-per").value || 40,
+      research_days: +$("#upg-days").value || 14, excluded_studios: upgEx }) });
+}
+$("#upg-save")?.addEventListener("click", async () => {
+  try { await saveUpgSettings(); $("#upg-save-status").textContent = "Saved"; loadUpgSettings(); }
+  catch (e) { $("#upg-save-status").textContent = e.message; }
+});
+$("#upg-test")?.addEventListener("click", async () => {
+  const out = $("#upg-test-out"); out.textContent = "Testing…";
+  try {
+    await saveUpgSettings();
+    const r = await api("/api/upgrades/test", { method: "POST" });
+    out.innerHTML = r.ok
+      ? `✓ Connected · ${plural(r.indexers.length, "indexer")}: ${esc(r.indexers.map((i) => i.name + (i.enabled ? "" : " (off)")).join(", ") || "none")}` +
+        (r.warnings.length ? `<br>Prowlarr says: ${esc(r.warnings.join(" · "))}` : "")
+      : `✗ ${esc(r.error)}`;
+    loadUpgSettings();
+  } catch (e) { out.textContent = "✗ " + e.message; }
+});
+
+// one scene, from its card: search Prowlarr now
+async function searchUpgrade(r, btn) {
+  if (!r) return;
+  btn.disabled = true; btn.textContent = "Searching…";
+  try {
+    const out = await api(`/api/upgrades/search/${encodeURIComponent(r.scene_id)}`, { method: "POST" });
+    if (out.found.length) {
+      btn.textContent = `⬆ ${plural(out.found.length, "upgrade")} found`;
+      toast(`${plural(out.found.length, "healthy upgrade")} for ${r.title} — see Upgrades`);
+      refreshSidebar();
+    } else { btn.textContent = "No better copy yet"; }
+  } catch (err) { toast(err.message, true); btn.textContent = "⬆ Better copy?"; btn.disabled = false; }
 }

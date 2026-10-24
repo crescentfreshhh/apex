@@ -31,6 +31,7 @@ from .perfreview import PerfReviewMixin
 from .find import FindMixin
 from .studios import StudiosMixin
 from .picture import PictureMixin
+from .upgrades import UpgradesMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -43,7 +44,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
-              PictureMixin):
+              PictureMixin, UpgradesMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5213,8 +5214,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         fresh = set(self.last_ingest().get("new") or [])
         new = sum(1 for r in rows if r["scene_id"] in fresh and r["tier"] == "unreviewed")
         dupes = self.cached_duplicates()
+        try:
+            upgrades = self.upgrade_counts()["found"]
+        except Exception:  # noqa: BLE001 — extra, never in the way
+            upgrades = 0
         return {"total": len(rows), "counts": counts, "views": views, "new": new,
-                "dupes": len(dupes["groups"]) if dupes else None,
+                "dupes": len(dupes["groups"]) if dupes else None, "upgrades": upgrades,
                 "model": self.tier_model_status()}
 
     def library_health(self) -> dict:
