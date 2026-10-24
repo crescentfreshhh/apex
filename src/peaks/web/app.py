@@ -2211,7 +2211,16 @@ def create_app(cfg=None):
     ):
         return service.save_schedule(embed_hours=embed_hours, sync=sync, prune=prune)
 
-    _start_scheduler(app, service, jobs)  # always on; it reads the interval live
+    import os as _os
+
+    if _os.environ.get("PEAKS_SCHEDULER", "1").strip().lower() not in ("0", "false", "no", "off"):
+        _start_scheduler(app, service, jobs)  # always on; it reads the interval live
+
+    @app.on_event("shutdown")
+    def _stop_scheduler():
+        stop = getattr(app.state, "_scheduler_stop", None)
+        if stop is not None:
+            stop.set()
 
     _start_memwatch(app, service)
     forensics.set_index_probe(service.index_health)

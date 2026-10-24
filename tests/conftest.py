@@ -17,6 +17,9 @@ def _isolate_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.setenv("PEAKS_EXPORT_DIR", str(tmp_path / "exports"))
     monkeypatch.setenv("PEAKS_WARM_ON_START", "0")   # no background start-up load in tests
+    # no minute-by-minute scheduler thread per app: dozens pile up across the
+    # suite and their work lands in other tests' timing / memory measurements
+    monkeypatch.setenv("PEAKS_SCHEDULER", "0")
 
 
 @pytest.fixture(autouse=True)
