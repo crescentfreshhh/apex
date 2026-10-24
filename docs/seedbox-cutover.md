@@ -36,10 +36,26 @@ itself. Do this once, in this order. It takes about an hour, most of it waiting.
 
 4. **Seedbox pipeline state:** `/mnt/user/appdata/seedbox-pull` → `/seedbox`, now
    **Read/Write** (was read-only).
-5. **rclone config (read-only):** `/boot/config/rclone/rclone.conf` →
-   `/rclone/rclone.conf`.
-6. **rclone pull filter (read-only):** `/boot/config/rclone-filters.txt` →
-   `/rclone/filters.txt`.
+5. **rclone config and pull filter: copy them, don't mount them.** Unraid's
+   container editor only offers `/mnt/user/...` paths, so copy both files into
+   the seedbox-pull folder. Peaks already sees that folder (step 4) and looks for
+   them in its `rclone/` subfolder. On the **Unraid terminal**:
+
+   ```sh
+   mkdir -p /mnt/user/appdata/seedbox-pull/rclone
+   cp /boot/config/rclone/rclone.conf /mnt/user/appdata/seedbox-pull/rclone/rclone.conf
+   cp /boot/config/rclone-filters.txt /mnt/user/appdata/seedbox-pull/rclone/filters.txt
+   chmod 600 /mnt/user/appdata/seedbox-pull/rclone/rclone.conf
+   ```
+
+   - **The seedbox password stays in that rclone.conf copy**, as it does in the
+     original (rclone stores it obscured, not encrypted). Keep the `appdata` share
+     unexported over SMB, or at least private.
+   - **If you change the rclone remote later** (`rclone config` on Unraid), run the
+     first `cp` again. Same for the filter file.
+   - **A missing file is reported plainly:** the Seedbox page shows "no rclone.conf"
+     or "no pull filter", and the pull won't start until the file is there.
+6. *(Nothing else for rclone: no extra mounts needed.)*
 7. **Whisparr config (read-only, advanced):** `/mnt/user/appdata/whisparr/config.xml`
    → `/whisparr/config.xml`, and `PEAKS_WHISPARR_URL` = `http://192.168.1.2:7171`.
    - If your template doesn't show these new fields, add them by hand: Add another

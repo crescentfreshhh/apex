@@ -27,8 +27,9 @@ RUN apt-get update \
     && apt-get purge -y wget xz-utils && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# rclone (pinned) for the seedbox jobs Peaks runs: your Unraid rclone.conf is
-# mounted read-only at /rclone/rclone.conf, so the seedbox credentials stay there
+# rclone (pinned) for the seedbox jobs Peaks runs: it reads your rclone.conf from
+# /rclone/rclone.conf if mounted, else /seedbox/rclone/rclone.conf (a copy in the
+# seedbox-pull folder) — the credentials stay in that file
 ARG RCLONE_VERSION=v1.68.2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget unzip ca-certificates \

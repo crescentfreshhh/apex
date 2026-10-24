@@ -175,11 +175,29 @@ class SeedJobsMixin:
     def _rclone_cmd(self) -> str:
         return os.environ.get("PEAKS_RCLONE", "rclone")
 
+    def _sj_find(self, name: str, preferred: str | None) -> str | None:
+        """A file the jobs need (rclone.conf, the filter), wherever it is: the
+        configured / mounted path, else a copy in the state folder's rclone/
+        (Unraid's container editor only offers /mnt/user paths, so copying the
+        files into /mnt/user/appdata/seedbox-pull/rclone/ is the easy route)."""
+        for p in (preferred, str(self._sj_dir() / "rclone" / name)):
+            if p and Path(p).is_file():
+                return p
+        return None
+
+    def _rclone_conf(self) -> str | None:
+        return self._sj_find("rclone.conf", os.environ.get("RCLONE_CONFIG") or "/rclone/rclone.conf")
+
+    def _rclone_filter(self, s: dict) -> str | None:
+        return self._sj_find("filters.txt", s["filter"])
+
     def _rclone(self, args: list[str], on_line=None, timeout: float | None = None) -> tuple[int, list[str]]:
         """Run rclone; stderr lines go to `on_line` as they come (stats, log).
         Returns (exit code, stdout lines)."""
         env = dict(os.environ)
-        env.setdefault("RCLONE_CONFIG", "/rclone/rclone.conf")
+        conf = self._rclone_conf()
+        if conf:
+            env["RCLONE_CONFIG"] = conf
         try:
             p = subprocess.Popen([self._rclone_cmd(), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True, env=env)
@@ -227,6 +245,12 @@ class SeedJobsMixin:
         if kind == "pull":
             if not s["remote"]:
                 return "set the seedbox rclone remote in Settings → Seedbox jobs"
+            if not self._rclone_conf() and not os.environ.get("PEAKS_RCLONE"):
+                return ("no rclone.conf — copy /boot/config/rclone/rclone.conf to "
+                        "/mnt/user/appdata/seedbox-pull/rclone/rclone.conf (or mount it at /rclone/rclone.conf)")
+            if not self._rclone_filter(s):
+                return ("no pull filter — copy /boot/config/rclone-filters.txt to "
+                        "/mnt/user/appdata/seedbox-pull/rclone/filters.txt (or mount it at /rclone/filters.txt)")
             missing = [c["dest"] for c in s["categories"] if not Path(c["dest"]).is_dir()]
             if missing:
                 return f"destination folder not found in the container: {', '.join(missing)}"
@@ -284,7 +308,7 @@ class SeedJobsMixin:
                 done_path.touch(exist_ok=True)
                 live["pull"] = {"stage": "listing", "cat": cat, "lanes": {}}
                 self._sj_tick(f"[{cat}] listing the seedbox")
-                rc, listing = self._rclone(["lsf", "-R", "--files-only", "--filter-from", s["filter"],
+                rc, listing = self._rclone(["lsf", "-R", "--files-only", "--filter-from", self._rclone_filter(s),
                                             "--ignore-case", f"{remote}/{cat}"], timeout=600)
                 if rc != 0:
                     errors.append(f"[{cat}] could not list the seedbox (connection/login problem)")

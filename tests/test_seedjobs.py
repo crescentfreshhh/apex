@@ -125,6 +125,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(svc_mod.Service, "client", lambda self: stash)
     monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: stash)
     svc = svc_mod.Service(cfg)
+    (tmp_path / "filters.txt").write_text("+ *.mp4\n")
     svc.save_seedjob_settings({"remote": f"fake:{box}", "filter": str(tmp_path / "filters.txt"),
                                "owner": f"{os.getuid()}:{os.getgid()}",
                                "categories": [{"cat": "1", "dest": str(lib / "norating")},
@@ -192,7 +193,7 @@ def test_pulls_run_a_few_at_a_time_and_never_overlap(env, monkeypatch):
             peak[0] = max(peak[0], len((live.get("pull") or {}).get("lanes") or {}))
             time.sleep(0.01)
     done = threading.Event()
-    th = threading.Thread(target=watch)
+    th = threading.Thread(target=watch, daemon=True)
     th.start()
     result = {}
     runner = threading.Thread(target=lambda: result.update(svc.run_seed_pull()))
@@ -399,3 +400,21 @@ def test_the_folder_watch_covers_the_pull_folders(env):
     assert svc.watch_status()["covered_by_pull"] == []               # not taken over yet
     svc.save_seedjob_settings({"cutover": True})
     assert svc.watch_status()["covered_by_pull"] == [str(lib / "VR")]
+
+
+
+def test_rclone_files_can_live_in_the_state_folder(env, monkeypatch, tmp_path):
+    """Unraid's container editor only offers /mnt/user paths: a copy of
+    rclone.conf and the filter in the state folder's rclone/ is found."""
+    svc, state = env["svc"], env["state"]
+    svc.save_seedjob_settings({"cutover": True, "filter": "/rclone/filters.txt"})
+    monkeypatch.delenv("PEAKS_RCLONE", raising=False)
+    monkeypatch.setenv("RCLONE_CONFIG", "/rclone/rclone.conf")            # the image's default, not mounted
+    assert "no rclone.conf" in svc.seedjob_status()["ready"]["pull"]
+    (state / "rclone").mkdir()
+    (state / "rclone" / "rclone.conf").write_text("[seedbox]\ntype = sftp\n")
+    assert "no pull filter" in svc.seedjob_status()["ready"]["pull"]
+    (state / "rclone" / "filters.txt").write_text("+ *.mp4\n")
+    assert svc._rclone_conf() == str(state / "rclone" / "rclone.conf")
+    assert svc._rclone_filter(svc.seedjob_settings()) == str(state / "rclone" / "filters.txt")
+    assert svc.seedjob_status()["ready"]["pull"] is None
