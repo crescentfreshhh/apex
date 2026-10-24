@@ -176,7 +176,7 @@ def test_client_reports_bad_credentials_ban_and_relogins_once():
 def test_client_writes_only_the_purges_delete():
     # reads, plus exactly one write — the purge's delete of torrents confirmed on Jarvis
     public = {n for n in dir(QbtClient) if not n.startswith("_")}
-    assert public == {"login", "torrents", "files", "delete_torrents"}
+    assert public == {"login", "torrents", "files", "free_space", "delete_torrents"}
 
 
 # --- the page: sources reported separately ------------------------------------------------

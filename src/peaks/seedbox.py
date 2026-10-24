@@ -260,6 +260,12 @@ class QbtClient:
                 raise QbtError(f"{what} wasn't JSON") from exc
         raise QbtError(f"{what} failed after logging in again")
 
+    def free_space(self) -> int | None:
+        """Free space on the seedbox's disk, as qBittorrent reports it (a read)."""
+        data = self._get_json("/api/v2/sync/maindata?rid=0", "status")
+        v = ((data or {}).get("server_state") or {}).get("free_space_on_disk")
+        return int(v) if isinstance(v, (int, float)) else None
+
     def files(self, torrent_hash: str) -> list[dict]:
         """A torrent's files (name relative to its save path, priority, size)."""
         from urllib.parse import quote

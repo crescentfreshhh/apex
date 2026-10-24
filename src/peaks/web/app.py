@@ -1518,6 +1518,12 @@ def create_app(cfg=None):
 
         return floor_state(service, jobs)
 
+    @app.get("/api/floor/day")
+    def floor_day_route():
+        from .floor import floor_day
+
+        return floor_day(service)
+
     @app.get("/api/floor/replay")
     def floor_replay_route(hours: float = Query(24, ge=1, le=168)):
         from .floor import floor_replay

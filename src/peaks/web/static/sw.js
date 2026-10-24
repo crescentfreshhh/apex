@@ -3,8 +3,8 @@
 // always fresh from Peaks when reachable, the last copy when not, so the app
 // opens and says why instead of Chrome's dinosaur. It never touches the API,
 // video streams (those come from Stash) or the megaboard's media.
-const CACHE = "peaks-shell-v2";
-const SHELL = ["/", "/static/app.js", "/static/floor.js", "/static/words.js", "/static/style.css", "/static/ui.css",
+const CACHE = "peaks-shell-v3";
+const SHELL = ["/", "/static/app.js", "/static/floor/engine.js", "/static/floor/audio.js", "/static/floor/world.js", "/static/words.js", "/static/style.css", "/static/ui.css",
   "/static/peaks.svg", "/static/icons/icon-192.png", "/megaboard/", "/megaboard/megaboard.js",
   "/megaboard/megaboard.css"];
 

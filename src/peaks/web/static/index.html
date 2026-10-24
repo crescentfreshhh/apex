@@ -372,9 +372,16 @@
   <!-- DUPLICATES -->
   <!-- FLOOR: the whole pipeline, live, as an ASCII factory floor -->
   <section id="floor" class="view">
-    <div class="floor-bar"><button id="floor-replay" class="btn sm ghost" title="Fast-forward the last 24 hours in a minute">&lt;&lt; Last 24 h</button>
-      <button id="floor-kiosk" class="btn sm ghost" title="Just the floor, full screen (Esc to leave)">[ ] Kiosk</button></div>
-    <pre id="floor-grid" class="floor-grid" aria-label="The Peaks pipeline, live"></pre>
+    <canvas id="floor-canvas" aria-label="The Peaks pipeline, live"></canvas>
+    <div id="floor-bar" class="floor-bar">
+      <button class="btn sm ghost" data-a="full" title="Just the floor, full screen (F; Esc to leave)">[ ] full screen</button>
+      <button class="btn sm ghost" data-a="replay" title="Fast-forward the last 24 hours (R)">&lt;&lt; last 24 h</button>
+      <button class="btn sm ghost" data-a="cam" title="Lock the camera if motion bothers you (C)">camera</button>
+      <button class="btn sm ghost" data-a="crt" title="Glow, scanlines and flicker: off / low / full">crt</button>
+      <button class="btn sm ghost" data-a="sound" title="Ambient sound, off by default (M)">sound</button>
+      <input type="range" id="floor-vol" min="0" max="1" step="0.05" title="Volume" />
+      <button class="btn sm ghost" data-a="back" title="Back to Peaks">back</button>
+    </div>
   </section>
 
   <!-- UPGRADES: better copies of your keepers, found through Prowlarr -->
@@ -893,6 +900,8 @@
 
   <script src="/static/words.js"></script>
   <script src="/static/app.js"></script>
-  <script src="/static/floor.js"></script>
+  <script src="/static/floor/engine.js"></script>
+  <script src="/static/floor/audio.js"></script>
+  <script src="/static/floor/world.js"></script>
 </body>
 </html>

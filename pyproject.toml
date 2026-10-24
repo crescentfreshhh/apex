@@ -49,4 +49,4 @@ peaks = "peaks.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"peaks.web" = ["static/*", "static/icons/*"]
+"peaks.web" = ["static/*", "static/icons/*", "static/floor/*"]

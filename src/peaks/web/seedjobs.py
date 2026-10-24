@@ -337,7 +337,7 @@ class SeedJobsMixin:
                     def on_line(line, lane=lane):
                         st = sj.rclone_stats(line)
                         if st:
-                            lane.update(bytes=st["bytes"], total=st["total"],
+                            lane.update(bytes=st["bytes"], total=st["total"], speed=st["speed"],
                                         pct=(st["bytes"] / st["total"]) if st["total"] else lane["pct"])
                         elif line.strip():
                             try:

@@ -418,3 +418,28 @@ def test_rclone_files_can_live_in_the_state_folder(env, monkeypatch, tmp_path):
     assert svc._rclone_conf() == str(state / "rclone" / "rclone.conf")
     assert svc._rclone_filter(svc.seedjob_settings()) == str(state / "rclone" / "filters.txt")
     assert svc.seedjob_status()["ready"]["pull"] is None
+
+
+def test_the_floor_day_and_readouts_are_counts_only(env):
+    import json
+
+    from peaks.web.floor import floor_day, floor_state, gpu_load
+    from peaks.web.jobs import JobManager
+
+    svc = env["svc"]
+    svc.save_seedjob_settings({"cutover": True})
+    svc.run_seed_pull()
+    svc.action_log().append("grade", title="Secret Title", path="/data/Show A/a.mp4", grade="reject")
+    jobs = JobManager()
+    st = floor_state(svc, jobs)
+    day = floor_day(svc)
+    assert set(st["stations"]["pull"]) >= {"state", "mbps"} and "series" in st
+    assert {"embed", "picture", "dupes", "purge", "upgrades", "backup"} <= set(st["stations"])
+    assert len(day["buckets"]["pull"]) == 144 and sum(day["buckets"]["pull"]) >= 1
+    assert day["today"]["pulled"] == 4 and day["today"]["graded"] == 1 and day["today"]["rejected"] == 1
+    assert "library" in day["disks"] or "config" in day["disks"]
+    blob = json.dumps(st) + json.dumps(day)
+    for name in ("a.mp4", "Show A", "v.mp4", "Secret"):
+        assert name not in blob
+    g = gpu_load()
+    assert g is None or set(g) == {"util", "mem_mb"}
