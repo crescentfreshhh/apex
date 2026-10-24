@@ -63,7 +63,7 @@ function pparam(extra = {}) {
 function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
-const VIEWS = ["foryou", "board", "explore", "performers", "studios", "upgrades", "catalogue", "review", "dupes",
+const VIEWS = ["foryou", "board", "explore", "performers", "studios", "upgrades", "floor", "catalogue", "review", "dupes",
   "statistics", "taste", "activity", "seedbox", "dashboard", "perfreview"];
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
@@ -86,6 +86,7 @@ function go(name) {
   if (name === "performers") openPerformers();
   if (name === "studios") openStudios();
   if (name === "upgrades") openUpgrades();
+  if (typeof openFloor === "function") { if (name === "floor") openFloor(); else stopFloor(); }
   if (name === "catalogue") {
     const qs = location.hash.split("?")[1];
     if (qs) applyCatParams(qsToParams(qs));       // a bookmarked / shared list
@@ -186,6 +187,7 @@ function showSettingsSection(sec) {
   if (sec === "backup") loadBackup();
   if (sec === "picture") loadPicSettings();
   if (sec === "upgrades") loadUpgSettings();
+  if (sec === "seedjobs") loadSjSettings();
   document.querySelectorAll("#set-nav [data-sec]").forEach((b) => b.classList.toggle("on", b.dataset.sec === sec));
   document.querySelectorAll(".sets .sec").forEach((p) => { p.hidden = p.dataset.sec !== sec; });
 }
@@ -5790,6 +5792,7 @@ async function openSeedbox(refresh) {
     const d = await api("/api/seedbox" + (refresh ? "/refresh" : ""), refresh ? { method: "POST" } : undefined);
     renderSeedbox(d);
   } catch (e) { $("#sb-verdict").className = "panel sb-verdict red"; $("#sb-verdict").textContent = "Couldn't load: " + e.message; }
+  loadSeedJobs();
   clearInterval(sbTimer);
   sbTimer = setInterval(() => {
     if (document.hidden || !$("#seedbox")?.classList.contains("active")) return;
@@ -6132,3 +6135,88 @@ async function searchUpgrade(r, btn) {
     } else { btn.textContent = "No better copy yet"; }
   } catch (err) { toast(err.message, true); btn.textContent = "⬆ Better copy?"; btn.disabled = false; }
 }
+
+
+// --- the seedbox jobs Peaks runs (pull / purge / report) ----------------------------
+const SJ_LABEL = { pull: "Pull new files", purge: "Purge confirmed torrents", report: "Daily report" };
+function sjReportHTML(r) {
+  if (!r) return '<div class="faint small">No report yet — the first one comes at the report time, or press Run now.</div>';
+  const c = r.came_in, gb = (b) => (b / 1e9).toFixed(1) + " GB";
+  const cats = Object.entries(c.by_category || {}).map(([k, v]) => `${esc(k)}: ${v.files} (${gb(v.bytes)})`).join(" · ");
+  return `<div class="sj-report ${r.ok ? "" : "warn"}">
+    <div><b>${r.ok ? "All good" : "Needs attention"}</b> <span class="faint">· ${esc(new Date(r.at * 1000).toLocaleString())}</span></div>
+    ${r.issues.length ? `<ul>${r.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
+    <div class="sb-kv"><span>Came in (24 h)</span><span><b>${plural(c.files, "file")}</b> · ${gb(c.bytes)}${cats ? ` <span class="faint">(${cats})</span>` : ""}</span>
+      <span>In your library</span><span>${c.in_stash} in Stash · ${c.identified} identified · ${c.graded} graded · ${c.unreviewed} unreviewed${c.not_in_stash_yet ? ` · ${c.not_in_stash_yet} not in Stash yet` : ""}</span>
+      <span>Pull</span><span>${r.pull.ok} ok · ${r.pull.failed} failed</span>
+      <span>Purge</span><span>${r.purge.runs ? (r.purge.mode === "dry run" ? "dry run" : `${plural(r.purge.deleted, "torrent")} deleted · ${gb(r.purge.freed_bytes)} freed`) : "didn't run"}</span></div></div>`;
+}
+async function loadSeedJobs() {
+  const box = $("#sb-jobs .sb-body"); if (!box) return;
+  let d;
+  try { d = await api("/api/seedjobs"); } catch (e) { box.innerHTML = sbNA(e.message); return; }
+  const now = Date.now() / 1000;
+  const p = d.purge, lp = d.last_purge;
+  const row = (k) => {
+    const why = d.ready[k];
+    const extra = k === "purge"
+      ? ` <span class="sb-pill ${p.dry ? "yellow" : "green"}">${p.dry ? (p.mode === "auto" && p.dry_days_left != null ? `dry run · live in ${p.dry_days_left.toFixed(1)} d` : "dry run") : "live"}</span>` +
+        (lp ? ` <span class="faint small">last: ${lp.dry ? "would delete" : "deleted"} ${plural(lp.delete, "torrent")} (${(lp.freed_bytes / 1e9).toFixed(1)} GB) · kept ${lp.kept}</span>` : "")
+      : "";
+    return `<div class="sj-job"><div><b>${SJ_LABEL[k]}</b>${extra}
+        <div class="small dim">${d.settings[k + "_on"] ? (k === "pull" ? `every ${d.settings.pull_every_min} min` : `daily at ${d.settings[k + "_at"]}`) : "off"} · last ${sbWhen(d.last[k], now)}</div>
+        ${why && k !== "report" ? `<div class="small warn">${esc(why)}</div>` : ""}</div>
+      <button class="btn sm sj-run" data-k="${k}" ${why && k !== "report" ? "disabled" : ""}>▶ Run now</button></div>`;
+  };
+  const alerts = (d.alerts || []).slice(-4).reverse().map((a) =>
+    `<div class="sj-alert ${a.level}">${esc(new Date(a.at * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }))} · ${esc(a.text)}</div>`).join("");
+  box.innerHTML = (!d.settings.cutover ? `<div class="sj-alert warning">Not taken over yet — the Unraid scripts are still in charge. Switch them off, then tick the box in <a href="#" data-go="dashboard" data-sec="seedjobs">Settings → Seedbox jobs</a>.</div>` : "") +
+    ["pull", "purge", "report"].map(row).join("") +
+    `<h4>Latest report</h4>${sjReportHTML(d.report)}` + (alerts ? `<h4>Recent</h4>${alerts}` : "");
+}
+$("#sb-jobs")?.addEventListener("click", async (e) => {
+  const b = e.target.closest(".sj-run"); if (!b) return;
+  b.disabled = true; b.textContent = "Running…";
+  try {
+    const job = await api(`/api/seedjobs/run/${b.dataset.k}`, { method: "POST" });
+    const j = await waitJob(job.id, (x) => {
+      const p = x.progress || {};
+      b.textContent = p.total ? `${p.done}/${p.total}…` : "Running…";
+    }, 1500);
+    if (j.status === "error") throw new Error(j.error);
+    toast(`${SJ_LABEL[b.dataset.k]}: done`);
+  } catch (err) { toast(err.message, true); }
+  loadSeedJobs(); openSeedbox();
+});
+let sjCats = [];
+async function loadSjSettings() {
+  let d;
+  try { d = await api("/api/seedjobs"); } catch { return; }
+  const s = d.settings;
+  $("#sj-cutover").checked = !!s.cutover; $("#sj-remote").value = s.remote || "";
+  $("#sj-pull-on").checked = !!s.pull_on; $("#sj-every").value = s.pull_every_min;
+  $("#sj-par").value = s.parallel; $("#sj-streams").value = s.streams;
+  $("#sj-purge-on").checked = !!s.purge_on; $("#sj-purge-at").value = s.purge_at; $("#sj-mode").value = s.purge_mode;
+  $("#sj-report-on").checked = !!s.report_on; $("#sj-report-at").value = s.report_at;
+  sjCats = s.categories || [];
+  $("#sj-cats").innerHTML = sjCats.map((c, i) => `<div class="row"><span class="muted">folder</span><b>${esc(c.cat)}</b><span class="muted">→</span>
+      <input class="sj-dest" data-i="${i}" value="${esc(c.dest)}" style="min-width:260px" /></div>`).join("");
+  $("#sj-cutover-note").textContent = d.foreign_pull
+    ? `runs.log shows a pull Peaks didn't make at ${new Date(d.foreign_pull * 1000).toLocaleTimeString()} — switch the Unraid script off first.`
+    : s.cutover ? "Peaks is running the jobs." : "Until you tick this, Peaks only watches.";
+  $("#sj-mode-note").textContent = d.purge.dry && d.purge.dry_days_left != null && s.purge_mode === "auto"
+    ? `Dry run: lists what it would delete. Goes live in ${d.purge.dry_days_left.toFixed(1)} days.`
+    : d.purge.dry ? "Dry run: lists what it would delete, deletes nothing." : "Live: deletes torrents confirmed on Jarvis.";
+}
+$("#sj-save")?.addEventListener("click", async () => {
+  if ($("#sj-cutover").checked && !confirm("Peaks will now pull from the seedbox and purge confirmed torrents (dry run first).\n\nAre the Unraid scripts switched off?")) return;
+  document.querySelectorAll(".sj-dest").forEach((el) => { sjCats[+el.dataset.i].dest = el.value.trim(); });
+  try {
+    await api("/api/seedjobs/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cutover: $("#sj-cutover").checked, remote: $("#sj-remote").value.trim(), categories: sjCats,
+        pull_on: $("#sj-pull-on").checked, pull_every_min: +$("#sj-every").value || 30, parallel: +$("#sj-par").value || 3,
+        streams: +$("#sj-streams").value || 4, purge_on: $("#sj-purge-on").checked, purge_at: $("#sj-purge-at").value || "05:00",
+        purge_mode: $("#sj-mode").value, report_on: $("#sj-report-on").checked, report_at: $("#sj-report-at").value || "06:00" }) });
+    $("#sj-save-status").textContent = "Saved"; loadSjSettings();
+  } catch (e) { $("#sj-save-status").textContent = e.message; }
+});

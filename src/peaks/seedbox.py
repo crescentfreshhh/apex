@@ -38,10 +38,10 @@ def parse_runs(text: str) -> tuple[list[Run], int]:
         if not line:
             continue
         parts = line.split("|")
-        if len(parts) != 4:
+        if len(parts) not in (4, 5):            # Peaks' purge adds a 5th field (bytes freed)
             bad += 1
             continue
-        at, kind, status, files = (p.strip() for p in parts)
+        at, kind, status, files = (p.strip() for p in parts[:4])
         try:
             at_f = float(at)
         except ValueError:
@@ -62,6 +62,25 @@ def parse_runs(text: str) -> tuple[list[Run], int]:
         runs.append(Run(at_f, kind, status == "ok", n))
     runs.sort(key=lambda r: r.at)
     return runs, bad
+
+
+def parse_all_runs(text: str) -> list[dict]:
+    """Every well-formed runs.log line, any job: [{at, kind, ok, count, bytes}]
+    oldest first (for the daily report and the factory floor)."""
+    out = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.strip().split("|")]
+        if len(parts) not in (4, 5) or parts[2] not in ("ok", "fail") or not parts[1]:
+            continue
+        try:
+            at = float(parts[0])
+            count = int(parts[3]) if parts[3] else None
+            nbytes = int(parts[4]) if len(parts) == 5 and parts[4] else None
+        except ValueError:
+            continue
+        out.append({"at": at, "kind": parts[1], "ok": parts[2] == "ok", "count": count, "bytes": nbytes})
+    out.sort(key=lambda r: r["at"])
+    return out
 
 
 def script_health(runs: list[Run], kind: str, now: float, failing: bool) -> dict:
@@ -164,16 +183,17 @@ def _ago(sec: float) -> str:
     return f"{h:.1f} h" if h < 48 else f"{h / 24:.1f} days"
 
 
-# --- qBittorrent: login + GET only -------------------------------------------------
+# --- qBittorrent: login + reads, and the purge's one delete ------------------------
 
 class QbtError(RuntimeError):
     pass
 
 
 class QbtClient:
-    """Read-only qBittorrent Web API (v2, as in 4.3.x): it can log in and list
-    torrents — nothing else exists here, so it can't pause, delete or change
-    anything."""
+    """qBittorrent Web API (v2, as in 4.3.x): log in, list torrents and their
+    files — and one write, `delete_torrents`, used only by the purge job for
+    torrents it has confirmed are safely on Jarvis. Nothing else can pause,
+    add or change anything."""
 
     def __init__(self, url: str, user: str, password: str, timeout: float = 15.0, session=None):
         import requests
@@ -220,3 +240,47 @@ class QbtClient:
                 raise QbtError("unexpected torrent list format")
             return data
         raise QbtError("torrent list failed after logging in again")
+
+    def _get_json(self, path: str, what: str):
+        if not self._logged_in:
+            self.login()
+        for attempt in (0, 1):
+            try:
+                r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
+            except Exception as exc:  # noqa: BLE001
+                raise QbtError(f"can't reach {self.base} ({type(exc).__name__})") from exc
+            if r.status_code == 403 and attempt == 0:
+                self.login()
+                continue
+            if r.status_code != 200:
+                raise QbtError(f"{what} failed (HTTP {r.status_code})")
+            try:
+                return r.json()
+            except ValueError as exc:
+                raise QbtError(f"{what} wasn't JSON") from exc
+        raise QbtError(f"{what} failed after logging in again")
+
+    def files(self, torrent_hash: str) -> list[dict]:
+        """A torrent's files (name relative to its save path, priority, size)."""
+        from urllib.parse import quote
+
+        data = self._get_json(f"/api/v2/torrents/files?hash={quote(torrent_hash)}", "file list")
+        if not isinstance(data, list):
+            raise QbtError("unexpected file list format")
+        return data
+
+    def delete_torrents(self, hashes: list[str], delete_files: bool = True) -> None:
+        """The purge's delete — the only write Peaks makes to qBittorrent."""
+        if not hashes:
+            return
+        if not self._logged_in:
+            self.login()
+        try:
+            r = self.s.post(f"{self.base}/api/v2/torrents/delete",
+                            data={"hashes": "|".join(hashes), "deleteFiles": "true" if delete_files else "false"},
+                            timeout=self.timeout)
+        except Exception as exc:  # noqa: BLE001
+            raise QbtError(f"can't reach {self.base} ({type(exc).__name__})") from exc
+        if r.status_code != 200:
+            raise QbtError(f"delete failed (HTTP {r.status_code})")
+

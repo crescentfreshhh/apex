@@ -27,6 +27,20 @@ RUN apt-get update \
     && apt-get purge -y wget xz-utils && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+# rclone (pinned) for the seedbox jobs Peaks runs: your Unraid rclone.conf is
+# mounted read-only at /rclone/rclone.conf, so the seedbox credentials stay there
+ARG RCLONE_VERSION=v1.68.2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget unzip ca-certificates \
+    && wget -qO /tmp/rclone.zip \
+        "https://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-amd64.zip" \
+    && unzip -q /tmp/rclone.zip -d /tmp/rc \
+    && cp /tmp/rc/rclone-*/rclone /usr/local/bin/rclone && chmod +x /usr/local/bin/rclone \
+    && rm -rf /tmp/rc /tmp/rclone.zip \
+    && apt-get purge -y wget unzip && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+ENV RCLONE_CONFIG=/rclone/rclone.conf
+
 # heavy ML deps pinned to CUDA 12.8 wheels — cover Blackwell (sm_120) through
 # Ampere, and still run fine on CPU when no GPU is present
 RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 \

@@ -173,9 +173,10 @@ def test_client_reports_bad_credentials_ban_and_relogins_once():
         QbtClient("https://b", "u", "p", session=_Session(info=[_Resp(200, text="<html>")])).torrents()
 
 
-def test_client_has_no_write_methods():
+def test_client_writes_only_the_purges_delete():
+    # reads, plus exactly one write — the purge's delete of torrents confirmed on Jarvis
     public = {n for n in dir(QbtClient) if not n.startswith("_")}
-    assert public == {"login", "torrents"}
+    assert public == {"login", "torrents", "files", "delete_torrents"}
 
 
 # --- the page: sources reported separately ------------------------------------------------

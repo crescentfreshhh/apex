@@ -1510,6 +1510,51 @@ def create_app(cfg=None):
     def duplicates():
         return service.refresh_duplicate_picks() or {"groups": None}
 
+    # --- the factory floor: the pipeline, live, in ASCII ---------------------------
+
+    @app.get("/api/floor")
+    def floor():
+        from .floor import floor_state
+
+        return floor_state(service, jobs)
+
+    @app.get("/api/floor/replay")
+    def floor_replay_route(hours: float = Query(24, ge=1, le=168)):
+        from .floor import floor_replay
+
+        return {"events": floor_replay(service, hours)}
+
+    @app.get("/floor")
+    def floor_page():
+        from fastapi.responses import RedirectResponse
+
+        return RedirectResponse("/#/floor?kiosk=1")
+
+    # --- seedbox jobs: pull / purge / report, run by Peaks ------------------------
+
+    @app.get("/api/seedjobs")
+    def seedjobs_status():
+        return service.seedjob_status()
+
+    @app.post("/api/seedjobs/settings")
+    def seedjobs_save(body: dict = Body(...)):
+        try:
+            return service.save_seedjob_settings(body)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/seedjobs/run/{kind}")
+    def seedjobs_run(kind: str):
+        if kind not in ("pull", "purge", "report"):
+            raise HTTPException(404, "unknown job")
+        why = None if kind == "report" else service._sj_ready(service.seedjob_settings(), kind)
+        if why:
+            raise HTTPException(409, why)
+        try:
+            return jobs.start(f"seed-{kind}", getattr(service, f"run_seed_{kind}")).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
     # --- upgrades: better copies of your keepers, through Prowlarr -----------------
 
     @app.get("/api/upgrades")
@@ -2445,6 +2490,12 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 _start_picture(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
+            for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over
+                try:
+                    if not jobs.running(f"seed-{kind}") and service.seedjob_due(kind):
+                        jobs.start(f"seed-{kind}", getattr(service, f"run_seed_{kind}"))
+                except Exception:  # noqa: BLE001 — a job's error is in its own log
+                    pass
             try:   # upgrades: the daily Prowlarr search, when you've switched it on
                 if not any(jobs.running(k) for k in ("ingest", "upgrades", "restore")) and service.upgrade_due():
                     jobs.start("upgrades", service.run_upgrade_pass)

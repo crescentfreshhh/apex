@@ -32,6 +32,7 @@ from .find import FindMixin
 from .studios import StudiosMixin
 from .picture import PictureMixin
 from .upgrades import UpgradesMixin
+from .seedjobs import SeedJobsMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -44,7 +45,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
-              PictureMixin, UpgradesMixin):
+              PictureMixin, UpgradesMixin, SeedJobsMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
