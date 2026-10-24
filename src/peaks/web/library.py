@@ -1265,14 +1265,20 @@ class LibraryMixin:
                 # graded meanwhile may have been moved by the renamer)
                 stage("auto tag")
                 if self.capabilities()["ops"].get("metadataAutoTag"):
-                    paths = [m["path"] for m in client.scene_details(new).values() if m.get("path")]
+                    out_ = self.settled_rejects(new)      # rejected while identify ran: leave them out
+                    paths = [m["path"] for sid, m in client.scene_details([s for s in new if s not in out_]).items()
+                             if m.get("path")]
                     at = defaults.get("autoTag") or {}
                     picked = {k: at.get(k) for k in ("performers", "studios", "tags") if at.get(k)}
                     at_in = picked or {"performers": ["*"], "studios": ["*"], "tags": ["*"]}
                     at_in = client.fit_input({**at_in, "paths": paths}, "AutoTagMetadataInput")
                     log(f"3/5 auto tag: {', '.join(k for k in ('performers', 'studios', 'tags') if k in at_in)}")
-                    self._wait_stash_job(client, client.metadata_auto_tag(at_in), "auto tag", job)
-                    stages["auto tag"] = "done"
+                    if paths:
+                        self._wait_stash_job(client, client.metadata_auto_tag(at_in), "auto tag", job)
+                    stages["auto tag"] = "done" + (f" · {len(out_)} reject{'s' if len(out_) != 1 else ''} left out"
+                                                   if out_ else "")
+                    if out_:
+                        self._note_rejects_skipped("auto tag", len(out_))
                     self._ingest_refresh(new)
                     self._repair_new_tier_tags(new, log)
                 else:
@@ -1309,7 +1315,8 @@ class LibraryMixin:
                     if job is not None:
                         job.progress = {"stage": "duplicates"}
                     log("5/5 duplicates: checking the new scenes against the library")
-                    dupes = self.find_duplicates(job, only_ids=set(new))
+                    keep_ = set(new) - self.settled_rejects(new)   # a reject isn't worth a duplicate group
+                    dupes = self.find_duplicates(job, only_ids=keep_) if keep_ else {"groups": []}
                     stages["duplicates"] = f"{len(dupes['groups'])} group(s)"
                     self._merge_dupes(dupes)
                 else:

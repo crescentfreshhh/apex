@@ -906,8 +906,12 @@ async function applyGrade(sid, grade, undoKey = "Z") {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scene_id: String(sid), grade }),
   });
-  gradeUndo.push({ sid: String(sid), prev: r.previous, grade });
+  const entry = { sid: String(sid), prev: r.previous, grade };
+  gradeUndo.push(entry);
   toast(`${gradeName(grade)} — ${undoKey} to undo`);
+  if (r.in_ingest) {                       // still in the running ingest: once the reject sticks, it's dropped
+    setTimeout(() => { if (gradeUndo.includes(entry)) toast(`${gradeName(grade)} — dropped from the running ingest (not embedded)`); }, 5500);
+  }
   return r.scene;
 }
 // "Keep as is": answer a suggestion at the current tier — nothing changes in Stash;

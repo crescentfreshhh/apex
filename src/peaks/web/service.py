@@ -10,6 +10,7 @@ from __future__ import annotations
 from .. import atomic
 
 import threading
+import time
 from io import BytesIO
 
 import numpy as np
@@ -605,9 +606,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         scene_timeout: float | None = None,
         batch_size: int | None = None,
         scene_ids: set[str] | None = None,
+        should_skip=None,
     ) -> dict:
         """One incremental embed pass (skips already-cached scenes). With
-        `scene_ids`, only those scenes are considered (the ingest of new files).
+        `scene_ids`, only those scenes are considered (the ingest of new files);
+        `should_skip(scene)` can drop one on the way ("skip") or ask again later
+        ("wait") — scenes you reject while the ingest runs.
 
         Every keyword overrides the corresponding config value for this run
         only — so the web UI can pick the model (e.g. a CLIP pass) or tweak
@@ -667,7 +671,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             total=total, log=_log,
             failure_log=failure_log_for(self.cfg),
             should_stop=(lambda: job.cancelled) if job else None,
+            should_skip=should_skip,
         )
+        if stats.get("skipped_rejected"):
+            self._note_rejects_skipped("embed", stats["skipped_rejected"])
         if stats.get("embedded"):              # nothing new → keep the loaded index warm
             self.invalidate_index(embedder.name)
         # deleted-from-Stash scenes can't ever embed — drop them from the failure
@@ -5430,6 +5437,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         prev = {"rating100": cur.get("rating100"), "o_counter": int(cur.get("o_counter") or 0),
                 "tag_ids": list(cur.get("tag_ids") or []), "organized": bool(cur.get("organized"))}
         rating, o = GRADES[grade]
+        rejected_at = self.__dict__.setdefault("_rejected_at", {})
+        if grade == "reject":
+            rejected_at[sid] = time.time()        # a running ingest drops it once this sticks
+        else:
+            rejected_at.pop(sid, None)
         if o is not None:
             self.set_o_count(sid, o, current=prev["o_counter"])
         tag_ids = self._tier_tag_list(prev["tag_ids"], grade)
@@ -5452,7 +5464,37 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._note_grade()
         self.record_verdict(sid, row["tier"], source=source)         # your answer, remembered
         self._watch_path(sid, cur.get("path") or row.get("path"))   # follow the renamer's move
-        return {"scene": row, "previous": prev}
+        return {"scene": row, "previous": prev,
+                "in_ingest": grade == "reject" and self._in_running_ingest(sid)}
+
+    def _in_running_ingest(self, sid: str) -> bool:
+        """Is this one of the new scenes of an ingest that's still running?"""
+        try:
+            rec = self.last_ingest()
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(rec.get("running")) and str(sid) in {str(x) for x in rec.get("new") or []}
+
+    REJECT_SETTLE = 5.0        # seconds a reject must stick (the undo window) before a running ingest drops it
+
+    def reject_settled(self, scene_id: str, now: float | None = None) -> str | None:
+        """'skip' — rejected long enough ago that the running ingest can drop it;
+        'wait' — rejected seconds ago, still undoable; None — not rejected here."""
+        t = self.__dict__.get("_rejected_at", {}).get(str(scene_id))
+        if t is None:
+            return None
+        return "skip" if ((now if now is not None else time.time()) - t) >= self.REJECT_SETTLE else "wait"
+
+    def _skip_rejected(self, scene) -> str | None:
+        return self.reject_settled(str(getattr(scene, "id", scene)))
+
+    def settled_rejects(self, ids) -> set[str]:
+        return {str(i) for i in ids if self.reject_settled(str(i)) == "skip"}
+
+    def _note_rejects_skipped(self, stage: str, n: int) -> None:
+        tick = getattr(self, "_sj_tick", None)
+        if tick:
+            tick(f"{stage}: skipped {n} reject{'s' if n != 1 else ''}")
 
     def restore_scene_grade(self, scene_id: str, rating100: int | None, o_counter: int,
                             source: str = "undo", tag_ids: list[str] | None = None,
@@ -5462,6 +5504,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         one final sceneUpdate. A previously unrated scene gets its rating
         cleared, not set to a value."""
         sid = str(scene_id)
+        self.__dict__.setdefault("_rejected_at", {}).pop(sid, None)     # undone: not a reject any more
         self.set_o_count(sid, int(o_counter or 0))
         unrated = rating100 is None or int(rating100) <= 0
         self.client().update_scene(

@@ -257,6 +257,11 @@ class WatchMixin:
         """Embed the scenes an ingest had to leave (main model). They're cleared whether or not each embeds — failures go
         to the failure log as with any embed, so nothing loops."""
         ids = self.embed_followup()
+        gone = self.settled_rejects(ids)           # rejected while they waited: not worth the GPU
+        if gone:
+            with self._folder_watch_lock():
+                self._save_followup(set(self.embed_followup()) - gone)
+            ids = [i for i in ids if i not in gone]
         if not ids:
             return {"embedded": 0}
         if job is not None:
@@ -269,8 +274,9 @@ class WatchMixin:
     def embed_new_scenes(self, job, ids) -> dict:
         """Embed just these scenes with the main model (text-search / CLIP stays
         a manual pass). Returns run stats plus a one-line summary."""
-        st = self.run_embed(job, scene_ids={str(i) for i in ids})
-        st["summary"] = f"{st.get('embedded', 0)} embedded, {st.get('failed', 0)} failed"
+        st = self.run_embed(job, scene_ids={str(i) for i in ids}, should_skip=self._skip_rejected)
+        st["summary"] = f"{st.get('embedded', 0)} embedded, {st.get('failed', 0)} failed" + (
+            f", {st['skipped_rejected']} rejects skipped" if st.get("skipped_rejected") else "")
         return st
 
     # --- what the UI shows -----------------------------------------------------------

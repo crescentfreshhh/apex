@@ -387,3 +387,26 @@ def test_owed_embeds_run_later_and_survive_a_restart(svc, stash):
     st = fresh.run_embed_followup()
     assert st["embedded"] == 2 and fresh.embed_followup() == []
     assert _models(stash)[-1] == ("embed", ["10", "11"])
+
+
+def test_a_scene_rejected_during_the_ingest_drops_out_of_what_follows(svc, stash, monkeypatch):
+    """Graded while identify ran: past the 5 s undo window, a reject isn't auto
+    tagged, embedded or duplicate-checked."""
+    real_identify = type(stash).metadata_identify
+
+    def identify_while_you_grade(self, inp):
+        svc.__dict__.setdefault("_rejected_at", {})["11"] = time.time() - 10     # you rejected it a while ago
+        return real_identify(self, inp)
+    monkeypatch.setattr(type(stash), "metadata_identify", identify_while_you_grade)
+    seen = {}
+    real_dupes = type(svc).find_duplicates
+
+    def dupes(self, job=None, **kw):
+        seen["only"] = sorted(kw.get("only_ids") or [])
+        return real_dupes(self, job, **kw)
+    monkeypatch.setattr(type(svc), "find_duplicates", dupes)
+    out = svc.run_ingest()
+    at = next(c[1] for c in stash.calls if c[0] == "auto_tag")
+    assert at["paths"] == ["/data/10.mp4"]
+    assert out["stages"]["auto tag"] == "done · 1 reject left out"
+    assert seen["only"] == ["10"]

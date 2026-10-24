@@ -67,6 +67,45 @@ def resolve_references_dir(base: str | Path, tag: str) -> Path:
     return sub if sub.is_dir() else Path(base)
 
 
+def _skipping(scenes: Iterable[Scene], should_skip, log: Logger, counts: dict, sleep=None):
+    """The scenes in order, minus the ones `should_skip(scene)` calls "skip"
+    (rejected while the ingest ran). "wait" (rejected seconds ago — still
+    undoable) moves a scene to the end, to be asked again."""
+    import time as _time
+    from collections import deque
+
+    sleep = sleep or _time.sleep
+    if should_skip is None:
+        yield from scenes
+        return
+    later: deque = deque()
+
+    def _drop(sc):
+        counts["skipped_rejected"] = counts.get("skipped_rejected", 0) + 1
+        log(f"  - scene {sc.id} skipped: rejected")
+
+    for sc in scenes:
+        v = should_skip(sc)
+        if v == "skip":
+            _drop(sc)
+        elif v == "wait":
+            later.append(sc)
+        else:
+            yield sc
+    asked = 0
+    while later:
+        sc = later.popleft()
+        v = should_skip(sc)
+        if v == "skip":
+            _drop(sc)
+        elif v == "wait" and asked < 20:          # the undo window is a few seconds
+            later.append(sc)
+            asked += 1
+            sleep(0.5)
+        else:
+            yield sc
+
+
 def embed_library(
     scenes: Iterable[Scene],
     sampler: FrameSampler,
@@ -79,6 +118,7 @@ def embed_library(
     log: Logger = print,
     failure_log=None,
     should_stop: Callable[[], bool] | None = None,
+    should_skip: Callable[[Scene], str | None] | None = None,
 ) -> dict:
     """Embed every scene not already cached. Resumable + idempotent.
 
@@ -120,13 +160,17 @@ def embed_library(
                 model=embedder.name,
             )
 
+    skips: dict = {}
+    scenes = _skipping(scenes, should_skip, log, skips)
     if workers > 1 and use_raw:
-        return _embed_library_parallel(
+        out = _embed_library_parallel(
             scenes, sampler, embedder, cache,
             signature=signature, batch_size=batch_size, total=total,
             workers=workers, log=log, failure_log=failure_log,
-            should_stop=should_stop,
+            should_stop=should_stop, should_skip=should_skip, skips=skips,
         )
+        out["skipped_rejected"] = skips.get("skipped_rejected", 0)
+        return out
 
     stats = {"embedded": 0, "skipped": 0, "failed": 0, "frames": 0}
     embed_seconds = 0.0
@@ -210,6 +254,7 @@ def embed_library(
             _record_failure(scene, key, exc)
     if stats["embedded"]:
         stats["seconds_per_scene"] = round(embed_seconds / stats["embedded"], 2)
+    stats["skipped_rejected"] = skips.get("skipped_rejected", 0)
     return stats
 
 
@@ -226,6 +271,8 @@ def _embed_library_parallel(
     log: Logger,
     failure_log=None,
     should_stop: Callable[[], bool] | None = None,
+    should_skip: Callable[[Scene], str | None] | None = None,
+    skips: dict | None = None,
 ) -> dict:
     """Raw-path embed with `workers` scenes decoding concurrently.
 
@@ -263,6 +310,12 @@ def _embed_library_parallel(
         nonlocal processed
         scene, key, future = entry
         processed += 1
+        if should_skip is not None and should_skip(scene) == "skip":    # rejected while it decoded
+            future.cancel()
+            if skips is not None:
+                skips["skipped_rejected"] = skips.get("skipped_rejected", 0) + 1
+            log(f"  - scene {scene.id} skipped: rejected")
+            return
         try:
             times, frames = future.result()
             chunks = [
