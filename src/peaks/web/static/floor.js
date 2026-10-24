@@ -119,9 +119,11 @@ function flMachine(g, s, x, y, w, h, st, f) {
         ["NEW", "unreviewed"], ["REJ", "rejected"]];
       const max = Math.max(1, ...rows.map(([, t]) => sh[t] || 0));
       rows.forEach(([lab, t], i) => {
-        const n = sh[t] || 0, bar = Math.round(6 * n / max);
-        flPut(g, x + 1, y + 2 + i, lab + " " + "#".repeat(bar).padEnd(6, "."), t === "rejected" ? "f-err" : "f-lib");
-        flPut(g, x + 12, y + 2 + i, String(n).slice(-3).padStart(3), "f-dim");
+        // "LEG ####  1978": a 4-wide bar and the count in 5 (never cut; 100k+ as "123k")
+        const n = sh[t] || 0, bar = Math.round(4 * n / max);
+        const num = n > 99999 ? `${Math.floor(n / 1000)}k` : String(n);
+        flPut(g, x + 1, y + 2 + i, lab + " " + "#".repeat(bar).padEnd(4, "."), t === "rejected" ? "f-err" : "f-lib");
+        flPut(g, x + 9, y + 2 + i, num.padStart(5), "f-dim");
       });
       break;
     }
