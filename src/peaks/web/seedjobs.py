@@ -275,6 +275,8 @@ class SeedJobsMixin:
         live = self._sj_live()
         try:
             errors, total, total_bytes = [], 0, 0
+            landed_paths: set[str] = set()
+            landed_files: list[str] = []
             remote = s["remote"].rstrip("/")
             for c in s["categories"]:
                 cat, dest = c["cat"], Path(c["dest"])
@@ -342,6 +344,11 @@ class SeedJobsMixin:
 
                 with ThreadPoolExecutor(max_workers=s["parallel"]) as ex:
                     results = list(ex.map(fetch, enumerate(new)))
+                landed_here = [str(dest / rel) for rel, ok, _ in results if ok and sj.wanted(rel)
+                               and not rel.lower().endswith(".funscript")]
+                if landed_here:
+                    landed_paths.add(str(dest))
+                    landed_files.extend(landed_here)
                 ok_n = sum(1 for _, ok, _ in results if ok)
                 fail_n = len(results) - ok_n
                 total += ok_n
@@ -359,15 +366,69 @@ class SeedJobsMixin:
                 failing.touch()
                 self._sj_alert("alert", "Seedbox pull failed: " + " ".join(errors))
             self._sj_update(lambda d: d["last"].__setitem__("pull", time.time()))
+            if landed_files:            # Stash scans exactly where they landed (norating, #VR…)
+                self._sj_hand_to_ingest(sorted(landed_paths), landed_files)
+                log("handed to the next ingest: " + ", ".join(sorted(landed_paths)))
             if total:
                 try:
                     self.action_log().append("seedbox-pull", detail=f"pulled {total} file(s) · {total_bytes / 1e9:.1f} GB")
                 except Exception:  # noqa: BLE001
                     pass
-            return {"pulled": total, "bytes": total_bytes, "errors": errors}
+            return {"pulled": total, "bytes": total_bytes, "errors": errors, "ingest": sorted(landed_paths)}
         finally:
             live["pull"] = {}
             lock.release()
+
+    # --- the hand-off to ingest: scan exactly where the pull put files ---------------
+
+    def _sj_hand_to_ingest(self, paths: list[str], files: list[str]) -> None:
+        def add(d):
+            p = d.get("ingest_pending") or {"paths": [], "files": []}
+            d["ingest_pending"] = {"paths": sorted(set(p["paths"]) | set(paths)),
+                                   "files": sorted(set(p["files"]) | set(files)), "at": time.time()}
+        self._sj_update(add)
+        try:                                   # the folder watch mustn't start a second ingest for them
+            self.watch_started(files)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def take_seed_ingest(self) -> dict | None:
+        """The folders waiting for an ingest (and forget them — `requeue` if it fails)."""
+        out = {}
+
+        def take(d):
+            out.update(d.pop("ingest_pending", None) or {})
+        self._sj_update(take)
+        return out or None
+
+    def requeue_seed_ingest(self, pending: dict) -> None:
+        self._sj_update(lambda d: d.__setitem__("ingest_pending", {
+            "paths": sorted(set((d.get("ingest_pending") or {}).get("paths", [])) | set(pending["paths"])),
+            "files": sorted(set((d.get("ingest_pending") or {}).get("files", [])) | set(pending["files"])),
+            "at": time.time(), "retry_after": time.time() + 600}))
+
+    def seed_ingest_waiting(self, now: float | None = None) -> bool:
+        p = self._sj_load().get("ingest_pending")
+        return bool(p and p.get("paths")) and (now or time.time()) >= (p.get("retry_after") or 0)
+
+    def _sj_dest_warnings(self, s: dict) -> list[str]:
+        """Pull destinations Stash won't scan, or Peaks won't show."""
+        dests = [c["dest"] for c in s["categories"]]
+        out = []
+        try:
+            for w in self.watch_warnings(dests):
+                if "isn't inside any Stash library folder" in w:
+                    d = w.split(" isn't", 1)[0]
+                    w = (f"Stash doesn't scan {d} — nothing pulled there will appear. "
+                         "Add it in Stash → Settings → Library.")
+                out.append(w)
+        except Exception:  # noqa: BLE001
+            pass
+        scope = (self.cfg.library.path or "").rstrip("/")
+        for d in dests:
+            if scope and not (d == scope or d.startswith(scope + "/")):
+                out.append(f"Peaks only shows scenes under {scope} (PEAKS_LIBRARY_PATH) — scenes from {d} won't appear in Peaks")
+        return out
 
     def _sj_ledger_path(self) -> Path:
         return Path(self.cfg.modeling.dir) / "seedbox_pulled.jsonl"
@@ -566,4 +627,6 @@ class SeedJobsMixin:
                 "ready": {k: self._sj_ready(s, k) for k in JOBS},
                 "purge": {"dry": self._purge_dry(s, now), "mode": s["purge_mode"],
                           "dry_until": until, "dry_days_left": (max(0.0, (until - now) / 86400) if until else None)},
-                "foreign_pull": self._sj_foreign_pull(now)}
+                "foreign_pull": self._sj_foreign_pull(now),
+                "ingest_pending": d.get("ingest_pending"),
+                "warnings": self._sj_dest_warnings(s)}

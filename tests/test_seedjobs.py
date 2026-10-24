@@ -121,6 +121,7 @@ def env(tmp_path, monkeypatch):
     cfg.modeling.labels_path = str(tmp_path / "labels.json")
     cfg.seedbox.dir = str(state)
     stash = FakeStash({})
+    stash.library_paths = lambda: [str(lib)]
     monkeypatch.setattr(svc_mod.Service, "client", lambda self: stash)
     monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: stash)
     svc = svc_mod.Service(cfg)
@@ -128,7 +129,7 @@ def env(tmp_path, monkeypatch):
                                "owner": f"{os.getuid()}:{os.getgid()}",
                                "categories": [{"cat": "1", "dest": str(lib / "norating")},
                                               {"cat": "vr", "dest": str(lib / "VR")}]})
-    return {"svc": svc, "box": box, "state": state, "lib": lib}
+    return {"svc": svc, "box": box, "state": state, "lib": lib, "stash": stash}
 
 
 def test_nothing_runs_before_the_cutover(env):
@@ -143,7 +144,8 @@ def test_pull_brings_only_new_files_and_records_each(env):
     svc.save_seedjob_settings({"cutover": True})
     (state / "1.done").write_text("1/already.mp4\nb.mp4\n")          # b.mp4 came down before
     out = svc.run_seed_pull()
-    assert out == {"pulled": 3, "bytes": 3000, "errors": []}
+    assert out == {"pulled": 3, "bytes": 3000, "errors": [],
+                   "ingest": sorted([str(lib / "norating"), str(lib / "VR")])}
     assert (lib / "norating" / "Show A" / "a.mp4").exists() and not (lib / "norating" / "b.mp4").exists()
     assert (lib / "VR" / "v.mp4").exists()
     assert set((state / "1.done").read_text().splitlines()) >= {"Show A/a.mp4", "Show A/a.funscript", "b.mp4"}
@@ -307,3 +309,93 @@ def test_the_floor_never_shows_a_file_name_and_stays_ascii(env):
     assert job.status == "done"
     assert "a.mp4" not in snap and "Show A" not in snap and "v.mp4" not in snap
     assert all(ord(c) < 127 for t in floor_state(svc, jobs)["ticker"] for c in t["text"])
+
+
+# --- the hand-off: Stash scans exactly where the pull put files --------------------------
+
+def test_a_pull_hands_exactly_its_folders_to_the_next_ingest(env):
+    svc, box, lib = env["svc"], env["box"], env["lib"]
+    svc.save_seedjob_settings({"cutover": True})
+    for f in ("1/Show A/a.mp4", "1/Show A/a.funscript", "1/b.mp4"):
+        (box / f).unlink()                                         # only VR is new
+    out = svc.run_seed_pull()
+    assert out["ingest"] == [str(lib / "VR")]
+    p = svc._sj_load()["ingest_pending"]
+    assert p["paths"] == [str(lib / "VR")] and p["files"] == [str(lib / "VR" / "v.mp4")]
+    assert str(lib / "VR" / "v.mp4") in svc._watch_state()["done"]     # the watch won't ingest it again
+    assert svc.seed_ingest_waiting()
+    # the next pull with nothing new adds nothing
+    assert svc.run_seed_pull()["ingest"] == []
+
+
+def test_both_categories_and_a_funscript_alone_doesnt_count(env):
+    svc, box, lib = env["svc"], env["box"], env["lib"]
+    svc.save_seedjob_settings({"cutover": True})
+    for f in ("1/Show A/a.mp4", "1/b.mp4"):
+        (box / f).unlink()                                         # category 1 brings only a .funscript
+    svc.run_seed_pull()
+    assert svc._sj_load()["ingest_pending"]["paths"] == [str(lib / "VR")]
+    (box / "1" / "new.mp4").write_bytes(b"x")
+    svc.run_seed_pull()
+    assert svc._sj_load()["ingest_pending"]["paths"] == sorted([str(lib / "VR"), str(lib / "norating")])
+
+
+def test_the_scheduler_starts_the_ingest_on_those_folders(env, monkeypatch):
+    import peaks.web.app as app_mod
+    from peaks.web.jobs import JobManager
+
+    svc, lib = env["svc"], env["lib"]
+    svc.save_seedjob_settings({"cutover": True})
+    svc.run_seed_pull()
+    monkeypatch.setattr(type(svc), "capabilities", lambda self, refresh=False: {"ops": {"metadataScan": True}})
+    calls = []
+    monkeypatch.setattr(type(svc), "run_ingest", lambda self, j, embed_busy=None, paths=None, trigger="manual":
+                        calls.append((sorted(paths), trigger)) or {"new": 0})
+    jobs = JobManager()
+    busy = jobs.start("embed", lambda j: time.sleep(0.3))
+    assert app_mod._seed_ingest_go(svc, jobs) is None and svc.seed_ingest_waiting()   # waits for the embed
+    while busy.status == "running":
+        time.sleep(0.02)
+    job = app_mod._seed_ingest_go(svc, jobs)
+    while job.status == "running":
+        time.sleep(0.02)
+    assert calls == [(sorted([str(lib / "norating"), str(lib / "VR")]), "pull")]
+    assert not svc.seed_ingest_waiting()
+
+
+def test_a_failed_handoff_ingest_is_retried(env, monkeypatch):
+    import peaks.web.app as app_mod
+    from peaks.web.jobs import JobManager
+
+    svc = env["svc"]
+    svc.save_seedjob_settings({"cutover": True})
+    svc.run_seed_pull()
+    monkeypatch.setattr(type(svc), "capabilities", lambda self, refresh=False: {"ops": {"metadataScan": True}})
+
+    def boom(self, j, embed_busy=None, paths=None, trigger="manual"):
+        raise RuntimeError("Stash down")
+    monkeypatch.setattr(type(svc), "run_ingest", boom)
+    job = app_mod._seed_ingest_go(svc, JobManager())
+    while job.status == "running":
+        time.sleep(0.02)
+    p = svc._sj_load()["ingest_pending"]
+    assert job.status == "error" and len(p["paths"]) == 2
+    assert not svc.seed_ingest_waiting() and svc.seed_ingest_waiting(now=time.time() + 601)
+
+
+def test_destinations_stash_wont_scan_are_flagged(env):
+    svc, stash, lib = env["svc"], env["stash"], env["lib"]
+    assert svc.seedjob_status()["warnings"] == []
+    stash.library_paths = lambda: [str(lib / "norating")]          # #VR isn't a Stash library folder
+    w = svc.seedjob_status()["warnings"]
+    assert len(w) == 1 and w[0].startswith(f"Stash doesn't scan {lib / 'VR'}")
+    svc.cfg.library.path = str(lib / "norating")
+    assert any("PEAKS_LIBRARY_PATH" in x for x in svc.seedjob_status()["warnings"])
+
+
+def test_the_folder_watch_covers_the_pull_folders(env):
+    svc, lib = env["svc"], env["lib"]
+    svc.save_watch_settings(on=True, paths=[str(lib / "norating")])
+    assert svc.watch_status()["covered_by_pull"] == []               # not taken over yet
+    svc.save_seedjob_settings({"cutover": True})
+    assert svc.watch_status()["covered_by_pull"] == [str(lib / "VR")]

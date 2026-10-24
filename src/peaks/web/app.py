@@ -2447,6 +2447,35 @@ def _watch_go(service: Service, jobs: JobManager, force: bool = False):
     return job
 
 
+def _seed_ingest_go(service: Service, jobs: JobManager):
+    """The seedbox pull brought files in: one Ingest that scans exactly the
+    folders they landed in (norating, #VR…), when nothing it waits for runs.
+    A failure puts the folders back, retried in 10 minutes."""
+    if not service.seed_ingest_waiting() or any(jobs.running(k) for k in _WATCH_WAIT_FOR):
+        return None
+    if not service.capabilities()["ops"].get("metadataScan"):
+        return None
+    pending = service.take_seed_ingest()
+    if not pending:
+        return None
+
+    def _ingest(j):
+        try:
+            return service.run_ingest(j, embed_busy=lambda: jobs.running("embed") is not None,
+                                      paths=pending["paths"], trigger="pull")
+        except InterruptedError:
+            raise
+        except Exception:
+            service.requeue_seed_ingest(pending)
+            raise
+
+    try:
+        return jobs.start("ingest", _ingest)
+    except RuntimeError:
+        service.requeue_seed_ingest(pending)
+        return None
+
+
 def _start_scheduler(app, service: Service, jobs: JobManager):
     """Recurring incremental-embed scheduler. Always running; it polls the
     settings each minute and reads the interval/enabled state live, so the
@@ -2488,6 +2517,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
             try:   # picture quality: new files, and the library once you've started it
                 _start_picture(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # files the pull just brought in: scan exactly where they landed
+                _seed_ingest_go(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over

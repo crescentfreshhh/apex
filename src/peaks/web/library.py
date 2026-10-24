@@ -1202,6 +1202,8 @@ class LibraryMixin:
                   "stage": "scan", "new": self.last_ingest().get("new") or [], "stages": stages}
         if trigger == "watch":
             log("started by the folder watch: new files in " + ", ".join(paths or []))
+        elif trigger == "pull":
+            log("started by the seedbox pull: new files in " + ", ".join(paths or []))
         before = client.all_scene_ids()
         try:
             defaults = client.config_defaults()

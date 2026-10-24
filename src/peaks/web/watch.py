@@ -137,7 +137,7 @@ class WatchMixin:
     def _watch_tick(self, now: float | None, force: bool) -> dict | None:
         now = time.time() if now is None else now
         cfg = self.watch_settings()
-        roots = cfg["watch_paths"]
+        roots = self._watch_roots(cfg)
         if not cfg["watch_on"] or not roots:
             return None
         st = self._watch_state()
@@ -165,6 +165,21 @@ class WatchMixin:
             go = False
         self._watch_save()
         return {"paths": roots, "files": settled} if go else None
+
+    def _pull_dests(self) -> list[str]:
+        """Where the seedbox pull drops files, once Peaks runs it — always watched."""
+        try:
+            s = self.seedjob_settings()
+        except Exception:  # noqa: BLE001
+            return []
+        return [c["dest"] for c in s["categories"]] if s.get("cutover") else []
+
+    def _watch_roots(self, cfg: dict) -> list[str]:
+        roots = list(cfg["watch_paths"])
+        for d in self._pull_dests():
+            if not any(d == r or d.startswith(r.rstrip("/") + "/") for r in roots):
+                roots.append(d)
+        return roots
 
     def watch_started(self, files: list[str], now: float | None = None) -> None:
         """An Ingest took these files: they're handled."""
@@ -272,7 +287,8 @@ class WatchMixin:
                 "check_error": st.get("check_error"), "now": time.time(),
                 "retry_after": st.get("retry_after"), "embed_owed": len(self.embed_followup()),
                 "ingest_warnings": self.ingest_warnings(auto),
-                "warnings": self.watch_warnings(cfg["watch_paths"])}
+                "covered_by_pull": [d for d in self._watch_roots(cfg) if d not in cfg["watch_paths"]],
+                "warnings": self.watch_warnings(self._watch_roots(cfg))}
 
     @staticmethod
     def ingest_warnings(rec: dict | None) -> list[str]:

@@ -5810,8 +5810,10 @@ setTimeout(() => api("/api/seedbox").then((d) => {
 // --- folder watch: new downloads ingest themselves --------------------------------
 let watchCfg = null;
 function watchLine(w) {
-  if (!w.watch_on || !w.watch_paths.length) return "";
-  const where = w.watch_paths.map((p) => `<code>${esc(p)}</code>`).join(", ");
+  const pulled = w.covered_by_pull || [];
+  if (!w.watch_on || !(w.watch_paths.length || pulled.length)) return "";
+  const where = w.watch_paths.map((p) => `<code>${esc(p)}</code>`)
+    .concat(pulled.map((p) => `<code title="the seedbox pull drops files here, so it's always watched">${esc(p)}</code> <span class="faint">(seedbox pull)</span>`)).join(", ");
   const ago = w.checked ? Math.max(0, Math.round((w.now || Date.now() / 1000) - w.checked)) : null;
   const bits = [`👁 Watching ${where}` + (ago == null ? "" : ` <span class="faint">· checked ${ago < 90 ? ago + " s" : Math.round(ago / 60) + " min"} ago</span>`)];
   if (w.check_error) bits.push(`<span class="bad">⚠ folder check failing: ${esc(w.check_error.error)}</span>`);
@@ -6170,7 +6172,10 @@ async function loadSeedJobs() {
   };
   const alerts = (d.alerts || []).slice(-4).reverse().map((a) =>
     `<div class="sj-alert ${a.level}">${esc(new Date(a.at * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }))} · ${esc(a.text)}</div>`).join("");
-  box.innerHTML = (!d.settings.cutover ? `<div class="sj-alert warning">Not taken over yet — the Unraid scripts are still in charge. Switch them off, then tick the box in <a href="#" data-go="dashboard" data-sec="seedjobs">Settings → Seedbox jobs</a>.</div>` : "") +
+  const warn = (d.warnings || []).map((w) => `<div class="sj-alert alert">⚠ ${esc(w)}</div>`).join("") +
+    (d.ingest_pending && d.ingest_pending.paths && d.ingest_pending.paths.length
+      ? `<div class="sj-alert ok">Waiting to ingest new files in ${esc(d.ingest_pending.paths.join(", "))}</div>` : "");
+  box.innerHTML = warn + (!d.settings.cutover ? `<div class="sj-alert warning">Not taken over yet — the Unraid scripts are still in charge. Switch them off, then tick the box in <a href="#" data-go="dashboard" data-sec="seedjobs">Settings → Seedbox jobs</a>.</div>` : "") +
     ["pull", "purge", "report"].map(row).join("") +
     `<h4>Latest report</h4>${sjReportHTML(d.report)}` + (alerts ? `<h4>Recent</h4>${alerts}` : "");
 }
