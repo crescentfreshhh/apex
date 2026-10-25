@@ -38,3 +38,15 @@ def _isolate_measure_state(tmp_path, monkeypatch):
     monkeypatch.setattr(svc_mod.Service, "_catalogue_disk_path",
                         lambda self: real(self) if Path(self.cfg.modeling.dir).is_absolute()
                         else tmp_path / "catalogue_cache.json.gz")
+
+
+@pytest.fixture(autouse=True)
+def _reset_tier_state():
+    """Retired/draining tiers are process-wide (peaks.tiers); a Service sets them
+    from its settings. Start every test with none, so pure tier tests see the
+    full scheme and one test's retirement never leaks into the next."""
+    from peaks.tiers import set_retired
+
+    set_retired(())
+    yield
+    set_retired(())

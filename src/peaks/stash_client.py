@@ -373,7 +373,7 @@ class StashClient:
 
     # --- scene writes (two-way sync with Stash) -----------------------------
 
-    _EDITABLE = ("rating100", "organized", "title", "date", "details")
+    _EDITABLE = ("rating100", "organized", "title", "date", "details", "performer_ids")
 
     def update_scene(self, scene_id: str, clear: tuple = (),
                      tag_ids: list[str] | None = None, **fields) -> dict:

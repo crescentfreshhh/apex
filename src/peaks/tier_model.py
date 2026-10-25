@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .tiers import RES_CLASSES
+from .tiers import RES_CLASSES, learned_tiers
 
 CLASSES: tuple[str, ...] = ("reject", "merveilleuse", "exceptionnelle", "legendaire")
 ORDINAL: dict[str, int] = {c: i for i, c in enumerate(CLASSES)}
@@ -41,6 +41,21 @@ TIER_CLASS: dict[str, str] = {
     "exceptionnelle": "exceptionnelle", "legendaire": "legendaire",
 }
 MIN_PER_CLASS = 10
+
+
+def train_class(tier: str) -> str | None:
+    """A catalogue tier's training class, or None when it isn't training data
+    (unreviewed, anomaly, and a tier being drained or retired: what's left in a
+    draining tier is just the scenes not re-graded yet, a biased sample)."""
+    c = TIER_CLASS.get(tier)
+    return c if c == "reject" or tier in learned_tiers() else None
+
+
+def live_ordinal(classes) -> dict[str, int]:
+    """Ordinal positions among the classes a model actually has, so a retired
+    middle tier leaves no gap (reject and Exceptionnelle are then one step apart)."""
+    have = set(classes)
+    return {c: i for i, c in enumerate(c for c in CLASSES if c in have)}
 _CODECS = ("h264", "hevc", "av1", "vp9")
 
 
@@ -335,7 +350,8 @@ class TierModel:
         """Per row: predicted class, its confidence, expected tier on the
         CLASSES ordinal scale, keeper probability, and the full distribution."""
         out = []
-        ords = np.array([ORDINAL[c] for c in self.classes_], dtype=np.float32)
+        live = live_ordinal(self.classes_)
+        ords = np.array([live[c] for c in self.classes_], dtype=np.float32)
         rej = self.classes_.index("reject") if "reject" in self.classes_ else None
         for p in proba:
             j = int(np.argmax(p))
@@ -383,6 +399,7 @@ def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bo
     from sklearn.model_selection import StratifiedKFold
 
     y_arr = np.asarray(y)
+    live = live_ordinal(set(y))
     k = max(2, min(folds, min(np.unique(y_arr, return_counts=True)[1])))
     exact = near = 0
     for tr, te in StratifiedKFold(n_splits=k, shuffle=True, random_state=0).split(Xq, y_arr):
@@ -397,17 +414,18 @@ def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bo
         pred = [m.classes_[int(i)] for i in np.argmax(proba, axis=1)]
         for p, t in zip(pred, y_arr[te]):
             exact += p == t
-            near += abs(ORDINAL[p] - ORDINAL[str(t)]) <= 1
+            near += abs(live[p] - live[str(t)]) <= 1
     n = len(y)
     return {"exact": round(exact / n, 3), "within_one": round(near / n, 3), "folds": k}
 
 
 def quality_floor(rows: list[dict], min_count: int = 5) -> dict:
     """The transparent quality flag: per resolution class, the lowest bitrate
-    among scenes the user has graded Merveilleuse or better (needs `min_count`
-    such scenes to set a floor). Scenes under it are 'below every scene you've
-    tiered at this resolution'."""
-    tiered = [r for r in rows if r.get("tier") in ("merveilleuse", "exceptionnelle", "legendaire")]
+    among scenes the user has graded into a learned keeper tier (needs
+    `min_count` such scenes to set a floor). Scenes under it are 'below every
+    scene you've tiered at this resolution'."""
+    keep = learned_tiers()
+    tiered = [r for r in rows if r.get("tier") in keep]
     floors: dict[str, dict] = {}
     for res in RES_CLASSES:
         mb = [r["quality"]["mbps"] for r in tiered

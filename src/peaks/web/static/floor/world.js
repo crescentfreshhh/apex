@@ -260,7 +260,7 @@ function machines(ctx, pal, f, t) {
   {
     const s = ST.library, sh = d.shelves || {};
     const rows = [["LEG", "legendaire"], ["EXC", "exceptionnelle"], ["MER", "merveilleuse"], ["ANO", "anomaly"],
-      ["NEW", "unreviewed"], ["REJ", "rejected"]];
+      ["NEW", "unreviewed"], ["REJ", "rejected"]].filter(([, t]) => t !== "merveilleuse" || sh[t]);   // retired: gone
     const max = Math.max(1, ...rows.map(([, t]) => sh[t] || 0));
     rows.forEach(([lab, t], i) => {
       const n = sh[t] || 0, bar = Math.round(7 * n / max);

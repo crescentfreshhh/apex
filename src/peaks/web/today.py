@@ -29,6 +29,15 @@ JOB_LABEL = {
     "promote": "Promotion candidates", "second": "Second look", "anomaly": "Anomalies",
     "trim": "No saved moments",
 }
+
+
+def _labels() -> dict:
+    from ..tiers import DEFAULT_NAMES, draining
+
+    d = draining()
+    return {**JOB_LABEL, "promote": "Drain " + " + ".join(DEFAULT_NAMES[t] for t in d)} if d else JOB_LABEL
+
+
 # quick one-key confirmations interleaved with real decisions, so it never drags
 MIX = ("saved", "new", "reject", "new", "promote", "saved", "second", "reject", "new",
        "anomaly", "trim", "new")
@@ -82,7 +91,10 @@ class TodayMixin:
                 out.append({"scene_id": r["scene_id"], "pick": pick, **_why(rec)})
         elif job in ("promote", "second"):
             for r in self._triage(job, rows, preds, floor, sig):
-                out.append({"scene_id": r["scene_id"], "pick": preds[r["scene_id"]]["tier"], "why": "", "detail": ""})
+                p = preds.get(r["scene_id"])
+                rec = (self._recommend(r, p, sig.get(r["scene_id"]), names) or {}) if job == "promote" else {}
+                out.append({"scene_id": r["scene_id"], "pick": rec.get("grade") or (p["tier"] if p else None),
+                            **_why(rec)})
         elif job == "anomaly":
             for r in self._triage("anomaly", rows, preds, floor, sig):
                 rec = self._suggest_for_anomaly(r, preds.get(r["scene_id"]), names) or {}
@@ -212,7 +224,7 @@ class TodayMixin:
             progress = {"done": len(ids & done), "total": len(ids), "goal": self.today_goal()}
         return {"next": [self._decision_payload(it, ctx) for it in nxt], "remaining": remaining,
                 "progress": progress, "job": job, "board": self._today_board(ctx), "week": self.week_tally(),
-                "labels": JOB_LABEL}
+                "labels": _labels()}
 
     def _decision_payload(self, it: dict, ctx: dict) -> dict:
         sid = it["scene_id"]
@@ -238,6 +250,7 @@ class TodayMixin:
             "jobs": counts,
             "likely": len(self._triage("likely", rows, preds, floor, sig)),
             "conflicts": sum(1 for r in rows if r["tag_state"]["conflict"]),
+            "orphans": len(self.orphan_rows(rows)),
             "quality": sum(1 for r in rows if r["tier"] == "unreviewed" and quality_flag(r["quality"], floor)),
             "dupes": len(dupes["groups"]) if dupes else None,
             "rejected": {"count": len(rejected), "bytes": sum(int(r.get("size") or 0) for r in rejected)},

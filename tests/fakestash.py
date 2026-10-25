@@ -54,6 +54,13 @@ class FakeStash:
             yield {"aliases": [], "image": None, "has_image": False, "scene_count": 0,
                    "favorite": False, "rating100": None, "created_at": "", **p}
 
+    def find_performers(self, name=None, limit=500):
+        import re
+
+        rx = re.compile(name[4:], re.I) if name and name.startswith("(?i)") else re.compile(name or "")
+        return [{"id": str(p["id"]), "name": p.get("name", ""), "image": None, "scene_count": 0}
+                for p in self.performers if rx.search(p.get("name", ""))][:limit]
+
     def performer_image(self, pid):
         p = next((x for x in self.performers if x["id"] == str(pid)), None)
         if not p or not p.get("has_image"):
@@ -96,6 +103,11 @@ class FakeStash:
                 v[k] = fields[k]
         if fields.get("tag_ids") is not None:
             v["tag_ids"] = [str(t) for t in fields["tag_ids"]]
+        if fields.get("performer_ids") is not None:          # names from `self.performers`
+            names = {str(p["id"]): p.get("name", "") for p in self.performers}
+            v["performers_detail"] = [{"id": str(i), "name": names.get(str(i), f"P{i}")}
+                                      for i in fields["performer_ids"]]
+            v["performers"] = [p["name"] for p in v["performers_detail"]]
         return {}
 
     def scene_add_o(self, sid):

@@ -1234,9 +1234,9 @@ def create_app(cfg=None):
 
     @app.post("/api/catalogue/grade-bulk")
     def catalogue_grade_bulk(body: BulkGradeIn):
-        from ..tiers import GRADES
+        from ..tiers import grades
 
-        if body.grade not in GRADES:
+        if body.grade not in grades():
             raise HTTPException(400, f"unknown grade: {body.grade}")
         if not body.scene_ids:
             raise HTTPException(400, "no scenes selected")
@@ -1752,6 +1752,55 @@ def create_app(cfg=None):
     @app.post("/api/catalogue/names")
     def catalogue_save_names(body: TierNamesIn):
         return service.save_tier_names(body.names)
+
+    @app.get("/api/orphans/{scene_id}/suggest")
+    def orphan_suggest(scene_id: str):
+        try:
+            return service.orphan_suggestions(scene_id)
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable etc.
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/scene/{scene_id}/performers/add")
+    def scene_add_performer(scene_id: str, body: dict):
+        pid = str(body.get("performer_id") or "").strip()
+        if not pid:
+            raise HTTPException(400, "performer_id is required")
+        try:
+            return service.add_performer(scene_id, pid)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.post("/api/scene/{scene_id}/performers/set")
+    def scene_set_performers(scene_id: str, body: dict):
+        ids = body.get("performer_ids")
+        if not isinstance(ids, list):
+            raise HTTPException(400, "performer_ids must be a list")
+        return service.set_scene_performers(scene_id, ids)
+
+    @app.post("/api/orphans/{scene_id}/not-them")
+    def orphan_not_them(scene_id: str, body: dict):
+        return service.orphan_not_them(scene_id, str(body.get("performer_id") or ""))
+
+    @app.get("/api/performers/search")
+    def performers_search(q: str = ""):
+        q = q.strip()
+        if len(q) < 2:
+            return []
+        try:
+            # Stash matches by (Go) regex: escape the metacharacters, ignore case
+            pat = "(?i)" + "".join("\\" + c if c in ".^$*+?()[]{}|\\" else c for c in q)
+            found = service.client().find_performers(pat, limit=12)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
+        return [{"id": str(p.get("id")), "name": p.get("name", "")} for p in found]
+
+    @app.get("/api/tiers/state")
+    def tiers_state():
+        return service.tier_state()
+
+    @app.post("/api/tiers/state")
+    def tiers_set_state(body: dict):
+        return service.set_tier_state(retired=body.get("retired"), draining=body.get("draining"))
 
     # --- library safety net: capabilities, action log, grade backups --------
 

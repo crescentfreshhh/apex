@@ -22,8 +22,13 @@ def stash():
 
 @pytest.fixture
 def svc(tmp_path, stash, monkeypatch):
+    import json
+    import os
+
     import peaks.web.service as svc_mod
 
+    with open(os.environ["PEAKS_SETTINGS"], "w") as fh:     # Merveilleuse live: the classic promote list
+        json.dump({"draining_tiers": []}, fh)
     cfg = Config()
     cfg.embedding.cache_dir = str(tmp_path / "cache")
     cfg.modeling.dir = str(tmp_path / "models")

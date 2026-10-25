@@ -34,6 +34,7 @@ from .studios import StudiosMixin
 from .picture import PictureMixin
 from .upgrades import UpgradesMixin
 from .seedjobs import SeedJobsMixin
+from .orphans import OrphansMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -41,12 +42,13 @@ class IndexMemoryError(RuntimeError):
 
 
 # the Catalogue's "Tier" sort: best → worst
+GRADE_OF_CLASS = {"reject": "reject", "exceptionnelle": "exceptionnelle", "legendaire": "legendaire"}
 TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anomaly": 2, "unreviewed": 1, "rejected": 0}
 
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
-              PictureMixin, UpgradesMixin, SeedJobsMixin):
+              PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -145,7 +147,67 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 self._settings_cache = atomic.read_json(path, default={}, set_aside=True) or {}
             except OSError:
                 self._settings_cache = {}
+            self._apply_tier_state(self._settings_cache)
         return self._settings_cache
+
+    def _apply_tier_state(self, s: dict) -> None:
+        """Retired and draining tiers (peaks.tiers): Merveilleuse drains by
+        default, and retires once nothing is left in it."""
+        from ..tiers import set_retired
+
+        set_retired(s.get("retired_tiers") or [], s.get("draining_tiers", ["merveilleuse"]))
+
+    def tier_state(self) -> dict:
+        """What the UI needs to hide retired tiers and show the drain."""
+        from ..tiers import draining, keeper_tiers, retired
+
+        self._settings()
+        return {"retired": list(retired()), "draining": list(draining()), "keepers": list(keeper_tiers()),
+                "retired_note": self._settings().get("tier_retired_note")}
+
+    def set_tier_state(self, retired: list[str] | None = None, draining: list[str] | None = None) -> dict:
+        """Change which tiers are retired / draining (by hand; Peaks also retires a
+        drained tier on its own). Rows are rebuilt so O-counts read the new way."""
+        from ..tiers import RETIRABLE
+
+        s = dict(self._settings())
+        if retired is not None:
+            s["retired_tiers"] = [t for t in retired if t in RETIRABLE]
+        if draining is not None:
+            s["draining_tiers"] = [t for t in draining if t in RETIRABLE]
+        self._save_settings_dict(s)
+        return self.tier_state()
+
+    def _save_settings_dict(self, s: dict) -> None:
+        from .. import atomic
+
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
+        self._settings_cache = s
+        self._apply_tier_state(s)
+        self._tag_id_cache = {}
+        self._cat_cache = None                 # tiers and tag states are read into the rows
+        self._tier_preds = None
+
+    def _check_drained(self, rows: list[dict]) -> None:
+        """Retire a draining tier once nothing is left in it (needs a real listing:
+        an empty or keeper-less one never retires anything)."""
+        import time as _t
+
+        from ..tiers import draining
+
+        drain = draining()
+        if not drain or not any(r["tier"] in ("exceptionnelle", "legendaire") for r in rows):
+            return
+        done = [t for t in drain if not any(r["tier"] == t for r in rows)]
+        if not done:
+            return
+        s = dict(self._settings())
+        s["retired_tiers"] = sorted(set(s.get("retired_tiers") or []) | set(done))
+        s["draining_tiers"] = [t for t in drain if t not in done]
+        s["tier_retired_note"] = {"tiers": done, "at": _t.time()}
+        self._save_settings_dict(s)
 
     # peak-level matching: represent a moment by the mean of its frames within a
     # window, not one midpoint frame. ON by default (steadier "find similar");
@@ -1008,12 +1070,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     @staticmethod
     def _parse_tiers(tiers) -> list[str]:
-        from ..tiers import KEEPER_TIERS
+        from ..tiers import keeper_tiers
 
         want = [t for t in (tiers.split(",") if isinstance(tiers, str) else (tiers or [])) if t]
-        bad = [t for t in want if t not in KEEPER_TIERS]
+        bad = [t for t in want if t not in keeper_tiers()]
         if bad or not want:
-            raise ValueError(f"tiers must be among {', '.join(KEEPER_TIERS)}")
+            raise ValueError(f"tiers must be among {', '.join(keeper_tiers())}")
         return want
 
     def tier_label(self, tiers) -> str:
@@ -4820,7 +4882,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "fingerprint": m.get("fingerprint"),
             "phash": m.get("phash"),
             "tag_state": tag_state(tier, m.get("tags") or [], bool(m.get("organized")),
-                                   self.tier_tag_names()),
+                                   self.tier_tag_names(), self._retired_tag_names()),
         }
 
     def _catalogue_all(self, refresh: bool = False) -> list[dict]:
@@ -5050,9 +5112,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
-        from ..tiers import RES_CLASSES, TIERS
+        from ..tiers import RES_CLASSES, TIERS, draining
 
         rows = self._catalogue_all(refresh=refresh)
+        self._check_drained(rows)
         tiers = {t for t in (tier or "").split(",") if t}
         resset = {r for r in (res or "").split(",") if r}
         terms = self._search_terms(q)
@@ -5195,10 +5258,22 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         grace_new = sum(1 for r in pool_all if (signals.get(r["scene_id"]) or {}).get("new")
                         and r["tier"] not in ("legendaire", "rejected")
                         and not (signals.get(r["scene_id"]) or {}).get("saves"))
+        drain = None
+        if view == "promote" and draining():
+            # the sure suggestions, grouped by grade, so each group is one bulk grade
+            drain = {}
+            for r in pool:
+                p, sg = preds.get(r["scene_id"]), signals.get(r["scene_id"])
+                rec = self._recommend(r, p, sg, names) or {}
+                sure = (rec.get("drain") and p and p["conf"] >= self.DRAIN_SURE) or (
+                    rec.get("grade") == "legendaire" and (sg or {}).get("saves"))
+                if sure:
+                    drain.setdefault(rec["grade"], []).append(r["scene_id"])
         return {
-            "items": items, "total": len(pool), "counts": counts, "views": views,
+            "items": items, "total": len(pool), "counts": counts, "views": views, "drain": drain,
             "grace": {"days": self.cfg.modeling.trim_grace_days, "new_excluded": grace_new},
             "names": self.tier_display_names(), "offset": offset, "limit": limit,
+            "tier_state": self.tier_state(),
             "model": self.tier_model_status(), "floor": floor,
             "ingest": {"finished": ingest.get("finished"), "new": len(ingest.get("new") or [])},
             "storage": self._storage(pool_all),
@@ -5212,6 +5287,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tiers import TIERS
 
         rows = self._catalogue_all()
+        self._check_drained(rows)
         counts = {t: 0 for t in TIERS}
         for r in rows:
             counts[r["tier"]] += 1
@@ -5227,6 +5303,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         except Exception:  # noqa: BLE001 — extra, never in the way
             upgrades = 0
         return {"total": len(rows), "counts": counts, "views": views, "new": new,
+                "tier_state": self.tier_state(),
                 "dupes": len(dupes["groups"]) if dupes else None, "upgrades": upgrades,
                 "model": self.tier_model_status()}
 
@@ -5426,10 +5503,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         Returns the updated catalogue row and the previous state
         {rating100, o_counter, tag_ids, organized} so the UI can undo."""
-        from ..tiers import GRADES
+        from ..tiers import GRADES, grades
 
-        if grade not in GRADES:
-            raise ValueError(f"unknown grade: {grade}")
+        if grade not in grades():
+            raise ValueError(f"unknown grade: {grade}" if grade not in GRADES else f"{grade} is retired")
         sid = str(scene_id)
         cur = self._meta_client().scene_details([sid]).get(sid)
         if not cur:
@@ -5640,7 +5717,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         import time as _t
 
         from ..tier_model import (
-            CLASSES, TIER_CLASS, fit_best, fit_fallback, picture_features, quality_features,
+            CLASSES, fit_best, fit_fallback, picture_features, quality_features, train_class,
             usable_classes, who_of,
         )
         from . import forensics
@@ -5648,7 +5725,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._tier_training = True
         try:
             everything = self._catalogue_all()
-            rows = [r for r in everything if r["tier"] in TIER_CLASS]
+            rows = [r for r in everything if train_class(r["tier"])]
             feats = self._scene_features(rows)
             self._remember_rejects(rows, feats)
             train = [r for r in rows if r["scene_id"] in feats]
@@ -5657,7 +5734,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             who = [who_of(r) for r in train]
             pics = self._picture_entries()
             pic = [picture_features(pics.get(r["scene_id"])) for r in train]
-            y = [TIER_CLASS[r["tier"]] for r in train]
+            y = [train_class(r["tier"]) for r in train]
             # rejects deleted from the library live on as remembered features
             live = {r["fingerprint"] for r in everything if r.get("fingerprint")}
             mem = self.reject_memory()
@@ -5684,7 +5761,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             fb_q = [quality_features(r["quality"]) for r in rows]
             fb_w = [who_of(r) for r in rows]
             fb_p = [picture_features(pics.get(r["scene_id"])) for r in rows]
-            fb_y = [TIER_CLASS[r["tier"]] for r in rows]
+            fb_y = [train_class(r["tier"]) for r in rows]
             for q, w in zip([] if mq is None else list(mq), mwho):
                 if w is not None:
                     fb_q.append(q)
@@ -5730,7 +5807,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         performer/studio fallback when there is one (marked `"from": "who"`).
         A graded scene's own grade is left out of its performers'/studio's
         records, so a second opinion isn't just its grade echoed back."""
-        from ..tier_model import TIER_CLASS, picture_features, quality_features, who_of
+        from ..tier_model import picture_features, quality_features, train_class, who_of
 
         st = self._tier_model_state()
         if st["model"] is None:
@@ -5753,7 +5830,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         def run(model, sids, Xv, Xq, source=None):
             rs = [by_id[s] for s in sids]
             who = [who_of(r) for r in rs]
-            own = [TIER_CLASS.get(r["tier"]) for r in rs]
+            own = [train_class(r["tier"]) for r in rs]
             pic = np.stack([picture_features(pics.get(s)) for s in sids])
             for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own, pic=pic))):
                 if source:
@@ -5775,9 +5852,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """A WhoEncoder over every graded scene (plus remembered rejects that
         kept their performers/studio) — the facts behind the "Performers: …"
         reason lines and the Library health tables. Cached per grading state."""
-        from ..tier_model import TIER_CLASS, WhoEncoder, who_of
+        from ..tier_model import WhoEncoder, train_class, who_of
 
-        graded = [(who_of(r), TIER_CLASS[r["tier"]]) for r in rows if r["tier"] in TIER_CLASS]
+        graded = [(who_of(r), train_class(r["tier"])) for r in rows if train_class(r["tier"])]
         try:
             live = {r["fingerprint"] for r in rows if r.get("fingerprint")}
             mem = self.reject_memory()
@@ -5889,7 +5966,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "detail": f"{round(100 * share)}% {label}"}
 
     TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim",
-                    "passed")
+                    "passed", "orphans")
+    DRAIN_SURE = 0.8      # drain suggestions this sure are offered as one bulk grade per tier
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
     PROMOTABLE = ("unreviewed", "merveilleuse", "exceptionnelle", "anomaly")
 
@@ -5974,6 +6052,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         your saves (→ Légendaire), the anomaly rules, and — for scenes past their
         grace period with no saves and a weak best moment the tier model doesn't
         rate as a keeper — Reject. New scenes are never pushed toward Reject."""
+        from ..tiers import draining
+
         sig = sig or {}
         n = sig.get("saves", 0)
         tier = row["tier"]
@@ -5982,6 +6062,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     "why": f"{n} saved moment{'s' if n != 1 else ''} — scenes you save from are Légendaire"}
         if tier == "anomaly":
             return self._suggest_for_anomaly(row, pred, names)
+        if tier in draining() and pred and pred.get("tier") in GRADE_OF_CLASS:
+            # a tier being drained: the model (which no longer learns from it) picks a live tier
+            g = GRADE_OF_CLASS[pred["tier"]]
+            nm = (names or {}).get("rejected" if g == "reject" else g, g)
+            return {"grade": g, "drain": True,
+                    "why": f"retiring {(names or {}).get(tier, tier)} — it looks most like your {nm} scenes",
+                    "detail": f"{round(pred['conf'] * 100)}% sure"}
         q25, b = getattr(self, "_best_q25", None), sig.get("best")
         keeper = (pred or {}).get("keeper")
         eligible = (tier not in ("legendaire", "rejected") and not n and not sig.get("new")
@@ -6032,6 +6119,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _triage_raw(self, view: str, pool: list[dict], preds: dict, floor: dict,
                     signals: dict | None = None) -> list[dict]:
         from ..tier_model import ORDINAL, quality_flag
+        from ..tiers import draining, learned_tiers
 
         signals = signals or {}
         if view == "saved":
@@ -6074,6 +6162,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             out = [r for r in pool if r["tier"] == "unreviewed" and quality_flag(r["quality"], floor)]
             return sorted(out, key=lambda r: r["quality"]["mbps"] or 0)
         if view == "promote":
+            drain = draining()
+            if drain:
+                # draining a tier: every scene left in it, with the model's live-tier
+                # guess — the surest first, so agreeing batches can go in one bulk grade
+                out = [r for r in pool if r["tier"] in drain]
+                return sorted(out, key=lambda r: -(preds.get(r["scene_id"]) or {}).get("conf", -1))
+
             def up(r):
                 p = preds[r["scene_id"]]["probs"]
                 return p.get("exceptionnelle", 0) + p.get("legendaire", 0)
@@ -6081,12 +6176,17 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                    and preds[r["scene_id"]]["tier"] in ("exceptionnelle", "legendaire")]
             return sorted(out, key=up, reverse=True)
         if view == "second":
+            if "merveilleuse" in learned_tiers():
+                low = lambda r: ORDINAL[preds[r["scene_id"]]["tier"]] <= ORDINAL["merveilleuse"]  # noqa: E731
+            else:          # no middle tier to look like: anything the model rates below its grade
+                low = lambda r: ORDINAL[preds[r["scene_id"]]["tier"]] < ORDINAL[r["tier"]]  # noqa: E731
             out = [r for r in pool if r["tier"] in ("exceptionnelle", "legendaire")
-                   and r["scene_id"] in preds
-                   and ORDINAL[preds[r["scene_id"]]["tier"]] <= ORDINAL["merveilleuse"]]
+                   and r["scene_id"] in preds and low(r)]
             return sorted(out, key=lambda r: preds[r["scene_id"]]["expected"])
         if view == "conflict":
             return [r for r in pool if r["tag_state"]["conflict"]]
+        if view == "orphans":
+            return self.orphan_rows(pool)
         if view == "anomaly":
             out = [r for r in pool if r["tier"] == "anomaly"]
             return sorted(out, key=lambda r: -(preds.get(r["scene_id"]) or {}).get("conf", 0))

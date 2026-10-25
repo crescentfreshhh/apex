@@ -107,7 +107,7 @@ class LibraryMixin:
         """Re-apply a backup's grades to every scene whose grade differs (matched
         by fingerprint). Goes through the normal grade path, so tier tags and the
         action log behave exactly as for a hand-made grade."""
-        from ..tiers import GRADES
+        from ..tiers import grades
 
         if not confirm:
             raise PermissionError("restoring a backup changes grades in Stash — confirm first")
@@ -119,7 +119,7 @@ class LibraryMixin:
             to = ch["to"]
             grade = "reject" if to["tier"] == "rejected" else to["tier"]
             try:
-                if grade in GRADES:
+                if grade in grades():
                     self.grade_scene(ch["scene_id"], grade, source=f"backup {name}")
                 else:
                     self.restore_scene_grade(ch["scene_id"], to["rating100"], to["o_counter"],
@@ -139,6 +139,11 @@ class LibraryMixin:
         from ..tiers import tier_tags
 
         return tier_tags(self._settings().get("tier_tags"))
+
+    def _retired_tag_names(self) -> dict[str, str]:
+        from ..tiers import retired_tags
+
+        return retired_tags(self._settings().get("tier_tags"))
 
     def save_tier_tags(self, tags: dict) -> dict[str, str]:
         from ..tiers import TIER_TAGS
@@ -180,11 +185,9 @@ class LibraryMixin:
 
     def _retired_tag_ids(self) -> set[str]:
         """Stash ids of retired tiers' tags (e.g. "personal upscale") that exist."""
-        from ..tiers import RETIRED_TIER_TAGS
-
         cache = self.__dict__.setdefault("_tag_id_cache", {})
         out = set()
-        for name in RETIRED_TIER_TAGS.values():
+        for name in self._retired_tag_names().values():
             key = name.lower()
             if key not in cache:
                 t = self.client().find_tag_by_name(name)
@@ -636,10 +639,10 @@ class LibraryMixin:
     def grade_bulk(self, job, scene_ids: list[str], grade: str) -> dict:
         """Grade scenes one at a time (one renamer run per scene), collecting each
         previous state so the whole batch can be undone together."""
-        from ..tiers import GRADES
+        from ..tiers import GRADES, grades
 
-        if grade not in GRADES:
-            raise ValueError(f"unknown grade: {grade}")
+        if grade not in grades():
+            raise ValueError(f"unknown grade: {grade}" if grade not in GRADES else f"{grade} is retired")
         ids = [str(s) for s in dict.fromkeys(scene_ids or [])]
         previous, failed = [], []
         for i, sid in enumerate(ids):

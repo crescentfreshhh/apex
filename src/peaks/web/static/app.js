@@ -873,15 +873,57 @@ let TIER_NAMES = {
   unreviewed: "Unreviewed", rejected: "Rejected", anomaly: "Anomaly",
   merveilleuse: "Merveilleuse", exceptionnelle: "Exceptionnelle", legendaire: "Légendaire",
 };
-const GRADES = ["reject", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–4, worst → best
+const GRADES = ["reject", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–n, worst → best
+// retired tiers (peaks/tiers.py): gone from every list, their O-count reads as an anomaly.
+// A draining tier still shows, and its Catalogue view becomes "Drain <tier>".
+let RETIRED = new Set(), DRAINING = new Set();
+const liveTier = (t) => !RETIRED.has(t);
+// what each grade means — one line each, shown on the grade buttons and the drain view
+const GRADE_HELP = {
+  legendaire: "The vault: you'd go looking for it, and re-download it tonight if it were lost.",
+  exceptionnelle: "The rotation: a solid keeper you're glad to see come up, but replaceable.",
+  merveilleuse: "Kept, middling (being retired).",
+  reject: "Would you notice it gone in a year? If not, let it go.",
+};
 function tierOf(rating100, o) {
   const r = +rating100 || 0;
   if (r <= 0) return "unreviewed";
   if (r <= 20) return "rejected";
   if (r < 100) return "unreviewed";
-  return ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  const t = ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  return RETIRED.has(t) ? "anomaly" : t;
 }
 function gradeName(g) { return g === "reject" ? "Reject (1★)" : TIER_NAMES[g]; }
+const gradeKey = (k) => k >= "1" && k <= String(GRADES.length);
+function applyTierState(st) {
+  if (!st) return;
+  const before = [...RETIRED].join(), drainBefore = [...DRAINING].join();
+  RETIRED = new Set(st.retired || []); DRAINING = new Set(st.draining || []);
+  const prune = (arr) => { for (let i = arr.length - 1; i >= 0; i--) if (RETIRED.has(Array.isArray(arr[i]) ? arr[i][0] : arr[i])) arr.splice(i, 1); };
+  [TIER_ORDER, GRADES, CAT_CHIPS, PF_TIERS, PR_TIERS, RV_GRADES].forEach(prune);
+  // a retired middle tier has nothing left to promote from: the view goes too
+  const pi = CAT_VIEWS.findIndex((v) => v[0] === "promote");
+  if (pi >= 0 && RETIRED.has("merveilleuse")) CAT_VIEWS.splice(pi, 1);
+  const pv = CAT_VIEWS.find((v) => v[0] === "promote");
+  if (pv && DRAINING.size) {
+    const n = [...DRAINING].map((t) => TIER_NAMES[t]).join(" + ");
+    pv[1] = `Drain ${n}`;
+    pv[2] = `Every ${n} scene left, with the tier it looks most like — the surest first, so agreeing ones can be bulk-graded. ${n} retires on its own when this is empty.`;
+  }
+  const sl = CAT_VIEWS.find((v) => v[0] === "second");
+  if (sl && (!liveTier("merveilleuse") || DRAINING.has("merveilleuse"))) sl[2] = "Légendaire/Exceptionnelle scenes the model rates below their grade";
+  const note = st.retired_note;
+  if (note && note.at) {
+    let seen = 0; try { seen = +localStorage.getItem("peaks_retired_seen") || 0; } catch { /* ok */ }
+    if (note.at > seen) {
+      toast(`${note.tiers.map((t) => TIER_NAMES[t]).join(" + ")} is empty — retired. Grade keys are now 1–${GRADES.length}.`);
+      try { localStorage.setItem("peaks_retired_seen", String(note.at)); } catch { /* ok */ }
+    }
+  }
+  if (before !== [...RETIRED].join() || drainBefore !== [...DRAINING].join()) {
+    if (typeof renderCatChips === "function") try { renderCatChips(); } catch { /* not built yet */ }
+  }
+}
 function tierBadge(rating100, o, { showUnreviewed = false } = {}) {
   const t = tierOf(rating100, o);
   if (t === "unreviewed" && !showUnreviewed) return "";
@@ -2308,7 +2350,7 @@ function renderStatistics(st, metrics, storage) {
 // disk space by tier, and the biggest files in tiers you might trim
 function storageCard(d) {
   if (!d) return "";
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"].filter(liveTier);
   const tot = d.total.bytes || 1;
   const bars = order.filter((t) => d.tiers[t]).map((t) => {
     const x = d.tiers[t];
@@ -2903,7 +2945,7 @@ async function openHealth() {
   try { h = await api("/api/library/health"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
   const n = (x) => (x ?? 0).toLocaleString();
   const pct = (a, b) => (b ? Math.round(100 * a / b) + "%" : "—");
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"].filter(liveTier);
   const rows = order.filter((t) => h.per_tier[t]).map((t) => {
     const x = h.per_tier[t];
     const w = x.scenes ? 100 * x.with_saves / x.scenes : 0;
@@ -3209,7 +3251,9 @@ function tdBoard() {
     card("Confirm", "saved", "Saved → Légendaire", j.saved, "you saved moments in these", "job"),
     card("Confirm", "reject", "Suggested to let go", j.reject, "passed over or among your weakest", "job"),
     card("Grade", "new", "New scenes", j.new, `${n(b.likely)} look like keepers`, "job"),
-    card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job"),
+    ...(RETIRED.has("merveilleuse") ? [] : [DRAINING.size
+      ? card("Second opinion", "promote", `Drain ${[...DRAINING].map((t) => TIER_NAMES[t]).join(" + ")}`, j.promote, "left to re-grade before it retires", "job")
+      : card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job")]),
     card("Second opinion", "second", "Second look", j.second, "Peaks rates them below your grade", "job"),
     card("Second opinion", "anomaly", "Anomalies", j.anomaly, "5★ with an unusual O-count", "job"),
     card("Trim", "trim", "No saved moments", j.trim, "past 30 days, nothing saved", "job"),
@@ -3217,6 +3261,7 @@ function tdBoard() {
     card("Upkeep", "rejected", "Rejected, awaiting delete", b.rejected.count, b.rejected.bytes ? `free ${fmtBytes(b.rejected.bytes)}` : "nothing to free", "rejected"),
     card("Upkeep", "conflict", "Tag conflicts", b.conflicts, "tier tags your renamer can't act on", "view"),
     card("Upkeep", "quality", "Quality check", b.quality, "below the quality you usually keep", "view"),
+    card("Upkeep", "orphans", "Orphans", b.orphans, "no performer yet — Peaks suggests who", "view"),
     ...(b.upgrades != null ? [card("Upkeep", "upgrades", "Upgrades found", b.upgrades, "better copies of your keepers — grab or skip", "upgrades")] : []),
     card("Teach", "teach", "Teach Peaks", 1, "a quick 👍/👎 on what it's unsure of", "teach"),
   ].join("");
@@ -3245,7 +3290,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const x = td.queue[0];
-  if (k >= "1" && k <= "4") { e.preventDefault(); tdAnswer(RV_GRADES[+k - 1][0]); }
+  if (gradeKey(k)) { e.preventDefault(); tdAnswer(RV_GRADES[+k - 1][0]); }
   else if (k === "enter" && x && x.pick) { e.preventDefault(); tdAnswer(x.pick); }
   else if (k === "s") { e.preventDefault(); tdSkip(); }
   else if (k === "u") { e.preventDefault(); tdUndo(); }
@@ -3584,9 +3629,10 @@ const CAT_VIEWS = [
   ["conflict", "Tag conflicts", "Scenes carrying two tier tags, or a tier tag that disagrees with their grade — the renamer can't file these. Re-grade to fix."],
   ["saved", "Saved → Légendaire", "Scenes you've saved moments in that aren't Légendaire yet — most saves first. One click grades them all."],
   ["trim", "No saved moments", "Scenes past their grace period with no saved moments, weakest best moment first — trim candidates. Légendaire and rejects are left out."],
+  ["orphans", "Orphans", "Scenes with no performer (or only junk ones like “upscale”) — keepers first. Peaks suggests who it might be from the scenes you've credited; nothing is written until you click."],
   ["passed", "Passed over", "Scenes the megaboard keeps showing you that you never save, 👍, explore, pin or enlarge — most-shown first. Légendaire, rejects and new scenes are left out."],
 ];
-const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict", "saved", "trim", "passed"]);
+const MODEL_FREE_VIEWS = new Set(["quality", "anomaly", "conflict", "saved", "trim", "passed", "orphans"]);
 const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 
 // --- Catalogue filters: chips under the search box ---------------------------------
@@ -3716,8 +3762,9 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     const d = await api("/api/catalogue?" + catParams(offset, refresh), { signal: ctl.signal });
     if (seq !== cat.seq) return;                // another section was picked meanwhile
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
+    applyTierState(d.tier_state);
     cat.items = append ? cat.items.concat(d.items) : d.items;
-    cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model;
+    cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model; cat.drain = d.drain;
     cat.grace = d.grace || cat.grace;
     renderCatViewbar();
     const nb = $("#btn-cat-new"), ing = d.ingest || {};
@@ -3755,6 +3802,7 @@ async function loadSidebar() {
   side.busy = true;
   try {
     const d = await api("/api/catalogue/summary");
+    applyTierState(d.tier_state);
     side.views = d.views; side.model = d.model;
     const set = (id, v) => { const el = $(id); if (el) el.textContent = v ? (+v).toLocaleString() : ""; };
     set("#nav-ct-cat", d.total);
@@ -3804,7 +3852,7 @@ function renderCatTriage() {
   const trained = !!m.trained;
   const views = side.views || cat.views || {};
   $("#cat-views").innerHTML = CAT_VIEWS.map(([v, label, tip]) => {
-    const needsModel = !MODEL_FREE_VIEWS.has(v) && !trained;
+    const needsModel = !MODEL_FREE_VIEWS.has(v) && !trained && !(v === "promote" && DRAINING.size);
     return `<button class="cat-chip cat-view ${cat.view === v ? "on" : ""}" data-v="${v}" title="${esc(tip)}${needsModel ? " (train the model first)" : ""}" ${needsModel ? "disabled" : ""}>${esc(label)} <span class="n">${(views[v] || 0).toLocaleString()}</span></button>`;
   }).join("");
   const btn = $("#btn-cat-train");
@@ -3850,7 +3898,7 @@ function whoGainText(rep) {
 }
 function renderCatStorage(st) {
   const el = $("#cat-storage"); if (!el || !st) return;
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed", "rejected"].filter(liveTier);
   el.innerHTML = order.filter((t) => st[t] && st[t].bytes).map((t) =>
     `<span class="stor-chip"><span class="tier-dot tier-bg-${t}"></span>${esc(TIER_NAMES[t])} <b>${fmtBytes(st[t].bytes)}</b>${t === "rejected" ? " awaiting delete" : ""}</span>`).join("");
 }
@@ -4194,20 +4242,29 @@ function renderCatViewbar() {
   } else if (cat.view === "passed") {
     bar.hidden = false;
     bar.innerHTML = `<span>The megaboard keeps showing you these and you never save, 👍, explore, pin or enlarge them — most-shown first. Grading a scene starts its record over. Select the ones to let go and press 1 (Reject).</span>`;
+  } else if (cat.view === "promote" && DRAINING.size) {
+    const name = [...DRAINING].map((t) => TIER_NAMES[t]).join(" + ");
+    const groups = Object.entries(cat.drain || {}).filter(([g]) => GRADES.includes(g));
+    bar.hidden = false;
+    bar.innerHTML = `<div class="drain-rubric"><b>Retiring ${esc(name)}.</b> Peaks no longer learns from what's left in it; each scene shows the tier it looks most like.
+        <ul>${["legendaire", "exceptionnelle", "reject"].map((g) => `<li><b>${esc(gradeName(g))}</b> — ${esc(GRADE_HELP[g])}</li>`).join("")}</ul></div>
+      <span class="drain-acts">${groups.length ? groups.map(([g, ids]) =>
+        `<button class="btn sm ${g === "reject" ? "ghost" : "pri"}" data-drain="${g}">Accept ${ids.length.toLocaleString()} sure → ${esc(gradeName(g))}</button>`).join(" ")
+        : '<span class="faint">No suggestions are 80% sure yet — grade a few by hand, then retrain.</span>'}</span>`;
   } else { bar.hidden = true; bar.innerHTML = ""; }
 }
-async function gradeAllSaved() {
-  let d;
-  try { d = await api("/api/catalogue?" + new URLSearchParams({ view: "saved", ids_only: "true", limit: 500 })); }
-  catch (e) { return toast(e.message, true); }
-  const ids = d.ids || [];
-  if (!ids.length) return toast("Nothing to promote");
-  if (!confirm(`Grade ${plural(ids.length, "scene")} with saved moments as ${gradeName("legendaire")}?\n\nEach gets the "${TIER_TAGS.legendaire || "legendaire"}" tag (other tier tags removed) and is marked organized — your renamer will move the files.\n\nZ undoes the whole batch.`)) return;
-  const btn = $("#btn-saved-all"); if (btn) btn.disabled = true;
+// grade a list of scenes in one job, with one Z to undo the batch
+async function bulkGradeIds(ids, grade, btn, what) {
+  if (!ids.length) return toast("Nothing to grade");
+  if (!confirm(`Grade ${plural(ids.length, "scene")}${what ? " " + what : ""} as ${gradeName(grade)}?\n\n` +
+    (grade === "reject" ? "They're rated 1★ and queued for deletion (nothing is deleted until you say so)." :
+      `Each gets the "${TIER_TAGS[grade] || grade}" tag (other tier tags removed) and is marked organized — your renamer will move the files.`) +
+    "\n\nZ undoes the whole batch.")) return;
+  if (btn) btn.disabled = true;
   try {
     const job = await api("/api/catalogue/grade-bulk", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scene_ids: ids, grade: "legendaire" }),
+      body: JSON.stringify({ scene_ids: ids, grade }),
     });
     const j = await waitJob(job.id, (x) => {
       const p = x.progress || {};
@@ -4215,12 +4272,23 @@ async function gradeAllSaved() {
     });
     if (j.status === "error") throw new Error(j.error);
     const r = j.result;
-    if (r.previous.length) gradeUndo.push({ bulk: true, items: r.previous, grade: "legendaire" });
-    toast(`${plural(r.graded, "scene")} → ${gradeName("legendaire")}${r.failed.length ? ` · ${r.failed.length} failed` : ""} — Z to undo`, !!r.failed.length);
+    if (r.previous.length) gradeUndo.push({ bulk: true, items: r.previous, grade });
+    toast(`${plural(r.graded, "scene")} → ${gradeName(grade)}${r.failed.length ? ` · ${r.failed.length} failed` : ""} — Z to undo`, !!r.failed.length);
   } catch (e) { toast(e.message, true); }
   openCatalogue();
 }
-document.addEventListener("click", (e) => { if (e.target.closest("#btn-saved-all")) gradeAllSaved(); });
+async function gradeAllSaved() {
+  let d;
+  try { d = await api("/api/catalogue?" + new URLSearchParams({ view: "saved", ids_only: "true", limit: 500 })); }
+  catch (e) { return toast(e.message, true); }
+  if (!(d.ids || []).length) return toast("Nothing to promote");
+  bulkGradeIds(d.ids, "legendaire", $("#btn-saved-all"), "with saved moments");
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#btn-saved-all")) gradeAllSaved();
+  const dr = e.target.closest("[data-drain]");
+  if (dr) bulkGradeIds((cat.drain || {})[dr.dataset.drain] || [], dr.dataset.drain, dr, "the model is sure about");
+});
 
 function catCardHTML(r, i) {
   const who = [r.performers.slice(0, 3).join(", "), r.studio, (r.date || "").slice(0, 4)].filter(Boolean).join(" · ");
@@ -4231,7 +4299,7 @@ function catCardHTML(r, i) {
   const sug = r.suggest ? r.suggest.grade : (p && r.tier === "unreviewed" ? p.tier : null);
   const short = { legendaire: "Lég", exceptionnelle: "Exc", merveilleuse: "Mer", reject: "Rej" };
   const grades = GRADES.map((g, k) =>
-    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1})"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
+    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1}) — ${esc(GRADE_HELP[g] || "")}"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
   const predLine = p
     ? `<div class="cat-pred">${predHTML(p)}` + (keeperHTML(p) ? ` · ${keeperHTML(p)}` : "") +
       (p.from === "who" ? ` <span class="faint" title="Not embedded yet: this guess comes only from how you've graded these performers and this studio">(from performer/studio history — not seen yet)</span>` : "") + `</div>`
@@ -4253,6 +4321,7 @@ function catCardHTML(r, i) {
       <div class="cat-who">${esc(who)}</div>
       <div class="qual">${qualityChips(r)}${picChipHTML(r.picture)}</div>
       ${sigLine(r)}${predLine}${whoLines(r)}${flag}${suggest}${tagLine(r)}
+      ${cat.view === "orphans" ? `<div class="orph" data-sid="${esc(r.scene_id)}">${orphHTML(r.scene_id)}</div>` : ""}
     </div>
     <div class="cat-moments">${moments || '<span class="faint small">moments appear once embedded</span>'}</div>
     <div class="cat-grades">${grades}</div>
@@ -4275,7 +4344,90 @@ function renderCatList() {
     ? cat.items.map(catCardHTML).join("")
     : '<p class="dim">Nothing here with these filters.</p>';
   $("#btn-cat-more").hidden = cat.items.length >= cat.total;
+  if (cat.view === "orphans") orphLoadAll();
 }
+
+// --- orphans: who might this be? ----------------------------------------------------
+// Suggestions are look-alikes from scenes you've credited — a hint to check against
+// the scene shown beside each name, never written without a click.
+const orph = { got: {}, done: {}, busy: false };
+function orphHTML(sid) {
+  const d = orph.got[sid], done = orph.done[sid];
+  if (done) return `<span class="orph-done">✓ Added <b>${esc(done.name)}</b></span> <button class="btn sm ghost" data-orph-undo="${esc(sid)}">Undo</button>`;
+  const search = `<span class="orph-search"><input type="search" placeholder="Someone else…" data-orph-q="${esc(sid)}" autocomplete="off" /><span class="orph-res"></span></span>`;
+  if (!d) return `<span class="faint small">Who is this? looking…</span>`;
+  if (!d.suggestions.length) return `<span class="faint small">Who is this? ${esc(d.reason || "no look-alikes yet")}</span> ${search}`;
+  return `<span class="orph-h">Who is this?</span> ${d.suggestions.map((x) => `<span class="orph-s s-${x.strength}" title="looks most like ${esc(x.via.title)}${x.studio ? " · has scenes at this studio" : ""}">
+      <img src="${x.via.cover}" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+      <span><b>${esc(x.name)}</b><i>${x.strength}${x.studio ? " · same studio" : ""}</i></span>
+      <button class="btn sm pri" data-orph-add="${esc(sid)}" data-pid="${esc(x.id)}" data-name="${esc(x.name)}" title="Add ${esc(x.name)} to this scene in Stash">Add</button>
+      <button class="btn sm ghost" data-orph-no="${esc(sid)}" data-pid="${esc(x.id)}" title="Not them — don't suggest again for this scene">✕</button></span>`).join("")} ${search}`;
+}
+function orphPaint(sid) { const el = document.querySelector(`.orph[data-sid="${CSS.escape(sid)}"]`); if (el) el.innerHTML = orphHTML(sid); }
+async function orphLoadAll() {
+  if (orph.busy) return;
+  orph.busy = true;
+  try {
+    for (const r of cat.items) {
+      if (cat.view !== "orphans") break;
+      if (orph.got[r.scene_id]) { orphPaint(r.scene_id); continue; }
+      try { orph.got[r.scene_id] = await api(`/api/orphans/${encodeURIComponent(r.scene_id)}/suggest`); }
+      catch (e) { orph.got[r.scene_id] = { suggestions: [], reason: e.message }; }
+      orphPaint(r.scene_id);
+    }
+  } finally { orph.busy = false; }
+}
+async function orphAdd(sid, pid, name) {
+  try {
+    const r = await api(`/api/scene/${encodeURIComponent(sid)}/performers/add`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_id: pid }) });
+    orph.done[sid] = { name, previous: r.previous };
+    const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
+    orphPaint(sid);
+    toast(`${name} added in Stash`);
+  } catch (e) { toast(e.message, true); }
+}
+document.addEventListener("click", async (e) => {
+  const add = e.target.closest("[data-orph-add]");
+  if (add) return orphAdd(add.dataset.orphAdd, add.dataset.pid, add.dataset.name);
+  const no = e.target.closest("[data-orph-no]");
+  if (no) {
+    const sid = no.dataset.orphNo;
+    try { await api(`/api/orphans/${encodeURIComponent(sid)}/not-them`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_id: no.dataset.pid }) }); } catch (err) { return toast(err.message, true); }
+    delete orph.got[sid]; orphPaint(sid);
+    try { orph.got[sid] = await api(`/api/orphans/${encodeURIComponent(sid)}/suggest`); } catch { orph.got[sid] = { suggestions: [] }; }
+    return orphPaint(sid);
+  }
+  const un = e.target.closest("[data-orph-undo]");
+  if (un) {
+    const sid = un.dataset.orphUndo, d = orph.done[sid]; if (!d) return;
+    try {
+      const r = await api(`/api/scene/${encodeURIComponent(sid)}/performers/set`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_ids: d.previous }) });
+      delete orph.done[sid];
+      const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
+      orphPaint(sid); toast("Undone");
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const pick = e.target.closest("[data-orph-pick]");
+  if (pick) return orphAdd(pick.dataset.orphPick, pick.dataset.pid, pick.dataset.name);
+});
+// type-ahead for "someone else"
+let orphQT = 0;
+document.addEventListener("input", (e) => {
+  const inp = e.target.closest("[data-orph-q]"); if (!inp) return;
+  clearTimeout(orphQT);
+  orphQT = setTimeout(async () => {
+    const box = inp.parentElement.querySelector(".orph-res"), q = inp.value.trim();
+    if (q.length < 2) { box.innerHTML = ""; return; }
+    try {
+      const found = await api("/api/performers/search?" + new URLSearchParams({ q }));
+      box.innerHTML = found.length ? found.map((p) => `<button class="btn sm ghost" data-orph-pick="${esc(inp.dataset.orphQ)}" data-pid="${esc(p.id)}" data-name="${esc(p.name)}">+ ${esc(p.name)}</button>`).join("")
+        : '<span class="faint small">no performer by that name in Stash</span>';
+    } catch (err) { box.textContent = err.message; }
+  }, 250);
+});
 function renderCatCard(i) {
   const old = $(`#cat-list .cat-card[data-i="${i}"]`);
   if (old) old.outerHTML = catCardHTML(cat.items[i], i);
@@ -4414,7 +4566,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("#catalogue")?.classList.contains("active") || !$("#viewer").hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  if (k >= "1" && k <= "4") { e.preventDefault(); gradeCat(cat.focus, GRADES[+k - 1]); }
+  if (gradeKey(k)) { e.preventDefault(); gradeCat(cat.focus, GRADES[+k - 1]); }
   else if (k === "j" || k === "arrowdown") { e.preventDefault(); focusCat(cat.focus + 1); }
   else if (k === "k" || k === "arrowup") { e.preventDefault(); focusCat(cat.focus - 1); }
   else if (k === "enter") { e.preventDefault(); watchCat(cat.focus); }
@@ -5031,7 +5183,7 @@ const CMDS = [
   ["Check tier tags…", "run", () => { go("dashboard"); showSettingsSection("tiers"); $("#btn-tag-sync").click(); }],
   ["Back up grades now", "run", () => { go("activity"); $("#btn-backup-now").click(); }],
   ["Delete rejected scenes…", "run", () => openDeleteDialog(null)],
-  ...["legendaire", "exceptionnelle", "merveilleuse", "unreviewed", "anomaly", "rejected"].map((t) =>
+  ...["legendaire", "exceptionnelle", "merveilleuse", "unreviewed", "anomaly", "rejected"].filter(liveTier).map((t) =>
     [`Catalogue: ${t}`, "tier", () => { cat.tier = t; cat.view = ""; cat.isNew = false; go("catalogue"); openCatalogue(); }]),
 ];
 const cmdk = { items: [], idx: 0 };
@@ -5289,9 +5441,9 @@ function renderReview() {
   const probs = (r.pred || {}).probs || {};
   const sug = r.suggest ? r.suggest.grade : (r.pred ? r.pred.tier : null);
   $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) =>
-    `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}"><span class="k">${k + 1}</span>
+    `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(GRADE_HELP[g] || "")}"><span class="k">${k + 1}</span>
       <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${d}</span></button>`).join("");
-  const order = ["legendaire", "exceptionnelle", "merveilleuse", "reject"];
+  const order = ["legendaire", "exceptionnelle", "merveilleuse", "reject"].filter(liveTier);
   $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
     const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
     return `<div class="pb" title="${esc(className(c))} ${p}%"><span>${esc(className(c))}</span><div class="b"><i class="tier-bg-${t}" style="width:${p}%"></i></div><span class="muted num">${p}%</span></div>`;
@@ -5507,7 +5659,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("#review")?.classList.contains("active") || !$("#viewer").hidden || !$("#cmdk").hidden) return;
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase(), v = $("#rv-v");
-  if (k >= "1" && k <= "4") { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
+  if (gradeKey(k)) { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
   else if (k === "0") { e.preventDefault(); rvKeep(); }
   else if (k === "j") { e.preventDefault(); rvMove(1); }
   else if (k === "k") { e.preventDefault(); rvMove(-1); }

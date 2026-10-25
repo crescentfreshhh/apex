@@ -1036,3 +1036,23 @@ body.kiosk .app { grid-template-columns: minmax(0, 1fr); }
 body.kiosk .main, body.kiosk .content, body.kiosk #content { margin: 0 !important; padding: 0 !important; }
 body.kiosk #floor.active { height: 100vh; border-radius: 0; }
 body.kiosk #floor-canvas { border-radius: 0; }
+
+/* draining a tier: the rubric + one bulk grade per sure group */
+.drain-rubric { flex: 1 1 420px; font-size: 13px; }
+.drain-rubric ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted, #9aa3a0); }
+.drain-rubric li { margin: 2px 0; }
+.cat-viewbar .drain-acts { flex: 0 1 auto; display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
+
+/* orphans: who might this be? */
+.orph { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+.orph-h { color: var(--muted, #9aa3a0); }
+.orph-s { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--line, #2a2f2d);
+  border-radius: 8px; background: rgba(255,255,255,.02); }
+.orph-s img { width: 56px; height: 32px; object-fit: cover; border-radius: 4px; }
+.orph-s span { display: flex; flex-direction: column; line-height: 1.2; }
+.orph-s i { font-style: normal; font-size: 11px; color: var(--muted, #9aa3a0); }
+.orph-s.s-strong { border-color: rgba(141,255,174,.45); }
+.orph-s.s-weak { opacity: .75; }
+.orph-search { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.orph-search input { width: 150px; }
+.orph-done { color: #8fd18f; }

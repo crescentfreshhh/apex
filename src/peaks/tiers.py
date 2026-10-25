@@ -15,6 +15,14 @@ was retired once every one of those scenes was re-graded. A 5★ scene with O 0
 now reads as an anomaly, and a scene still carrying the old tag as a tag
 conflict — stragglers surface instead of being filed silently.
 
+Merveilleuse is being retired the same way, in two steps (settings.json):
+
+* **draining** (`draining_tiers`): the tier still exists and still grades, but
+  the tier model stops learning from it — what's left is just the scenes not
+  re-graded yet, a biased sample — and Peaks suggests a live tier for each;
+* **retired** (`retired_tiers`, set by Peaks once nothing is left in it): its
+  O-count reads as an anomaly, it can't be graded into, and it leaves every list.
+
 Tier keys are stable ASCII ids; display names are configurable (settings.json
 `tier_names`) and default to the user's own names.
 """
@@ -48,6 +56,43 @@ GRADES: dict[str, tuple[int, int | None]] = {
 
 _O_TIER = {16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire"}
 
+# keeper tiers that can be drained and retired (the top keeper never is)
+RETIRABLE: tuple[str, ...] = ("merveilleuse",)
+_RETIRED: set[str] = set()
+_DRAINING: set[str] = set()
+
+
+def set_retired(tiers, draining=()) -> None:
+    """The process-wide retired and draining tiers (the service sets these from
+    its settings). A tier can't be both: retired wins."""
+    _RETIRED.clear()
+    _RETIRED.update(t for t in tiers or () if t in RETIRABLE)
+    _DRAINING.clear()
+    _DRAINING.update(t for t in draining or () if t in RETIRABLE and t not in _RETIRED)
+
+
+def draining() -> tuple[str, ...]:
+    return tuple(t for t in KEEPER_TIERS if t in _DRAINING)
+
+
+def learned_tiers() -> tuple[str, ...]:
+    """Keeper tiers the tier model learns from: live and not being drained."""
+    return tuple(t for t in KEEPER_TIERS if t not in _RETIRED and t not in _DRAINING)
+
+
+def retired() -> tuple[str, ...]:
+    return tuple(t for t in KEEPER_TIERS if t in _RETIRED)
+
+
+def keeper_tiers() -> tuple[str, ...]:
+    """The keeper tiers still in use, worst → best."""
+    return tuple(t for t in KEEPER_TIERS if t not in _RETIRED)
+
+
+def grades() -> dict[str, tuple[int, int | None]]:
+    """The grades that can be applied now (a retired tier can't be graded into)."""
+    return {g: v for g, v in GRADES.items() if g not in _RETIRED}
+
 # weights for ranking by tier (performer leaderboard, statistics)
 TIER_WEIGHT: dict[str, int] = {"merveilleuse": 1, "exceptionnelle": 2, "legendaire": 3}
 
@@ -69,7 +114,8 @@ def tier_of(rating100, o_counter) -> str:
         o = int(o_counter or 0)
     except (TypeError, ValueError):
         o = 0
-    return _O_TIER.get(o, "anomaly")
+    t = _O_TIER.get(o, "anomaly")
+    return "anomaly" if t in _RETIRED else t
 
 
 def tier_names(overrides: dict | None = None) -> dict[str, str]:
@@ -100,29 +146,40 @@ RETIRED_TIER_TAGS: dict[str, str] = {
 }
 
 
-def tier_tags(overrides: dict | None = None) -> dict[str, str]:
+def tier_tags(overrides: dict | None = None, live: bool = True) -> dict[str, str]:
+    """Tier → tag name. `live` leaves out retired tiers (their tags then read as
+    retired tags: see `retired_tags`)."""
     tags = dict(TIER_TAGS)
     for k, v in (overrides or {}).items():
         if k in tags and isinstance(v, str) and v.strip():
             tags[k] = v.strip()[:80]
-    return tags
+    return {k: v for k, v in tags.items() if not (live and k in _RETIRED)}
+
+
+def retired_tags(overrides: dict | None = None) -> dict[str, str]:
+    """Tags of retired tiers, old and new: grading strips them, carrying one is a conflict."""
+    out = dict(RETIRED_TIER_TAGS)
+    every = tier_tags(overrides, live=False)
+    out.update({t: every[t] for t in _RETIRED if t in every})
+    return out
 
 
 def tag_state(tier: str, tag_names: list[str], organized: bool,
-              tags: dict[str, str] | None = None) -> dict:
+              tags: dict[str, str] | None = None, old: dict[str, str] | None = None) -> dict:
     """How a scene's tier tags line up with its grade.
 
     {present: [tiers whose tag it carries], conflict: str|None, needs_sync: bool}
     conflict: two or more tier tags, or a tier tag that disagrees with the
     O-count grade. needs_sync: a tagged tier missing its tag / organized flag,
     or carrying another tier's tag (fixable by the explicit tag sync)."""
-    tags = tags or TIER_TAGS
+    tags = {k: v for k, v in (tags or TIER_TAGS).items() if k not in _RETIRED}
+    old = old if old is not None else retired_tags()
     have = {n.strip().lower() for n in tag_names or []}
     present = [t for t, name in tags.items() if name.lower() in have]
-    retired = [t for t, name in RETIRED_TIER_TAGS.items() if name.lower() in have]
+    retired = [t for t, name in old.items() if name.lower() in have]
     conflict = None
     if retired:
-        conflict = "carries a retired tier tag (" + ", ".join(RETIRED_TIER_TAGS[t] for t in retired) + ")"
+        conflict = "carries a retired tier tag (" + ", ".join(old[t] for t in retired) + ")"
     elif len(present) >= 2:
         conflict = "several tier tags"
     elif present and present[0] != tier:

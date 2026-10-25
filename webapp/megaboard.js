@@ -684,7 +684,7 @@ function onKey(e) {
     case "Backspace": case "b": e.preventDefault(); goBack(); break;
     case "u": undoGrade(); break;
     case "1": case "2": case "3": case "4":
-      if (ft) gradeScene(ft.apex.scene_id, MB_GRADES[+e.key - 1]); break;
+      if (ft && MB_GRADES[+e.key - 1]) gradeScene(ft.apex.scene_id, MB_GRADES[+e.key - 1]); break;
     default: break;
   }
 }
@@ -714,14 +714,21 @@ function tierKey(rating100, o) {
   const r = +rating100 || 0;
   if (r <= 0 || (r > 20 && r < 100)) return "unreviewed";
   if (r <= 20) return "rejected";
-  return ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  const t = ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
+  return MB_RETIRED.has(t) ? "anomaly" : t;
 }
 function tierBadge(t) {
   return t && t !== "unreviewed" ? `<span class="mb-tier tier-${t}">${esc(MB_TIER_NAMES[t] || t)}</span>` : "";
 }
 
 // --- grade from the board: your tiers, same keys as the Review queue ------------
-const MB_GRADES = ["reject", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–4
+const MB_GRADES = ["reject", "merveilleuse", "exceptionnelle", "legendaire"];   // keys 1–n
+// a retired tier (Peaks → tiers) leaves the grade row; its O-count reads as an anomaly
+let MB_RETIRED = new Set();
+fetch("/api/tiers/state").then((r) => (r.ok ? r.json() : null)).then((st) => {
+  MB_RETIRED = new Set((st && st.retired) || []);
+  for (let i = MB_GRADES.length - 1; i >= 0; i--) if (MB_RETIRED.has(MB_GRADES[i])) MB_GRADES.splice(i, 1);
+}).catch(() => {});
 function gradeLabel(g) { return g === "reject" ? "Reject" : (MB_TIER_NAMES[g] || g); }
 // a name that fits a phone's four-across row (your own tier names are trimmed)
 const MB_SHORT = { merveilleuse: "Merv.", exceptionnelle: "Except.", legendaire: "Légend." };
