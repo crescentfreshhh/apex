@@ -1816,8 +1816,18 @@ def create_app(cfg=None):
 
     @app.get("/api/scene/{scene_id}/picks")
     def scene_picks(scene_id: str):
-        return [{"t": p["t"], "score": p.get("score"), "thumb": p.get("thumb")}
+        done = service.answered_picks(scene_id)
+        return [{"t": p["t"], "score": p.get("score"), "thumb": p.get("thumb"),
+                 "answered": any(abs(p["t"] - t) <= 1.0 for t in done)}
                 for p in service.scene_picks(scene_id)]
+
+    @app.get("/api/prefs/pick-prompts")
+    def get_pick_prompts():
+        return {"on": service.pick_prompts_on()}
+
+    @app.post("/api/prefs/pick-prompts")
+    def set_pick_prompts(body: dict):
+        return {"on": service.set_pick_prompts(bool(body.get("on", True)))}
 
     @app.get("/api/insights/arbiter")
     def insights_arbiter():

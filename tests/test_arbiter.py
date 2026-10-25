@@ -155,3 +155,23 @@ def test_trend_backfill_and_daily_snapshot(tmp_path, monkeypatch):
     assert not by_d[today.isoformat()]["rec"]                   # today: recorded, not reconstructed
     assert t["freed"][-1]["gb"] == 5.0
     assert svc._trend_snapshot(svc._catalogue_all()) is False   # once a day
+
+
+def test_picks_know_what_you_answered_and_the_prompt_switch(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+    import peaks.web.service as svc_mod
+
+    svc, _ = _triage_svc(tmp_path, monkeypatch)
+    monkeypatch.setattr(svc_mod.Service, "scene_picks",
+                        lambda self, sid, n=4: [{"t": 120.0, "score": 0.9, "thumb": "x"},
+                                                {"t": 30.0, "score": 0.7, "thumb": "y"}])
+    c = TestClient(app_mod.create_app(svc.cfg))
+    c.post("/api/label", params={"t": 120.4, "label": 0, "scene_id": "0", "pick": "true"})
+    picks = c.get("/api/scene/0/picks").json()
+    assert [p["answered"] for p in picks] == [True, False]       # matched to the pick, not the other one
+    assert c.get("/api/prefs/pick-prompts").json() == {"on": True}  # on by default
+    assert c.post("/api/prefs/pick-prompts", json={"on": False}).json() == {"on": False}
+    fresh = TestClient(app_mod.create_app(svc.cfg))               # it's a setting, not a browser thing
+    assert fresh.get("/api/prefs/pick-prompts").json() == {"on": False}

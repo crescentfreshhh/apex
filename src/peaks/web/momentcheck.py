@@ -79,6 +79,24 @@ class MomentCheckMixin:
         except Exception:  # noqa: BLE001
             pass
 
+    def answered_picks(self, scene_id: str) -> list[float]:
+        """Times of this scene's picks you've already answered (👍/👎)."""
+        return [float(x["t"]) for x in self._mc_read("pick_feedback.jsonl") if x.get("scene_id") == str(scene_id)]
+
+    def pick_prompts_on(self) -> bool:
+        return bool(self._settings().get("pick_prompts", True))
+
+    def set_pick_prompts(self, on: bool) -> bool:
+        from .. import atomic
+
+        s = dict(self._settings())
+        s["pick_prompts"] = bool(on)
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic.write_json(path, s, indent=2, trailing_newline=True)
+        self._settings_cache = s                 # a display pref: no cache needs rebuilding
+        return bool(on)
+
     def record_pick_feedback(self, scene_id: str, t: float, label: int) -> None:
         self._mc_append("pick_feedback.jsonl", {"at": time.time(), "scene_id": str(scene_id),
                                                 "t": round(float(t), 2), "label": int(label)})

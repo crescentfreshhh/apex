@@ -1334,7 +1334,6 @@ function openViewer(hit) {
     if (currentHit === hit && picks.some((p) => p.score != null)) pickSetup(v, hit.scene_id, picks, $(".viewer-video"), $("#viewer-heat"));
   }).catch(() => {});
 }
-$("#viewer-v")?.addEventListener("timeupdate", () => pickTick($("#viewer-v")));
 function closeViewer() {
   const V = $("#viewer"), v = $("#viewer-v");
   if (typeof stopRadio === "function") stopRadio();
@@ -3196,54 +3195,105 @@ async function trendHTML() {
 }
 
 // --- picks while watching: "your kind of moment?" -------------------------------------------
-// Peaks' picks are marked on the timeline; when playback reaches one, a chip asks 👍/👎.
-// The answer is a taste label at the pick's own time.
-const pickW = new WeakMap();      // video → {sid, picks, done:Set, chip, marks}
+// Peaks' picks are marked on the timeline. While the playhead is inside one pick's window
+// the prompt asks about THAT pick — its frame and time shown, the time a link back to it —
+// and any seek re-checks at once, so you and Peaks are always judging the same moment.
+// On/off is one setting on the server, shared by every player on every device.
+const PICK_PRE = 1, PICK_POST = 6;            // the window around a pick, in seconds
+let pickPromptsOn = true;
+const pickW = new WeakMap();                  // video → {sid, picks:[{t, thumb, done}], chip, track, shown}
+function pickPaintToggles() {
+  document.body.classList.toggle("picks-off", !pickPromptsOn);
+  document.querySelectorAll(".pick-toggle").forEach((b) => {
+    b.classList.toggle("on", pickPromptsOn);
+    b.textContent = pickPromptsOn ? "◆ Picks" : "◇ Picks";
+    b.title = pickPromptsOn ? "Peaks asks about its picks as you reach them — click to stop asking (everywhere)"
+      : "Peaks' pick questions are off — click to turn them on (everywhere)";
+  });
+}
+api("/api/prefs/pick-prompts").then((d) => { pickPromptsOn = !!d.on; pickPaintToggles(); }).catch(() => {});
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest(".pick-toggle"); if (!b) return;
+  pickPromptsOn = !pickPromptsOn; pickPaintToggles();
+  for (const v of [$("#viewer-v"), $("#rv-v")]) if (v) pickTick(v);
+  try {
+    await api("/api/prefs/pick-prompts", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: pickPromptsOn }) });
+  } catch (err) { toast(err.message, true); }
+});
 function pickSetup(v, sid, picks, host, track) {
-  const st = { sid, picks: picks.map((p) => +p.t), done: new Set(), chip: null, track };
+  const st = { sid, picks: picks.map((p) => ({ t: +p.t, thumb: p.thumb, done: !!p.answered })), chip: null, track, shown: null };
   pickW.set(v, st);
   host.querySelector(".pick-chip")?.remove();
   track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
   const chip = document.createElement("div");
   chip.className = "pick-chip"; chip.hidden = true;
-  chip.innerHTML = `<span>Peaks pick · your kind of moment?</span><button data-pv="1" title="Yes (+)">👍</button><button data-pv="0" title="No (−)">👎</button>`;
   host.appendChild(chip); st.chip = chip;
-  chip.addEventListener("click", (e) => { const b = e.target.closest("[data-pv]"); if (b) pickAnswer(v, +b.dataset.pv); });
+  chip.addEventListener("click", (e) => {
+    const ans = e.target.closest("[data-pv]");
+    if (ans) return pickAnswer(v, +ans.dataset.pv, +chip.dataset.t);
+    if (e.target.closest("[data-pjump]")) {                 // back to the moment being asked about
+      v.currentTime = Math.max(0, +chip.dataset.t - PICK_PRE); v.play().catch(() => {});
+    }
+  });
+  if (!v._pickWired) {                                     // once per player: every seek re-checks
+    v._pickWired = true;
+    v.addEventListener("seeking", () => pickTick(v));
+    v.addEventListener("seeked", () => pickTick(v));
+    v.addEventListener("timeupdate", () => pickTick(v));
+  }
   const draw = () => {
     const own = track.querySelectorAll(".pk[data-t]");
-    if (own.length) { own.forEach((x) => x.classList.toggle("done", st.done.has(+x.dataset.t))); return; }
+    const doneAt = (t) => st.picks.some((p) => p.done && Math.abs(p.t - t) < 0.5);
+    if (own.length) { own.forEach((x) => x.classList.toggle("done", doneAt(+x.dataset.t))); return; }
     if (!v.duration) return;
     track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
-    for (const t of st.picks) {
+    for (const p of st.picks) {
       const m = document.createElement("span");
-      m.className = "pick-mk" + (st.done.has(t) ? " done" : ""); m.style.left = (100 * t / v.duration).toFixed(2) + "%";
-      m.title = `Peaks pick ${fmt(t)}`; track.appendChild(m);
+      m.className = "pick-mk" + (p.done ? " done" : ""); m.style.left = (100 * p.t / v.duration).toFixed(2) + "%";
+      m.title = `Peaks pick ${fmt(p.t)}`; track.appendChild(m);
     }
   };
   st.draw = draw;
   if (v.duration) draw(); else v.addEventListener("loadedmetadata", draw, { once: true });
+  pickTick(v);
 }
-function pickCurrent(v) {
+function pickAt(v) {
   const st = pickW.get(v); if (!st) return null;
-  return st.picks.find((t) => !st.done.has(t) && Math.abs(t - v.currentTime) <= 3) ?? null;
+  const now = v.currentTime;
+  return st.picks.find((p) => !p.done && now >= p.t - PICK_PRE && now <= p.t + PICK_POST) || null;
 }
 function pickTick(v) {
   const st = pickW.get(v); if (!st || !st.chip) return;
-  st.chip.hidden = pickCurrent(v) == null;
+  const p = pickPromptsOn && !v.seeking ? pickAt(v) : null;
+  if (!p) { st.chip.hidden = true; st.shown = null; return; }
+  if (st.shown !== p) {                                    // a different moment: a different question
+    st.shown = p;
+    st.chip.dataset.t = p.t;
+    st.chip.innerHTML = `${p.thumb ? `<img data-pjump src="${p.thumb}" alt="" title="Watch it again" />` : ""}
+      <span>Peaks pick · <a href="#" data-pjump title="Jump back to this moment">${fmt(p.t)}</a> · your kind of moment?</span>
+      <button data-pv="1" title="Yes (+)">👍</button><button data-pv="0" title="No (−)">👎</button>`;
+    st.chip.querySelector("a")?.addEventListener("click", (e) => e.preventDefault());
+    st.chip.classList.remove("fresh"); void st.chip.offsetWidth; st.chip.classList.add("fresh");
+  }
+  st.chip.hidden = false;
 }
-async function pickAnswer(v, label) {
-  const st = pickW.get(v), t = pickCurrent(v); if (!st || t == null) return;
-  st.done.add(t); st.chip.hidden = true; st.draw();
+async function pickAnswer(v, label, t) {
+  const st = pickW.get(v); if (!st) return;
+  const p = st.picks.find((x) => x.t === t);
+  if (!p || pickAt(v) !== p) return toast("You've moved off that moment — it'll ask again when you're on one");
+  p.done = true; st.shown = null; st.chip.hidden = true; st.draw();
   try {
-    const qs = new URLSearchParams(pparam({ t: t.toFixed(2), label, scene_id: st.sid, pick: "true" }));
+    const qs = new URLSearchParams(pparam({ t: p.t.toFixed(2), label, scene_id: st.sid, pick: "true" }));
     const c = await api("/api/label?" + qs, { method: "POST" });
-    toast(label ? "👍 Your kind — noted" : "👎 Not your kind — noted"); updateTasteUI(c);
-  } catch (e) { toast(e.message, true); }
+    toast(label ? `👍 ${fmt(p.t)} is your kind — noted` : `👎 ${fmt(p.t)} isn't your kind — noted`); updateTasteUI(c);
+  } catch (e) { p.done = false; st.draw(); toast(e.message, true); }
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, textarea, select") || (e.key !== "+" && e.key !== "-" && e.key !== "=")) return;
   for (const v of [$("#viewer-v"), $("#rv-v")]) {
-    if (v && pickCurrent(v) != null && !v.closest("[hidden]")) { e.preventDefault(); pickAnswer(v, e.key === "-" ? 0 : 1); return; }
+    const st = v && pickW.get(v);
+    if (st && st.shown && !st.chip.hidden && !v.closest("[hidden]")) { e.preventDefault(); pickAnswer(v, e.key === "-" ? 0 : 1, st.shown.t); return; }
   }
 });
 // Library health: the performers and studios you grade best and worst
@@ -5716,7 +5766,15 @@ function renderReview() {
   $("#rv-nopeaks").hidden = rv.peaks.length > 0;
   $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
     rv.peaks.map((t) => `<span class="pk" style="left:calc(16px + (100% - 32px) * ${(t / dur).toFixed(4)})" data-t="${t}" title="${fmt(t)}"></span>`).join("");
-  if ((r.moments || []).some((m) => m.score != null)) pickSetup(v, r.scene_id, r.moments, $("#rv-v").parentElement, $("#rv-scrub"));
+  if ((r.moments || []).some((m) => m.score != null)) {
+    pickSetup(v, r.scene_id, r.moments, $("#rv-v").parentElement, $("#rv-scrub"));
+    api(`/api/scene/${encodeURIComponent(r.scene_id)}/picks`).then((ps) => {        // which you've answered before
+      const st = pickW.get(v);
+      if (!st || st.sid !== r.scene_id) return;
+      for (const p of st.picks) if (ps.some((x) => x.answered && Math.abs(x.t - p.t) <= 1)) p.done = true;
+      st.draw(); pickTick(v);
+    }).catch(() => {});
+  }
   // grades: current one outlined, the model's pick highlighted
   const cur = r.tier === "rejected" ? "reject" : r.tier;
   const probs = (r.pred || {}).probs || {};
@@ -5896,7 +5954,6 @@ $("#rv-v")?.addEventListener("timeupdate", () => {
   const v = $("#rv-v"), bar = $("#rv-prog");
   if (bar && v.duration) bar.style.width = (100 * v.currentTime / v.duration).toFixed(2) + "%";
   rvEngageTick(v);
-  pickTick(v);
 });
 $("#rv-v")?.addEventListener("click", () => { const v = $("#rv-v"); v.paused ? v.play() : v.pause(); });
 // volume: a mute button + slider, remembered per browser (starts muted so the
