@@ -23,7 +23,7 @@ from pathlib import Path
 
 USER_SOURCES = ("catalogue", "bulk", "keep")      # automatic changes aren't your verdict
 MORE_SHOWINGS = 8                                  # the megaboard's "passed" threshold
-QUESTIONS = ("saved", "promote", "second", "trim", "passed", "reject")
+QUESTIONS = ("saved", "drain", "promote", "second", "trim", "passed", "reject")
 
 
 class VerdictMixin:
@@ -102,7 +102,6 @@ class VerdictMixin:
     def _answered(self, question: str, row: dict, pred: dict | None, sig: dict | None) -> bool:
         """Has `question` been answered for this scene, with nothing new since?"""
         from ..tier_model import ORDINAL
-        from ..tiers import draining
 
         v = self._vd().get(str(row["scene_id"]))
         if not v:
@@ -124,9 +123,9 @@ class VerdictMixin:
 
         if question == "saved":
             return int(sig.get("saves") or 0) <= ev["saves"]
+        if question == "drain":                 # asked again only if the guess changes
+            return not (guess and guess != ev["pred"])
         if question == "promote":
-            if row["tier"] in draining():       # draining: asked again only if the guess changes
-                return not (guess and guess != ev["pred"])
             return not (guess and rank(guess) > rank(ev["pred"]))
         if question == "second":
             return not (guess and rank(guess) < rank(ev["pred"]))

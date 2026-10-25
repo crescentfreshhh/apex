@@ -5259,7 +5259,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         and r["tier"] not in ("legendaire", "rejected")
                         and not (signals.get(r["scene_id"]) or {}).get("saves"))
         drain = None
-        if view == "promote" and draining():
+        if view == "drain" and draining():
             # the sure suggestions, grouped by grade, so each group is one bulk grade
             drain = {}
             for r in pool:
@@ -5965,7 +5965,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return {"grade": g, "why": why,
                 "detail": f"{round(100 * share)}% {label}"}
 
-    TRIAGE_VIEWS = ("likely", "quality", "promote", "second", "anomaly", "conflict", "saved", "trim",
+    TRIAGE_VIEWS = ("likely", "quality", "drain", "promote", "second", "anomaly", "conflict", "saved", "trim",
                     "passed", "orphans")
     DRAIN_SURE = 0.8      # drain suggestions this sure are offered as one bulk grade per tier
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
@@ -6110,7 +6110,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _triage(self, view: str, pool: list[dict], preds: dict, floor: dict,
                 signals: dict | None = None) -> list[dict]:
         out = self._triage_raw(view, pool, preds, floor, signals)
-        if view in ("saved", "promote", "second", "trim", "passed") and self._vd():
+        if view in ("saved", "drain", "promote", "second", "trim", "passed") and self._vd():
             signals = signals or {}
             out = [r for r in out if not self._answered(
                 view, r, preds.get(r["scene_id"]), signals.get(r["scene_id"]))]
@@ -6161,13 +6161,18 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if view == "quality":
             out = [r for r in pool if r["tier"] == "unreviewed" and quality_flag(r["quality"], floor)]
             return sorted(out, key=lambda r: r["quality"]["mbps"] or 0)
-        if view == "promote":
+        if view == "drain":
+            # a tier being retired: every scene left in it, with the model's live-tier
+            # guess — the surest first, so agreeing batches can go in one bulk grade
             drain = draining()
-            if drain:
-                # draining a tier: every scene left in it, with the model's live-tier
-                # guess — the surest first, so agreeing batches can go in one bulk grade
-                out = [r for r in pool if r["tier"] in drain]
-                return sorted(out, key=lambda r: -(preds.get(r["scene_id"]) or {}).get("conf", -1))
+            out = [r for r in pool if r["tier"] in drain]
+            return sorted(out, key=lambda r: -(preds.get(r["scene_id"]) or {}).get("conf", -1))
+        if view == "promote":
+            if "merveilleuse" not in learned_tiers():
+                # no middle tier: Exceptionnelle scenes the model rates Légendaire, surest first
+                out = [r for r in pool if r["tier"] == "exceptionnelle" and r["scene_id"] in preds
+                       and preds[r["scene_id"]]["tier"] == "legendaire"]
+                return sorted(out, key=lambda r: preds[r["scene_id"]]["probs"].get("legendaire", 0), reverse=True)
 
             def up(r):
                 p = preds[r["scene_id"]]["probs"]

@@ -901,15 +901,18 @@ function applyTierState(st) {
   RETIRED = new Set(st.retired || []); DRAINING = new Set(st.draining || []);
   const prune = (arr) => { for (let i = arr.length - 1; i >= 0; i--) if (RETIRED.has(Array.isArray(arr[i]) ? arr[i][0] : arr[i])) arr.splice(i, 1); };
   [TIER_ORDER, GRADES, CAT_CHIPS, PF_TIERS, PR_TIERS, RV_GRADES].forEach(prune);
-  // a retired middle tier has nothing left to promote from: the view goes too
-  const pi = CAT_VIEWS.findIndex((v) => v[0] === "promote");
-  if (pi >= 0 && RETIRED.has("merveilleuse")) CAT_VIEWS.splice(pi, 1);
-  const pv = CAT_VIEWS.find((v) => v[0] === "promote");
-  if (pv && DRAINING.size) {
+  // the drain view exists only while a tier drains
+  const di = CAT_VIEWS.findIndex((v) => v[0] === "drain");
+  if (di >= 0 && !DRAINING.size) CAT_VIEWS.splice(di, 1);
+  const dv = CAT_VIEWS.find((v) => v[0] === "drain");
+  if (dv) {
     const n = [...DRAINING].map((t) => TIER_NAMES[t]).join(" + ");
-    pv[1] = `Drain ${n}`;
-    pv[2] = `Every ${n} scene left, with the tier it looks most like — the surest first, so agreeing ones can be bulk-graded. ${n} retires on its own when this is empty.`;
+    dv[1] = `Drain ${n}`;
+    dv[2] = `Every ${n} scene left, with the tier it looks most like — the surest first, so agreeing ones can be bulk-graded. ${n} retires on its own when this is empty.`;
   }
+  // with no live middle tier, promotion means Exceptionnelle → Légendaire
+  const pv = CAT_VIEWS.find((v) => v[0] === "promote");
+  if (pv && (RETIRED.has("merveilleuse") || DRAINING.has("merveilleuse"))) pv[2] = "Exceptionnelle scenes the model rates Légendaire — most likely first";
   const sl = CAT_VIEWS.find((v) => v[0] === "second");
   if (sl && (!liveTier("merveilleuse") || DRAINING.has("merveilleuse"))) sl[2] = "Légendaire/Exceptionnelle scenes the model rates below their grade";
   const note = st.retired_note;
@@ -3172,7 +3175,7 @@ function tdJump(step) {
   td.mi = (td.mi + step + td.moments.length) % td.moments.length;
   tdLoadMoment();
 }
-const TD_KEEPABLE = new Set(["saved", "reject", "promote", "second", "trim"]);
+const TD_KEEPABLE = new Set(["saved", "reject", "drain", "promote", "second", "trim"]);
 async function tdAnswer(grade, keep = false) {
   const x = td.queue[0]; if (!x || (!grade && !keep)) return;
   if (keep && !TD_KEEPABLE.has(x.job)) return;
@@ -3251,9 +3254,8 @@ function tdBoard() {
     card("Confirm", "saved", "Saved → Légendaire", j.saved, "you saved moments in these", "job"),
     card("Confirm", "reject", "Suggested to let go", j.reject, "passed over or among your weakest", "job"),
     card("Grade", "new", "New scenes", j.new, `${n(b.likely)} look like keepers`, "job"),
-    ...(RETIRED.has("merveilleuse") ? [] : [DRAINING.size
-      ? card("Second opinion", "promote", `Drain ${[...DRAINING].map((t) => TIER_NAMES[t]).join(" + ")}`, j.promote, "left to re-grade before it retires", "job")
-      : card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job")]),
+    ...(DRAINING.size ? [card("Second opinion", "drain", `Drain ${[...DRAINING].map((t) => TIER_NAMES[t]).join(" + ")}`, j.drain, "left to re-grade before it retires", "job")] : []),
+    card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job"),
     card("Second opinion", "second", "Second look", j.second, "Peaks rates them below your grade", "job"),
     card("Second opinion", "anomaly", "Anomalies", j.anomaly, "5★ with an unusual O-count", "job"),
     card("Trim", "trim", "No saved moments", j.trim, "past 30 days, nothing saved", "job"),
@@ -3623,6 +3625,7 @@ const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, vie
 const CAT_VIEWS = [
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
+  ["drain", "Drain", "Every scene left in a tier being retired, with the tier it looks most like"],
   ["promote", "Promotion candidates", "Merveilleuse scenes that look like your Exceptionnelle/Légendaire ones"],
   ["second", "Second look", "Exceptionnelle/Légendaire scenes that look more like Merveilleuse or below"],
   ["anomaly", "Anomaly suggestions", "5★ scenes with an O-count outside your scheme, with a suggested tier"],
@@ -3852,7 +3855,7 @@ function renderCatTriage() {
   const trained = !!m.trained;
   const views = side.views || cat.views || {};
   $("#cat-views").innerHTML = CAT_VIEWS.map(([v, label, tip]) => {
-    const needsModel = !MODEL_FREE_VIEWS.has(v) && !trained && !(v === "promote" && DRAINING.size);
+    const needsModel = !MODEL_FREE_VIEWS.has(v) && !trained && v !== "drain";
     return `<button class="cat-chip cat-view ${cat.view === v ? "on" : ""}" data-v="${v}" title="${esc(tip)}${needsModel ? " (train the model first)" : ""}" ${needsModel ? "disabled" : ""}>${esc(label)} <span class="n">${(views[v] || 0).toLocaleString()}</span></button>`;
   }).join("");
   const btn = $("#btn-cat-train");
@@ -4242,7 +4245,7 @@ function renderCatViewbar() {
   } else if (cat.view === "passed") {
     bar.hidden = false;
     bar.innerHTML = `<span>The megaboard keeps showing you these and you never save, 👍, explore, pin or enlarge them — most-shown first. Grading a scene starts its record over. Select the ones to let go and press 1 (Reject).</span>`;
-  } else if (cat.view === "promote" && DRAINING.size) {
+  } else if (cat.view === "drain" && DRAINING.size) {
     const name = [...DRAINING].map((t) => TIER_NAMES[t]).join(" + ");
     const groups = Object.entries(cat.drain || {}).filter(([g]) => GRADES.includes(g));
     bar.hidden = false;
@@ -4307,7 +4310,7 @@ function catCardHTML(r, i) {
   const flag = (r.flag ? `<div class="cat-flag">⚠ ${textNum(r.flag, r.flag_detail)}</div>` : "") +
     (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate</div>` : "");
   const keepable = r.tier !== "unreviewed" && r.tier !== "anomaly"
-    && (r.suggest || ["promote", "second", "saved", "trim", "passed"].includes(cat.view));
+    && (r.suggest || ["drain", "promote", "second", "saved", "trim", "passed"].includes(cat.view));
   const suggest = (r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "")
     + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "")
     + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "");
@@ -5478,7 +5481,7 @@ function renderReview() {
 // a suggestion to answer: the scene has one, or you're working an answerable list
 function rvKeepable(r) {
   return !!r && r.tier !== "unreviewed" && r.tier !== "anomaly"
-    && (!!r.suggest || (rv.source === "catalogue" && ["promote", "second", "saved", "trim", "passed"].includes(cat.view)));
+    && (!!r.suggest || (rv.source === "catalogue" && ["drain", "promote", "second", "saved", "trim", "passed"].includes(cat.view)));
 }
 async function rvKeep() {
   const r = rv.items[rv.i]; if (!rvKeepable(r)) return;

@@ -23,10 +23,10 @@ import json
 import time
 from pathlib import Path
 
-JOBS = ("saved", "reject", "new", "promote", "second", "anomaly", "trim")
+JOBS = ("saved", "reject", "new", "drain", "promote", "second", "anomaly", "trim")
 JOB_LABEL = {
     "saved": "Saved → Légendaire", "reject": "Suggested to let go", "new": "Grade new scenes",
-    "promote": "Promotion candidates", "second": "Second look", "anomaly": "Anomalies",
+    "drain": "Drain", "promote": "Promotion candidates", "second": "Second look", "anomaly": "Anomalies",
     "trim": "No saved moments",
 }
 
@@ -35,11 +35,11 @@ def _labels() -> dict:
     from ..tiers import DEFAULT_NAMES, draining
 
     d = draining()
-    return {**JOB_LABEL, "promote": "Drain " + " + ".join(DEFAULT_NAMES[t] for t in d)} if d else JOB_LABEL
+    return {**JOB_LABEL, "drain": "Drain " + " + ".join(DEFAULT_NAMES[t] for t in d)} if d else JOB_LABEL
 
 
 # quick one-key confirmations interleaved with real decisions, so it never drags
-MIX = ("saved", "new", "reject", "new", "promote", "saved", "second", "reject", "new",
+MIX = ("saved", "new", "drain", "reject", "new", "promote", "saved", "second", "drain", "reject", "new",
        "anomaly", "trim", "new")
 DEFAULT_GOAL = 20
 
@@ -89,10 +89,10 @@ class TodayMixin:
                 if rec.get("grade") and not (rec["grade"] == "reject" and (sig.get(r["scene_id"]) or {}).get("new")):
                     pick = rec["grade"]
                 out.append({"scene_id": r["scene_id"], "pick": pick, **_why(rec)})
-        elif job in ("promote", "second"):
+        elif job in ("drain", "promote", "second"):
             for r in self._triage(job, rows, preds, floor, sig):
                 p = preds.get(r["scene_id"])
-                rec = (self._recommend(r, p, sig.get(r["scene_id"]), names) or {}) if job == "promote" else {}
+                rec = (self._recommend(r, p, sig.get(r["scene_id"]), names) or {}) if job == "drain" else {}
                 out.append({"scene_id": r["scene_id"], "pick": rec.get("grade") or (p["tier"] if p else None),
                             **_why(rec)})
         elif job == "anomaly":

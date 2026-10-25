@@ -46,7 +46,7 @@ def test_drain_view_suggests_live_tiers_then_retires(tmp_path, monkeypatch):
     assert rep["trained"] and set(rep["classes"]) == {"exceptionnelle", "legendaire"}   # Merveilleuse left out
     assert rep["counts"]["merveilleuse"] == 0
 
-    d = svc.catalogue(view="promote", limit=100)
+    d = svc.catalogue(view="drain", limit=100)
     merv = {sid for sid, v in stash.s.items() if v["rating100"] == 100 and v["o_counter"] == 16}
     assert {r["scene_id"] for r in d["items"]} == merv                  # every scene left in it
     confs = [r["pred"]["conf"] for r in d["items"]]
@@ -81,6 +81,39 @@ def test_no_retirement_without_a_real_listing(tmp_path, monkeypatch):
     svc, _ = _triage_svc(tmp_path, monkeypatch, settings={"draining_tiers": ["merveilleuse"]})
     svc._check_drained([])                              # Stash down / empty: never retire
     assert svc.tier_state()["retired"] == []
+
+
+def test_promotion_after_retirement_is_exceptionnelle_to_legendaire(tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+    from fakestash import FakeStash
+    from peaks.config import Config
+
+    with open(os.environ["PEAKS_SETTINGS"], "w") as fh:
+        json.dump({"retired_tiers": ["merveilleuse"], "draining_tiers": []}, fh)
+    stash = FakeStash({"1": {"rating100": 100, "o_counter": 17}, "2": {"rating100": 100, "o_counter": 17},
+                       "3": {"rating100": 100, "o_counter": 17}, "4": {"rating100": 100, "o_counter": 18}})
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    cfg.modeling.dir = str(tmp_path / "models")
+    monkeypatch.setattr(svc_mod.Service, "client", lambda self: stash)
+    monkeypatch.setattr(svc_mod.Service, "_meta_client", lambda self: stash)
+    svc = svc_mod.Service(cfg)
+    svc._settings()
+
+    def pred(tier, p_leg):
+        probs = {"reject": 0.0, "exceptionnelle": 1 - p_leg, "legendaire": p_leg}
+        return {"tier": tier, "probs": probs, "conf": max(p_leg, 1 - p_leg), "expected": 1.5, "keeper": 1.0}
+
+    rows = [svc._cat_update_row(s) for s in ("1", "2", "3", "4")]
+    preds = {"1": pred("legendaire", 0.7), "2": pred("legendaire", 0.95), "3": pred("exceptionnelle", 0.2),
+             "4": pred("legendaire", 0.9)}
+    ids = lambda: [r["scene_id"] for r in svc._triage("promote", rows, preds, {}, {})]  # noqa: E731
+    assert ids() == ["2", "1"]                       # Exceptionnelle that looks Légendaire, likeliest first
+    assert [r["scene_id"] for r in svc._triage("drain", rows, preds, {}, {})] == []
+    svc.keep_as_is("2")                              # your answer: it stays Exceptionnelle
+    assert ids() == ["1"]
+    preds["2"] = pred("legendaire", 0.99)            # retraining alone never brings it back
+    assert ids() == ["1"]
 
 
 # --- orphans -------------------------------------------------------------------------------
