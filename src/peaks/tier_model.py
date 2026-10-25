@@ -82,6 +82,12 @@ def visual_features(frames: np.ndarray, scores: np.ndarray | None = None,
 _FEAT_RES: tuple[str, ...] = ("SD", "720p", "1080p", "1440p", "4K")
 
 
+QUALITY_FEATURES: tuple[str, ...] = (
+    "bitrate", "bits per pixel", "frame rate", "bitrate unknown", "resolution unknown",
+    *(f"res {r}" for r in _FEAT_RES[:-1]), "res 4K+",
+    *(f"codec {c}" for c in _CODECS), "codec other")
+
+
 def quality_features(q: dict) -> np.ndarray:
     """A scene's quality facts (peaks.tiers.quality_of) → a fixed-length vector.
     Unknown values become 0 with an explicit 'missing' flag, so a file Stash
@@ -331,6 +337,81 @@ class TierModel:
         self.classes_ = [str(c) for c in self._clf.classes_]
         return self
 
+    def design_row(self, Xv, Xq, who: list | None = None, own: list | None = None,
+                   pic=None) -> np.ndarray:
+        """The standardized design matrix predict_proba feeds the classifier."""
+        Xw = None
+        if getattr(self, "use_who", False):
+            n = len(Xq)
+            Xw = self.who_enc.encode(who if who is not None else [None] * n, own)
+        Xp = None
+        if getattr(self, "use_picture", False):
+            Xp = self._arr(pic) if pic is not None else np.stack([picture_features(None)] * len(Xq))
+        return self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False, Xp=Xp)
+
+    def groups(self) -> list[tuple[str, int, int]]:
+        """(group, start, end) column spans of the design matrix: look · file · who · picture."""
+        out, at = [], 0
+        if getattr(self, "use_visual", True):
+            k = int(self._pca.n_components_)
+            out.append(("look", at, at + k))
+            at += k
+        if self.use_quality:
+            out.append(("file", at, at + len(QUALITY_FEATURES)))
+            at += len(QUALITY_FEATURES)
+        if getattr(self, "use_who", False):
+            out.append(("who", at, at + len(WHO_FEATURES)))
+            at += len(WHO_FEATURES)
+        if getattr(self, "use_picture", False):
+            out.append(("picture", at, at + len(PIC_FEATURES)))
+        return out
+
+    def logit_gap(self, a: str, b: str) -> tuple[np.ndarray, float]:
+        """(per-column weight, intercept) of the log-odds of tier `a` over tier `b`:
+        gap = w · x + c for a design row x. Exact for the fitted model."""
+        coef, icpt, cl = self._clf.coef_, self._clf.intercept_, self.classes_
+        if len(cl) == 2:                       # binary: one row, the log-odds of classes_[1]
+            sgn = 1.0 if (a, b) == (cl[1], cl[0]) else -1.0
+            return sgn * coef[0], float(sgn * icpt[0])
+        i, j = cl.index(a), cl.index(b)
+        return coef[i] - coef[j], float(icpt[i] - icpt[j])
+
+    def explain(self, a: str, b: str, xv, xq, who=None, own=None, pic=None) -> dict:
+        """Why this scene leans `a` over `b`: the log-odds gap split exactly into
+        groups (look · file · who · picture) plus the baseline, and inside the named
+        groups each feature's push. Contributions sum to `gap`."""
+        x = self.design_row(None if xv is None else np.asarray([xv]), np.asarray([xq]),
+                            who=[who] if self.use_who else None,
+                            own=[own] if own is not None else None,
+                            pic=None if pic is None else np.asarray([pic]))[0]
+        w, c = self.logit_gap(a, b)
+        push = w * x
+        names = {"file": QUALITY_FEATURES, "who": WHO_FEATURES, "picture": PIC_FEATURES}
+        groups = []
+        for g, s, e in self.groups():
+            feats = []
+            if g in names:
+                feats = sorted(({"name": n, "push": round(float(push[s + i]), 4)}
+                                for i, n in enumerate(names[g])), key=lambda f: -abs(f["push"]))
+                feats = [f for f in feats if abs(f["push"]) >= 0.01][:4]
+            groups.append({"group": g, "push": round(float(push[s:e].sum()), 4), "features": feats})
+        return {"a": a, "b": b, "gap": round(float(push.sum() + c), 4), "baseline": round(c, 4),
+                "groups": groups}
+
+    def frame_push(self, a: str, b: str, frames: np.ndarray) -> np.ndarray:
+        """Each frame's pull toward `a` over `b` through the look alone (a frame
+        stands in for both halves of the scene's visual features). Relative values:
+        higher = more `a`-like."""
+        if not getattr(self, "use_visual", True) or frames is None or not len(frames):
+            return np.zeros(0, np.float32)
+        f = np.asarray(frames, np.float32)
+        f = f / np.maximum(np.linalg.norm(f, axis=1, keepdims=True), 1e-9)
+        z = self._pca.transform(np.hstack([f, f]))
+        k = z.shape[1]
+        z = (z - self._scaler.mean_[:k]) / self._scaler.scale_[:k]
+        w, _ = self.logit_gap(a, b)
+        return z @ w[:k]
+
     def predict_proba(self, Xv, Xq, who: list | None = None, own: list | None = None,
                       pic=None) -> np.ndarray:
         """`own[i]`: scene i's current grade when it's one the records were
@@ -559,3 +640,34 @@ def fit_fallback(Xq: np.ndarray, y: list[str], who: list,
     m = TierModel(use_quality=True, use_who=True, use_visual=False, use_picture=use_pic).fit(
         None, Xq2, y2, who=w2, pic=p2 if use_pic else None)
     return m, {"trained": True, **rep}
+
+
+def fit_folds(model: "TierModel", Xv, Xq, y: list[str], who: list | None = None,
+              pic=None, folds: int = 5) -> tuple[list["TierModel"], np.ndarray, np.ndarray]:
+    """Honest verdicts on the training scenes: `folds` models with `model`'s
+    settings, each fitted without one fold. Returns (fold models, out-of-fold
+    probabilities aligned to model.classes_, each row's fold). A scene's honest
+    verdict comes from the one model that never saw its grade."""
+    from sklearn.model_selection import StratifiedKFold
+
+    y_arr = np.asarray(y)
+    k = max(2, min(folds, int(min(np.unique(y_arr, return_counts=True)[1]))))
+    n = len(y_arr)
+    proba = np.zeros((n, len(model.classes_)), np.float32)
+    fold_of = np.zeros(n, np.int32)
+    out = []
+    split = StratifiedKFold(n_splits=k, shuffle=True, random_state=1).split(Xq, y_arr)
+    for f, (tr, te) in enumerate(split):
+        m = TierModel(use_quality=model.use_quality, pca_dim=model.pca_dim, C=model.C,
+                      use_who=model.use_who, use_visual=model.use_visual, use_picture=model.use_picture)
+        m.fit(None if Xv is None else Xv[tr], Xq[tr], list(y_arr[tr]),
+              who=[who[i] for i in tr] if model.use_who else None,
+              pic=pic[tr] if model.use_picture else None)
+        p = m.predict_proba(None if Xv is None else Xv[te], Xq[te],
+                            who=[who[i] for i in te] if model.use_who else None,
+                            pic=pic[te] if model.use_picture else None)
+        for j, c in enumerate(m.classes_):
+            proba[te, model.classes_.index(c)] = p[:, j]
+        fold_of[te] = f
+        out.append(m)
+    return out, proba, fold_of

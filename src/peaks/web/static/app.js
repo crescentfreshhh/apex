@@ -1330,7 +1330,11 @@ function openViewer(hit) {
   try { $("#viewer-stash").href = new URL(hit.stream, location.href).origin + "/scenes/" + hit.scene_id; }
   catch { $("#viewer-stash").href = "#"; }
   loadViewerMeta(hit.scene_id);
+  api(`/api/scene/${encodeURIComponent(hit.scene_id)}/picks`).then((picks) => {
+    if (currentHit === hit && picks.some((p) => p.score != null)) pickSetup(v, hit.scene_id, picks, $(".viewer-video"), $("#viewer-heat"));
+  }).catch(() => {});
 }
+$("#viewer-v")?.addEventListener("timeupdate", () => pickTick($("#viewer-v")));
 function closeViewer() {
   const V = $("#viewer"), v = $("#viewer-v");
   if (typeof stopRadio === "function") stopRadio();
@@ -2938,7 +2942,12 @@ function picChipHTML(p, { long = false } = {}) {
   return `<span class="q qpic ${cls} ${long ? "long" : ""}" title="${esc(tip)}">${esc(head)}${words && long ? ` · ${esc(words)}` : ""}</span>` +
     (long ? `<div class="faint small pic-subs">${esc(picSubsText(p))}</div>` : "");
 }
-wireTabs("#ins-tabs", (t) => { if (t === "coverage") openExperimental(); if (t === "health") openHealth(); });
+wireTabs("#ins-tabs", (t) => {
+  if (t === "coverage") openExperimental();
+  if (t === "health") openHealth();
+  if (t === "arbiter") openArbiter();
+  if (t === "moments") openMoments();
+});
 
 // --- Library health: saves, the model's view of each tier, the trim pool -------------
 async function openHealth() {
@@ -2960,7 +2969,8 @@ async function openHealth() {
   const bars = Object.entries(bk).map(([k, v]) =>
     `<div class="hbk"><i style="height:${(100 * v / bmax).toFixed(1)}%"></i><b>${n(v)}</b><span>${k}</span></div>`).join("");
   const t = h.trim, a = t.ages;
-  box.innerHTML = `
+  const trend = await trendHTML();
+  box.innerHTML = trend + `
     <div class="hgrid">
       <div class="card pad hcard"><span class="tq-l">Scenes with saved moments</span>
         <span class="tq-v tq-words">${esc(cap(h.with_saves_words || ""))}${fig(pct(h.with_saves, h.scenes))}</span>
@@ -2985,6 +2995,257 @@ async function openHealth() {
         <p class="small">${n(a.new)} new (under ${h.grace_days} days, protected) · ${n(a["30d-6mo"])} 30 days–6 months · ${n(a["6mo+"])} over 6 months${a.unknown ? ` · ${n(a.unknown)} unknown age` : ""}${t.unembedded ? ` · ${n(t.unembedded)} not embedded yet (can't be judged)` : ""}</p></div>
     </div>${whoHealth(h.who)}`;
 }
+// --- the Arbiter: why Peaks agrees or disagrees with your grade --------------------------
+// The verdict on a graded scene comes from a model that never saw that grade, and the
+// argument is its log-odds gap split exactly into what it looked at.
+const ARG_COLOR = { legendaire: "var(--cv-leg)", exceptionnelle: "var(--cv-exc)", reject: "var(--cv-rej)", merveilleuse: "var(--cv-mer)" };
+const argCache = {};
+async function argueLoad(sid, el, i) {
+  el.hidden = false;
+  if (!argCache[sid]) el.innerHTML = '<span class="faint small">Weighing it up…</span>';
+  try { argCache[sid] = argCache[sid] || await api(`/api/tiers/explain/${encodeURIComponent(sid)}`); }
+  catch (e) { el.innerHTML = `<span class="faint small">${esc(e.message)}</span>`; return; }
+  el.innerHTML = argueHTML(argCache[sid], i);
+}
+function argueHTML(e, i) {
+  if (!e.ok) return `<span class="faint small">${esc(e.reason || "no argument to make")}</span>`;
+  const nm = (c) => esc(e.names[c] || c), a = e.verdict, b = e.against;
+  const head = e.yours
+    ? (e.agree === "agree"
+      ? `Peaks agrees: <b>${nm(a)}</b> ${Math.round(e.conf * 100)}%`
+      : `You: <b>${nm(e.yours)}</b> · Peaks: <b>${nm(a)}</b> ${Math.round(e.conf * 100)}% — it rates this <b>${e.agree}</b> than you`)
+    : `Peaks: <b>${nm(a)}</b> ${Math.round(e.conf * 100)}% over ${nm(b)}`;
+  const honest = e.honest ? `<span class="faint small" title="Judged by a model trained without this scene's grade, so your grade can't sway it">· judged without your grade</span>` : "";
+  const max = Math.max(0.5, ...e.groups.map((g) => Math.abs(g.push)));
+  const rows = e.groups.map((g) => {
+    const w = (50 * Math.abs(g.push) / max).toFixed(1), toA = g.push >= 0;
+    const facts = (g.facts || []).map((f) => `<div class="arg-fact">${esc(f)}</div>`).join("");
+    return `<div class="arg-row" title="${esc(g.label)}: ${g.push >= 0 ? "+" : ""}${g.push.toFixed(2)} log-odds toward ${toA ? (e.names[a] || a) : (e.names[b] || b)}">
+      <span class="arg-l">${esc(g.label)}</span>
+      <span class="arg-bar"><i style="${toA ? `left:50%;width:${w}%` : `right:50%;width:${w}%`};background:${ARG_COLOR[toA ? a : b] || "var(--cv-1)"}"></i></span>
+      <span class="arg-v">${g.push >= 0 ? "+" : "−"}${Math.abs(g.push).toFixed(2)}</span>${facts}</div>`;
+  }).join("");
+  const look = (c) => ((e.lookalikes || {})[c] || []).map((x) =>
+    `<span class="arg-look" title="${esc(x.title)} · ${Math.round(x.sim * 100)}% alike"><img loading="lazy" src="${x.cover}" alt="" onerror="this.style.visibility='hidden'" /></span>`).join("");
+  const moms = (c) => ((e.moments || {})[c] || []).map((m) =>
+    `<img class="arg-m" loading="lazy" src="${m.thumb}" data-sid="${esc(e.scene_id)}" data-t="${m.t}" title="${fmt(m.t)} — pulls toward ${esc(e.names[c] || c)}" />`).join("");
+  const words = e.words && Object.keys(e.words).length
+    ? `<div class="arg-words"><span class="faint small" title="CLIP description terms, shown only when they genuinely separate these two tiers in your library">hint ·</span> ${[a, b].map((c) =>
+      (e.words[c] || []).length ? `leans ${(e.words[c] || []).map((w) => `<i>${esc(w.term)}</i>`).join(", ")} <span class="faint">(like your ${nm(c)})</span>` : "").filter(Boolean).join(" · ")}</div>` : "";
+  const ruling = e.yours && e.agree !== "agree" && i != null ? `<div class="arg-rule">
+      <button class="btn sm pri" data-arg-grade="${esc(a)}" data-i="${i}">Peaks is right → ${nm(a)}</button>
+      <button class="btn sm" data-arg-keep data-i="${i}">I'm right — keep ${nm(e.yours)}</button></div>` : "";
+  return `<div class="arg-head">${head} ${honest}</div>
+    <div class="arg-axis"><span style="color:${ARG_COLOR[b] || ""}">← ${nm(b)}</span><span style="color:${ARG_COLOR[a] || ""}">${nm(a)} →</span></div>
+    ${rows}
+    <div class="arg-row arg-total"><span class="arg-l">Overall</span><span class="arg-v">${e.gap >= 0 ? "+" : "−"}${Math.abs(e.gap).toFixed(2)}</span><span class="faint small">${esc(e.summary || "")}</span></div>
+    <div class="arg-cols"><div><span class="faint small">Looks most like your ${nm(a)}</span><div>${look(a)}</div></div>
+      <div><span class="faint small">…and your ${nm(b)}</span><div>${look(b)}</div></div></div>
+    ${(e.moments || {})[a] ? `<div class="arg-cols"><div><span class="faint small">Moments that say ${nm(a)}</span><div>${moms(a)}</div></div>
+      <div><span class="faint small">Moments that say ${nm(b)}</span><div>${moms(b)}</div></div></div>` : ""}
+    ${words}${ruling}`;
+}
+document.addEventListener("click", (ev) => {
+  const why = ev.target.closest("[data-why]");
+  if (why) {
+    const card = why.closest(".cat-card"), el = card && card.querySelector(".argue");
+    if (el) { if (!el.hidden && el.innerHTML) { el.hidden = true; return; } argueLoad(why.dataset.why, el, +card.dataset.i); }
+    return;
+  }
+  const g = ev.target.closest("[data-arg-grade]");
+  if (g) { const i = +g.dataset.i; focusCat(i, false); gradeCat(i, g.dataset.argGrade === "reject" ? "reject" : g.dataset.argGrade); return; }
+  const k = ev.target.closest("[data-arg-keep]");
+  if (k) { const i = +k.dataset.i; focusCat(i, false); keepCat(i); return; }
+  const m = ev.target.closest(".arg-m");
+  if (m) {
+    const it = cat.items.find((x) => x.scene_id === m.dataset.sid);
+    if (it) openViewer({ ...it, stream: it.stream, time: +m.dataset.t, key: (it.moments[0] || {}).key });
+  }
+});
+// cards in the disagreement lists open their argument straight away
+function argueAutoOpen() {
+  if (!["promote", "second", "arbiter"].includes(cat.view)) return;
+  document.querySelectorAll("#cat-list .cat-card").forEach((c) => {
+    const el = c.querySelector(".argue"), it = cat.items[+c.dataset.i];
+    if (el && it && it.pred && el.hidden) argueLoad(it.scene_id, el, +c.dataset.i);
+  });
+}
+
+// --- charts (small, single-series, plain SVG + a hover readout) ----------------------------
+function lineChart(pts, { y, fmtY, dashedUntil, h = 140 } = {}) {
+  if (pts.length < 2) return '<p class="faint small">Not enough history yet.</p>';
+  const W = 640, H = h, L = 44, R = 8, T = 8, B = 20;
+  const ys = pts.map((p) => p[y]), lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
+  const X = (i) => L + (W - L - R) * i / (pts.length - 1), Y = (v) => T + (H - T - B) * (1 - (v - lo) / span);
+  const path = (seg) => seg.map(([i, v], k) => `${k ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join("");
+  const all = pts.map((p, i) => [i, p[y]]);
+  const cut = dashedUntil != null ? pts.findIndex((p) => !p.rec) : -1;
+  const solid = cut > 0 ? all.slice(cut - 1) : (cut === 0 ? all : []), dashed = cut > 0 ? all.slice(0, cut) : (cut < 0 ? all : []);
+  const grid = [lo, lo + span / 2, hi].map((v) => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="cg"/><text x="${L - 6}" y="${Y(v) + 4}" class="ct" text-anchor="end">${esc(fmtY(v))}</text>`).join("");
+  const first = pts[0].d, last = pts[pts.length - 1].d;
+  return `<div class="chart" data-pts='${esc(JSON.stringify(pts.map((p) => [p.d, p[y], !!p.rec])))}' data-fmt="${y}">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(y)} over time">
+      ${grid}
+      ${dashed.length > 1 ? `<path d="${path(dashed)}" class="cl dashed"/>` : ""}
+      ${solid.length > 1 ? `<path d="${path(solid)}" class="cl"/>` : ""}
+      <text x="${L}" y="${H - 4}" class="ct">${esc(first)}</text><text x="${W - R}" y="${H - 4}" class="ct" text-anchor="end">${esc(last)}</text>
+      <line class="cx" x1="0" x2="0" y1="${T}" y2="${H - B}" visibility="hidden"/>
+    </svg><div class="ctip" hidden></div></div>`;
+}
+function barChart(items, { label, value, fmtV }) {
+  if (!items.length) return '<p class="faint small">Nothing yet.</p>';
+  const max = Math.max(...items.map(value), 1e-9);
+  return `<div class="ibars">${items.map((x) => `<div class="ibar" title="${esc(label(x))}: ${esc(fmtV(value(x)))}">
+    <span class="bl">${esc(label(x))}</span><span class="bt"><i style="width:${(100 * value(x) / max).toFixed(1)}%"></i></span><span class="bv">${esc(fmtV(value(x)))}</span></div>`).join("")}</div>`;
+}
+document.addEventListener("mousemove", (ev) => {
+  const c = ev.target.closest(".chart"); if (!c) return;
+  const svg = c.querySelector("svg"), tip = c.querySelector(".ctip"), x = c.querySelector(".cx");
+  const pts = JSON.parse(c.dataset.pts), r = svg.getBoundingClientRect();
+  const fx = (ev.clientX - r.left) / r.width * 640, L = 44, R = 8;
+  const i = Math.max(0, Math.min(pts.length - 1, Math.round((fx - L) / (640 - L - R) * (pts.length - 1))));
+  const px = L + (640 - L - R) * i / (pts.length - 1);
+  x.setAttribute("x1", px); x.setAttribute("x2", px); x.setAttribute("visibility", "visible");
+  const [d, v, rec] = pts[i];
+  tip.hidden = false; tip.style.left = `${(100 * px / 640).toFixed(1)}%`;
+  tip.textContent = `${d} · ${c.dataset.fmt === "gb" ? fmtBytes(v * 1e9) : (+v).toLocaleString() + " scenes"}${rec ? " (reconstructed)" : ""}`;
+});
+document.addEventListener("mouseout", (ev) => {
+  const c = ev.target.closest && ev.target.closest(".chart");
+  if (c && !c.contains(ev.relatedTarget)) { c.querySelector(".ctip").hidden = true; c.querySelector(".cx").setAttribute("visibility", "hidden"); }
+});
+
+// --- Insights → Arbiter ----------------------------------------------------------------
+async function openArbiter() {
+  const box = $("#arbiter-body"); if (!box) return;
+  box.innerHTML = '<p class="dim">Asking for honest verdicts…</p>';
+  let s;
+  try { s = await api("/api/insights/arbiter"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  if (!s.ok) { box.innerHTML = `<p class="dim">${esc(s.reason)}</p>`; return; }
+  const nm = (c) => esc(s.names[c] || c), pc = (x) => Math.round(100 * x) + "%";
+  const BEST_FIRST = ["legendaire", "exceptionnelle", "merveilleuse", "reject"];
+  const cls = BEST_FIRST.filter((c) => s.classes.includes(c));
+  const grid = `<table class="arb-grid"><thead><tr><th class="faint small">You ↓ · Peaks →</th>${cls.map((c) => `<th>${nm(c)}</th>`).join("")}</tr></thead><tbody>${cls.map((g) => {
+    const tot = Object.values(s.grid[g]).reduce((a, b) => a + b, 0) || 1;
+    return `<tr><th>${nm(g)}</th>${cls.map((v) => {
+      const n = s.grid[g][v], sh = n / tot, diag = g === v;
+      return `<td class="${diag ? "diag" : n ? "dis" : ""}" ${!diag && n ? `data-cell="${g}>${v}"` : ""} style="--sh:${sh.toFixed(3)}" title="You graded ${n} ${s.names[g] || g}; Peaks says ${s.names[v] || v}${!diag && n ? " — click to review them" : ""}">${n ? n.toLocaleString() : "·"}</td>`;
+    }).join("")}</tr>`;
+  }).join("")}</tbody></table>`;
+  const per = cls.map((c) => `<div class="card pad hcard"><span class="tq-l">${nm(c)}</span><span class="tq-v">${s.per_tier[c].n ? pc(s.per_tier[c].agree / s.per_tier[c].n) : "—"}</span><span class="faint small">${s.per_tier[c].agree} of ${s.per_tier[c].n} agree</span></div>`).join("");
+  const clusters = s.clusters.length ? s.clusters.map((c) => `<li><b>${esc(c.value)}</b> <span class="faint">(${c.kind})</span> — Peaks rates these <b>${c.way}</b> than you: ${c.same_way} of ${c.n}</li>`).join("")
+    : '<li class="faint">Nothing stands out: where you disagree, it isn\'t one studio, performer, resolution or picture band.</li>';
+  const calib = barChart(s.calibration, { label: (b) => `says ${Math.round(b.lo * 100)}–${Math.round(b.hi * 100)}% (${b.n})`, value: (b) => b.right, fmtV: (v) => `right ${pc(v)}` });
+  const drivers = s.drivers && s.drivers.groups ? barChart(s.drivers.groups, { label: (g) => g.label, value: (g) => g.share, fmtV: pc }) : '<p class="faint small">Needs both Légendaire and Exceptionnelle graded.</p>';
+  const words = s.words.length ? `<p class="small">${s.words.map((w) => `<span class="q" title="effect size ${w.d}">${esc(w.term)} → ${esc(w.favours)}</span>`).join(" ")}</p>` : '<p class="faint small">No description words reliably separate your tiers — so none are shown.</p>';
+  box.innerHTML = `
+    <div class="hgrid"><div class="card pad hcard"><span class="tq-l">Peaks agrees with you</span><span class="tq-v">${pc(s.agree)}</span>
+      <span class="faint small">on ${s.n.toLocaleString()} graded scenes, each judged without its grade${s.trained_at ? ` · trained ${esc(s.trained_at)}` : ""}</span></div>${per}</div>
+    <div class="hgrid two">
+      <div class="card pad"><h3>Your grade vs Peaks' verdict</h3>${grid}<p class="faint small">Off the diagonal are the disagreements — click a number to rule on them.</p></div>
+      <div class="card pad"><h3>Where you part ways</h3><ul class="arb-cl">${clusters}</ul>
+        <h3 style="margin-top:14px">How much its confidence is worth</h3>${calib}</div></div>
+    <div class="hgrid two">
+      <div class="card pad"><h3>What separates ${nm("legendaire")} from ${nm("exceptionnelle")}</h3>${drivers}</div>
+      <div class="card pad"><h3>In words <span class="faint small">(hint)</span></h3>${words}</div></div>`;
+}
+document.addEventListener("click", (ev) => {
+  const c = ev.target.closest("[data-cell]"); if (!c) return;
+  cat.view = "arbiter"; cat.cell = c.dataset.cell; cat.tier = ""; go("catalogue"); openCatalogue();
+});
+
+// --- Insights → Moments -------------------------------------------------------------------
+async function openMoments() {
+  const box = $("#moments-body"); if (!box) return;
+  box.innerHTML = '<p class="dim">Checking Peaks\' picks against your saves…</p>';
+  let m;
+  try { m = await api("/api/insights/moments"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
+  const pair = (x) => `<div class="mc-pair ${x.rank ? "hit" : "miss"}">
+      <figure><img loading="lazy" src="${x.saved_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>you saved ${fmt(x.saved)}</figcaption></figure>
+      <figure><img loading="lazy" src="${x.pick_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>${x.rank ? `Peaks' #${x.rank} pick` : "Peaks' nearest pick"}${x.pick != null ? " " + fmt(x.pick) : ""}</figcaption></figure></div>`;
+  box.innerHTML = `
+    <div class="hgrid">
+      <div class="card pad hcard"><span class="tq-l">Found before you saved it</span><span class="tq-v">${pc(m.live.top3)}</span>
+        <span class="faint small">top ${m.top_k} picks · ${m.live.n} saves since this started${m.live.top1 != null ? ` · first pick ${pc(m.live.top1)}` : ""}</span></div>
+      <div class="card pad hcard"><span class="tq-l">Estimate from older saves</span><span class="tq-v">${pc(m.estimate.top3)}</span>
+        <span class="faint small">${m.estimate.n} saves in ${m.estimate.scenes} scenes, each judged without its own saves</span></div>
+      <div class="card pad hcard"><span class="tq-l">Your kind of moment</span><span class="tq-v">${pc(m.approval.rate)}</span>
+        <span class="faint small">👍 on Peaks' picks while watching · ${m.approval.n} answers</span></div>
+    </div>
+    <div class="hgrid two">
+      <div class="card pad"><h3>Found, by month</h3>${barChart(m.live.by_month, { label: (x) => `${x.month} (${x.n})`, value: (x) => x.rate, fmtV: pc })}</div>
+      <div class="card pad"><h3>Your kind, by month</h3>${barChart(m.approval.by_month, { label: (x) => `${x.month} (${x.n})`, value: (x) => x.rate, fmtV: pc })}</div></div>
+    <div class="card pad"><h3>Misses <span class="faint small">— where Peaks looked elsewhere (${m.examples_from})</span></h3><div class="mc-grid">${m.misses.map(pair).join("") || '<p class="faint small">None yet.</p>'}</div></div>
+    <div class="card pad"><h3>Hits</h3><div class="mc-grid">${m.hits.map(pair).join("") || '<p class="faint small">None yet.</p>'}</div></div>
+    <p class="faint small">A save counts as found when it's within ${m.window} s of one of Peaks' top ${m.top_k} picks for that scene.</p>`;
+}
+
+// --- Library health → the shrink trendline ---------------------------------------------------
+async function trendHTML() {
+  let t;
+  try { t = await api("/api/insights/trend"); } catch { return ""; }
+  const rec = t.points.some((p) => p.rec);
+  return `<div class="hgrid two">
+    <div class="card pad"><h3>Library size <span class="faint small">now ${fmtBytes(t.now.gb * 1e9)} · ${t.now.scenes.toLocaleString()} scenes</span></h3>
+      ${lineChart(t.points, { y: "gb", fmtY: (v) => fmtBytes(v * 1e9), dashedUntil: rec ? 1 : null })}
+      <h3 style="margin-top:10px">Scenes</h3>${lineChart(t.points, { y: "scenes", fmtY: (v) => Math.round(v).toLocaleString(), dashedUntil: rec ? 1 : null, h: 110 })}
+      ${rec ? `<p class="faint small">Dashed: reconstructed from what's here and what you've deleted${t.recorded_since ? ` (recorded daily since ${esc(t.recorded_since)})` : ""}.</p>` : ""}</div>
+    <div class="card pad"><h3>Freed per month <span class="faint small">${t.month_freed_gb ? `${fmtBytes(t.month_freed_gb * 1e9)} this month` : ""}</span></h3>
+      ${barChart(t.freed.slice(-12), { label: (m) => `${m.month} (${m.scenes})`, value: (m) => m.gb, fmtV: (v) => fmtBytes(v * 1e9) })}</div></div>`;
+}
+
+// --- picks while watching: "your kind of moment?" -------------------------------------------
+// Peaks' picks are marked on the timeline; when playback reaches one, a chip asks 👍/👎.
+// The answer is a taste label at the pick's own time.
+const pickW = new WeakMap();      // video → {sid, picks, done:Set, chip, marks}
+function pickSetup(v, sid, picks, host, track) {
+  const st = { sid, picks: picks.map((p) => +p.t), done: new Set(), chip: null, track };
+  pickW.set(v, st);
+  host.querySelector(".pick-chip")?.remove();
+  track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
+  const chip = document.createElement("div");
+  chip.className = "pick-chip"; chip.hidden = true;
+  chip.innerHTML = `<span>Peaks pick · your kind of moment?</span><button data-pv="1" title="Yes (+)">👍</button><button data-pv="0" title="No (−)">👎</button>`;
+  host.appendChild(chip); st.chip = chip;
+  chip.addEventListener("click", (e) => { const b = e.target.closest("[data-pv]"); if (b) pickAnswer(v, +b.dataset.pv); });
+  const draw = () => {
+    const own = track.querySelectorAll(".pk[data-t]");
+    if (own.length) { own.forEach((x) => x.classList.toggle("done", st.done.has(+x.dataset.t))); return; }
+    if (!v.duration) return;
+    track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
+    for (const t of st.picks) {
+      const m = document.createElement("span");
+      m.className = "pick-mk" + (st.done.has(t) ? " done" : ""); m.style.left = (100 * t / v.duration).toFixed(2) + "%";
+      m.title = `Peaks pick ${fmt(t)}`; track.appendChild(m);
+    }
+  };
+  st.draw = draw;
+  if (v.duration) draw(); else v.addEventListener("loadedmetadata", draw, { once: true });
+}
+function pickCurrent(v) {
+  const st = pickW.get(v); if (!st) return null;
+  return st.picks.find((t) => !st.done.has(t) && Math.abs(t - v.currentTime) <= 3) ?? null;
+}
+function pickTick(v) {
+  const st = pickW.get(v); if (!st || !st.chip) return;
+  st.chip.hidden = pickCurrent(v) == null;
+}
+async function pickAnswer(v, label) {
+  const st = pickW.get(v), t = pickCurrent(v); if (!st || t == null) return;
+  st.done.add(t); st.chip.hidden = true; st.draw();
+  try {
+    const qs = new URLSearchParams(pparam({ t: t.toFixed(2), label, scene_id: st.sid, pick: "true" }));
+    const c = await api("/api/label?" + qs, { method: "POST" });
+    toast(label ? "👍 Your kind — noted" : "👎 Not your kind — noted"); updateTasteUI(c);
+  } catch (e) { toast(e.message, true); }
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, select") || (e.key !== "+" && e.key !== "-" && e.key !== "=")) return;
+  for (const v of [$("#viewer-v"), $("#rv-v")]) {
+    if (v && pickCurrent(v) != null && !v.closest("[hidden]")) { e.preventDefault(); pickAnswer(v, e.key === "-" ? 0 : 1); return; }
+  }
+});
 // Library health: the performers and studios you grade best and worst
 function whoHealth(w) {
   if (!w) return "";
@@ -3107,6 +3368,15 @@ function tdShow() {
     </div>
     <div class="td-keys">1–4 grade · Enter accept · 0 keep as is · S skip · U undo · P / click the still: play peaks · Space pause · M sound · ←/→ moments</div>`;
   $("#td-body").querySelectorAll(".td-grades button").forEach((b) => b.onclick = () => tdAnswer(b.dataset.g));
+  if (["promote", "second"].includes(x.job) && x.pred) {
+    api(`/api/tiers/explain/${encodeURIComponent(x.scene_id)}`).then((e) => {
+      if (!e.ok || td.queue[0] !== x) return;
+      const el = document.createElement("div");
+      el.className = "cat-sug td-arg";
+      el.innerHTML = `Peaks says <b>${esc(e.names[e.verdict] || e.verdict)}</b>${e.honest ? " (without seeing your grade)" : ""} — ${esc(e.summary)}`;
+      $("#td-body .td-why")?.prepend(el);
+    }).catch(() => {});
+  }
   $("#td-accept")?.addEventListener("click", () => tdAnswer(x.pick));
   $("#td-keep")?.addEventListener("click", () => tdAnswer(null, true));
   $("#td-skip").onclick = tdSkip; $("#td-undo").onclick = tdUndo;
@@ -3744,6 +4014,7 @@ function catParams(offset, refresh) {
   if (cat.performerId) qs.set("performer_id", cat.performerId);
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
+  if (cat.view === "arbiter" && cat.cell) qs.set("cell", cat.cell);
   if (cat.isNew) qs.set("new", "true");
   const q = $("#cat-q").value.trim(); if (q) qs.set("q", q);
   const res = $("#cat-res").value; if (res) qs.set("res", res);
@@ -4313,7 +4584,8 @@ function catCardHTML(r, i) {
     && (r.suggest || ["drain", "promote", "second", "saved", "trim", "passed"].includes(cat.view));
   const suggest = (r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "")
     + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "")
-    + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "");
+    + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "")
+    + (p && p.from !== "who" ? `<button class="btn sm ghost" data-why="${esc(r.scene_id)}" title="Why Peaks rates it this way — and, if you graded it, where it disagrees">Why?</button><div class="argue" hidden></div>` : "");
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
@@ -4348,6 +4620,7 @@ function renderCatList() {
     : '<p class="dim">Nothing here with these filters.</p>';
   $("#btn-cat-more").hidden = cat.items.length >= cat.total;
   if (cat.view === "orphans") orphLoadAll();
+  argueAutoOpen();
 }
 
 // --- orphans: who might this be? ----------------------------------------------------
@@ -5262,6 +5535,10 @@ const RV_GRADES = [
 ];
 function catListLabel() {
   if (cat.isNew) return "New from ingest";
+  if (cat.view === "arbiter") {
+    const [g, v] = (cat.cell || ">").split(">");
+    return `Arbiter · you ${className(g)}, Peaks ${className(v)}`;
+  }
   if (cat.view) return (CAT_VIEWS.find((v) => v[0] === cat.view) || [0, cat.view])[1];
   return cat.tier ? TIER_NAMES[cat.tier] : "All scenes";
 }
@@ -5439,6 +5716,7 @@ function renderReview() {
   $("#rv-nopeaks").hidden = rv.peaks.length > 0;
   $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
     rv.peaks.map((t) => `<span class="pk" style="left:calc(16px + (100% - 32px) * ${(t / dur).toFixed(4)})" data-t="${t}" title="${fmt(t)}"></span>`).join("");
+  if ((r.moments || []).some((m) => m.score != null)) pickSetup(v, r.scene_id, r.moments, $("#rv-v").parentElement, $("#rv-scrub"));
   // grades: current one outlined, the model's pick highlighted
   const cur = r.tier === "rejected" ? "reject" : r.tier;
   const probs = (r.pred || {}).probs || {};
@@ -5618,6 +5896,7 @@ $("#rv-v")?.addEventListener("timeupdate", () => {
   const v = $("#rv-v"), bar = $("#rv-prog");
   if (bar && v.duration) bar.style.width = (100 * v.currentTime / v.duration).toFixed(2) + "%";
   rvEngageTick(v);
+  pickTick(v);
 });
 $("#rv-v")?.addEventListener("click", () => { const v = $("#rv-v"); v.paused ? v.play() : v.pause(); });
 // volume: a mute button + slider, remembered per browser (starts muted so the

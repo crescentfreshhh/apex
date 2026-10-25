@@ -747,7 +747,7 @@ def create_app(cfg=None):
     @app.post("/api/label")
     def add_label(
         t: float, label: int, key: str | None = None,
-        scene_id: str | None = None, profile: str | None = None,
+        scene_id: str | None = None, profile: str | None = None, pick: bool = False,
     ):
         # the megaboard rates by scene_id+time (it has no cache key) — resolve it
         # the same way "more like this moment" does.
@@ -756,6 +756,8 @@ def create_app(cfg=None):
         if key is None:
             raise HTTPException(400, "need a key or a resolvable scene_id")
         res = service.add_label(key, t, label, profile=profile, scene_id=scene_id)
+        if pick and scene_id is not None:          # an answer on one of Peaks' picks
+            service.record_pick_feedback(scene_id, t, label)
         # hands-off training: once enough new ratings pile up, retrain the taste
         # model in the background so "Train now" is optional. One train at a time.
         res["autotrain"] = False
@@ -1170,10 +1172,10 @@ def create_app(cfg=None):
         size_min: float | None = Query(None, ge=0), size_max: float | None = Query(None, ge=0),
         organized: str | None = Query(None, pattern="^(yes|no)$"),
         pic: str | None = Query(None, pattern="^(low|good|excellent|noscore|upscaled|unmeasured)$"),
-        pic_min: int | None = Query(None, ge=0, le=100),
+        pic_min: int | None = Query(None, ge=0, le=100), cell: str | None = None,
     ):
         try:
-            return service.catalogue(tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
+            return service.catalogue(cell=cell, tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
                                      performer_id=performer_id, performer_ids=performer_ids,
                                      perf_mode=perf_mode, studios=studios, tags=tags, tags_not=tags_not,
                                      vr=vr, added_from=added_from, added_to=added_to, saves=saves,
@@ -1793,6 +1795,36 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(503, str(exc))
         return [{"id": str(p.get("id")), "name": p.get("name", "")} for p in found]
+
+    @app.get("/api/tiers/explain/{scene_id}")
+    def tiers_explain(scene_id: str):
+        try:
+            return service.tier_explain(scene_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.get("/api/insights/trend")
+    def insights_trend(days: int = Query(365, ge=7, le=3650)):
+        try:
+            return service.library_trend(days=days)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
+
+    @app.get("/api/insights/moments")
+    def insights_moments():
+        return service.moment_insights()
+
+    @app.get("/api/scene/{scene_id}/picks")
+    def scene_picks(scene_id: str):
+        return [{"t": p["t"], "score": p.get("score"), "thumb": p.get("thumb")}
+                for p in service.scene_picks(scene_id)]
+
+    @app.get("/api/insights/arbiter")
+    def insights_arbiter():
+        try:
+            return service.arbiter_summary()
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable etc.
+            raise HTTPException(503, str(exc))
 
     @app.get("/api/tiers/state")
     def tiers_state():

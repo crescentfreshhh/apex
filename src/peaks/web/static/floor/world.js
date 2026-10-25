@@ -555,6 +555,15 @@ function panels(pal, f, t) {
       E.putS(rc + 9, r++, `${bytes(v.free)} free`, pal.text);
     }
   }
+  // the shrink trendline: library size over the last 30 days, and what's been freed
+  const tr = day.trend;
+  if (tr && tr.gb && tr.gb.length > 1) {
+    const first = tr.gb[0], last = tr.gb[tr.gb.length - 1], diff = last - first;
+    E.putS(rc, r, "library".padEnd(9), pal.dim);
+    E.putS(rc + 9, r, braille(tr.gb, 12), diff <= 0 ? pal.run : pal.warn);
+    E.putS(rc + 22, r++, `${diff <= 0 ? "-" : "+"}${Math.abs(diff).toFixed(0)}GB/30d`, pal.text);
+    if (tr.month_freed_gb) E.putS(rc, r++, `freed this month ${tr.month_freed_gb.toFixed(0)}GB`, pal.dim);
+  }
 
   // bottom: the log, typed out
   const tickRows = 5, ty = rows - tickRows - 1;

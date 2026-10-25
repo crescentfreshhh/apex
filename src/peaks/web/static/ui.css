@@ -1056,3 +1056,66 @@ body.kiosk #floor-canvas { border-radius: 0; }
 .orph-search { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .orph-search input { width: 150px; }
 .orph-done { color: #8fd18f; }
+
+/* chart marks: validated against the dark surface (dataviz validate_palette: all checks pass) */
+:root { --cv-1: #ab8526; --cv-leg: #ab8526; --cv-exc: #a374f0; --cv-rej: #e0604d; --cv-mer: #5f8fd8; }
+
+/* the Arbiter's argument on a card */
+.argue { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); font-size: 13px; }
+.arg-head { margin-bottom: 6px; }
+.arg-axis { display: flex; justify-content: space-between; font-size: 11.5px; margin: 0 52px 2px 120px; }
+.arg-row { display: grid; grid-template-columns: 116px 1fr 48px; align-items: center; gap: 4px 8px; margin: 3px 0; }
+.arg-row .arg-fact { grid-column: 2 / 4; color: var(--dim); font-size: 12px; }
+.arg-l { color: var(--dim); }
+.arg-bar { position: relative; height: 10px; }
+.arg-bar::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--line2); }
+.arg-bar i { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.arg-v { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
+.arg-total { border-top: 1px solid var(--line); padding-top: 4px; grid-template-columns: 116px 48px 1fr; }
+.arg-total .arg-v { text-align: left; }
+.arg-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
+.arg-look img, .arg-m { width: 72px; height: 41px; object-fit: cover; border-radius: 4px; margin: 3px 4px 0 0; }
+.arg-m { cursor: pointer; }
+.arg-words { margin-top: 8px; } .arg-words i { font-style: normal; color: var(--fg); }
+.arg-rule { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.td-arg { margin-bottom: 4px; }
+
+/* Insights: agreement grid, bars, line charts, moment pairs */
+.arb-grid { border-collapse: separate; border-spacing: 2px; width: 100%; font-variant-numeric: tabular-nums; }
+.arb-grid th { font-weight: 500; color: var(--dim); text-align: left; padding: 4px 6px; }
+.arb-grid td { text-align: center; padding: 8px 6px; border-radius: 4px; background: color-mix(in srgb, var(--cv-1) calc(var(--sh) * 70%), var(--panel2)); }
+.arb-grid td.diag { outline: 1px solid var(--line2); }
+.arb-grid td.dis { cursor: pointer; } .arb-grid td.dis:hover { outline: 2px solid var(--cv-1); }
+.arb-cl { margin: 0; padding-left: 18px; } .arb-cl li { margin: 4px 0; }
+.ibars { display: flex; flex-direction: column; gap: 6px; }
+.ibar { display: grid; grid-template-columns: minmax(110px, 40%) 1fr auto; gap: 8px; align-items: center; font-size: 12.5px; }
+.ibar .bl { color: var(--dim); } .ibar .bv { font-variant-numeric: tabular-nums; }
+.ibar .bt { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
+.ibar .bt i { display: block; height: 100%; background: var(--cv-1); border-radius: 0 4px 4px 0; }
+.chart { position: relative; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .cl { fill: none; stroke: var(--cv-1); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.chart .cl.dashed { stroke-dasharray: 4 4; opacity: .7; }
+.chart .cg { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart .ct { fill: var(--dim); font-size: 10px; }
+.chart .cx { stroke: var(--line2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart .ctip { position: absolute; top: 0; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line2);
+  border-radius: 6px; padding: 3px 8px; font-size: 12px; white-space: nowrap; pointer-events: none; }
+.mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.mc-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 6px; border-radius: 8px; border: 1px solid var(--line); }
+.mc-pair.hit { border-color: rgba(74,200,136,.4); } .mc-pair.miss { border-color: rgba(224,96,77,.35); }
+.mc-pair figure { margin: 0; } .mc-pair img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; }
+.mc-pair figcaption { font-size: 11.5px; color: var(--dim); }
+
+/* picks while watching */
+.pick-mk { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1px; background: var(--gold); opacity: .9; pointer-events: none; }
+.pick-mk.done, .rv-scrub .pk.done { background: var(--ok); }
+.viewer-video, .rv-player { position: relative; }
+.pick-chip { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px;
+  background: rgba(10,10,12,.86); border: 1px solid var(--line2); border-radius: 999px; padding: 6px 10px; font-size: 13px; z-index: 5; }
+.pick-chip button { background: none; border: 1px solid var(--line2); border-radius: 999px; padding: 2px 10px; font-size: 15px; cursor: pointer; color: inherit; }
+.pick-chip button:hover { border-color: var(--gold); }
+@media (max-width: 760px) {
+  .arg-row { grid-template-columns: 84px 1fr 42px; } .arg-axis { margin-left: 88px; margin-right: 46px; }
+  .arg-cols { grid-template-columns: 1fr; }
+}

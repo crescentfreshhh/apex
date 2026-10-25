@@ -254,7 +254,14 @@ def floor_day(service, now: float | None = None) -> dict:
         service._floor_sb_free = sb = (now, val)
     if sb[1] is not None:
         disks["seedbox"] = {"free": sb[1]}
-    return {"now": now, "start": start, "buckets": buckets, "today": today, "disks": disks}
+    trend = None
+    try:
+        tr = service.library_trend(days=30)
+        trend = {"gb": [p["gb"] for p in tr["points"]], "month_freed_gb": tr["month_freed_gb"],
+                 "scenes": tr["now"]["scenes"]}
+    except Exception:  # noqa: BLE001 — extra
+        pass
+    return {"now": now, "start": start, "buckets": buckets, "today": today, "disks": disks, "trend": trend}
 
 
 def floor_replay(service, hours: float = 24) -> list[dict]:

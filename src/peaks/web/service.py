@@ -35,6 +35,9 @@ from .picture import PictureMixin
 from .upgrades import UpgradesMixin
 from .seedjobs import SeedJobsMixin
 from .orphans import OrphansMixin
+from .arbiter import ArbiterMixin
+from .momentcheck import MomentCheckMixin
+from .trend import TrendMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -48,7 +51,8 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
-              PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin):
+              PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
+              ArbiterMixin, MomentCheckMixin, TrendMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -2216,6 +2220,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         deliberate "I love this", so it's folded into your taste model as a
         positive (feeds the reranker, not just the retrieval centroid)."""
         tag = tag or self.cfg.markers.tag_name
+        if tag == self.cfg.markers.tag_name:
+            self.moment_check_on_save(str(scene_id), float(start))   # before it joins your taste
         client = self.client()
         t = client.find_or_create_tag(tag)
         if end is None or end <= start:
@@ -5108,7 +5114,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                   saves: str | None = None, min_o: int | None = None,
                   size_min: float | None = None, size_max: float | None = None,
                   organized: str | None = None, pic: str | None = None,
-                  pic_min: int | None = None) -> dict:
+                  pic_min: int | None = None, cell: str | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -5221,8 +5227,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 pass
         signals = self._scene_signals(rows)
         views = {v: len(self._triage(v, pool, preds, floor, signals)) for v in self.TRIAGE_VIEWS}
-        in_view = view in self.TRIAGE_VIEWS
-        if in_view:
+        in_view = view in self.TRIAGE_VIEWS or view == "arbiter"
+        if view == "arbiter":                  # a cell of the Insights agreement grid
+            pool = self.arbiter_cell(pool, preds, cell or "")
+        elif in_view:
             pool = self._triage(view, pool, preds, floor, signals)      # the view's own order
         elif tiers:
             pool = [r for r in pool if r["tier"] in tiers]
@@ -5288,6 +5296,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         rows = self._catalogue_all()
         self._check_drained(rows)
+        try:
+            self._trend_snapshot(rows)                # one point a day for the shrink trendline
+        except OSError:
+            pass
         counts = {t: 0 for t in TIERS}
         for r in rows:
             counts[r["tier"]] += 1
@@ -5717,7 +5729,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         import time as _t
 
         from ..tier_model import (
-            CLASSES, fit_best, fit_fallback, picture_features, quality_features, train_class,
+            CLASSES, fit_best, fit_fallback, fit_folds, picture_features, quality_features, train_class,
             usable_classes, who_of,
         )
         from . import forensics
@@ -5768,10 +5780,18 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     fb_w.append(w)
                     fb_p.append(picture_features(None))
                     fb_y.append("reject")
+            ids = [r["scene_id"] for r in train] + [None] * remembered
             # one heavy fit at a time, process-wide (taste training shares it)
             with self._train_lock, forensics.busy("tier-train"):
-                model, rep = fit_best(Xv, Xq, [y[i] for i in keep], who=[who[i] for i in keep],
-                                      pic=np.stack([pic[i] for i in keep]))
+                yk, wk, pk = [y[i] for i in keep], [who[i] for i in keep], np.stack([pic[i] for i in keep])
+                model, rep = fit_best(Xv, Xq, yk, who=wk, pic=pk)
+                # honest verdicts: each graded scene judged by the fold model that never saw its grade
+                model.folds, oof_p, fold_of = fit_folds(model, Xv, Xq, yk, who=wk, pic=pk)
+                model.oof = {}
+                for i, summ in zip(range(len(keep)), model.summarize(oof_p)):
+                    sid = ids[keep[i]]
+                    if sid is not None:
+                        model.oof[sid] = {**summ, "fold": int(fold_of[i]), "graded": yk[i], "honest": True}
                 fallback, fb_rep = (fit_fallback(np.stack(fb_q), fb_y, fb_w, pic=np.stack(fb_p)) if fb_q
                                     else (None, {"trained": False, "n": 0}))
             model.fallback = fallback
@@ -5845,6 +5865,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 and (r.get("performer_ids") or r.get("studio"))]
         if fb is not None and rest:
             run(fb, rest, None, np.stack([quality_features(by_id[s]["quality"]) for s in rest]), "who")
+        # graded scenes: the honest verdict (a fold model that never saw the grade)
+        # replaces the in-sample one, so second opinions aren't the grade echoed back
+        for sid, summ in (getattr(m, "oof", None) or {}).items():
+            if sid in preds and train_class(by_id[sid]["tier"]):
+                preds[sid] = {k: v for k, v in summ.items() if k not in ("fold", "graded")}
         self._tier_preds = (key, preds)
         return preds
 

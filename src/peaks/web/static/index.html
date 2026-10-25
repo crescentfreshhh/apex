@@ -423,8 +423,10 @@
   <section id="statistics" class="view">
     <div class="head"><h1>Insights</h1><span id="stats-status" class="sub2"></span><span class="grow"></span>
       <button id="btn-stats-refresh" class="btn ghost" title="Recompute">↻ Refresh</button></div>
-    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="health">Library health</span><span data-tab="coverage">Taste coverage</span></div>
+    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="arbiter">Arbiter</span><span data-tab="moments">Moments</span><span data-tab="health">Library health</span><span data-tab="coverage">Taste coverage</span></div>
     <div id="stats-body" class="dim" data-pane="overview">Crunching your library…</div>
+    <div id="arbiter-body" data-pane="arbiter" hidden><p class="dim">Asking for honest verdicts…</p></div>
+    <div id="moments-body" data-pane="moments" hidden><p class="dim">Checking Peaks' picks…</p></div>
     <div id="health-body" data-pane="health" hidden><p class="dim">Reading your library…</p></div>
     <div id="experimental" data-pane="coverage" hidden>
       <div class="toolbar">
