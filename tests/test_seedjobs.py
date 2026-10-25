@@ -443,3 +443,7 @@ def test_the_floor_day_and_readouts_are_counts_only(env):
         assert name not in blob
     g = gpu_load()
     assert g is None or set(g) == {"util", "mem_mb"}
+    # the pull bay draws one belt per concurrent download
+    assert st["stations"]["pull"]["parallel"] == svc.seedjob_settings()["parallel"]
+    svc.save_seedjob_settings({"parallel": 6})
+    assert floor_state(svc, jobs)["stations"]["pull"]["parallel"] == 6

@@ -62,6 +62,7 @@ def floor_state(service, jobs) -> dict:
         sjs = service.seedjob_status()
         stations["purge"]["dry"] = sjs["purge"]["dry"]
         stations["pull"]["taken_over"] = bool(sjs["settings"]["cutover"])
+        stations["pull"]["parallel"] = int(sjs["settings"].get("parallel") or 3)   # belts in the bay
         lp = sjs.get("last_purge") or {}
         stations["purge"]["last"] = {"delete": lp.get("delete"), "dry": lp.get("dry")}
     except Exception:  # noqa: BLE001

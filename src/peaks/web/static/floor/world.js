@@ -27,7 +27,19 @@ const ST = {
   report: { x: 101, y: LOW_Y, w: 15, h: LOW_H, label: "REPORT", tag: "12" },
   crusher: { x: 122, y: LOW_Y, w: 18, h: LOW_H, label: "CRUSHER", tag: "13" },
 };
-const LANES_X0 = 17, LANES_X1 = 42, LANE_Y = [MAIN_Y + 3, MAIN_Y + 6, MAIN_Y + 9];
+const LANES_X0 = 17, LANES_X1 = 42;
+// one belt per concurrent download (Settings → Seedbox jobs), spread over the bay's
+// rows MAIN_Y+2 … MAIN_Y+10: three rows each up to 3 belts (crate above, label below),
+// two rows for 4 (crate on the belt, label below) and 5 (crate on the belt, a gap below),
+// one row from 6 (percent in the crate)
+function laneLayout(n) {
+  n = Math.max(1, Math.min(8, n | 0 || 3));
+  const pitch = n <= 3 ? 3 : n <= 5 ? 2 : 1;
+  const used = (n - 1) * pitch + 1;
+  const top = MAIN_Y + 2 + Math.floor((9 - used) / 2);
+  return { n, pitch, labels: n <= 4, ys: Array.from({ length: n }, (_, i) => top + i * pitch) };
+}
+const lanesNow = () => laneLayout(((FW.data || {}).stations || {}).pull?.parallel);
 const BELT_Y = MAIN_Y + 7;
 const MAIN_ORDER = ["inbox", "ingest", "embed", "picture", "dupes", "library"];
 const WALK_Y = 25;
@@ -125,9 +137,10 @@ function drawStatic(pal, night) {
     for (let y = MAIN_Y + MAIN_H; y < LOW_Y - 1; y++) if (y < WALK_Y - 1 || y > WALK_Y + 2) P(ctx, cx - 1, y, "| |", pal.side, 0.8);
   }
   for (const k of Object.keys(ST)) block(ctx, ST[k], pal);
-  // the pull bay: three rails between the seedbox and the inbox
+  // the pull bay: a rail under each belt (one per concurrent download)
   P(ctx, LANES_X0, MAIN_Y + 1, "P U L L   B A Y", pal.dim, 0.8, true);
-  for (const ly of LANE_Y) { P(ctx, LANES_X0, ly + 1, "-".repeat(LANES_X1 - LANES_X0), pal.side, 0.8); }
+  const L = lanesNow();
+  if (L.pitch === 3) for (const ly of L.ys) P(ctx, LANES_X0, ly + 1, "-".repeat(LANES_X1 - LANES_X0), pal.side, 0.8);
   if (night) P(ctx, 4, 48, "night shift", pal.dim, 0.5);
 }
 
@@ -162,23 +175,45 @@ function machines(ctx, pal, f, t) {
   }
   // pull lanes: one crate per file in flight, filling with bytes
   {
-    const lanes = d.lanes || [];
-    LANE_Y.forEach((ly, i) => {
-      const lane = lanes[i], on = !!lane;
-      let belt = "";
-      for (let x = 0; x < LANES_X1 - LANES_X0; x++) belt += on ? ((x + f) % 4 === 0 ? ">" : "=") : "=";
-      P(ctx, LANES_X0, ly, belt, on ? pal.text : pal.dim, on ? 0.9 : 0.5);
-      if (lane) {
-        const c = FW.lanes[lane.id] || (FW.lanes[lane.id] = { x: LANES_X0 });
+    const lanes = d.lanes || [], L = lanesNow();
+    // each file keeps its belt while in flight (a finished neighbour doesn't make crates jump)
+    const live = new Set(lanes.map((l) => l.id));
+    for (const id of Object.keys(FW.lanes)) if (!live.has(+id)) delete FW.lanes[id];
+    const used = new Set(Object.values(FW.lanes).map((c) => c.slot));
+    const bySlot = [];
+    for (const lane of lanes) {
+      let c = FW.lanes[lane.id];
+      if (!c) {
+        let slot = 0;
+        while (used.has(slot) && slot < L.n) slot++;
+        c = FW.lanes[lane.id] = { x: LANES_X0, slot };
+        used.add(slot);
+      }
+      if (c.slot < L.n) bySlot[c.slot] = { lane, c };
+    }
+    L.ys.forEach((ly, i) => {
+      const it = bySlot[i], on = !!it;
+      const above = L.pitch === 3;                      // crate above the belt, or riding on it
+      if (on) {
+        const { lane, c } = it;
         const target = LANES_X0 + lane.pct * (LANES_X1 - LANES_X0 - 9);
         c.x += (target - c.x) * 0.08;
-        const fill = Math.round(lane.pct * 4);
-        P(ctx, c.x, ly - 1, `[${"#".repeat(fill).padEnd(4, ".")}]`, pal.crate, 1, true);
-        FE.putW(FE.tctx, c.x, ly - 1, "[####]", pal.crate, 0.5);
-        P(ctx, LANES_X0 + 1, ly + 1, `${(lane.cat || "?").slice(0, 2).padEnd(3)}${lane.mbps ? lane.mbps.toFixed(1) + " MB/s" : ""}  ${Math.round(lane.pct * 100)}%`, pal.dim, 0.9);
       }
+      const cx = on ? it.c.x : -99;
+      let belt = "";
+      for (let x = 0; x < LANES_X1 - LANES_X0; x++) {
+        const under = !above && LANES_X0 + x > cx - 1 && LANES_X0 + x < cx + 6.5;   // the crate hides the belt
+        belt += under ? " " : on ? ((x + f) % 4 === 0 ? ">" : "=") : "=";
+      }
+      P(ctx, LANES_X0, ly, belt, on ? pal.text : pal.dim, on ? 0.9 : 0.5);
+      if (!on) return;
+      const { lane, c } = it;
+      const pct = Math.round(lane.pct * 100);
+      const crate = L.pitch === 1 ? `[${String(pct).padStart(3, "0")}%]` : `[${"#".repeat(Math.round(lane.pct * 4)).padEnd(4, ".")}]`;
+      P(ctx, c.x, above ? ly - 1 : ly, crate, pal.crate, 1, true);
+      if (above) FE.putW(FE.tctx, c.x, ly - 1, "[####]", pal.crate, 0.5);      // afterglow (would smear a number)
+      if (L.labels) P(ctx, LANES_X0 + 1, ly + 1, `${(lane.cat || "?").slice(0, 2).padEnd(3)}${lane.mbps ? lane.mbps.toFixed(1) + " MB/s" : ""}  ${pct}%`, pal.dim, 0.9);
     });
-    if ((lanes.length || 0) > 3) P(ctx, LANES_X0 + 2, LANE_Y[2] + 2, `+${lanes.length - 3} more`, pal.dim);
     const q = (S.pull || {}).queued;
     if (q) P(ctx, LANES_X0 + 16, MAIN_Y + 1, `queue ${q}`, pal.dim);
   }
@@ -550,7 +585,8 @@ function events(prev, next, pal) {
   const ids = new Set((next.lanes || []).map((l) => l.id));
   for (const l of prev.lanes || []) {
     if (!ids.has(l.id)) {                      // a file landed: it drops into the inbox
-      FE.emit(LANES_X1 - 1, LANE_Y[0], 6, { chars: "o.", color: pal.crate, vx: 0.4, vy: -0.3, spread: 0.8, life: 0.6 });
+      const c = FW.lanes[l.id], L = lanesNow();
+      FE.emit(LANES_X1 - 1, L.ys[Math.min((c && c.slot) || 0, L.n - 1)], 6, { chars: "o.", color: pal.crate, vx: 0.4, vy: -0.3, spread: 0.8, life: 0.6 });
       if (window.FA) FA.click();
     }
   }
@@ -603,7 +639,7 @@ function frame(ts) {
   FW.idle = Date.now() - FW.lastActive > 10 * 60 * 1000;
   const k = dayness(FW.replay ? new Date(FW.replay.t * 1000) : new Date());
   const pal = palette(FW.idle, k);
-  const key = `${E.W}x${E.H}|${Math.round(k * 8)}|${FW.idle}`;
+  const key = `${E.W}x${E.H}|${Math.round(k * 8)}|${FW.idle}|${lanesNow().n}`;
   if (E.statKey !== key) { drawStatic(pal, FW.idle); E.statKey = key; }
   // world
   const w = E.wctx;
@@ -676,6 +712,7 @@ function replayStep() {
   for (const k of ["pull", "purge", "ingest", "embed", "picture", "dupes", "upgrades", "backup", "taste", "report"]) {
     sts[k] = { state: (r.hot[k] || 0) > FW.f ? "running" : "idle" };
   }
+  sts.pull.parallel = (((FW.saved || {}).stations || {}).pull || {}).parallel;   // the same bay
   FW.data.stations = sts;
   FW.data.lanes = sts.pull.state === "running" ? [{ id: 1, cat: "1", pct: (FW.f % 30) / 30, mbps: 0 }] : [];
   if (r.t >= r.end) { FW.replay = null; FW.data = FW.saved; toast("Replay done — back to live"); poll(); }
