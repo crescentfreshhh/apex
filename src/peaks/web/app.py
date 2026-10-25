@@ -2300,6 +2300,11 @@ def create_app(cfg=None):
 
     import os as _os
 
+    try:                    # a restart mid-pull: hand what had already landed to the next ingest
+        service.resume_seed_landings()
+    except Exception:  # noqa: BLE001 — never in the way of starting up
+        pass
+
     if _os.environ.get("PEAKS_SCHEDULER", "1").strip().lower() not in ("0", "false", "no", "off"):
         _start_scheduler(app, service, jobs)  # always on; it reads the interval live
 

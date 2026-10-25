@@ -158,6 +158,44 @@ def test_pull_brings_only_new_files_and_records_each(env):
     assert svc._sj_foreign_pull(time.time()) is None                # Peaks' own runs aren't "foreign"
 
 
+def test_a_restart_mid_pull_still_hands_landed_files_to_ingest(env, monkeypatch):
+    import peaks.web.service as svc_mod
+
+    svc, lib = env["svc"], env["lib"]
+    svc.save_seedjob_settings({"cutover": True})
+
+    class Died(BaseException):
+        pass
+
+    def die(self, paths, files):          # the container goes down just before the hand-off
+        raise Died()
+    monkeypatch.setattr(svc_mod.Service, "_sj_hand_to_ingest", die)
+    with pytest.raises(Died):
+        svc.run_seed_pull()
+    monkeypatch.undo()
+    assert svc._sj_load().get("landing")                  # landed, not handed over
+    assert not svc._sj_load().get("ingest_pending")
+
+    again = svc_mod.Service(svc.cfg)                       # the restart
+    again.client = svc.client
+    assert again.resume_seed_landings() == 3
+    pending = again._sj_load()["ingest_pending"]
+    assert set(pending["files"]) == {str(lib / "norating" / "Show A" / "a.mp4"), str(lib / "norating" / "b.mp4"),
+                                     str(lib / "VR" / "v.mp4")}             # not the .funscript
+    assert set(pending["paths"]) == {str(lib / "norating"), str(lib / "VR")}
+    assert "landing" not in again._sj_load()
+    assert again.resume_seed_landings() == 0               # once only
+    assert any("interrupted" in a["text"] for a in again.seedjob_status()["alerts"])
+
+
+def test_a_normal_pull_leaves_nothing_to_resume(env):
+    svc = env["svc"]
+    svc.save_seedjob_settings({"cutover": True})
+    svc.run_seed_pull()
+    assert "landing" not in svc._sj_load()
+    assert svc.resume_seed_landings() == 0
+
+
 def test_a_failed_file_fails_the_run_and_is_retried(env):
     svc, box, state = env["svc"], env["box"], env["state"]
     svc.save_seedjob_settings({"cutover": True})

@@ -357,6 +357,8 @@ class SeedJobsMixin:
                         size = target.stat().st_size
                         self._sj_append_ledger({"t": time.time(), "cat": cat, "rel": rel, "path": str(target),
                                                 "size": size, "ext": rel.rsplit(".", 1)[-1].lower()})
+                        if sj.wanted(rel) and not rel.lower().endswith(".funscript"):
+                            self._sj_landed(str(dest), str(target))     # survives a restart mid-pull
                     live["pull"]["lanes"].pop(i, None)
                     live["pull"]["done"] = live["pull"].get("done", 0) + 1
                     self._sj_tick(f"[{cat}] {'OK  ' if ok else 'FAIL'} file {i + 1}/{len(new)}"
@@ -393,6 +395,7 @@ class SeedJobsMixin:
             if landed_files:            # Stash scans exactly where they landed (norating, #VR…)
                 self._sj_hand_to_ingest(sorted(landed_paths), landed_files)
                 log("handed to the next ingest: " + ", ".join(sorted(landed_paths)))
+            self._sj_update(lambda d: d.pop("landing", None))   # handed over (or nothing landed)
             if total:
                 try:
                     self.action_log().append("seedbox-pull", detail=f"pulled {total} file(s) · {total_bytes / 1e9:.1f} GB")
@@ -415,6 +418,36 @@ class SeedJobsMixin:
             self.watch_started(files)
         except Exception:  # noqa: BLE001
             pass
+
+    def _sj_landed(self, path: str, file: str) -> None:
+        """Note a file the moment it lands, so a restart before the pull ends
+        can still hand it to ingest (see resume_seed_landings)."""
+        def add(d):
+            ln = d.setdefault("landing", {"paths": [], "files": []})
+            if path not in ln["paths"]:
+                ln["paths"].append(path)
+            ln["files"].append(file)
+        self._sj_update(add)
+
+    def resume_seed_landings(self) -> int:
+        """At startup: files an interrupted pull landed but never handed to
+        ingest go to the next ingest now. Returns how many."""
+        lock = self.__dict__.setdefault("_sj_pull_lock", threading.Lock())
+        if not lock.acquire(blocking=False):
+            return 0                            # a pull is running: it hands them over itself
+        try:
+            ln = {}
+            self._sj_update(lambda d: ln.update(d.pop("landing", None) or {}))
+            files = sorted(set(ln.get("files") or []))
+            if not files:
+                return 0
+            self._sj_hand_to_ingest(sorted(set(ln.get("paths") or [])), files)
+            msg = f"handed {len(files)} file(s) from an interrupted pull to the next ingest"
+            self._sj_tick(msg)
+            self._sj_alert("warning", "Seedbox pull was interrupted — " + msg)
+            return len(files)
+        finally:
+            lock.release()
 
     def take_seed_ingest(self) -> dict | None:
         """The folders waiting for an ingest (and forget them — `requeue` if it fails)."""
