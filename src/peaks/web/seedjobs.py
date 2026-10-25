@@ -432,6 +432,8 @@ class SeedJobsMixin:
     def resume_seed_landings(self) -> int:
         """At startup: files an interrupted pull landed but never handed to
         ingest go to the next ingest now. Returns how many."""
+        if not self._sj_load().get("landing"):
+            return 0                            # nothing interrupted (and nothing written)
         lock = self.__dict__.setdefault("_sj_pull_lock", threading.Lock())
         if not lock.acquire(blocking=False):
             return 0                            # a pull is running: it hands them over itself
