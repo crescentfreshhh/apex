@@ -173,10 +173,41 @@ def test_client_reports_bad_credentials_ban_and_relogins_once():
         QbtClient("https://b", "u", "p", session=_Session(info=[_Resp(200, text="<html>")])).torrents()
 
 
-def test_client_writes_only_the_purges_delete():
-    # reads, plus exactly one write — the purge's delete of torrents confirmed on Jarvis
+def test_client_writes_only_the_purges_delete_and_grabs_add():
+    # reads, plus exactly two writes — the purge's delete of torrents confirmed on
+    # Jarvis, and the add of an upgrade you clicked Grab on
     public = {n for n in dir(QbtClient) if not n.startswith("_")}
-    assert public == {"login", "torrents", "files", "free_space", "delete_torrents"}
+    assert public == {"login", "torrents", "files", "free_space", "delete_torrents", "add_torrent"}
+
+
+class _AddSession(_Session):
+    def __init__(self, answers):
+        super().__init__()
+        self.answers, self.adds = list(answers), []
+
+    def post(self, url, data=None, timeout=None, files=None):
+        path = url.split("/api/v2/")[1]
+        self.calls.append(("POST", path))
+        if path == "auth/login":
+            return self.login_resp
+        self.adds.append({"data": data, "files": files})
+        return self.answers.pop(0)
+
+
+def test_add_torrent_sends_the_file_or_magnet_into_the_category():
+    s = _AddSession([_Resp(200, "Ok."), _Resp(200, "Ok.")])
+    c = QbtClient("https://b", "u", "p", session=s)
+    c.add_torrent(data=b"d4:infoe", category="1")
+    assert s.adds[0]["data"] == {"category": "1"} and s.adds[0]["files"]["torrents"][1] == b"d4:infoe"
+    c.add_torrent(magnet="magnet:?xt=urn:btih:abc", category="1")
+    assert s.adds[1]["data"] == {"category": "1", "urls": "magnet:?xt=urn:btih:abc"} and not s.adds[1]["files"]
+    with pytest.raises(QbtError, match="wouldn't take"):
+        QbtClient("https://b", "u", "p", session=_AddSession([_Resp(200, "Fails.")])).add_torrent(data=b"d")
+    s = _AddSession([_Resp(403), _Resp(200, "Ok.")])                 # session expired: log in again once
+    QbtClient("https://b", "u", "p", session=s).add_torrent(data=b"d")
+    assert [u for _, u in s.calls] == ["auth/login", "torrents/add", "auth/login", "torrents/add"]
+    with pytest.raises(QbtError, match="nothing to add"):
+        QbtClient("https://b", "u", "p", session=_AddSession([])).add_torrent()
 
 
 # --- the page: sources reported separately ------------------------------------------------

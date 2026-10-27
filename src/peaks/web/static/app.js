@@ -6537,11 +6537,11 @@ $("#upg-list")?.addEventListener("click", async (e) => {
     if (btn.classList.contains("upg-more")) { upg.open.add(sid); renderUpgrades(); return; }
     if (btn.classList.contains("upg-grab")) {
       const c = r.found.find((x) => x.guid === btn.dataset.guid);
-      if (!confirm(`Grab this release?\n\n${c.title}\n${c.height || "?"}p · ${upgSize(c.size)} · ${c.seeders} seeders · ${c.indexer}\n\nProwlarr sends it to its download client.`)) return;
+      if (!confirm(`Grab this release?\n\n${c.title}\n${c.height || "?"}p · ${upgSize(c.size)} · ${c.seeders} seeders · ${c.indexer}\n\nPeaks adds it to your seedbox qBittorrent; the next pull brings it home.`)) return;
       btn.disabled = true; btn.textContent = "Grabbing…";
-      await api("/api/upgrades/grab", { method: "POST", headers: { "Content-Type": "application/json" },
+      const g = await api("/api/upgrades/grab", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scene_id: sid, guid: c.guid }) });
-      toast("Sent to Prowlarr — it'll come in through your seedbox pull");
+      toast(`Added to qBittorrent${g.category ? ` (category ${g.category})` : ""} — the next pull brings it home`);
     } else if (btn.classList.contains("upg-search")) {
       btn.disabled = true; btn.textContent = "Searching…";
       const out = await api(`/api/upgrades/search/${encodeURIComponent(sid)}`, { method: "POST" });
@@ -6582,6 +6582,13 @@ async function loadUpgSettings() {
   $("#upg-seed").value = s.min_seeders; $("#upg-auto").checked = !!s.auto;
   $("#upg-per").value = s.per_day; $("#upg-days").value = s.research_days;
   upgEx = s.excluded_studios || []; renderUpgEx();
+  const qc = $("#upg-qcat");
+  if (qc) {
+    const opts = [...new Set([...(s.qbt_choices || []), s.qbt_category].filter(Boolean))];
+    qc.innerHTML = opts.length ? opts.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")
+      : '<option value="">(set up Seedbox jobs categories first)</option>';
+    qc.value = s.qbt_category || s.qbt_effective || "";
+  }
 }
 function renderUpgEx() {
   $("#upg-ex").innerHTML = upgEx.length ? upgEx.map((x, i) => `<span class="cat-chip">${esc(x)} <button class="x" data-i="${i}" title="Remove">✕</button></span>`).join("")
@@ -6600,7 +6607,8 @@ async function saveUpgSettings() {
   return api("/api/upgrades/settings", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url: $("#upg-url").value.trim(), api_key: $("#upg-key").value,
       min_seeders: +$("#upg-seed").value || 5, auto: $("#upg-auto").checked, per_day: +$("#upg-per").value || 40,
-      research_days: +$("#upg-days").value || 14, excluded_studios: upgEx }) });
+      research_days: +$("#upg-days").value || 14, excluded_studios: upgEx,
+      qbt_category: $("#upg-qcat") ? $("#upg-qcat").value : undefined }) });
 }
 $("#upg-save")?.addEventListener("click", async () => {
   try { await saveUpgSettings(); $("#upg-save-status").textContent = "Saved"; loadUpgSettings(); }

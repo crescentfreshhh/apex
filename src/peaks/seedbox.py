@@ -191,9 +191,10 @@ class QbtError(RuntimeError):
 
 class QbtClient:
     """qBittorrent Web API (v2, as in 4.3.x): log in, list torrents and their
-    files — and one write, `delete_torrents`, used only by the purge job for
-    torrents it has confirmed are safely on Jarvis. Nothing else can pause,
-    add or change anything."""
+    files — and two writes: `delete_torrents`, used only by the purge job for
+    torrents it has confirmed are safely on Jarvis, and `add_torrent`, used
+    only when you click Grab on an upgrade. Nothing else can pause or change
+    anything."""
 
     def __init__(self, url: str, user: str, password: str, timeout: float = 15.0, session=None):
         import requests
@@ -275,8 +276,35 @@ class QbtClient:
             raise QbtError("unexpected file list format")
         return data
 
+    def add_torrent(self, data: bytes | None = None, magnet: str | None = None, category: str = "") -> None:
+        """Grab's add: a .torrent file (`data`) or a magnet link, into `category`."""
+        if not data and not magnet:
+            raise QbtError("nothing to add — no torrent file or magnet link")
+        if not self._logged_in:
+            self.login()
+        form = {"category": category} if category else {}
+        for attempt in (0, 1):
+            try:
+                if data:
+                    r = self.s.post(f"{self.base}/api/v2/torrents/add", data=form, timeout=self.timeout,
+                                    files={"torrents": ("upgrade.torrent", data, "application/x-bittorrent")})
+                else:
+                    r = self.s.post(f"{self.base}/api/v2/torrents/add", data={**form, "urls": magnet},
+                                    timeout=self.timeout)
+            except Exception as exc:  # noqa: BLE001
+                raise QbtError(f"can't reach {self.base} ({type(exc).__name__})") from exc
+            if r.status_code == 403 and attempt == 0:     # session expired: log in again once
+                self.login()
+                continue
+            if r.status_code != 200:
+                raise QbtError(f"adding the torrent failed (HTTP {r.status_code})")
+            if (r.text or "").strip() != "Ok.":
+                raise QbtError("qBittorrent wouldn't take the torrent (not a valid torrent, or already added?)")
+            return
+        raise QbtError("adding the torrent failed after logging in again")
+
     def delete_torrents(self, hashes: list[str], delete_files: bool = True) -> None:
-        """The purge's delete — the only write Peaks makes to qBittorrent."""
+        """The purge's delete — only for torrents confirmed safely home."""
         if not hashes:
             return
         if not self._logged_in:

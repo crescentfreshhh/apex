@@ -1571,7 +1571,11 @@ def create_app(cfg=None):
 
     @app.get("/api/upgrades/settings")
     def upgrades_settings():
-        return service.upgrade_settings()
+        try:                                   # the categories your seedbox pull brings home
+            choices = [c["cat"] for c in service.seedjob_settings()["categories"]]
+        except Exception:  # noqa: BLE001
+            choices = []
+        return {**service.upgrade_settings(), "qbt_choices": choices, "qbt_effective": service._upg_category()}
 
     @app.post("/api/upgrades/settings")
     def upgrades_save_settings(body: dict = Body(...)):
@@ -1598,12 +1602,15 @@ def create_app(cfg=None):
     @app.post("/api/upgrades/grab")
     def upgrades_grab(body: dict = Body(...)):
         from ..prowlarr import ProwlarrError
+        from ..seedbox import QbtError
 
         try:
             return service.upgrade_grab(str(body.get("scene_id") or ""), str(body.get("guid") or ""))
         except LookupError as exc:
             raise HTTPException(404, str(exc))
-        except ProwlarrError as exc:
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except (ProwlarrError, QbtError) as exc:
             raise HTTPException(502, str(exc))
 
     @app.post("/api/upgrades/dismiss/{scene_id}")

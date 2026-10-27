@@ -28,7 +28,7 @@ from .. import prowlarr as pw
 KEEPERS = ("merveilleuse", "exceptionnelle", "legendaire")
 TIER_FIRST = {"legendaire": 0, "exceptionnelle": 1, "merveilleuse": 2}
 DEFAULTS = {"url": "", "api_key": "", "min_seeders": 5, "excluded_studios": [], "auto": False,
-            "per_day": 40, "research_days": 14, "categories": []}
+            "per_day": 40, "research_days": 14, "categories": [], "qbt_category": ""}
 STALL_DAYS = 14
 SEARCH_GAP = 3.0              # seconds between searches in the daily pass
 
@@ -51,7 +51,8 @@ class UpgradesMixin:
 
         settings = dict(self._settings())
         cur = {**DEFAULTS, **(settings.get("upgrades") or {})}
-        for k in ("url", "auto", "min_seeders", "per_day", "research_days", "excluded_studios", "categories"):
+        for k in ("url", "auto", "min_seeders", "per_day", "research_days", "excluded_studios", "categories",
+                  "qbt_category"):
             if k in body and body[k] is not None:
                 cur[k] = body[k]
         key = body.get("api_key")
@@ -65,6 +66,7 @@ class UpgradesMixin:
         cur["excluded_studios"] = sorted({str(x).strip() for x in cur["excluded_studios"] or [] if str(x).strip()},
                                          key=str.lower)
         cur["categories"] = [int(c) for c in cur["categories"] or []]
+        cur["qbt_category"] = str(cur.get("qbt_category") or "").strip()
         settings["upgrades"] = cur
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +198,8 @@ class UpgradesMixin:
                               "indexer": rel.get("indexer"), "title": rel.get("title"),
                               "size": rel.get("size"), "seeders": rel.get("seeders"),
                               "leechers": rel.get("leechers"), "height": info["height"],
-                              "age": rel.get("age"), "info_url": rel.get("infoUrl")})
+                              "age": rel.get("age"), "info_url": rel.get("infoUrl"),
+                              "download_url": rel.get("downloadUrl"), "magnet_url": rel.get("magnetUrl")})
         found.sort(key=lambda c: (-(c["height"] or 0), -(c["seeders"] or 0), -(c["size"] or 0)))
         with self._upg_lock():
             d = self._upg_load()
@@ -255,35 +258,60 @@ class UpgradesMixin:
 
     # --- grabbing, and following the grab -------------------------------------------
 
-    def upgrade_grab(self, scene_id: str, guid: str, client: pw.ProwlarrClient | None = None) -> dict:
-        """Ask Prowlarr to send this release (one Peaks found for this scene) to
-        its download client."""
+    def _upg_category(self) -> str:
+        """The qBittorrent category grabs go into: your choice, else the first
+        seedbox pull category that isn't VR (upgrades are flat scenes)."""
+        cat = self.upgrade_settings(reveal=True).get("qbt_category")
+        if cat:
+            return cat
+        try:
+            cats = [c["cat"] for c in self.seedjob_settings()["categories"]]
+        except Exception:  # noqa: BLE001
+            cats = []
+        return next((c for c in cats if "vr" not in c.lower()), cats[0] if cats else "")
+
+    def upgrade_grab(self, scene_id: str, guid: str, client: pw.ProwlarrClient | None = None,
+                     qbt=None) -> dict:
+        """Add this release (one Peaks found for this scene) to your seedbox
+        qBittorrent, in the upgrade category, so the next pull brings it home.
+        Prowlarr only searches and hands over the torrent — it needs no
+        download client of its own."""
         sid = str(scene_id)
         with self._upg_lock():
             e = self._upg_load()["scenes"].get(sid) or {}
         cand = next((c for c in e.get("found") or [] if c["guid"] == guid), None)
         if cand is None:
             raise LookupError("that release isn't one Peaks found for this scene — search again")
+        if qbt is None:
+            c = self.cfg.seedbox
+            if not (c.qbt_url and c.qbt_user and c.qbt_password):
+                raise ValueError("grabs go to your seedbox qBittorrent, which isn't set up "
+                                 "(PEAKS_QBT_URL / _USER / _PASSWORD on the container)")
+            qbt = self._sj_qbt()
+        category = self._upg_category()
         client = client or self._prowlarr()
+        if not (cand.get("download_url") or cand.get("magnet_url")):
+            cand = self._upg_refind(sid, cand, client)          # found before Peaks kept the links
         try:
-            client.grab(cand["guid"], cand["indexer_id"])
+            kind, payload = client.fetch_torrent(cand.get("download_url"), cand.get("magnet_url"))
         except pw.ProwlarrError as exc:
-            if getattr(exc, "status", None) != 404:
+            if getattr(exc, "status", None) not in (404, 410):
                 raise
-            # Prowlarr grabs from its search cache (~30 min); Peaks searched earlier.
-            # Search again to refill it, find the same release, and grab that.
-            cand = self._upg_refind(sid, cand, client)
-            client.grab(cand["guid"], cand["indexer_id"])
+            cand = self._upg_refind(sid, cand, client)          # the link went stale: fetch it fresh
+            kind, payload = client.fetch_torrent(cand.get("download_url"), cand.get("magnet_url"))
+        qbt.add_torrent(data=payload if kind == "torrent" else None,
+                        magnet=payload if kind == "magnet" else None, category=category)
         row = next((r for r in self._catalogue_all() if r["scene_id"] == sid), None)
         with self._upg_lock():
             d = self._upg_load()
             e = d["scenes"].setdefault(sid, {})
-            e.update(state="grabbed", grabbed={**cand, "at": time.time()},
+            e.update(state="grabbed", grabbed={**cand, "at": time.time(), "category": category},
                      have={"size": (row or {}).get("size"), "res": ((row or {}).get("quality") or {}).get("res")})
             self._upg_save(d)
-        self._log_scene("upgrade-grab", row, detail=f"asked Prowlarr for {cand['title']} "
-                        f"({cand.get('height') or '?'}p, {cand.get('seeders')} seeders, {cand.get('indexer')})")
-        return e
+        self._log_scene("upgrade-grab", row, detail=f"added {cand['title']} to qBittorrent "
+                        f"(category {category or 'none'}; {cand.get('height') or '?'}p, "
+                        f"{cand.get('seeders')} seeders, {cand.get('indexer')})")
+        return {**e, "category": category}
 
     def _upg_refind(self, sid: str, cand: dict, client) -> dict:
         """The same release, fresh from Prowlarr: by guid + indexer, else (some

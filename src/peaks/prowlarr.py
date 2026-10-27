@@ -75,6 +75,42 @@ class ProwlarrClient:
         out = self._call("GET", "/api/v1/search", params=params)
         return out if isinstance(out, list) else []
 
+    def fetch_torrent(self, download_url: str | None, magnet_url: str | None = None) -> tuple[str, bytes | str]:
+        """The release itself, through Prowlarr's download proxy (it works without
+        Prowlarr's search cache): ("torrent", file bytes) or ("magnet", link)."""
+        if download_url:
+            # Prowlarr writes the link with its own idea of its address; fetch it
+            # through the URL Peaks reaches Prowlarr at
+            from urllib.parse import urlsplit
+
+            u = urlsplit(download_url)
+            if u.path.startswith("/"):
+                base_path = urlsplit(self.base).path.rstrip("/")
+                path = u.path if base_path and u.path.startswith(base_path + "/") else base_path + u.path
+                download_url = f"{self.base[:len(self.base) - len(base_path)] if base_path else self.base}{path}" \
+                    + (f"?{u.query}" if u.query else "")
+            try:
+                r = self.s.get(download_url, timeout=self.timeout, allow_redirects=False)
+            except Exception as exc:  # noqa: BLE001
+                raise ProwlarrError(f"can't fetch the torrent from Prowlarr ({type(exc).__name__})") from exc
+            loc = r.headers.get("Location") or ""
+            if r.status_code in (301, 302, 303, 307, 308) and loc.startswith("magnet:"):
+                return "magnet", loc
+            if r.status_code in (301, 302, 303, 307, 308) and loc:
+                try:
+                    r = self.s.get(loc, timeout=self.timeout)
+                except Exception as exc:  # noqa: BLE001
+                    raise ProwlarrError(f"can't fetch the torrent ({type(exc).__name__})") from exc
+            if r.status_code == 200 and r.content[:1] == b"d":          # a bencoded .torrent
+                return "torrent", r.content
+            if r.status_code >= 400 and not magnet_url:
+                why = _why(r)
+                raise ProwlarrError(f"Prowlarr couldn't fetch the torrent (HTTP {r.status_code})"
+                                    + (f": {why}" if why else ""), r.status_code)
+        if magnet_url:
+            return "magnet", magnet_url
+        raise ProwlarrError("this release has no torrent file or magnet link Peaks can use")
+
     def grab(self, guid: str, indexer_id: int) -> dict:
         """Prowlarr sends this release to its download client."""
         return self._call("POST", "/api/v1/search", json={"guid": guid, "indexerId": int(indexer_id)}) or {}

@@ -65,14 +65,27 @@ class FakeProwlarr:
         self.searches.append(query)
         return list(self.releases)
 
-    def grab(self, guid, indexer_id):
-        self.grabs.append((guid, indexer_id))
-        return {}
+    def grab(self, guid, indexer_id):          # Prowlarr's own grab: Peaks must never use it now
+        raise AssertionError("Peaks asked Prowlarr to grab (it has no download client)")
+
+    def fetch_torrent(self, download_url, magnet_url=None):
+        self.grabs.append(download_url)
+        return "torrent", b"d4:infod4:name3:abcee"
+
+
+class FakeQbt:
+    def __init__(self):
+        self.added = []
+
+    def add_torrent(self, data=None, magnet=None, category=""):
+        self.added.append({"data": data, "magnet": magnet, "category": category})
 
 
 def _rel(title, seeders=20, leechers=2, size=8e9, guid=None):
-    return {"guid": guid or title, "indexerId": 3, "indexer": "Tracker", "title": title, "size": size,
-            "seeders": seeders, "leechers": leechers, "protocol": "torrent"}
+    g = guid or title
+    return {"guid": g, "indexerId": 3, "indexer": "Tracker", "title": title, "size": size,
+            "seeders": seeders, "leechers": leechers, "protocol": "torrent",
+            "downloadUrl": f"http://prowlarr/3/download?link={g}"}
 
 
 @pytest.fixture
@@ -151,10 +164,12 @@ def test_the_daily_pass_is_capped_and_waits_before_searching_again(svc):
 def test_grab_only_found_releases_then_follow_it(svc):
     fake = FakeProwlarr([_rel("Vixen.23.05.14.Jane.Doe.Sunset.Dreams.2160p", guid="g1")])
     svc.upgrade_search("1", client=fake)
+    qbt = FakeQbt()
     with pytest.raises(LookupError):
-        svc.upgrade_grab("1", "made-up", client=fake)
-    svc.upgrade_grab("1", "g1", client=fake)
-    assert fake.grabs == [("g1", 3)]
+        svc.upgrade_grab("1", "made-up", client=fake, qbt=qbt)
+    out = svc.upgrade_grab("1", "g1", client=fake, qbt=qbt)
+    assert fake.grabs == ["http://prowlarr/3/download?link=g1"]
+    assert qbt.added == [{"data": b"d4:infod4:name3:abcee", "magnet": None, "category": out["category"]}]
     assert "upgrade-grab" in [e["action"] for e in svc.history()]
     assert [c["scene_id"] for c in svc.upgrades()["grabbed"]] == ["1"]
     # the new copy arrives and the duplicate check pairs it with the old one
@@ -167,7 +182,7 @@ def test_a_grab_that_never_arrives_stalls_and_can_be_retried(svc):
     fake = FakeProwlarr([_rel("Vixen.23.05.14.Jane.Doe.Sunset.Dreams.2160p", guid="g1"),
                          _rel("Vixen.23.05.14.Jane.Doe.Sunset.Dreams.2160p.v2", guid="g2")])
     svc.upgrade_search("1", client=fake)
-    svc.upgrade_grab("1", "g1", client=fake)
+    svc.upgrade_grab("1", "g1", client=fake, qbt=FakeQbt())
     d = svc._upg_load()
     d["scenes"]["1"]["grabbed"]["at"] = time.time() - 15 * 86400
     svc._upg_save(d)
@@ -205,60 +220,82 @@ def test_not_configured_says_so(svc):
 
 
 class ForgetfulProwlarr(FakeProwlarr):
-    """Prowlarr grabs only from its ~30-minute search cache: it forgets between
-    Peaks' search and your click. `reguid` mimics indexers that mint a new guid
-    on every search."""
+    """Prowlarr's links are minted per search and can go stale; `reguid` mimics
+    indexers that also mint a new guid on every search."""
 
     def __init__(self, releases, reguid=False):
         super().__init__(releases)
-        self.cache, self.reguid, self.n = set(), reguid, 0
+        self.live, self.reguid, self.n = set(), reguid, 0
 
     def search(self, query, categories=None):
         self.n += 1
         out = []
         for r in self.releases:
             r = dict(r, guid=f"{r['guid']}#{self.n}") if self.reguid else dict(r)
-            self.cache.add((r["guid"], r["indexerId"]))
+            r["downloadUrl"] = f"http://prowlarr/3/download?link={r['guid']}&s={self.n}"
+            self.live.add(r["downloadUrl"])
             out.append(r)
         self.searches.append(query)
         return out
 
     def forget(self):
-        self.cache.clear()
+        self.live.clear()
 
-    def grab(self, guid, indexer_id):
-        if (guid, indexer_id) not in self.cache:
-            raise pw.ProwlarrError("Prowlarr answered HTTP 404 for /api/v1/search: "
-                                   "Couldn't find requested release in cache, try searching again", 404)
-        return super().grab(guid, indexer_id)
+    def fetch_torrent(self, download_url, magnet_url=None):
+        if download_url not in self.live:
+            raise pw.ProwlarrError("Prowlarr couldn't fetch the torrent (HTTP 404)", 404)
+        return super().fetch_torrent(download_url, magnet_url)
 
 
-def test_a_grab_after_prowlarrs_cache_expired_searches_again(svc):
-    fake = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")])
+def test_a_stale_link_searches_again(svc):
+    fake, qbt = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")]), FakeQbt()
     svc.upgrade_search("1", client=fake)
     fake.forget()                                          # hours later
-    svc.upgrade_grab("1", "g1", client=fake)
-    assert fake.grabs == [("g1", 3)]                       # found again and grabbed, once
+    svc.upgrade_grab("1", "g1", client=fake, qbt=qbt)
+    assert len(qbt.added) == 1                             # found again and added, once
     assert [c["scene_id"] for c in svc.upgrades()["grabbed"]] == ["1"]
 
 
 def test_a_new_guid_on_the_second_search_is_still_the_same_release(svc):
-    fake = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")], reguid=True)
+    fake, qbt = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")], reguid=True), FakeQbt()
     first = svc.upgrade_search("1", client=fake)["found"][0]["guid"]
     fake.forget()
-    svc.upgrade_grab("1", first, client=fake)
-    assert len(fake.grabs) == 1 and fake.grabs[0][0] != first   # same indexer + title + size
+    svc.upgrade_grab("1", first, client=fake, qbt=qbt)
+    assert len(qbt.added) == 1 and svc.upgrades()["grabbed"][0]["grabbed"]["guid"] != first
 
 
 def test_a_release_gone_from_the_indexer_says_so_and_refreshes(svc):
-    fake = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")])
+    fake, qbt = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")]), FakeQbt()
     svc.upgrade_search("1", client=fake)
     fake.forget()
     fake.releases = [_rel("Vixen 23 05 14 Jane Doe 2160p REPACK", guid="g2", size=9e9)]
     with pytest.raises(LookupError, match="isn't on Tracker any more"):
-        svc.upgrade_grab("1", "g1", client=fake)
-    assert fake.grabs == []
+        svc.upgrade_grab("1", "g1", client=fake, qbt=qbt)
+    assert qbt.added == []
     assert [c["guid"] for c in svc.upgrades()["found"][0]["found"]] == ["g2"]   # the list is fresh
+
+
+def test_releases_found_before_links_were_kept_are_found_again(svc):
+    fake, qbt = FakeProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")]), FakeQbt()
+    svc.upgrade_search("1", client=fake)
+    d = svc._upg_load()
+    for c in d["scenes"]["1"]["found"]:
+        c.pop("download_url"); c.pop("magnet_url")       # as stored by the previous version
+    svc._upg_save(d)
+    svc.upgrade_grab("1", "g1", client=fake, qbt=qbt)
+    assert len(qbt.added) == 1
+
+
+def test_grab_category_defaults_to_the_first_flat_pull_category_and_needs_qbt(svc):
+    svc.save_seedjob_settings({"categories": [{"cat": "vr", "dest": "/x"}, {"cat": "1", "dest": "/y"}]})
+    assert svc._upg_category() == "1"                       # never VR on its own
+    svc.save_upgrade_settings({"qbt_category": "upgrades"})
+    assert svc._upg_category() == "upgrades"
+    fake = FakeProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")])
+    svc.upgrade_search("1", client=fake)
+    svc.cfg.seedbox.qbt_url = ""
+    with pytest.raises(ValueError, match="qBittorrent"):
+        svc.upgrade_grab("1", "g1", client=fake)
 
 
 def test_prowlarr_errors_carry_its_own_explanation():
@@ -278,3 +315,33 @@ def test_prowlarr_errors_carry_its_own_explanation():
     with pytest.raises(pw.ProwlarrError) as e:
         c.grab("g", 1)
     assert e.value.status == 404 and "try searching again" in str(e.value)
+
+
+def test_fetch_torrent_file_magnet_redirect_and_fallback():
+    class R:
+        def __init__(self, status=200, content=b"", headers=None, text=""):
+            self.status_code, self.content, self.headers, self.text = status, content, headers or {}, text
+
+        def json(self):
+            raise ValueError
+
+    class S:
+        def __init__(self, answers):
+            self.headers, self.answers, self.urls = {}, list(answers), []
+
+        def get(self, url, **k):
+            self.urls.append(url)
+            return self.answers.pop(0)
+
+    s = S([R(200, b"d4:infoe")])
+    c = pw.ProwlarrClient("http://jarvis:9696", "k", session=s)
+    assert c.fetch_torrent("http://localhost:9696/3/download?link=x") == ("torrent", b"d4:infoe")
+    assert s.urls == ["http://jarvis:9696/3/download?link=x"]        # through the address Peaks uses
+    c = pw.ProwlarrClient("http://jarvis:9696", "k", session=S([R(302, headers={"Location": "magnet:?xt=1"})]))
+    assert c.fetch_torrent("http://jarvis:9696/3/download?link=x") == ("magnet", "magnet:?xt=1")
+    c = pw.ProwlarrClient("http://jarvis:9696", "k", session=S([R(500, text="boom")]))
+    assert c.fetch_torrent("http://jarvis:9696/3/download?link=x", "magnet:?xt=2") == ("magnet", "magnet:?xt=2")
+    c = pw.ProwlarrClient("http://jarvis:9696", "k", session=S([R(404, text="gone")]))
+    with pytest.raises(pw.ProwlarrError) as e:
+        c.fetch_torrent("http://jarvis:9696/3/download?link=x")
+    assert e.value.status == 404
