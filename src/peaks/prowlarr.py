@@ -16,7 +16,22 @@ import unicodedata
 
 
 class ProwlarrError(RuntimeError):
-    pass
+    """`status` is Prowlarr's HTTP status when it answered with an error (else None)."""
+
+    def __init__(self, msg: str, status: int | None = None):
+        super().__init__(msg)
+        self.status = status
+
+
+def _why(r) -> str:
+    """Prowlarr's own explanation of an error answer, short."""
+    try:
+        j = r.json()
+        msg = j.get("message") if isinstance(j, dict) else (j[0].get("errorMessage") if isinstance(j, list) and j else None)
+    except (ValueError, AttributeError, IndexError):
+        msg = None
+    msg = (msg or (r.text or "")).strip().replace("\n", " ")
+    return msg[:160]
 
 
 class ProwlarrClient:
@@ -38,9 +53,11 @@ class ProwlarrClient:
         except Exception as exc:  # noqa: BLE001 — network: report, don't raise raw
             raise ProwlarrError(f"can't reach Prowlarr at {self.base} ({type(exc).__name__})") from exc
         if r.status_code == 401:
-            raise ProwlarrError("Prowlarr refused the API key (401)")
+            raise ProwlarrError("Prowlarr refused the API key (401)", 401)
         if r.status_code >= 400:
-            raise ProwlarrError(f"Prowlarr answered HTTP {r.status_code} for {path}")
+            why = _why(r)
+            raise ProwlarrError(f"Prowlarr answered HTTP {r.status_code} for {path}" + (f": {why}" if why else ""),
+                                r.status_code)
         try:
             return r.json() if r.content else None
         except ValueError as exc:

@@ -202,3 +202,79 @@ def test_not_configured_says_so(svc):
     assert svc.upgrade_test() == {"ok": False, "error":
                                   "Prowlarr isn't set up — add its URL and API key in Settings → Upgrades"}
     assert not svc.upgrade_due()
+
+
+class ForgetfulProwlarr(FakeProwlarr):
+    """Prowlarr grabs only from its ~30-minute search cache: it forgets between
+    Peaks' search and your click. `reguid` mimics indexers that mint a new guid
+    on every search."""
+
+    def __init__(self, releases, reguid=False):
+        super().__init__(releases)
+        self.cache, self.reguid, self.n = set(), reguid, 0
+
+    def search(self, query, categories=None):
+        self.n += 1
+        out = []
+        for r in self.releases:
+            r = dict(r, guid=f"{r['guid']}#{self.n}") if self.reguid else dict(r)
+            self.cache.add((r["guid"], r["indexerId"]))
+            out.append(r)
+        self.searches.append(query)
+        return out
+
+    def forget(self):
+        self.cache.clear()
+
+    def grab(self, guid, indexer_id):
+        if (guid, indexer_id) not in self.cache:
+            raise pw.ProwlarrError("Prowlarr answered HTTP 404 for /api/v1/search: "
+                                   "Couldn't find requested release in cache, try searching again", 404)
+        return super().grab(guid, indexer_id)
+
+
+def test_a_grab_after_prowlarrs_cache_expired_searches_again(svc):
+    fake = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")])
+    svc.upgrade_search("1", client=fake)
+    fake.forget()                                          # hours later
+    svc.upgrade_grab("1", "g1", client=fake)
+    assert fake.grabs == [("g1", 3)]                       # found again and grabbed, once
+    assert [c["scene_id"] for c in svc.upgrades()["grabbed"]] == ["1"]
+
+
+def test_a_new_guid_on_the_second_search_is_still_the_same_release(svc):
+    fake = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")], reguid=True)
+    first = svc.upgrade_search("1", client=fake)["found"][0]["guid"]
+    fake.forget()
+    svc.upgrade_grab("1", first, client=fake)
+    assert len(fake.grabs) == 1 and fake.grabs[0][0] != first   # same indexer + title + size
+
+
+def test_a_release_gone_from_the_indexer_says_so_and_refreshes(svc):
+    fake = ForgetfulProwlarr([_rel("Vixen 23 05 14 Jane Doe 2160p", guid="g1")])
+    svc.upgrade_search("1", client=fake)
+    fake.forget()
+    fake.releases = [_rel("Vixen 23 05 14 Jane Doe 2160p REPACK", guid="g2", size=9e9)]
+    with pytest.raises(LookupError, match="isn't on Tracker any more"):
+        svc.upgrade_grab("1", "g1", client=fake)
+    assert fake.grabs == []
+    assert [c["guid"] for c in svc.upgrades()["found"][0]["found"]] == ["g2"]   # the list is fresh
+
+
+def test_prowlarr_errors_carry_its_own_explanation():
+    class R:
+        status_code, content, text = 404, b"x", ""
+
+        def json(self):
+            return {"message": "Couldn't find requested release in cache, try searching again"}
+
+    class S:
+        headers = {}
+
+        def request(self, *a, **k):
+            return R()
+
+    c = pw.ProwlarrClient("http://p", "k", session=S())
+    with pytest.raises(pw.ProwlarrError) as e:
+        c.grab("g", 1)
+    assert e.value.status == 404 and "try searching again" in str(e.value)

@@ -264,7 +264,16 @@ class UpgradesMixin:
         cand = next((c for c in e.get("found") or [] if c["guid"] == guid), None)
         if cand is None:
             raise LookupError("that release isn't one Peaks found for this scene — search again")
-        (client or self._prowlarr()).grab(cand["guid"], cand["indexer_id"])
+        client = client or self._prowlarr()
+        try:
+            client.grab(cand["guid"], cand["indexer_id"])
+        except pw.ProwlarrError as exc:
+            if getattr(exc, "status", None) != 404:
+                raise
+            # Prowlarr grabs from its search cache (~30 min); Peaks searched earlier.
+            # Search again to refill it, find the same release, and grab that.
+            cand = self._upg_refind(sid, cand, client)
+            client.grab(cand["guid"], cand["indexer_id"])
         row = next((r for r in self._catalogue_all() if r["scene_id"] == sid), None)
         with self._upg_lock():
             d = self._upg_load()
@@ -275,6 +284,21 @@ class UpgradesMixin:
         self._log_scene("upgrade-grab", row, detail=f"asked Prowlarr for {cand['title']} "
                         f"({cand.get('height') or '?'}p, {cand.get('seeders')} seeders, {cand.get('indexer')})")
         return e
+
+    def _upg_refind(self, sid: str, cand: dict, client) -> dict:
+        """The same release, fresh from Prowlarr: by guid + indexer, else (some
+        indexers mint a new guid each search) the same indexer, title and size.
+        Raises a plain error — with the list refreshed — when it's gone."""
+        fresh = self.upgrade_search(sid, client=client)["found"]
+        same = next((c for c in fresh if c["guid"] == cand["guid"] and c["indexer_id"] == cand["indexer_id"]), None)
+        if same is None:
+            size = cand.get("size") or 0
+            same = next((c for c in fresh if c["indexer_id"] == cand["indexer_id"] and c["title"] == cand["title"]
+                         and (not size or abs((c.get("size") or 0) - size) <= 0.01 * size)), None)
+        if same is None:
+            raise LookupError(f"that release isn't on {cand.get('indexer') or 'the indexer'} any more — "
+                              "the list is refreshed, pick another")
+        return same
 
     def upgrade_dismiss(self, scene_id: str) -> dict:
         with self._upg_lock():
