@@ -107,7 +107,16 @@
     <div class="card pad tq" id="taste-quality"></div>
     <div class="seg tabs" id="taste-tabs">
       <span class="on" data-tab="teach">Teach</span><span data-tab="picker">Picker</span>
-      <span data-tab="labels">Labels</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
+      <span data-tab="labels">Labels</span><span data-tab="concepts">Concepts</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
+    </div>
+    <div class="panel" id="cx-panel" data-pane="concepts" hidden>
+      <p class="cap">Name something you look for, in your own words — “close framing”, “slow build”, “flat lighting” — then mark a few frames
+        yes or no. Peaks learns it, uses it in search and Catalogue filters, and argues in it when it explains a grade (only when it
+        really separates your tiers).</p>
+      <div class="row"><input id="cx-new" placeholder="A new concept, in your words…" maxlength="60" style="min-width:280px" />
+        <button id="cx-add" class="btn pri sm">Teach it</button></div>
+      <div id="cx-list" class="cx-list"></div>
+      <div id="cx-teach" class="cx-teach" hidden></div>
     </div>
     <div class="panel" id="pic-panel" data-pane="picture" hidden>
       <div class="seg pic-mode" id="pic-mode"><span class="on" data-mode="pair">Compare two</span><span data-mode="one">Rate one</span></div>

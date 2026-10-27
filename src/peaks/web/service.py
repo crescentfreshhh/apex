@@ -38,6 +38,7 @@ from .orphans import OrphansMixin
 from .arbiter import ArbiterMixin
 from .momentcheck import MomentCheckMixin
 from .trend import TrendMixin
+from .concepts import ConceptsMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -52,7 +53,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
-              ArbiterMixin, MomentCheckMixin, TrendMixin):
+              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5114,7 +5115,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                   saves: str | None = None, min_o: int | None = None,
                   size_min: float | None = None, size_max: float | None = None,
                   organized: str | None = None, pic: str | None = None,
-                  pic_min: int | None = None, cell: str | None = None) -> dict:
+                  pic_min: int | None = None, cell: str | None = None,
+                  concept: str | None = None, concept_min: float | None = None) -> dict:
         """A filtered, sorted page of the library for grading, plus per-tier
         counts (counted before the tier filter, so the chips always show
         what each tier holds within the other filters)."""
@@ -5210,6 +5212,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             return True
 
         pool = [r for r in rows if keep(r)]
+        cscores = None
+        if concept:                            # one of your concepts: a filter and/or a sort
+            try:
+                cscores = self.concept_scene_scores(concept)
+            except LookupError:
+                cscores = {}
+            if concept_min is not None:
+                pool = [r for r in pool if cscores.get(r["scene_id"], 0.0) >= concept_min]
         pool_all = pool
         counts = {t: 0 for t in TIERS}
         for r in pool:
@@ -5235,8 +5245,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         elif tiers:
             pool = [r for r in pool if r["tier"] in tiers]
 
-        pool = self._sort_rows(pool, sort, dir, in_view=in_view, preds=preds,
-                               res_rank={c: i for i, c in enumerate(RES_CLASSES)}, pics=pics)
+        if sort == "concept" and cscores is not None:
+            pool = sorted(pool, key=lambda r: cscores.get(r["scene_id"], -1.0), reverse=dir != "asc")
+        else:
+            pool = self._sort_rows(pool, sort, dir, in_view=in_view, preds=preds,
+                                   res_rank={c: i for i, c in enumerate(RES_CLASSES)}, pics=pics)
         if ids_only:        # a bulk action over the whole list (no cards, no thumbnails)
             return {"ids": [r["scene_id"] for r in pool], "total": len(pool)}
         page = pool[offset: offset + limit]
@@ -5262,6 +5275,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "who": self._who_reasons(r, who_enc, names),
                 "dupe": r["scene_id"] in dupe_ids,
                 "picture": pics.get(r["scene_id"]),
+                "concept": cscores.get(r["scene_id"]) if cscores is not None else None,
             })
         grace_new = sum(1 for r in pool_all if (signals.get(r["scene_id"]) or {}).get("new")
                         and r["tier"] not in ("legendaire", "rejected")

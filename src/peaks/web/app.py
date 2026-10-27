@@ -721,6 +721,13 @@ def create_app(cfg=None):
         q: str, top_k: int = 60, taste: bool = False, per_scene: int = 3,
         min_score: float = 0.0, neg_weight: float = 0.5, enrich: int = 300,
     ):
+        # one of your trained concepts, by name: search with what Peaks learned from you
+        slug = next((s for s, nm in service.trained_concepts() if nm.strip().lower() == q.strip().lower()), None)
+        if slug:
+            hits = service.concept_search(slug, top_k=top_k, per_scene=per_scene if per_scene > 0 else None)
+            out = _search_payload(service, hits, enrich=enrich)
+            out["concept"] = q.strip()
+            return out
         if not service.has_clip_index():
             raise HTTPException(
                 400, "no CLIP index — run an embed pass with PEAKS_MODEL=clip"
@@ -1173,9 +1180,10 @@ def create_app(cfg=None):
         organized: str | None = Query(None, pattern="^(yes|no)$"),
         pic: str | None = Query(None, pattern="^(low|good|excellent|noscore|upscaled|unmeasured)$"),
         pic_min: int | None = Query(None, ge=0, le=100), cell: str | None = None,
+        concept: str | None = None, concept_min: float | None = Query(None, ge=0, le=1),
     ):
         try:
-            return service.catalogue(cell=cell, tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
+            return service.catalogue(cell=cell, concept=concept, concept_min=concept_min, tier=tier, res=res, min_mbps=min_mbps, q=q, sort=sort, dir=dir,
                                      performer_id=performer_id, performer_ids=performer_ids,
                                      perf_mode=perf_mode, studios=studios, tags=tags, tags_not=tags_not,
                                      vr=vr, added_from=added_from, added_to=added_to, saves=saves,
@@ -1827,6 +1835,51 @@ def create_app(cfg=None):
         return [{"t": p["t"], "score": p.get("score"), "thumb": p.get("thumb"),
                  "answered": any(abs(p["t"] - t) <= 1.0 for t in done)}
                 for p in service.scene_picks(scene_id)]
+
+    # --- concepts: Peaks learns your words ------------------------------------------
+
+    @app.get("/api/concepts")
+    def concepts_list():
+        return service.concepts()
+
+    @app.post("/api/concepts")
+    def concepts_create(body: dict = Body(...)):
+        try:
+            return service.concept_create(str(body.get("name") or ""))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.delete("/api/concepts/{name}")
+    def concepts_delete(name: str):
+        try:
+            return service.concept_delete(name)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.get("/api/concepts/{name}/teach")
+    def concepts_teach(name: str, n: int = Query(12, ge=1, le=48)):
+        try:
+            return service.concept_candidates(name, n=n)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.post("/api/concepts/{name}/label")
+    def concepts_label(name: str, body: dict = Body(...)):
+        try:
+            return service.concept_label(name, str(body["key"]), float(body["t"]), int(body["label"]),
+                                         scene_id=body.get("scene_id"))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(400, f"bad mark: {exc}")
+
+    @app.get("/api/concepts/{name}/search")
+    def concepts_search(name: str, top_k: int = 60, per_scene: int = 3, enrich: int = 300):
+        try:
+            hits = service.concept_search(name, top_k=top_k, per_scene=per_scene if per_scene > 0 else None)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        return _search_payload(service, hits, enrich=enrich)
 
     @app.get("/api/prefs/pick-prompts")
     def get_pick_prompts():

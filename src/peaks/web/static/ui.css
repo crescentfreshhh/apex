@@ -1128,3 +1128,18 @@ body.picks-off .pick-chip, body.picks-off .pick-mk { display: none !important; }
   .arg-row { grid-template-columns: 84px 1fr 42px; } .arg-axis { margin-left: 88px; margin-right: 46px; }
   .arg-cols { grid-template-columns: 1fr; }
 }
+
+/* concepts: your own words */
+.cx-list { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.cx-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
+.cx-rel { font-size: 12px; color: var(--ano); } .cx-rel.mid { color: var(--gold); } .cx-rel.ok { color: var(--ok); }
+.cx-teach-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
+.cx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.cx-cell { position: relative; border-radius: 8px; overflow: hidden; border: 2px solid transparent; background: #000; }
+.cx-cell img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; }
+.cx-cell.yes { border-color: var(--ok); } .cx-cell.no { border-color: var(--rej); opacity: .6; }
+.cx-ans { display: flex; } .cx-ans button { flex: 1; padding: 6px; background: var(--panel); color: var(--fg); border: 0; cursor: pointer; }
+.cx-ans button + button { border-left: 1px solid var(--line); } .cx-ans button:hover { background: var(--panel2); }
+.arg-say { display: flex; gap: 8px; margin-top: 8px; } .arg-say input { flex: 1; min-width: 0; }
+.arg-cx { color: var(--gold); font-weight: 600; }
+.q.cx { border-color: var(--gold); }

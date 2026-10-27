@@ -219,9 +219,26 @@ class ArbiterMixin:
         self._arb_words_cache = (id(idx), out)
         return out
 
-    def _arb_separating(self, a: str, b: str, rows):
-        """[(term, effect size d, col)] terms that separate tier a from tier b, |d| ≥ gate."""
-        t = self._arb_word_table(rows)
+    def _arb_concept_table(self, rows):
+        """Your own concepts as a (names, scene_id → row, z-scored scene × concept) table, or None."""
+        try:
+            trained = self.trained_concepts()
+        except Exception:  # noqa: BLE001
+            return None
+        if not trained:
+            return None
+        scores = [self.concept_scene_scores(slug) for slug, _ in trained]
+        sids = sorted(set().union(*[set(x) for x in scores]))
+        if not sids:
+            return None
+        S = np.array([[sc.get(sid, 0.0) for sc in scores] for sid in sids], np.float32)
+        Z = (S - S.mean(axis=0)) / np.maximum(S.std(axis=0), 1e-6)
+        return ([name for _, name in trained], {sid: i for i, sid in enumerate(sids)}, Z)
+
+    def _arb_separating(self, a: str, b: str, rows, table=None):
+        """[(term, effect size d, col)] terms that separate tier a from tier b, |d| ≥ gate
+        (CLIP vocabulary by default; `table` = another, e.g. your concepts)."""
+        t = table if table is not None else self._arb_word_table(rows)
         if t is None:
             return [], None
         labels, pos, Z = t
@@ -236,15 +253,21 @@ class ArbiterMixin:
         return keep, t
 
     def _arb_words(self, sid: str, a: str, b: str, rows, k: int = 3) -> dict:
-        sep, t = self._arb_separating(a, b, rows)
-        if not sep or t is None or sid not in t[1]:
-            return {}
-        z = t[2][t[1][sid]]
-        lean_a = [(w, d, float(z[j])) for w, d, j in sep if d > 0 and z[j] > 0.5]
-        lean_b = [(w, d, float(z[j])) for w, d, j in sep if d < 0 and z[j] > 0.5]
-        fmt = lambda xs: [{"term": w, "d": round(abs(d), 2), "z": round(zz, 2)}  # noqa: E731
-                          for w, d, zz in sorted(xs, key=lambda x: -abs(x[1]) * x[2])[:k]]
-        out = {a: fmt(lean_a), b: fmt(lean_b)}
+        """What the scene leans toward, in words that really separate the two tiers:
+        your own concepts first, then the CLIP vocabulary."""
+        out = {a: [], b: []}
+        for kind, table in (("concept", self._arb_concept_table(rows)), ("word", None)):
+            if kind == "concept" and table is None:
+                continue
+            sep, t = self._arb_separating(a, b, rows, table=table)
+            if not sep or t is None or sid not in t[1]:
+                continue
+            z = t[2][t[1][sid]]
+            for side, sign in ((a, 1), (b, -1)):
+                xs = [(w, d, float(z[j])) for w, d, j in sep if d * sign > 0 and z[j] > 0.5]
+                for w, d, zz in sorted(xs, key=lambda x: -abs(x[1]) * x[2]):
+                    if len(out[side]) < k:
+                        out[side].append({"term": w, "d": round(abs(d), 2), "z": round(zz, 2), "kind": kind})
         return out if out[a] or out[b] else {}
 
     # --- the library-wide picture --------------------------------------------------------
@@ -361,9 +384,15 @@ class ArbiterMixin:
         a, b = "legendaire", "exceptionnelle"
         if a not in classes or b not in classes:
             return []
-        sep, _ = self._arb_separating(a, b, rows)
-        return [{"term": w, "d": round(d, 2), "favours": names.get(a if d > 0 else b, a if d > 0 else b)}
-                for w, d, _ in sep[:10]]
+        out = []
+        ct = self._arb_concept_table(rows)
+        for kind, table in (("concept", ct), ("word", None)):
+            if kind == "concept" and table is None:
+                continue
+            sep, _ = self._arb_separating(a, b, rows, table=table)
+            out += [{"term": w, "d": round(d, 2), "kind": kind,
+                     "favours": names.get(a if d > 0 else b, a if d > 0 else b)} for w, d, _ in sep[:10]]
+        return out[:12]
 
     # --- the grid's drill-down ----------------------------------------------------------
 

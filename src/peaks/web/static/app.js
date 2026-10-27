@@ -1182,6 +1182,7 @@ async function textSearch() {
   try {
     const d = await api("/api/search/text?q=" + encodeURIComponent(q) + searchQuery());
     onSearchResults(d.items);
+    if (d.concept) toast(`Searched with your concept “${d.concept}” — what Peaks learned from your marks`);
   } catch (e) { $("#results").innerHTML = ""; toast(e.message, true); }
 }
 
@@ -2675,6 +2676,7 @@ document.addEventListener("click", async (e) => {
   }
 });
 wireTabs("#taste-tabs", (t) => { if (t === "picker" && !pickItems.length) loadPicks(); if (t === "teach") loadNextSwipe(); $("#taste")?.classList.toggle("pic-wide", t === "picture");   // the players get the whole width
+  if (t === "concepts") loadConcepts(true);
   if (t === "picture") { loadPic(); picToTop(); } else stopPicVideos(); });
 
 // --- Picture quality: "which looks better?" and the measuring status -----------------------
@@ -3030,10 +3032,13 @@ function argueHTML(e, i) {
     `<img class="arg-m" loading="lazy" src="${m.thumb}" data-sid="${esc(e.scene_id)}" data-t="${m.t}" title="${fmt(m.t)} — pulls toward ${esc(e.names[c] || c)}" />`).join("");
   const words = e.words && Object.keys(e.words).length
     ? `<div class="arg-words"><span class="faint small" title="CLIP description terms, shown only when they genuinely separate these two tiers in your library">hint ·</span> ${[a, b].map((c) =>
-      (e.words[c] || []).length ? `leans ${(e.words[c] || []).map((w) => `<i>${esc(w.term)}</i>`).join(", ")} <span class="faint">(like your ${nm(c)})</span>` : "").filter(Boolean).join(" · ")}</div>` : "";
+      (e.words[c] || []).length ? `leans ${(e.words[c] || []).map((w) => w.kind === "concept"
+        ? `<b class="arg-cx" title="Your concept — learned from your marks">◇ ${esc(w.term)}</b>` : `<i>${esc(w.term)}</i>`).join(", ")} <span class="faint">(like your ${nm(c)})</span>` : "").filter(Boolean).join(" · ")}</div>` : "";
   const ruling = e.yours && e.agree !== "agree" && i != null ? `<div class="arg-rule">
       <button class="btn sm pri" data-arg-grade="${esc(a)}" data-i="${i}">Peaks is right → ${nm(a)}</button>
-      <button class="btn sm" data-arg-keep data-i="${i}">I'm right — keep ${nm(e.yours)}</button></div>` : "";
+      <button class="btn sm" data-arg-keep data-i="${i}">I'm right — keep ${nm(e.yours)}</button></div>
+    <div class="arg-say"><input data-arg-say placeholder="Because… say it in your words (e.g. “flat lighting”)" maxlength="60" />
+      <button class="btn sm ghost" data-arg-say-btn title="Turn your words into a concept Peaks learns from a few marks">Teach Peaks this</button></div>` : "";
   return `<div class="arg-head">${head} ${honest}</div>
     <div class="arg-axis"><span style="color:${ARG_COLOR[b] || ""}">← ${nm(b)}</span><span style="color:${ARG_COLOR[a] || ""}">${nm(a)} →</span></div>
     ${rows}
@@ -3053,6 +3058,17 @@ document.addEventListener("click", (ev) => {
   }
   const g = ev.target.closest("[data-arg-grade]");
   if (g) { const i = +g.dataset.i; focusCat(i, false); gradeCat(i, g.dataset.argGrade === "reject" ? "reject" : g.dataset.argGrade); return; }
+  const say = ev.target.closest("[data-arg-say-btn]");
+  if (say) {                                        // your reason, in your words → a concept to teach
+    const v = say.parentElement.querySelector("[data-arg-say]").value.trim(); if (!v) return;
+    api("/api/concepts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: v }) })
+      .then(async (c) => {
+        go("taste"); document.querySelector('#taste-tabs [data-tab="concepts"]')?.click();
+        await loadConcepts(true); cxTeach(c.slug);
+        toast(`“${c.name}” — mark a few frames and Peaks learns it`);
+      }).catch((err) => toast(err.message, true));
+    return;
+  }
   const k = ev.target.closest("[data-arg-keep]");
   if (k) { const i = +k.dataset.i; focusCat(i, false); keepCat(i); return; }
   const m = ev.target.closest(".arg-m");
@@ -3136,7 +3152,8 @@ async function openArbiter() {
     : '<li class="faint">Nothing stands out: where you disagree, it isn\'t one studio, performer, resolution or picture band.</li>';
   const calib = barChart(s.calibration, { label: (b) => `says ${Math.round(b.lo * 100)}–${Math.round(b.hi * 100)}% (${b.n})`, value: (b) => b.right, fmtV: (v) => `right ${pc(v)}` });
   const drivers = s.drivers && s.drivers.groups ? barChart(s.drivers.groups, { label: (g) => g.label, value: (g) => g.share, fmtV: pc }) : '<p class="faint small">Needs both Légendaire and Exceptionnelle graded.</p>';
-  const words = s.words.length ? `<p class="small">${s.words.map((w) => `<span class="q" title="effect size ${w.d}">${esc(w.term)} → ${esc(w.favours)}</span>`).join(" ")}</p>` : '<p class="faint small">No description words reliably separate your tiers — so none are shown.</p>';
+  const words = s.words.length ? `<p class="small">${s.words.map((w) => `<span class="q ${w.kind === "concept" ? "cx" : ""}" title="${w.kind === "concept" ? "your concept · " : ""}effect size ${w.d}">${w.kind === "concept" ? "◇ " : ""}${esc(w.term)} → ${esc(w.favours)}</span>`).join(" ")}</p>`
+    : '<p class="faint small">No description words — or concepts of yours — reliably separate your tiers, so none are shown. Teach some in Taste → Concepts.</p>';
   box.innerHTML = `
     <div class="hgrid"><div class="card pad hcard"><span class="tq-l">Peaks agrees with you</span><span class="tq-v">${pc(s.agree)}</span>
       <span class="faint small">on ${s.n.toLocaleString()} graded scenes, each judged without its grade${s.trained_at ? ` · trained ${esc(s.trained_at)}` : ""}</span></div>${per}</div>
@@ -3963,7 +3980,7 @@ const className = (c) => TIER_NAMES[c === "reject" ? "rejected" : c] || c;
 // views and the chip bar all read and write it through cfParams / cfFromParams.
 const CF_EMPTY = () => ({ performers: [], perfMode: "all", studios: [], tags: [], tagsNot: [], vr: "",
   saves: "", organized: "", released: ["", ""], added: ["", ""], length: ["", ""], size: ["", ""],
-  minO: "", performer: "", pic: "", picMin: "" });
+  minO: "", performer: "", pic: "", picMin: "", concept: "" });
 cat.f = CF_EMPTY();
 const CF_TYPES = [
   ["performers", "Performer", "Scenes with a performer — add several for scenes with all of them (or any)"],
@@ -3979,9 +3996,90 @@ const CF_TYPES = [
   ["minO", "O-count", "At least this many Os"],
   ["organized", "Organised", "Marked organised in Stash — or not"],
   ["pic", "Picture", "Picture quality: below your line, upscaled, not measured yet, or a minimum score"],
+  ["concept", "Concept", "Scenes that show one of your own concepts (Taste → Concepts)"],
 ];
 const CF_LISTS = new Set(["performer_ids", "pnames", "studios", "tags", "tags_not"]);
 const cfArr = (x) => (x == null || x === "" ? [] : Array.isArray(x) ? x : [x]);
+// --- concepts: your own words, learned from a few marks (Taste → Concepts) ------------------------
+let cxList = [];
+const cxTrained = () => cxList.filter((c) => c.trained);
+function cxName(slug) { return (cxList.find((c) => c.slug === slug) || {}).name || slug; }
+async function loadConcepts(render = false) {
+  try { cxList = await api("/api/concepts"); } catch { return; }
+  // "Most <concept> first" in the Catalogue's sort
+  const sel = $("#cat-sort");
+  if (sel) {
+    const cur = sel.value;
+    sel.querySelectorAll("option[data-cx]").forEach((o) => o.remove());
+    for (const c of cxTrained()) sel.insertAdjacentHTML("beforeend", `<option data-cx value="concept:${esc(c.slug)}">Most “${esc(c.name)}”</option>`);
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  }
+  if (render) renderConcepts();
+}
+loadConcepts();
+function renderConcepts() {
+  const box = $("#cx-list"); if (!box) return;
+  box.innerHTML = cxList.length ? cxList.map((c) => `<div class="cx-row" data-cx="${esc(c.slug)}">
+      <b>${esc(c.name)}</b>
+      <span class="faint small">${c.yes} yes · ${c.no} no${c.accuracy != null ? ` · right ${Math.round(c.accuracy * 100)}% on marks it didn't learn from` : ""}</span>
+      <span class="cx-rel ${c.reliability === "taught well" ? "ok" : c.reliability === "getting there" ? "mid" : ""}">${esc(c.reliability)}</span>
+      <span class="grow"></span>
+      <button class="btn sm pri" data-cx-teach>Teach</button>
+      ${c.trained ? `<button class="btn sm ghost" data-cx-find>Find</button><button class="btn sm ghost" data-cx-cat>In Catalogue</button>` : ""}
+      <button class="btn sm ghost" data-cx-del title="Forget this concept and your marks for it">✕</button></div>`).join("")
+    : '<p class="faint small">No concepts yet.</p>';
+}
+const cxT = { slug: null, items: [] };
+async function cxTeach(slug) {
+  cxT.slug = slug;
+  const box = $("#cx-teach"); box.hidden = false;
+  box.innerHTML = `<p class="dim">Finding frames to ask you about…</p>`;
+  try { cxT.items = await api(`/api/concepts/${encodeURIComponent(slug)}/teach?n=12`); }
+  catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  const c = cxList.find((x) => x.slug === slug) || { name: slug };
+  box.innerHTML = `<div class="cx-teach-h"><b>Is this “${esc(c.name)}”?</b>
+      <span class="faint small">${c.trained ? "Mostly the frames it's least sure about." : "A first round: some guesses from the words, some at random."}</span>
+      <span class="grow"></span><button class="btn sm" data-cx-more>More</button><button class="btn sm ghost" data-cx-close>Done</button></div>
+    <div class="cx-grid">${cxT.items.map((x, i) => `<div class="cx-cell" data-i="${i}"><img loading="lazy" src="${x.thumb}" alt="" />
+      <div class="cx-ans"><button data-cx-y>Yes</button><button data-cx-n>No</button></div></div>`).join("")
+      || '<p class="faint small">Nothing left to ask about right now.</p>'}</div>`;
+}
+document.addEventListener("click", async (e) => {
+  if (e.target.closest("#cx-add")) {
+    const v = $("#cx-new").value.trim(); if (!v) return;
+    try { const c = await api("/api/concepts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: v }) });
+      $("#cx-new").value = ""; await loadConcepts(true); cxTeach(c.slug); } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const row = e.target.closest("[data-cx]");
+  if (row && e.target.closest("[data-cx-teach]")) return cxTeach(row.dataset.cx);
+  if (row && e.target.closest("[data-cx-find]")) { go("explore"); $("#q").value = cxName(row.dataset.cx); $("#btn-text").click(); return; }
+  if (row && e.target.closest("[data-cx-cat]")) {
+    cat.view = ""; cat.tier = ""; cat.sortTouched = true; go("catalogue");
+    await loadConcepts(); $("#cat-sort").value = "concept:" + row.dataset.cx; openCatalogue(); return;
+  }
+  if (row && e.target.closest("[data-cx-del]")) {
+    if (!confirm(`Forget “${cxName(row.dataset.cx)}” and your marks for it?`)) return;
+    try { await api(`/api/concepts/${encodeURIComponent(row.dataset.cx)}`, { method: "DELETE" }); } catch (err) { toast(err.message, true); }
+    if (cxT.slug === row.dataset.cx) $("#cx-teach").hidden = true;
+    return loadConcepts(true);
+  }
+  if (e.target.closest("[data-cx-more]")) return cxTeach(cxT.slug);
+  if (e.target.closest("[data-cx-close]")) { $("#cx-teach").hidden = true; return; }
+  const ans = e.target.closest("[data-cx-y], [data-cx-n]");
+  if (ans) {
+    const cell = ans.closest(".cx-cell"), x = cxT.items[+cell.dataset.i], yes = ans.hasAttribute("data-cx-y");
+    cell.classList.remove("yes", "no"); cell.classList.add(yes ? "yes" : "no");
+    try {
+      const r = await api(`/api/concepts/${encodeURIComponent(cxT.slug)}/label`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: x.key, t: x.t, label: yes ? 1 : 0, scene_id: x.scene_id }) });
+      if (r.report && r.report.trained) await loadConcepts(true);
+      else { const c = cxList.find((y) => y.slug === cxT.slug); if (c) { c.yes = r.yes; c.no = r.no; renderConcepts(); } }
+    } catch (err) { toast(err.message, true); }
+  }
+});
+$("#cx-new")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#cx-add").click(); });
+
 function cfParams(f = cat.f) {
   const p = {};
   if (f.performers.length) {
@@ -3999,6 +4097,7 @@ function cfParams(f = cat.f) {
   if (f.minO !== "") p.min_o = f.minO;
   if (f.pic) p.pic = f.pic;
   if (f.picMin !== "") p.pic_min = f.picMin;
+  if (f.concept) { p.concept = f.concept; p.concept_min = 0.5; }
   return p;
 }
 function cfFromParams(p) {
@@ -4014,6 +4113,7 @@ function cfFromParams(p) {
   f.released = [g("date_from"), g("date_to")]; f.added = [g("added_from"), g("added_to")];
   f.length = [g("dur_min"), g("dur_max")]; f.size = [g("size_min"), g("size_max")]; f.minO = g("min_o");
   f.pic = p.pic || ""; f.picMin = g("pic_min");
+  f.concept = p.concept_min != null && p.concept ? String(p.concept) : "";
   return f;
 }
 function cfCount(f = cat.f) { return Object.keys(cfParams(f)).filter((k) => !["pnames", "perf_mode"].includes(k)).length; }
@@ -4065,6 +4165,11 @@ function catParams(offset, refresh) {
   if (cat.view) qs.set("view", cat.view);
   else if (cat.tier) qs.set("tier", cat.tier);
   if (cat.view === "arbiter" && cat.cell) qs.set("cell", cat.cell);
+  const sv = $("#cat-sort").value;
+  if (sv.startsWith("concept:")) {                // "Most <your concept> first"
+    qs.set("sort", "concept");
+    if (!qs.has("concept")) qs.set("concept", sv.slice(8));
+  }
   if (cat.isNew) qs.set("new", "true");
   const q = $("#cat-q").value.trim(); if (q) qs.set("q", q);
   const res = $("#cat-res").value; if (res) qs.set("res", res);
@@ -4297,6 +4402,7 @@ function cfChipText(k, i) {
     case "pic": return { low: "Picture below Good", good: "Picture Good or better", excellent: "Picture Excellent or better",
       noscore: "Picture: no score yet", upscaled: "Upscaled picture", unmeasured: "Picture not measured yet" }[f.pic] || "Picture";
     case "picMin": return `Picture ≥ ${f.picMin}`;
+    case "concept": return `◇ ${cxName(f.concept)}`;
   }
   return k;
 }
@@ -4310,7 +4416,7 @@ function renderCatFChips() {
   f.studios.forEach((_, i) => out.push(chip("studios", i)));
   f.tags.forEach((_, i) => out.push(chip("tags", i)));
   f.tagsNot.forEach((_, i) => out.push(chip("tagsNot", i)));
-  for (const k of ["vr", "saves", "organized", "minO", "pic", "picMin"]) if (f[k] !== "") out.push(chip(k));
+  for (const k of ["vr", "saves", "organized", "minO", "pic", "picMin", "concept"]) if (f[k] !== "") out.push(chip(k));
   for (const k of ["released", "added", "length", "size"]) if (f[k][0] !== "" || f[k][1] !== "") out.push(chip(k));
   $("#cat-fchips").innerHTML = out.join("");
   $("#btn-cat-clear").hidden = !out.length;
@@ -4379,6 +4485,8 @@ function cfEdit(k, anchor) {
       ["upscaled", "Upscaled"], ["noscore", "No score yet"], ["unmeasured", "Not measured yet"], ["", "Any"]], f.pic) +
       `<div class="row">or a score of at least <input data-a type="number" min="0" max="100" step="5" class="num-sm" value="${esc(f.picMin)}" /> <button class="btn sm pri" data-apply>Apply</button></div>`;
   else if (k === "minO") body = `<div class="row">at least <input data-a type="number" min="0" step="1" class="num-sm" value="${esc(f.minO)}" /> Os <button class="btn sm pri" data-apply>Apply</button></div>`;
+  else if (k === "concept") body = cxTrained().length ? opts(cxTrained().map((c) => [c.slug, c.name]), f.concept)
+    : `<p class="faint small">No concepts taught yet — Taste → Concepts.</p>`;
   pop.innerHTML = `<div class="fpop-h">${esc(label)}</div>${body}`;
   pop.hidden = false;
   const bar = $("#cat-fbar").getBoundingClientRect(), r = anchor.getBoundingClientRect();
