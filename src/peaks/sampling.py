@@ -414,6 +414,31 @@ class FrameSampler:
             raise SamplerError(f"no frame decoded for {path}@{time}s")
         return PILImage.open(BytesIO(out.stdout)).convert("RGB")
 
+    def window_frames(self, path: str, start: float, duration: float, step: float) -> list[tuple[float, "Image"]]:
+        """Frames every `step` s over [start, start + duration) in one ffmpeg run —
+        the moment zoom's dense look at a stretch (frame i is from start + i*step)."""
+        from PIL import Image as PILImage  # lazy
+
+        if duration <= 0 or step <= 0:
+            return []
+        scale = self._scale_filter()
+        cmd = [
+            self.ffmpeg, "-v", "error", *self._input_args(),
+            "-ss", f"{max(0.0, start):g}", "-i", path, "-t", f"{duration:g}",
+            "-vf", ",".join([f"fps=1/{step:g}", *([scale] if scale else [])]),
+            "-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "-",
+        ]
+        try:
+            out = subprocess.run(cmd, capture_output=True, check=True)
+        except FileNotFoundError as exc:
+            raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
+        except subprocess.CalledProcessError as exc:
+            raise SamplerError(f"ffmpeg window failed for {path}@{start}s: {exc.stderr[:200]}") from exc
+        frames = []
+        for i, jpg in enumerate(iter_jpegs(BytesIO(out.stdout))):
+            frames.append((round(max(0.0, start) + i * step, 2), PILImage.open(BytesIO(jpg)).convert("RGB")))
+        return frames
+
     # --- bulk sampling --------------------------------------------------------------
 
     def iter_frames(self, path: str) -> Iterator[tuple[float, "Image"]]:

@@ -1833,8 +1833,30 @@ def create_app(cfg=None):
     def scene_picks(scene_id: str):
         done = service.answered_picks(scene_id)
         return [{"t": p["t"], "score": p.get("score"), "thumb": p.get("thumb"),
+                 **({"start": p["start"], "end": p["end"], "shape": p.get("shape")} if "start" in p else {}),
                  "answered": any(abs(p["t"] - t) <= 1.0 for t in done)}
                 for p in service.scene_picks(scene_id)]
+
+    @app.get("/api/moments/zoom")
+    def moments_zoom():
+        st = service.zoom_status()
+        j = jobs.running("zoom")
+        st["running"] = j.as_dict() if j is not None else None
+        return st
+
+    @app.post("/api/moments/zoom")
+    def moments_zoom_run():
+        try:
+            return jobs.start("zoom", service.run_zoom).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/moments/train")
+    def moments_train():
+        try:
+            return service.train_moment_model()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
 
     # --- concepts: Peaks learns your words ------------------------------------------
 
@@ -2564,6 +2586,26 @@ def _start_picture(service: Service, jobs: JobManager):
         return None
 
 
+_ZOOM_WAIT_FOR = (*_PICTURE_WAIT_FOR, "zoom")
+_zoom_next = {"at": 0.0}
+
+
+def _start_zoom(service: Service, jobs: JobManager):
+    """Zoom into candidate moments when nothing heavier runs. Checked at most every
+    10 minutes, and only with the index already in memory (never loads it just to look)."""
+    import time as _t
+
+    if _t.time() < _zoom_next["at"] or any(jobs.running(k) for k in _ZOOM_WAIT_FOR):
+        return None
+    _zoom_next["at"] = _t.time() + 600
+    if not service.index_loaded() or not service.zoom_due():
+        return None
+    try:
+        return jobs.start("zoom", service.run_zoom)
+    except RuntimeError:
+        return None
+
+
 def _rewarm(service: Service, jobs: JobManager):
     """The main index got dropped (an embed added scenes, an ingest freed memory
     for Stash, a delete…): reload it in the background now, so whoever opens
@@ -2688,6 +2730,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
             try:   # picture quality: new files, and the library once you've started it
                 _start_picture(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # moment zoom: dense looks at candidate moments, when nothing else runs
+                _start_zoom(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             try:   # files the pull just brought in: scan exactly where they landed

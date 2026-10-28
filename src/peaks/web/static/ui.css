@@ -1143,3 +1143,11 @@ body.picks-off .pick-chip, body.picks-off .pick-mk { display: none !important; }
 .arg-say { display: flex; gap: 8px; margin-top: 8px; } .arg-say input { flex: 1; min-width: 0; }
 .arg-cx { color: var(--gold); font-weight: 600; }
 .q.cx { border-color: var(--gold); }
+
+/* picks as spans (zoomed scenes): the whole moment, start to end */
+.pick-span { position: absolute; top: 0; bottom: 0; background: rgba(212,174,85,.28); border-left: 1px solid var(--gold);
+  border-right: 1px solid var(--gold); pointer-events: none; }
+.rv-scrub .pick-span { top: auto; bottom: 20px; height: 10px; border-radius: 3px; background: rgba(212,174,85,.5); }
+.pick-span.done { background: rgba(74,200,136,.25); border-color: var(--ok); }
+body.picks-off .pick-span { display: none !important; }
+.htab tr.on td { color: var(--fg); font-weight: 600; } .q.neg { opacity: .7; }

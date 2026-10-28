@@ -39,6 +39,7 @@ from .arbiter import ArbiterMixin
 from .momentcheck import MomentCheckMixin
 from .trend import TrendMixin
 from .concepts import ConceptsMixin
+from .zoom import ZoomMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -53,7 +54,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
-              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin):
+              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}

@@ -1278,10 +1278,11 @@ async function loadViewerMeta(sid) {
     catch (e) { toast(e.message, true); gs.value = ""; }
   });
 }
-async function saveMoment(sid, t) {
+async function saveMoment(sid, t, end) {
   if (!sid) return toast("no scene id for this result", true);
   try {
     const p = { t: (t || 0).toFixed(2) };
+    if (end != null && end > t) p.end = (+end).toFixed(2);   // a span: its own in/out points
     if (ptag()) p.tag = ptag();   // file the moment under the active profile's tag
     const r = await api(`/api/scene/${sid}/apex?` + new URLSearchParams(p), { method: "POST" });
     toast("Saved moment + added to taste @ " + fmt(t) + (PROFILE.isDefault() ? "" : ` · ${PROFILE.name}`)
@@ -3174,8 +3175,9 @@ document.addEventListener("click", (ev) => {
 async function openMoments() {
   const box = $("#moments-body"); if (!box) return;
   box.innerHTML = '<p class="dim">Checking Peaks\' picks against your saves…</p>';
-  let m;
+  let m, z = null;
   try { m = await api("/api/insights/moments"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  try { z = await api("/api/moments/zoom"); } catch { /* the zoom is extra */ }
   const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
   const pair = (x) => `<div class="mc-pair ${x.rank ? "hit" : "miss"}">
       <figure><img loading="lazy" src="${x.saved_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>you saved ${fmt(x.saved)}</figcaption></figure>
@@ -3192,10 +3194,45 @@ async function openMoments() {
     <div class="hgrid two">
       <div class="card pad"><h3>Found, by month</h3>${barChart(m.live.by_month, { label: (x) => `${x.month} (${x.n})`, value: (x) => x.rate, fmtV: pc })}</div>
       <div class="card pad"><h3>Your kind, by month</h3>${barChart(m.approval.by_month, { label: (x) => `${x.month} (${x.n})`, value: (x) => x.rate, fmtV: pc })}</div></div>
+    ${zoomCard(z)}
     <div class="card pad"><h3>Misses <span class="faint small">— where Peaks looked elsewhere (${m.examples_from})</span></h3><div class="mc-grid">${m.misses.map(pair).join("") || '<p class="faint small">None yet.</p>'}</div></div>
     <div class="card pad"><h3>Hits</h3><div class="mc-grid">${m.hits.map(pair).join("") || '<p class="faint small">None yet.</p>'}</div></div>
     <p class="faint small">A save counts as found when it's within ${m.window} s of one of Peaks' top ${m.top_k} picks for that scene.</p>`;
 }
+
+// Moments tab: the moment zoom — frame picks vs shape picks, judged on scenes held out
+function zoomCard(z) {
+  if (!z) return "";
+  const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
+  const md = z.model || {}, run = z.running;
+  const status = run ? `zooming… ${(run.progress || {}).done ?? 0} of ${(run.progress || {}).total ?? "?"}`
+    : `${(z.zoomed || 0).toLocaleString()} of ${(z.embedded || 0).toLocaleString()} scenes zoomed`;
+  const cmp = md.trained ? `<table class="htab"><thead><tr><th></th><th>First pick</th><th>Top 3</th></tr></thead><tbody>
+      <tr class="${md.use_shape ? "" : "on"}"><td>Frame picks <span class="faint small">(single frames)</span></td><td>${pc(md.frame.top1)}</td><td>${pc(md.frame.top3)}</td></tr>
+      <tr class="${md.use_shape ? "on" : ""}"><td>Shape picks <span class="faint small">(how the moment unfolds)</span></td><td>${pc(md.shape.top1)}</td><td>${pc(md.shape.top3)}</td></tr></tbody></table>
+      <p class="small">${esc(md.verdict || "")} <span class="faint">· compared on ${md.compared} scene(s) it didn't learn from</span></p>`
+    : `<p class="faint small">${esc(md.reason || "Not trained yet — it trains after each zoom run.")}</p>`;
+  const words = (md.weights || []).length ? `<p class="small">What your moments have: ${md.weights.map((w) =>
+    `<span class="q ${w.weight > 0 ? "" : "neg"}" title="weight ${w.weight}">${w.weight > 0 ? "" : "not "}${esc(w.words)}</span>`).join(" ")}</p>` : "";
+  return `<div class="card pad"><h3>Moment shape <span class="faint small">— ${esc(status)}</span></h3>
+    <p class="faint small">Peaks takes a closer look (a frame every 2 s) around its candidate moments and learns which <i>shapes</i> you save —
+      a build-up, a hold, movement, your concepts. It only switches to shape picks when they beat frame picks on scenes held out.</p>
+    ${cmp}${words}
+    <div class="row"><button class="btn sm" id="zoom-run" ${run ? "disabled" : ""}>Zoom more now</button>
+      <button class="btn sm ghost" id="zoom-train">Retrain</button></div></div>`;
+}
+document.addEventListener("click", async (e) => {
+  if (e.target.closest("#zoom-run")) {
+    try { await api("/api/moments/zoom", { method: "POST" }); toast("Zooming in the background — this page updates when you come back"); }
+    catch (err) { toast(err.message, true); }
+    openMoments();
+  } else if (e.target.closest("#zoom-train")) {
+    e.target.closest("#zoom-train").disabled = true;
+    try { const r = await api("/api/moments/train", { method: "POST" }); toast(r.verdict || r.reason || "Trained"); }
+    catch (err) { toast(err.message, true); }
+    openMoments();
+  }
+});
 
 // --- Library health → the shrink trendline ---------------------------------------------------
 async function trendHTML() {
@@ -3239,7 +3276,9 @@ document.addEventListener("click", async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 function pickSetup(v, sid, picks, host, track) {
-  const st = { sid, picks: picks.map((p) => ({ t: +p.t, thumb: p.thumb, done: !!p.answered })), chip: null, track, shown: null };
+  const st = { sid, chip: null, track, shown: null,
+    picks: picks.map((p) => ({ t: +p.t, thumb: p.thumb, done: !!p.answered,
+      start: p.start != null ? +p.start : null, end: p.end != null ? +p.end : null })) };
   pickW.set(v, st);
   host.querySelector(".pick-chip")?.remove();
   track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
@@ -3250,7 +3289,12 @@ function pickSetup(v, sid, picks, host, track) {
     const ans = e.target.closest("[data-pv]");
     if (ans) return pickAnswer(v, +ans.dataset.pv, +chip.dataset.t);
     if (e.target.closest("[data-pjump]")) {                 // back to the moment being asked about
-      v.currentTime = Math.max(0, +chip.dataset.t - PICK_PRE); v.play().catch(() => {});
+      const p = st.picks.find((x) => x.t === +chip.dataset.t);
+      v.currentTime = Math.max(0, p && p.start != null ? p.start : +chip.dataset.t - PICK_PRE); v.play().catch(() => {});
+    }
+    if (e.target.closest("[data-psave]")) {                 // keep the span as a saved moment, in and out
+      const p = st.picks.find((x) => x.t === +chip.dataset.t);
+      if (p) saveMoment(st.sid, p.start, p.end);
     }
   });
   if (!v._pickWired) {                                     // once per player: every seek re-checks
@@ -3262,8 +3306,19 @@ function pickSetup(v, sid, picks, host, track) {
   const draw = () => {
     const own = track.querySelectorAll(".pk[data-t]");
     const doneAt = (t) => st.picks.some((p) => p.done && Math.abs(p.t - t) < 0.5);
+    const dur = v.duration || 0;
+    track.querySelectorAll(".pick-span").forEach((x) => x.remove());
+    if (dur) for (const p of st.picks) {                    // spans: the whole moment, not just its peak
+      if (p.start == null) continue;
+      const m = document.createElement("span");
+      const a = Math.max(0, p.start) / dur, w = Math.max(0.002, (Math.min(dur, p.end) - Math.max(0, p.start)) / dur);
+      m.className = "pick-span" + (p.done ? " done" : "");
+      if (own.length) { m.style.left = `calc(16px + (100% - 32px) * ${a.toFixed(4)})`; m.style.width = `calc((100% - 32px) * ${w.toFixed(4)})`; }
+      else { m.style.left = (100 * a).toFixed(2) + "%"; m.style.width = (100 * w).toFixed(2) + "%"; }
+      m.title = `Peaks pick ${fmt(p.start)}–${fmt(p.end)}`; track.appendChild(m);
+    }
     if (own.length) { own.forEach((x) => x.classList.toggle("done", doneAt(+x.dataset.t))); return; }
-    if (!v.duration) return;
+    if (!dur) return;
     track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
     for (const p of st.picks) {
       const m = document.createElement("span");
@@ -3278,7 +3333,8 @@ function pickSetup(v, sid, picks, host, track) {
 function pickAt(v) {
   const st = pickW.get(v); if (!st) return null;
   const now = v.currentTime;
-  return st.picks.find((p) => !p.done && now >= p.t - PICK_PRE && now <= p.t + PICK_POST) || null;
+  return st.picks.find((p) => !p.done && now >= (p.start != null ? p.start : p.t - PICK_PRE)
+    && now <= (p.end != null ? p.end : p.t + PICK_POST)) || null;
 }
 function pickTick(v) {
   const st = pickW.get(v); if (!st || !st.chip) return;
@@ -3288,8 +3344,9 @@ function pickTick(v) {
     st.shown = p;
     st.chip.dataset.t = p.t;
     st.chip.innerHTML = `${p.thumb ? `<img data-pjump src="${p.thumb}" alt="" title="Watch it again" />` : ""}
-      <span>Peaks pick · <a href="#" data-pjump title="Jump back to this moment">${fmt(p.t)}</a> · your kind of moment?</span>
-      <button data-pv="1" title="Yes (+)">👍</button><button data-pv="0" title="No (−)">👎</button>`;
+      <span>Peaks pick · <a href="#" data-pjump title="Jump back to this moment">${p.start != null ? `${fmt(p.start)}–${fmt(p.end)}` : fmt(p.t)}</a> · your kind of moment?</span>
+      <button data-pv="1" title="Yes (+)">👍</button><button data-pv="0" title="No (−)">👎</button>
+      ${p.start != null ? `<button data-psave title="Save this stretch as a moment, with its own in and out points">★</button>` : ""}`;
     st.chip.querySelector("a")?.addEventListener("click", (e) => e.preventDefault());
     st.chip.classList.remove("fresh"); void st.chip.offsetWidth; st.chip.classList.add("fresh");
   }
@@ -5879,6 +5936,10 @@ function renderReview() {
     api(`/api/scene/${encodeURIComponent(r.scene_id)}/picks`).then((ps) => {        // which you've answered before
       const st = pickW.get(v);
       if (!st || st.sid !== r.scene_id) return;
+      if (ps.some((x) => x.start != null)) {                 // a zoomed scene: its picks are spans
+        pickSetup(v, r.scene_id, ps, $("#rv-v").parentElement, $("#rv-scrub"));
+        return;
+      }
       for (const p of st.picks) if (ps.some((x) => x.answered && Math.abs(x.t - p.t) <= 1)) p.done = true;
       st.draw(); pickTick(v);
     }).catch(() => {});

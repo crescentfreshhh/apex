@@ -59,7 +59,14 @@ class MomentCheckMixin:
         return None
 
     def scene_picks(self, scene_id: str, n: int = 4) -> list[dict]:
-        """Peaks' best moments in a scene, best first: [{t, score, thumb}]."""
+        """Peaks' best moments in a scene, best first: [{t, score, thumb}] — spans
+        ({…, start, end}) once the scene is zoomed (peaks.web.zoom)."""
+        try:
+            spans = self.zoom_picks(str(scene_id))
+        except Exception:  # noqa: BLE001 — zoom is extra, never in the way
+            spans = None
+        if spans:
+            return spans[:n]
         strip = self._scene_moment_strips([str(scene_id)], n=n, min_gap=PICK_GAP).get(str(scene_id)) or []
         return sorted(strip, key=lambda m: -(m.get("score") or 0))
 
