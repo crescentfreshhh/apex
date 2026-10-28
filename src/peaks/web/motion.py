@@ -110,7 +110,7 @@ class MotionMixin:
     def _motion_embedder(self):
         from ..embedding import MotionEmbedder
 
-        return MotionEmbedder(device=self.cfg.embedding.device or None)
+        return MotionEmbedder(device=self.cfg.embedding.device or None, log=getattr(self, "_motion_log", None))
 
     def _motion_sampler(self):
         from ..sampling import FrameSampler
@@ -149,6 +149,7 @@ class MotionMixin:
         if not todo:
             return {"seen": 0}
         try:
+            self._motion_log = log                        # a first run fetches the weights: say so
             embedder = self._motion_embedder()
         except Exception as exc:  # noqa: BLE001 — model missing: say so on the Lab card
             self._motion_error = str(exc)

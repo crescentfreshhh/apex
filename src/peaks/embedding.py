@@ -300,6 +300,32 @@ class MotionUnavailable(RuntimeError):
 
 
 VJEPA_ENTRY = "vjepa2_1_vit_large_384"
+# Meta's hub code currently points its weights at http://localhost:8300 (a dev
+# override left in src/hub/backbones.py, facebookresearch/vjepa2 issue #174), so
+# Peaks fetches the checkpoint from the real host into torch.hub's cache first —
+# the loader then finds it there and never asks localhost.
+VJEPA_URL = "https://dl.fbaipublicfiles.com/vjepa2/"
+VJEPA_WEIGHTS = {"vjepa2_1_vit_large_384": "vjepa2_1_vitl_dist_vitG_384.pt"}
+
+
+def _ensure_vjepa_weights(torch, entry: str, log=None) -> None:
+    """Put the entry's checkpoint in torch.hub's checkpoint cache (once)."""
+    from pathlib import Path
+
+    name = VJEPA_WEIGHTS.get(entry)
+    if not name:
+        return
+    dest = Path(torch.hub.get_dir()) / "checkpoints" / name
+    if dest.exists() and dest.stat().st_size > 0:
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if log:
+        log(f"fetching V-JEPA 2.1 weights ({name}, one time, ~1 GB)…")
+    try:
+        torch.hub.download_url_to_file(VJEPA_URL + name, str(dest), progress=False)
+    except Exception as exc:  # noqa: BLE001
+        raise MotionUnavailable(f"couldn't fetch the V-JEPA 2.1 weights {VJEPA_URL + name}: {exc} — check the "
+                                f"container can reach dl.fbaipublicfiles.com") from exc
 
 
 class MotionEmbedder:
@@ -312,15 +338,18 @@ class MotionEmbedder:
     _MEAN = (0.485, 0.456, 0.406)
     _STD = (0.229, 0.224, 0.225)
 
-    def __init__(self, entry: str = VJEPA_ENTRY, device: str | None = None):
+    def __init__(self, entry: str = VJEPA_ENTRY, device: str | None = None, log=None):
         import torch  # lazy
 
         self._torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        _ensure_vjepa_weights(torch, entry, log)
         try:
             out = torch.hub.load("facebookresearch/vjepa2", entry)
         except Exception as exc:  # noqa: BLE001 — network, missing deps, a renamed entry…
-            raise MotionUnavailable(f"couldn't load V-JEPA 2.1 ({entry}) through torch.hub: {exc}") from exc
+            hint = (f" (the weights {VJEPA_WEIGHTS[entry]} are already in torch.hub's cache, so this is the hub "
+                    f"code itself — Meta's repo may have changed)" if entry in VJEPA_WEIGHTS else "")
+            raise MotionUnavailable(f"couldn't load V-JEPA 2.1 ({entry}) through torch.hub: {exc}{hint}") from exc
         enc = out[0] if isinstance(out, (tuple, list)) else out      # some entries return (encoder, predictor)
         self._half = self.device.startswith("cuda")
         self.model = enc.eval().to(self.device)

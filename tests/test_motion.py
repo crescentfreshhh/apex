@@ -87,15 +87,64 @@ def test_motion_that_says_nothing_is_not_used(tmp_path, monkeypatch):
     assert rep["uses"] == "shape"                                          # the shape already wins; noise adds nothing
 
 
-def test_a_hub_load_failure_is_a_clear_error(monkeypatch):
+def _fake_torch(tmp_path, events, load=None, download=None):
+    class Enc:
+        embed_dim = 1024
+
+        def eval(self):
+            return self
+
+        def to(self, _):
+            return self
+
+    def fetch(url, dst, progress=True):
+        events.append(("download", url, dst))
+        if download:
+            download()
+        open(dst, "wb").write(b"weights")
+
+    def hub_load(repo, entry):
+        events.append(("load", repo, entry))
+        if load:
+            load()
+        return Enc(), object()                                   # (encoder, predictor)
+    return types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False),
+                                 hub=types.SimpleNamespace(load=hub_load, get_dir=lambda: str(tmp_path / "hub"),
+                                                           download_url_to_file=fetch),
+                                 tensor=lambda *a, **k: types.SimpleNamespace(view=lambda *s: None), float16="f16")
+
+
+def test_the_weights_come_from_meta_not_localhost_and_only_once(tmp_path, monkeypatch):
+    """Meta's hub code points its weights at localhost:8300 (vjepa2 issue #174):
+    Peaks fetches them from dl.fbaipublicfiles.com into the hub cache first."""
     from peaks import embedding as E
 
-    def boom(*a, **k):
+    ev, said = [], []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(tmp_path, ev))
+    E.MotionEmbedder(log=said.append)
+    assert ev[0][0] == "download" and ev[1][0] == "load"                      # cached before the hub looks
+    assert ev[0][1] == "https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt"
+    assert ev[0][2] == str(tmp_path / "hub" / "checkpoints" / "vjepa2_1_vitl_dist_vitG_384.pt")
+    assert said and "one time" in said[0]
+    ev.clear()
+    E.MotionEmbedder()
+    assert [e[0] for e in ev] == ["load"]                                     # already cached: no download
+
+
+def test_a_failed_download_or_hub_load_is_a_clear_error(tmp_path, monkeypatch):
+    from peaks import embedding as E
+
+    def refuse():
+        raise OSError("[Errno 111] Connection refused")
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(tmp_path, [], download=refuse))
+    with pytest.raises(E.MotionUnavailable, match="dl.fbaipublicfiles.com"):
+        E.MotionEmbedder()
+    assert not (tmp_path / "hub" / "checkpoints" / "vjepa2_1_vitl_dist_vitG_384.pt").exists()   # retried next run
+
+    def boom():
         raise RuntimeError("HTTP Error 404")
-    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False),
-                                       hub=types.SimpleNamespace(load=boom), float16="f16")
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    with pytest.raises(E.MotionUnavailable, match="V-JEPA 2.1"):
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(tmp_path / "b", [], load=boom))
+    with pytest.raises(E.MotionUnavailable, match="V-JEPA 2.1.*already in torch.hub's cache"):
         E.MotionEmbedder()
 
 
