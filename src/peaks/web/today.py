@@ -255,6 +255,7 @@ class TodayMixin:
             "dupes": len(dupes["groups"]) if dupes else None,
             "rejected": {"count": len(rejected), "bytes": sum(int(r.get("size") or 0) for r in rejected)},
             "upgrades": self._today_upgrades(),
+            "settle": self.settle_count(rows, preds) if self._tier_model_state()["model"] is not None else None,
         }
 
     def _today_upgrades(self) -> int | None:

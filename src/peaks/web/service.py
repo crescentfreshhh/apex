@@ -41,6 +41,7 @@ from .trend import TrendMixin
 from .concepts import ConceptsMixin
 from .zoom import ZoomMixin
 from .lab import LabMixin
+from .settle import FAST_RETRAIN, SettleMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -55,7 +56,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
-              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin):
+              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5238,7 +5239,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             except Exception:  # noqa: BLE001 — memory is best-effort
                 pass
         signals = self._scene_signals(rows)
-        views = {v: len(self._triage(v, pool, preds, floor, signals)) for v in self.TRIAGE_VIEWS}
+        views = {v: (self.settle_count(pool, preds) if v == "settle" else len(self._triage(v, pool, preds, floor, signals)))
+                 for v in self.TRIAGE_VIEWS}
         in_view = view in self.TRIAGE_VIEWS or view == "arbiter"
         if view == "arbiter":                  # a cell of the Insights agreement grid
             pool = self.arbiter_cell(pool, preds, cell or "")
@@ -5278,6 +5280,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "dupe": r["scene_id"] in dupe_ids,
                 "picture": pics.get(r["scene_id"]),
                 "concept": cscores.get(r["scene_id"]) if cscores is not None else None,
+                "settle": self.settle_info(r["scene_id"]) if view == "settle" else None,
             })
         grace_new = sum(1 for r in pool_all if (signals.get(r["scene_id"]) or {}).get("new")
                         and r["tier"] not in ("legendaire", "rejected")
@@ -5322,7 +5325,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         preds = self._tier_predictions(rows)
         floor = quality_floor(rows)
         signals = self._scene_signals(rows)
-        views = {v: len(self._triage(v, rows, preds, floor, signals)) for v in self.TRIAGE_VIEWS}
+        views = {v: (self.settle_count(rows, preds) if v == "settle" else len(self._triage(v, rows, preds, floor, signals)))
+                 for v in self.TRIAGE_VIEWS}
         fresh = set(self.last_ingest().get("new") or [])
         new = sum(1 for r in rows if r["scene_id"] in fresh and r["tier"] == "unreviewed")
         dupes = self.cached_duplicates()
@@ -5645,7 +5649,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 pass
         # (predictions are NOT invalidated: a grade changes a scene's tier, not
         # its picture or bitrate — views are re-derived from rows every request)
-        if self._grades_since_train >= 25 and self._tier_model_state()["model"] is not None:
+        if self.settling():
+            self._settle_log(answer=True)          # a question answered
+        every = FAST_RETRAIN if self.settling() else 25   # learn faster while you settle
+        if self._grades_since_train >= every and self._tier_model_state()["model"] is not None:
             with self._train_gate:
                 if getattr(self, "_tier_training", False):
                     return
@@ -5819,6 +5826,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             self._tier_state = {"model": model, "report": report}
             self._tier_preds = None
             self._grades_since_train = 0
+            try:
+                self._settle_log(force=True)          # a point on the settling chart per retrain
+            except Exception:  # noqa: BLE001
+                pass
             return report
         finally:
             self._tier_training = False
@@ -6007,7 +6018,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "detail": f"{round(100 * share)}% {label}"}
 
     TRIAGE_VIEWS = ("likely", "quality", "drain", "promote", "second", "anomaly", "conflict", "saved", "trim",
-                    "passed", "orphans")
+                    "passed", "orphans", "settle")
     DRAIN_SURE = 0.8      # drain suggestions this sure are offered as one bulk grade per tier
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
     PROMOTABLE = ("unreviewed", "merveilleuse", "exceptionnelle", "anomaly")
@@ -6163,6 +6174,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tiers import draining, learned_tiers
 
         signals = signals or {}
+        if view == "settle":
+            return self.settle_queue(pool, preds)
         if view == "saved":
             # scenes you've saved moments in that aren't Légendaire yet — most saves first
             out = [r for r in pool if r["tier"] in self.PROMOTABLE

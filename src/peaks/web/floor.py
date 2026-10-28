@@ -125,7 +125,8 @@ def floor_state(service, jobs) -> dict:
         stations["backup"]["last"] = None
     series = _record(service, now, {"pull_mbps": pull_mbps, "embeds": stations["embed"]["done"] or 0})
     return {"now": now, "stations": stations, "lanes": lanes, "shelves": shelves,
-            "counts": {"dupes": len(dupes.get("groups") or []), "upgrades": upg},
+            "counts": {"dupes": len(dupes.get("groups") or []), "upgrades": upg,
+                       "unsettled": getattr(service, "_settle_last", None)},
             "series": series, "ticker": ticker[-14:]}
 
 

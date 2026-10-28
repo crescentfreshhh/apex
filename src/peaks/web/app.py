@@ -1942,6 +1942,23 @@ def create_app(cfg=None):
     def set_pick_prompts(body: dict):
         return {"on": service.set_pick_prompts(bool(body.get("on", True)))}
 
+    # --- settling the library: the questions left -----------------------------------
+
+    @app.get("/api/settle")
+    def settle_get():
+        return service.settle_state()
+
+    @app.post("/api/settle/rule/{scene_id}")
+    def settle_rule(scene_id: str):
+        try:
+            return service.settle_rule(scene_id)
+        except KeyError:
+            raise HTTPException(404, "no such scene")
+
+    @app.delete("/api/settle/rule/{scene_id}")
+    def settle_unrule(scene_id: str):
+        return service.settle_unrule(scene_id)
+
     @app.get("/api/insights/arbiter")
     def insights_arbiter():
         try:

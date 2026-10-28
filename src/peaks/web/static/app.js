@@ -2347,7 +2347,8 @@ function renderStatistics(st, metrics, storage) {
       </div>`;
   }
 
-  body.innerHTML = buildCard + freshCard + perfCard + sceneCard + coverageCard + storageCard(storage);
+  body.innerHTML = '<div id="settle-card"></div>' + buildCard + freshCard + perfCard + sceneCard + coverageCard + storageCard(storage);
+  loadSettleCard();
 
   const slider = $("#stats-floor");
   if (slider) {
@@ -3096,7 +3097,7 @@ function lineChart(pts, { y, fmtY, dashedUntil, h = 140 } = {}) {
   const X = (i) => L + (W - L - R) * i / (pts.length - 1), Y = (v) => T + (H - T - B) * (1 - (v - lo) / span);
   const path = (seg) => seg.map(([i, v], k) => `${k ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join("");
   const all = pts.map((p, i) => [i, p[y]]);
-  const cut = dashedUntil != null ? pts.findIndex((p) => !p.rec) : -1;
+  const cut = dashedUntil != null ? pts.findIndex((p) => !p.rec) : 0;      // 0: all solid
   const solid = cut > 0 ? all.slice(cut - 1) : (cut === 0 ? all : []), dashed = cut > 0 ? all.slice(0, cut) : (cut < 0 ? all : []);
   const grid = [lo, lo + span / 2, hi].map((v) => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="cg"/><text x="${L - 6}" y="${Y(v) + 4}" class="ct" text-anchor="end">${esc(fmtY(v))}</text>`).join("");
   const first = pts[0].d, last = pts[pts.length - 1].d;
@@ -3130,6 +3131,50 @@ document.addEventListener("mousemove", (ev) => {
 document.addEventListener("mouseout", (ev) => {
   const c = ev.target.closest && ev.target.closest(".chart");
   if (c && !c.contains(ev.relatedTarget)) { c.querySelector(".ctip").hidden = true; c.querySelector(".cx").setAttribute("visibility", "hidden"); }
+});
+
+// --- settling the library: the questions left ------------------------------------------------
+async function loadSettleCard() {
+  const box = $("#settle-card"); if (!box) return;
+  let d;
+  try { d = await api("/api/settle"); } catch { return; }
+  if (!d.ok) { box.innerHTML = ""; return; }
+  const n = (x) => (x ?? 0).toLocaleString(), t = d.threshold;
+  const pts = (d.history || []).map((h) => ({ d: new Date(h.at * 1000).toLocaleDateString(), unsettled: h.unsettled }));
+  const cal = t.measured ? `Peaks is right ${Math.round(100 * t.accuracy)}% of the time above ${Math.round(100 * t.t)}% sure (checked on ${n(t.above)} of your grades, each judged without its own grade), so those count as settled — they wait in Likely keepers as suggestions.`
+    : `Not enough grades yet to measure where Peaks is right 9 times in 10 — it uses ${Math.round(100 * t.t)}% sure until it can.`;
+  box.innerHTML = `<div class="panel stat-card settle-card"><h3>Settling your library</h3>
+    <div class="settle-top"><div><span class="settle-n">${n(d.unsettled)}</span><span class="settle-l">question${d.unsettled === 1 ? "" : "s"} left</span></div>
+      <div class="settle-parts"><span><b>${n(d.unsure)}</b> Peaks can't call yet</span><span><b>${n(d.disagree)}</b> grades it disagrees with</span>
+        <span><b>${n(d.sure)}</b> it's sure about <a href="#" data-settle-likely>(Likely keepers)</a></span>
+        ${d.unembedded ? `<span class="faint">${n(d.unembedded)} not analysed yet</span>` : ""}</div>
+      <button class="btn pri" data-settle-start ${d.unsettled ? "" : "disabled"}>Start settling</button></div>
+    ${d.projection ? `<p class="small">At the rate your answers have been settling others (about ${d.projection.per_answer} each), that's roughly <b>${n(d.projection.answers)} more answers</b>.</p>` : ""}
+    ${pts.length > 1 ? lineChart(pts, { y: "unsettled", fmtY: (v) => Math.round(v).toLocaleString(), h: 110 }) : ""}
+    <p class="faint small">${esc(cal)} Peaks never grades anything itself.</p></div>`;
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-settle-start]")) { cat.view = "settle"; cat.tier = ""; go("catalogue"); openCatalogue(); }
+  else if (e.target.closest("[data-settle-likely]")) { e.preventDefault(); cat.view = "likely"; cat.tier = ""; go("catalogue"); openCatalogue(); }
+});
+function rvSettleBanner(r) {
+  const box = $("#rv-settle"); if (!box) return;
+  const s = r.settle;
+  box.hidden = !s;
+  if (!s) return;
+  box.className = "rv-settle " + s.kind;
+  box.innerHTML = s.kind === "disagree"
+    ? `<span>⚖ ${esc(s.why)} — keep yours or grade again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
+    : `<span>? ${esc(s.why)} — your grade teaches it the most here</span>`;
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-settle-keep]"); if (!b) return;
+  b.disabled = true;
+  try {
+    await api(`/api/settle/rule/${encodeURIComponent(b.dataset.settleKeep)}`, { method: "POST" });
+    const r = rv.items[rv.i]; if (r) r.settle = null;
+    toast("Your grade stands — settled"); rvMove(1);
+  } catch (err) { toast(err.message, true); b.disabled = false; }
 });
 
 // --- Insights → Arbiter ----------------------------------------------------------------
@@ -3710,6 +3755,7 @@ function tdBoard() {
     card("Confirm", "saved", "Saved → Légendaire", j.saved, "you saved moments in these", "job"),
     card("Confirm", "reject", "Suggested to let go", j.reject, "passed over or among your weakest", "job"),
     card("Grade", "new", "New scenes", j.new, `${n(b.likely)} look like keepers`, "job"),
+    ...(b.settle != null ? [card("Settle", "settle", "Settle the library", b.settle, "questions left — most to learn first", "view")] : []),
     ...(DRAINING.size ? [card("Second opinion", "drain", `Drain ${[...DRAINING].map((t) => TIER_NAMES[t]).join(" + ")}`, j.drain, "left to re-grade before it retires", "job")] : []),
     card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job"),
     card("Second opinion", "second", "Second look", j.second, "Peaks rates them below your grade", "job"),
@@ -4079,6 +4125,7 @@ const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, vie
               focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false,
               isNew: false, sortTouched: false, sortDir: "" };
 const CAT_VIEWS = [
+  ["settle", "Settle the library", "The questions left before your library is settled, most to learn first: scenes Peaks can't call yet, and grades it confidently disagrees with (every fifth). Answer in Review."],
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
   ["drain", "Drain", "Every scene left in a tier being retired, with the tier it looks most like"],
@@ -6006,6 +6053,7 @@ function renderReview() {
       st.draw(); pickTick(v);
     }).catch(() => {});
   }
+  rvSettleBanner(r);
   // grades: current one outlined, the model's pick highlighted
   const cur = r.tier === "rejected" ? "reject" : r.tier;
   const probs = (r.pred || {}).probs || {};

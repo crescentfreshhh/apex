@@ -506,7 +506,7 @@ function panels(pal, f, t) {
   E.putS(1, r++, "-- TODAY " + "-".repeat(LW - 10), pal.dim);
   const T = [["pulled", `${today.pulled ?? 0} files`], ["in", `${today.pulled_gb ?? 0} GB`], ["embedded", today.embedded ?? 0],
     ["graded", today.graded ?? 0], ["rejected", today.rejected ?? 0], ["freed", `${today.freed_gb ?? 0} GB`],
-    ["upgrades", today.upgrades ?? 0]];
+    ["upgrades", today.upgrades ?? 0], ...((d.counts || {}).unsettled != null ? [["to settle", d.counts.unsettled]] : [])];
   for (const [k, v] of T) { E.putS(2, r, k.padEnd(10, "."), pal.dim); E.putS(13, r, String(v), pal.text); r++; }
 
   // right: throughput, the day, storage
