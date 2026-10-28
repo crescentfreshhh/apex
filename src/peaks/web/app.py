@@ -721,6 +721,8 @@ def create_app(cfg=None):
         q: str, top_k: int = 60, taste: bool = False, per_scene: int = 3,
         min_score: float = 0.0, neg_weight: float = 0.5, enrich: int = 300,
     ):
+        if q.strip().lower().startswith("sound:"):           # search what scenes sound like
+            return search_sound(q.split(":", 1)[1].strip(), top_k=top_k, enrich=enrich)
         # one of your trained concepts, by name: search with what Peaks learned from you
         slug = next((s for s, nm in service.trained_concepts() if nm.strip().lower() == q.strip().lower()), None)
         if slug:
@@ -742,6 +744,38 @@ def create_app(cfg=None):
         except ImportError as exc:
             raise HTTPException(500, f"CLIP unavailable: {exc}")
         return _search_payload(service, hits, enrich=enrich)
+
+    @app.get("/api/search/sound")
+    def search_sound(q: str, top_k: int = 60, enrich: int = 300):
+        if not q:
+            raise HTTPException(400, "say what it should sound like")
+        try:
+            hits = service.sound_search(q, top_k=top_k)
+        except Exception as exc:  # noqa: BLE001 — no CLAP model yet
+            raise HTTPException(503, f"sound search unavailable: {exc}")
+        out = _search_payload(service, hits, enrich=enrich)
+        out["sound"] = q
+        return out
+
+    # --- hearing: Peaks listens ----------------------------------------------------
+
+    @app.get("/api/hear")
+    def hear_get():
+        d = service.hear_status()
+        j = jobs.running("hear")
+        d["running"] = j.as_dict() if j is not None else None
+        return d
+
+    @app.post("/api/hear")
+    def hear_run():
+        try:
+            return jobs.start("hear", service.run_hear).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/hear/settings")
+    def hear_settings(body: dict = Body(...)):
+        return service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
 
     # --- taste (explicit thumbs → personalized ranking) ---------------------
 
@@ -1869,7 +1903,7 @@ def create_app(cfg=None):
 
     @app.post("/api/lab/{cand}/run")
     def lab_run(cand: str):
-        busy = [k for k in _PICTURE_WAIT_FOR if jobs.running(k)]
+        busy = [k for k in (*_PICTURE_WAIT_FOR, "zoom", "hear") if jobs.running(k)]
         if busy:
             raise HTTPException(409, f"waits for the running {busy[0]} job to finish")
         try:
@@ -2643,13 +2677,36 @@ def _start_zoom(service: Service, jobs: JobManager):
     10 minutes, and only with the index already in memory (never loads it just to look)."""
     import time as _t
 
-    if _t.time() < _zoom_next["at"] or any(jobs.running(k) for k in _ZOOM_WAIT_FOR):
+    if _t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab")):
         return None
     _zoom_next["at"] = _t.time() + 600
     if not service.index_loaded() or not service.zoom_due():
         return None
     try:
         return jobs.start("zoom", service.run_zoom)
+    except RuntimeError:
+        return None
+
+
+_HEAR_WAIT_FOR = (*_ZOOM_WAIT_FOR, "hear", "lab")
+_hear_next = {"at": 0.0}
+
+
+def _start_hear(service: Service, jobs: JobManager):
+    """Listen to scenes when nothing heavier runs. Checked at most every 10 minutes,
+    only with the index already in memory, and backs off for an hour after a failure
+    (no model, no network) so it doesn't retry in a loop."""
+    import time as _t
+
+    if _t.time() < _hear_next["at"] or any(jobs.running(k) for k in _HEAR_WAIT_FOR):
+        return None
+    _hear_next["at"] = _t.time() + 600
+    if not service.index_loaded() or not service.hear_due():
+        return None
+    if getattr(service, "_hear_error", None):
+        _hear_next["at"] = _t.time() + 3600
+    try:
+        return jobs.start("hear", service.run_hear)
     except RuntimeError:
         return None
 
@@ -2782,6 +2839,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 pass
             try:   # moment zoom: dense looks at candidate moments, when nothing else runs
                 _start_zoom(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # hearing: Peaks listens to scenes, when nothing else runs
+                _start_hear(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             try:   # files the pull just brought in: scan exactly where they landed

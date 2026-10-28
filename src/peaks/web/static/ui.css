@@ -1171,3 +1171,4 @@ body.picks-off .pick-span { display: none !important; }
   border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); font-size: 13px; }
 .rv-settle.disagree { border-color: var(--gold); }
 .rv-settle span { flex: 1; min-width: 180px; }
+.lab-h { margin: 18px 0 4px; }

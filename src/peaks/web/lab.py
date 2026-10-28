@@ -74,7 +74,31 @@ class LabMixin:
                         "trial": t, "stale": bool(t and t.get("against") != active),
                         "error": (d.get("errors", {}).get(c) or {}).get("error")})
         return {"active": active, "active_label": dino_label(active), "candidates": out,
-                "sample_cap": SAMPLE_CAP}
+                "sample_cap": SAMPLE_CAP, "senses": self.lab_senses()}
+
+    def lab_senses(self) -> list[dict]:
+        """The extra senses (hearing, motion): coverage, and what the honest tests
+        say they add to finding moments and to grading."""
+        mm = (self._zoom_state().get("model") or {})
+        sets = mm.get("sets") or {}
+        tier = (self._tier_model_state().get("report") or {})
+        out = []
+        for sid, label, status in (("sound", "Hearing", self.hear_status),):
+            try:
+                st = status()
+            except Exception as exc:  # noqa: BLE001
+                st = {"error": str(exc)}
+            key = f"shape + {sid}"
+            out.append({
+                "id": sid, "label": label, "status": st,
+                "moments": {"without": sets.get("shape"), "with": sets.get(key),
+                            "in_use": bool(mm.get("use_shape") and mm.get("uses") in (key, "all"))},
+                "grading": {"without": ((tier.get(f"cv_without_{sid}") if tier.get(f"use_{sid}")
+                                         else tier.get("cv")) or {}).get("exact"),
+                            "with": (tier.get(f"cv_with_{sid}") or {}).get("exact"),
+                            "gain": tier.get(f"{sid}_gain"), "in_use": bool(tier.get(f"use_{sid}"))},
+            })
+        return out
 
     # --- the sample ------------------------------------------------------------------------
 

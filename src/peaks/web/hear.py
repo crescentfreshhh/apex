@@ -56,7 +56,11 @@ class HearMixin:
     def _hear_keys(self) -> dict[str, str]:
         """scene_id → cache key, for scenes in the visual index (the key is the file's)."""
         idx = self.index(self._model_name())
-        return {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        hit = self.__dict__.get("_hear_keys_cache")
+        if hit is None or hit[0] is not idx:
+            hit = (idx, {str(m.get("scene_id")): k for k, m in idx.key_meta.items()})
+            self._hear_keys_cache = hit
+        return hit[1]
 
     def heard(self, sid: str) -> bool:
         k = self._hear_keys().get(str(sid))
@@ -110,6 +114,7 @@ class HearMixin:
                        meta={"scene_id": sid, "no_audio": True})
             cache.save(key, CLAP_NS, np.zeros(0, np.float32), np.zeros((0, embedder.dim), np.float32),
                        meta={"scene_id": sid, "no_audio": True})
+            self.__dict__.get("_sound_vec_memo", {}).pop(str(sid), None)
             return {"no_audio": True}
         et, ef, ct, cv, pend, pend_t = [], [], [], [], [], []
 
@@ -136,6 +141,7 @@ class HearMixin:
         vecs = np.concatenate(cv) if cv else np.zeros((0, embedder.dim), np.float32)
         cache.save(key, CLAP_NS, np.asarray(ct, np.float32), vecs, meta={"scene_id": sid})
         self.__dict__.pop("_sound_bank_cache", None)
+        self.__dict__.get("_sound_vec_memo", {}).pop(str(sid), None)
         return {"blocks": len(ct)}
 
     def run_hear(self, job=None, limit: int | None = None) -> dict:
@@ -248,18 +254,25 @@ class HearMixin:
         """[unit mean of all CLAP blocks, unit mean of the loudest 10 %] — the tier model's sound group."""
         from ..tier_model import visual_features
 
+        memo = self.__dict__.setdefault("_sound_vec_memo", {})
+        if str(sid) in memo:
+            return memo[str(sid)]
         s = self._sound_load(sid)
-        if s is None or not len(s[3]):
-            return None
-        et, ef, ct, cv = s
-        loud = np.interp(ct, et, ef[:, ENV_FEATURES.index("loudness")]) if len(et) else None
-        return visual_features(cv, loud)
+        out = None
+        if s is not None and len(s[3]):
+            et, ef, ct, cv = s
+            loud = np.interp(ct, et, ef[:, ENV_FEATURES.index("loudness")]) if len(et) else None
+            out = visual_features(cv, loud)
+        memo[str(sid)] = out
+        return out
 
     # --- search by sound -----------------------------------------------------------------------
 
-    def sound_search(self, q: str, top_k: int = 60) -> list[dict]:
+    def sound_search(self, q: str, top_k: int = 60) -> list:
         """Moments whose sound matches words ("moaning", "music", "laughing"):
         CLAP text vs every heard block, best block per scene."""
+        from ..search import Hit
+
         emb = self.__dict__.get("_clap_text")
         if emb is None:
             emb = self._hear_embedder()
@@ -277,6 +290,6 @@ class HearMixin:
                 continue
             s = (cv / np.maximum(np.linalg.norm(cv, axis=1, keepdims=True), 1e-9)) @ w
             j = int(np.argmax(s))
-            out.append({"scene_id": sid, "key": k, "time": float(max(0.0, ct[j] - 5.0)), "score": float(s[j])})
-        out.sort(key=lambda x: -x["score"])
+            out.append(Hit(scene_id=sid, key=k, time=float(max(0.0, ct[j] - 5.0)), score=float(s[j])))
+        out.sort(key=lambda h: -h.score)
         return out[:top_k]

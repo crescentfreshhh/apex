@@ -42,6 +42,7 @@ from .concepts import ConceptsMixin
 from .zoom import ZoomMixin
 from .lab import LabMixin
 from .settle import FAST_RETRAIN, SettleMixin
+from .hear import HearMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -56,7 +57,8 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
-              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin):
+              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
+              HearMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5742,6 +5744,24 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             out[sid] = (vis[sid], quality_features(r["quality"]))
         return out
 
+    def _sense_rows(self, sids: list) -> dict[str, np.ndarray]:
+        """Extra senses for the tier model, one row per scene (None ids: deleted
+        rejects — missing): {"sound": rows, ...}. A sense nobody has yet is left out."""
+        from ..tier_model import sense_row
+
+        out = {}
+        for name, fn in (("sound", self.sound_scene_vector),):
+            vecs = []
+            for sid in sids:
+                try:
+                    vecs.append(fn(sid) if sid is not None else None)
+                except Exception:  # noqa: BLE001 — a sense is extra, never in the way
+                    vecs.append(None)
+            dim = next((len(v) for v in vecs if v is not None), None)
+            if dim:
+                out[name] = np.stack([sense_row(v, dim) for v in vecs])
+        return out
+
     def train_tier_model(self) -> dict:
         """Fit the triage model on every graded, embedded scene. Returns the
         report (per-class counts, CV accuracy with and without quality
@@ -5804,12 +5824,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     fb_p.append(picture_features(None))
                     fb_y.append("reject")
             ids = [r["scene_id"] for r in train] + [None] * remembered
+            senses = self._sense_rows(ids)
             # one heavy fit at a time, process-wide (taste training shares it)
             with self._train_lock, forensics.busy("tier-train"):
                 yk, wk, pk = [y[i] for i in keep], [who[i] for i in keep], np.stack([pic[i] for i in keep])
-                model, rep = fit_best(Xv, Xq, yk, who=wk, pic=pk)
+                sk = {k: v[keep] for k, v in senses.items()}
+                model, rep = fit_best(Xv, Xq, yk, who=wk, pic=pk, senses=sk)
                 # honest verdicts: each graded scene judged by the fold model that never saw its grade
-                model.folds, oof_p, fold_of = fit_folds(model, Xv, Xq, yk, who=wk, pic=pk)
+                model.folds, oof_p, fold_of = fit_folds(model, Xv, Xq, yk, who=wk, pic=pk, senses=sk)
                 model.oof = {}
                 for i, summ in zip(range(len(keep)), model.summarize(oof_p)):
                     sid = ids[keep[i]]
@@ -5879,7 +5901,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             who = [who_of(r) for r in rs]
             own = [train_class(r["tier"]) for r in rs]
             pic = np.stack([picture_features(pics.get(s)) for s in sids])
-            for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own, pic=pic))):
+            sen = self._sense_rows(sids) if getattr(model, "use_senses", ()) else None
+            for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own, pic=pic,
+                                                                           senses=sen))):
                 if source:
                     summ["from"] = source
                 preds[s] = summ

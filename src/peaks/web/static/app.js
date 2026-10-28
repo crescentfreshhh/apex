@@ -3247,6 +3247,10 @@ async function openMoments() {
 }
 
 // Moments tab: the moment zoom — frame picks vs shape picks, judged on scenes held out
+const ZOOM_SET_NAMES = {
+  shape: "Shape picks (how the moment unfolds)", "shape + sound": "Shape + sound (how it sounds too)",
+  "shape + motion": "Shape + motion (how it moves)", all: "Shape + sound + motion",
+};
 function zoomCard(z) {
   if (!z) return "";
   const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
@@ -3255,7 +3259,8 @@ function zoomCard(z) {
     : `${(z.zoomed || 0).toLocaleString()} of ${(z.embedded || 0).toLocaleString()} scenes zoomed`;
   const cmp = md.trained ? `<table class="htab cmp-t"><thead><tr><th></th><th>First pick</th><th>Top 3</th></tr></thead><tbody>
       <tr class="${md.use_shape ? "" : "on"}"><td>Frame picks <span class="faint small">(single frames)</span></td><td>${pc(md.frame.top1)}</td><td>${pc(md.frame.top3)}</td></tr>
-      <tr class="${md.use_shape ? "on" : ""}"><td>Shape picks <span class="faint small">(how the moment unfolds)</span></td><td>${pc(md.shape.top1)}</td><td>${pc(md.shape.top3)}</td></tr></tbody></table>
+      ${Object.entries(md.sets || { shape: md.shape }).map(([k, v]) => `<tr class="${md.use_shape && (md.uses || "shape") === k ? "on" : ""}">
+        <td>${esc(ZOOM_SET_NAMES[k] || k)}</td><td>${pc(v.top1)}</td><td>${pc(v.top3)}</td></tr>`).join("")}</tbody></table>
       <p class="small">${esc(md.verdict || "")} <span class="faint">· compared on ${md.compared} scene(s) it didn't learn from</span></p>`
     : `<p class="faint small">${esc(md.reason || "Not trained yet — it trains after each zoom run.")}</p>`;
   const words = (md.weights || []).length ? `<p class="small">What your moments have: ${md.weights.map((w) =>
@@ -3292,9 +3297,43 @@ async function openLab() {
       ${d.sample_cap} graded scenes plus every scene with saved moments, at your sampling. Both models are judged on exactly the same
       scenes: grading (each scene graded by a model that never saw it) and finding your saved moments. A switch is only offered on a
       clear win. Now using <b>${esc(d.active_label)}</b>.</p>
-    <div class="lab-grid">${d.candidates.map((c) => labCard(c, run)).join("")}</div>`;
+    <div class="lab-grid">${d.candidates.map((c) => labCard(c, run)).join("")}</div>
+    <h3 class="lab-h">Senses</h3>
+    <p class="faint small">Extra senses Peaks can learn from. Each runs in the background when nothing else does, and is used only where
+      it makes Peaks better on your library — finding your moments, or grading — tested on scenes it didn't learn from.</p>
+    <div class="lab-grid">${(d.senses || []).map(senseCard).join("")}</div>`;
   if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden) openLab(); }, 4000);
 }
+const SENSE_API = { sound: "/api/hear", motion: "/api/motion" };
+const SENSE_DESC = {
+  sound: "Listens to each scene: loudness, how much is happening, rhythm, and what it sounds like (CLAP — open weights, no token). Also lets you search by sound: type <code>sound: …</code> in search.",
+  motion: "Watches how your candidate moments move, 4-second clips at a time (V-JEPA 2.1 — open weights, no token).",
+};
+function senseCard(x) {
+  const pc = (v) => (v == null ? "—" : Math.round(100 * v) + "%");
+  const st = x.status || {}, m = x.moments || {}, g = x.grading || {};
+  const cov = st.heard ?? st.seen;
+  const verdict = (inUse, w, wo) => inUse ? '<b class="lab-win">in use</b>' : (w == null ? '<span class="faint">not tested yet</span>' : '<span class="faint">not better yet</span>');
+  return `<div class="card pad lab-card"><h3>${esc(x.label)} ${st.settings && !st.settings.on ? '<span class="q">off</span>' : ""}</h3>
+    <p class="faint small">${SENSE_DESC[x.id] || ""}</p>
+    <p class="small">${cov != null ? `${cov.toLocaleString()} of ${(st.embedded ?? 0).toLocaleString()} scenes ${x.id === "sound" ? "heard" : "seen"}` : "—"}</p>
+    <table class="htab cmp-t"><thead><tr><th></th><th>without</th><th>with</th><th></th></tr></thead><tbody>
+      <tr><td>Finds your moments <span class="faint small">(top 3)</span></td><td>${pc((m.without || {}).top3)}</td><td>${pc((m.with || {}).top3)}</td><td>${verdict(m.in_use, m.with)}</td></tr>
+      <tr><td>Grades right</td><td>${pc(g.without)}</td><td>${pc(g.with)}</td><td>${verdict(g.in_use, g.with)}</td></tr></tbody></table>
+    ${st.error ? `<p class="small lab-err">Last run failed: ${esc(st.error)}</p>` : ""}
+    <div class="row"><button class="btn sm" data-sense-run="${x.id}">Run now</button>
+      <button class="btn sm ghost" data-sense-on="${x.id}" data-on="${st.settings && st.settings.on ? 0 : 1}">${st.settings && st.settings.on ? "Turn off" : "Turn on"}</button></div></div>`;
+}
+document.addEventListener("click", async (e) => {
+  const r = e.target.closest("[data-sense-run]"), o = e.target.closest("[data-sense-on]");
+  if (!r && !o) return;
+  const id = (r || o).dataset.senseRun || (r || o).dataset.senseOn, base = SENSE_API[id];
+  try {
+    if (r) { r.disabled = true; await api(base, { method: "POST" }); toast("Running in the background — see Activity"); }
+    else await api(base + "/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: o.dataset.on === "1" }) });
+  } catch (err) { toast(err.message, true); }
+  openLab();
+});
 function labCard(c, run) {
   const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
   const t = c.trial, mine = run && run.status === "running" && (run.progress || {}).cand === c.id;

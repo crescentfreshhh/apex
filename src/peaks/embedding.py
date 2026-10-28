@@ -251,6 +251,50 @@ class DinoV3Embedder(DinoV2Embedder):
         return feats.cpu().numpy().astype(np.float32)
 
 
+CLAP_REPO = "laion/larger_clap_general"
+
+
+class ClapAudioEmbedder:
+    """CLAP: sound and words in one space (Hugging Face transformers, open
+    weights). `embed_audio` takes mono float32 blocks at `sr`; `embed_text`
+    takes prompts like "moaning" or "music". Both return unit vectors."""
+
+    name = "clap-audio"
+
+    def __init__(self, repo: str = CLAP_REPO, device: str | None = None):
+        import torch  # lazy
+        from transformers import ClapModel, ClapProcessor
+
+        self._torch = torch
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.processor = ClapProcessor.from_pretrained(repo)
+        self.model = ClapModel.from_pretrained(repo).eval().to(self.device)
+        self.sr = int(self.processor.feature_extractor.sampling_rate)
+        self.dim = int(self.model.config.projection_dim)
+
+    def _norm(self, feats) -> np.ndarray:
+        feats = self._torch.nn.functional.normalize(feats.float(), dim=1)
+        return feats.cpu().numpy().astype(np.float32)
+
+    def embed_audio(self, blocks: Sequence[np.ndarray]) -> np.ndarray:
+        if not blocks:
+            return np.zeros((0, self.dim), np.float32)
+        arrs = [np.asarray(b, np.float32) for b in blocks]
+        try:                                   # newer transformers: audio=, older: audios=
+            inputs = self.processor(audio=arrs, sampling_rate=self.sr, return_tensors="pt")
+        except TypeError:
+            inputs = self.processor(audios=arrs, sampling_rate=self.sr, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
+        with self._torch.no_grad():
+            return self._norm(self.model.get_audio_features(**inputs))
+
+    def embed_text(self, prompts: Sequence[str]) -> np.ndarray:
+        inputs = self.processor(text=list(prompts), return_tensors="pt", padding=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
+        with self._torch.no_grad():
+            return self._norm(self.model.get_text_features(**inputs))
+
+
 def make_dino(model_name: str = "dinov2_vits14", device: str | None = None) -> Embedder:
     """The structure channel for a backbone name — DINOv2 via torch.hub, DINOv3 via transformers."""
     if model_name.startswith("dinov3_"):

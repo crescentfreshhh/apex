@@ -284,8 +284,10 @@ class TierModel:
     `use_visual=False` gives the fallback for scenes not embedded yet."""
 
     def __init__(self, use_quality: bool = True, pca_dim: int = 48, C: float = 0.5,
-                 use_who: bool = False, use_visual: bool = True, use_picture: bool = False):
+                 use_who: bool = False, use_visual: bool = True, use_picture: bool = False,
+                 use_senses: tuple[str, ...] = ()):
         self.use_quality = use_quality
+        self.use_senses = tuple(use_senses)     # extra senses (sound, motion), each its own group
         self.use_who = use_who
         self.use_picture = use_picture
         self.use_visual = use_visual
@@ -294,8 +296,9 @@ class TierModel:
         self.classes_: list[str] = []
         self.who_enc: WhoEncoder | None = None
         self._pca = self._scaler = self._clf = None
+        self._sense_pca: dict = {}
 
-    def _design(self, Xv, Xq, Xw, fit: bool, Xp=None) -> np.ndarray:
+    def _design(self, Xv, Xq, Xw, fit: bool, Xp=None, senses: dict | None = None) -> np.ndarray:
         from sklearn.decomposition import PCA
         from sklearn.preprocessing import StandardScaler
 
@@ -311,16 +314,39 @@ class TierModel:
             parts.append(Xw)
         if getattr(self, "use_picture", False):       # (older pickles: never)
             parts.append(Xp)
+        for name in getattr(self, "use_senses", ()):
+            parts.append(self._sense_block(name, (senses or {}).get(name), len(Xq), fit))
         X = np.hstack(parts)
         if fit:
             self._scaler = StandardScaler().fit(X)
         return self._scaler.transform(X)
 
+    def _sense_block(self, name: str, rows, n: int, fit: bool) -> np.ndarray:
+        """A sense's rows (sense_row: features + a trailing 'missing' flag) →
+        its PCA components (zero where missing) + the flag."""
+        from sklearn.decomposition import PCA
+
+        if rows is None:
+            if fit:
+                raise ValueError(f"use_senses needs each scene's {name} rows")
+            k = int(self._sense_pca[name].n_components_)
+            return np.hstack([np.zeros((n, k), np.float32), np.ones((n, 1), np.float32)])
+        R = np.asarray(rows, np.float32)
+        miss = R[:, -1:] > 0.5
+        F = R[:, :-1]
+        if fit:
+            have = F[~miss[:, 0]]
+            k = max(1, min(SENSE_DIM, len(have) - 1, F.shape[1]))
+            self._sense_pca[name] = PCA(n_components=k, random_state=0).fit(have if len(have) > k else F)
+        Z = self._sense_pca[name].transform(F) * (~miss)
+        return np.hstack([Z, miss.astype(np.float32)])
+
     @staticmethod
     def _arr(X):
         return None if X is None else np.asarray(X, np.float32)
 
-    def fit(self, Xv, Xq, y: list[str], who: list | None = None, pic=None) -> "TierModel":
+    def fit(self, Xv, Xq, y: list[str], who: list | None = None, pic=None,
+            senses: dict | None = None) -> "TierModel":
         from sklearn.linear_model import LogisticRegression
 
         Xw = None
@@ -331,14 +357,14 @@ class TierModel:
             Xw = _oof_who(who, list(y))
         if self.use_picture and pic is None:
             raise ValueError("use_picture needs each scene's picture features")
-        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=True, Xp=self._arr(pic))
+        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=True, Xp=self._arr(pic), senses=senses)
         self._clf = LogisticRegression(C=self.C, class_weight="balanced", max_iter=3000)
         self._clf.fit(X, np.asarray(y))
         self.classes_ = [str(c) for c in self._clf.classes_]
         return self
 
     def design_row(self, Xv, Xq, who: list | None = None, own: list | None = None,
-                   pic=None) -> np.ndarray:
+                   pic=None, senses: dict | None = None) -> np.ndarray:
         """The standardized design matrix predict_proba feeds the classifier."""
         Xw = None
         if getattr(self, "use_who", False):
@@ -347,7 +373,7 @@ class TierModel:
         Xp = None
         if getattr(self, "use_picture", False):
             Xp = self._arr(pic) if pic is not None else np.stack([picture_features(None)] * len(Xq))
-        return self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False, Xp=Xp)
+        return self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False, Xp=Xp, senses=senses)
 
     def groups(self) -> list[tuple[str, int, int]]:
         """(group, start, end) column spans of the design matrix: look · file · who · picture."""
@@ -364,6 +390,11 @@ class TierModel:
             at += len(WHO_FEATURES)
         if getattr(self, "use_picture", False):
             out.append(("picture", at, at + len(PIC_FEATURES)))
+            at += len(PIC_FEATURES)
+        for name in getattr(self, "use_senses", ()):
+            k = int(self._sense_pca[name].n_components_) + 1
+            out.append((name, at, at + k))
+            at += k
         return out
 
     def logit_gap(self, a: str, b: str) -> tuple[np.ndarray, float]:
@@ -376,14 +407,15 @@ class TierModel:
         i, j = cl.index(a), cl.index(b)
         return coef[i] - coef[j], float(icpt[i] - icpt[j])
 
-    def explain(self, a: str, b: str, xv, xq, who=None, own=None, pic=None) -> dict:
+    def explain(self, a: str, b: str, xv, xq, who=None, own=None, pic=None, senses: dict | None = None) -> dict:
         """Why this scene leans `a` over `b`: the log-odds gap split exactly into
         groups (look · file · who · picture) plus the baseline, and inside the named
         groups each feature's push. Contributions sum to `gap`."""
         x = self.design_row(None if xv is None else np.asarray([xv]), np.asarray([xq]),
                             who=[who] if self.use_who else None,
                             own=[own] if own is not None else None,
-                            pic=None if pic is None else np.asarray([pic]))[0]
+                            pic=None if pic is None else np.asarray([pic]),
+                            senses={k: np.asarray([v]) for k, v in (senses or {}).items() if v is not None})[0]
         w, c = self.logit_gap(a, b)
         push = w * x
         names = {"file": QUALITY_FEATURES, "who": WHO_FEATURES, "picture": PIC_FEATURES}
@@ -413,7 +445,7 @@ class TierModel:
         return z @ w[:k]
 
     def predict_proba(self, Xv, Xq, who: list | None = None, own: list | None = None,
-                      pic=None) -> np.ndarray:
+                      pic=None, senses: dict | None = None) -> np.ndarray:
         """`own[i]`: scene i's current grade when it's one the records were
         built from (so its own grade is left out of its encoding), else None.
         `pic`: picture features (rows of picture_features); missing → all unknown."""
@@ -424,7 +456,7 @@ class TierModel:
         Xp = None
         if getattr(self, "use_picture", False):
             Xp = self._arr(pic) if pic is not None else np.stack([picture_features(None)] * len(Xq))
-        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False, Xp=Xp)
+        X = self._design(self._arr(Xv), self._arr(Xq), Xw, fit=False, Xp=Xp, senses=senses)
         return self._clf.predict_proba(X)
 
     def summarize(self, proba: np.ndarray) -> list[dict]:
@@ -472,7 +504,8 @@ def usable_classes(y: list[str], min_per_class: int = MIN_PER_CLASS) -> tuple[li
 def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bool,
                    folds: int = 5, pca_dim: int = 48, use_who: bool = False,
                    who: list | None = None, use_visual: bool = True,
-                   use_picture: bool = False, pic: np.ndarray | None = None) -> dict:
+                   use_picture: bool = False, pic: np.ndarray | None = None,
+                   use_senses: tuple[str, ...] = (), senses: dict | None = None) -> dict:
     """Stratified k-fold: exact accuracy and 'within one tier' accuracy (the
     predicted tier is at most one step from the real one on the ordinal).
     Performer/studio records are rebuilt inside each fold from its training
@@ -485,13 +518,13 @@ def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bo
     exact = near = 0
     for tr, te in StratifiedKFold(n_splits=k, shuffle=True, random_state=0).split(Xq, y_arr):
         m = TierModel(use_quality=use_quality, pca_dim=pca_dim, use_who=use_who,
-                      use_visual=use_visual, use_picture=use_picture)
+                      use_visual=use_visual, use_picture=use_picture, use_senses=use_senses)
         m.fit(None if Xv is None else Xv[tr], Xq[tr], list(y_arr[tr]),
               who=[who[i] for i in tr] if use_who else None,
-              pic=pic[tr] if use_picture else None)
+              pic=pic[tr] if use_picture else None, senses=_take(senses, use_senses, tr))
         proba = m.predict_proba(None if Xv is None else Xv[te], Xq[te],
                                 who=[who[i] for i in te] if use_who else None,
-                                pic=pic[te] if use_picture else None)
+                                pic=pic[te] if use_picture else None, senses=_take(senses, use_senses, te))
         pred = [m.classes_[int(i)] for i in np.argmax(proba, axis=1)]
         for p, t in zip(pred, y_arr[te]):
             exact += p == t
@@ -546,7 +579,8 @@ PCA_GRID: tuple[int, ...] = (8, 16, 32, 48)
 
 
 def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
-             who: list | None = None, pic: np.ndarray | None = None) -> tuple[TierModel, dict]:
+             who: list | None = None, pic: np.ndarray | None = None,
+             senses: dict | None = None) -> tuple[TierModel, dict]:
     """Pick the visual PCA size by cross-validation, then fit on everything.
 
     The right size depends on how many scenes are graded and how much the
@@ -595,9 +629,49 @@ def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
         if use_pic:
             rep["cv_without_picture"] = cur
             rep["cv"] = with_pic
-    model = TierModel(use_quality=True, pca_dim=best_k, use_who=use_who, use_picture=use_pic)
-    model.fit(Xv, Xq, y, who=who if use_who else None, pic=pic if use_pic else None)
+    # each extra sense (sound, motion) gets the same test, on top of what's kept so far
+    use_senses: list[str] = []
+    for name, rows in (senses or {}).items():
+        if rows is None or not _has_sense(rows):
+            continue
+        cur = rep["cv"]
+        trial = (*use_senses, name)
+        with_s = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=best_k, use_who=use_who,
+                                who=who if use_who else None, use_picture=use_pic, pic=pic if use_pic else None,
+                                use_senses=trial, senses=senses)
+        gain = round(with_s["exact"] - cur["exact"], 3)
+        keep = gain > WHO_MARGIN
+        rep.update({f"cv_with_{name}": with_s, f"{name}_gain": gain, f"use_{name}": keep})
+        if keep:
+            use_senses.append(name)
+            rep[f"cv_without_{name}"] = cur
+            rep["cv"] = with_s
+    model = TierModel(use_quality=True, pca_dim=best_k, use_who=use_who, use_picture=use_pic,
+                      use_senses=tuple(use_senses))
+    model.fit(Xv, Xq, y, who=who if use_who else None, pic=pic if use_pic else None, senses=senses)
     return model, rep
+
+
+SENSE_DIM = 16            # PCA components per extra sense
+
+
+def sense_row(vec: np.ndarray | None, dim: int) -> np.ndarray:
+    """A scene's row for an extra sense: its vector + 0, or zeros + 1 (missing)."""
+    if vec is None:
+        return np.r_[np.zeros(dim, np.float32), np.float32(1.0)]
+    return np.r_[np.asarray(vec, np.float32), np.float32(0.0)]
+
+
+def _has_sense(rows, min_share: float = 0.2, min_n: int = 20) -> bool:
+    R = np.asarray(rows)
+    have = int((R[:, -1] == 0).sum()) if R.ndim == 2 and len(R) else 0
+    return have >= min_n and have / len(R) >= min_share
+
+
+def _take(senses: dict | None, use: tuple, idx) -> dict | None:
+    if not use or not senses:
+        return None
+    return {k: np.asarray(senses[k])[idx] for k in use if senses.get(k) is not None}
 
 
 def _has_pictures(pic: np.ndarray, min_share: float = 0.2) -> bool:
@@ -643,7 +717,7 @@ def fit_fallback(Xq: np.ndarray, y: list[str], who: list,
 
 
 def fit_folds(model: "TierModel", Xv, Xq, y: list[str], who: list | None = None,
-              pic=None, folds: int = 5) -> tuple[list["TierModel"], np.ndarray, np.ndarray]:
+              pic=None, folds: int = 5, senses: dict | None = None) -> tuple[list["TierModel"], np.ndarray, np.ndarray]:
     """Honest verdicts on the training scenes: `folds` models with `model`'s
     settings, each fitted without one fold. Returns (fold models, out-of-fold
     probabilities aligned to model.classes_, each row's fold). A scene's honest
@@ -658,14 +732,16 @@ def fit_folds(model: "TierModel", Xv, Xq, y: list[str], who: list | None = None,
     out = []
     split = StratifiedKFold(n_splits=k, shuffle=True, random_state=1).split(Xq, y_arr)
     for f, (tr, te) in enumerate(split):
+        use_s = tuple(getattr(model, "use_senses", ()))
         m = TierModel(use_quality=model.use_quality, pca_dim=model.pca_dim, C=model.C,
-                      use_who=model.use_who, use_visual=model.use_visual, use_picture=model.use_picture)
+                      use_who=model.use_who, use_visual=model.use_visual, use_picture=model.use_picture,
+                      use_senses=use_s)
         m.fit(None if Xv is None else Xv[tr], Xq[tr], list(y_arr[tr]),
               who=[who[i] for i in tr] if model.use_who else None,
-              pic=pic[tr] if model.use_picture else None)
+              pic=pic[tr] if model.use_picture else None, senses=_take(senses, use_s, tr))
         p = m.predict_proba(None if Xv is None else Xv[te], Xq[te],
                             who=[who[i] for i in te] if model.use_who else None,
-                            pic=pic[te] if model.use_picture else None)
+                            pic=pic[te] if model.use_picture else None, senses=_take(senses, use_s, te))
         for j, c in enumerate(m.classes_):
             proba[te, model.classes_.index(c)] = p[:, j]
         fold_of[te] = f

@@ -25,6 +25,9 @@ from pathlib import Path
 import numpy as np
 
 from ..moment_shape import FEATURES, WORDS, shape_features, span
+from .hear import SOUND_WORDS
+
+SENSE_WORDS = {**SOUND_WORDS}
 
 ZOOM_HALF = 20.0          # seconds either side of a candidate
 ZOOM_STEP = 2.0           # one frame every … seconds inside a window
@@ -308,17 +311,36 @@ class ZoomMixin:
             f = shape_features(times[m], s[m], vecs[m], level)
             for slug, p in concepts:
                 f[f"concept:{slug}"] = float(p[m].max())
-            out.append({"c": c["c"], "kind": c["kind"], "taste": c.get("taste"),
-                        "span": span(times[m], s[m]), "feats": f})
+            sp = span(times[m], s[m])
+            f.update(self._window_senses(sid, c["c"], sp[1]))
+            out.append({"c": c["c"], "kind": c["kind"], "taste": c.get("taste"), "span": sp, "feats": f})
         return out
 
-    def _zoom_feature_names(self) -> list[str]:
-        names = list(FEATURES)
+    def _window_senses(self, sid: str, centre: float, peak: float) -> dict:
+        """Sound (and later motion) features of one window; {} when not heard/seen."""
+        out = {}
+        for fn in (self.sound_window_features,):
+            try:
+                f = fn(sid, centre, peak, ZOOM_HALF)
+            except Exception:  # noqa: BLE001 — a sense is extra, never in the way
+                f = None
+            if f:
+                out.update(f)
+        return out
+
+    def _zoom_feature_groups(self) -> dict[str, list[str]]:
+        """Feature columns by group: the shape (+ your concepts), then each sense."""
+        from .hear import SOUND_FEATURES
+
+        shape = list(FEATURES)
         try:
-            names += [f"concept:{slug}" for slug, _ in self.trained_concepts()]
+            shape += [f"concept:{slug}" for slug, _ in self.trained_concepts()]
         except Exception:  # noqa: BLE001
             pass
-        return names
+        return {"shape": shape, "sound": list(SOUND_FEATURES)}
+
+    def _zoom_feature_names(self) -> list[str]:
+        return [n for cols in self._zoom_feature_groups().values() for n in cols]
 
     def _zoom_dataset(self):
         """Every zoomed window with a label where there is one: (rows, X, y, weight, scene)."""
@@ -353,7 +375,6 @@ class ZoomMixin:
     def train_moment_model(self) -> dict:
         """Fit the moment model and score it honestly against frame picks."""
         from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import GroupKFold
         from sklearn.preprocessing import StandardScaler
 
         rows, X, y, wt, grp, names = self._zoom_dataset()
@@ -367,8 +388,58 @@ class ZoomMixin:
         saved = self._zoom_saved()
         g = np.asarray(grp)
         scenes = sorted(set(g[lab]))
+        groups = self._zoom_feature_groups()
+        col = {n: i for i, n in enumerate(names)}
+        # which senses have any data at all in these windows
+        present = {k: v for k, v in groups.items()
+                   if k == "shape" or (X[:, [col[n] for n in v]] != 0).any()}
+        sets = {"shape": present["shape"]}
+        for k in present:
+            if k != "shape":
+                sets[f"shape + {k}"] = present["shape"] + present[k]
+        if len(present) > 2:
+            sets["all"] = [n for k in present for n in present[k]]
+        results, probs = {}, {}
+        frame = None
+        for label, cols in sets.items():
+            idx = [col[n] for n in cols]
+            prob = self._mm_heldout(X[:, idx], y, wt, g, lab, scenes)
+            n, f1, f3, s1, s3 = self._mm_hits(rows, prob, scenes, saved)
+            frame = frame or (n, f1, f3)
+            results[label] = {"top1": s1, "top3": s3}
+            probs[label] = prob
+        n, f1, f3 = frame
+        # the simplest set that isn't clearly beaten: a richer one must win by the margin
+        chosen = "shape"
+        for label in sets:
+            if label != chosen and results[label]["top3"] is not None and results[chosen]["top3"] is not None \
+                    and results[label]["top3"] >= results[chosen]["top3"] + SWITCH_MARGIN:
+                chosen = label
+        names = sets[chosen]
+        Xc = X[:, [col[c] for c in names]]
+        sc = StandardScaler().fit(Xc[lab])
+        m = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000).fit(sc.transform(Xc[lab]), y[lab],
+                                                                                     sample_weight=wt[lab])
+        best = results[chosen]
+        use = bool(n >= SWITCH_MIN_SCENES and best["top3"] is not None and f3 is not None
+                   and best["top3"] >= f3 + SWITCH_MARGIN)
+        rep.update(trained=True, compared=n, frame={"top1": f1, "top3": f3},
+                   shape=results["shape"], sets=results, uses=chosen, use_shape=use,
+                   verdict=((f"shape picks win — Peaks now ranks moments by {chosen}" if chosen != "shape"
+                             else "shape picks win — Peaks now ranks moments by shape") if use else
+                            f"not better yet — Peaks keeps frame picks{'' if n >= SWITCH_MIN_SCENES else f' (compared on {n} of the {SWITCH_MIN_SCENES} scenes it needs)'}"),
+                   weights=self._zoom_words(names, m.coef_[0]))
+        return self._zoom_store_model((sc, m, names), rep)
+
+    @staticmethod
+    def _mm_heldout(X, y, wt, g, lab, scenes) -> np.ndarray:
+        """Each window's probability from a model that never saw its scene."""
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import GroupKFold
+        from sklearn.preprocessing import StandardScaler
+
         k = max(2, min(5, len(scenes)))
-        prob = np.full(len(rows), np.nan)
+        prob = np.full(len(y), np.nan)
         for tr_s, te_s in GroupKFold(n_splits=k).split(scenes, groups=scenes):
             tr = lab & np.isin(g, [scenes[i] for i in tr_s])
             te = np.isin(g, [scenes[i] for i in te_s])
@@ -378,8 +449,12 @@ class ZoomMixin:
             m = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000).fit(sc.transform(X[tr]), y[tr],
                                                                                          sample_weight=wt[tr])
             prob[te] = m.predict_proba(sc.transform(X[te]))[:, 1]
-        # held-out scenes with saves: today's frame picks vs the shape model's, same hit rule
-        shape1 = shape3 = frame1 = frame3 = n = 0
+        return prob
+
+    @staticmethod
+    def _mm_hits(rows, prob, scenes, saved):
+        """Held-out scenes with saves: (n, frame top1, frame top3, model top1, model top3)."""
+        s1 = s3 = f1 = f3 = n = 0
         for sid in scenes:
             sv = saved.get(sid, [])
             ws = [(i, r) for i, r in enumerate(rows) if r["sid"] == sid and r["kind"] == "pick" and not np.isnan(prob[i])]
@@ -387,25 +462,17 @@ class ZoomMixin:
                 continue
             n += 1
             by_taste = [r["c"] for _, r in sorted(ws, key=lambda x: -(x[1]["taste"] or 0))]
-            by_shape = [r["span"][1] for i, r in sorted(ws, key=lambda x: -prob[x[0]])]
+            # the same point for both rankings — the candidate itself — so only the order differs
+            by_shape = [r["c"] for i, r in sorted(ws, key=lambda x: -prob[x[0]])]
 
             def hit(picks, kk):
                 return any(abs(p - t) <= HIT for p in picks[:kk] for t in sv)
-            frame1 += hit(by_taste, 1)
-            frame3 += hit(by_taste, 3)
-            shape1 += hit(by_shape, 1)
-            shape3 += hit(by_shape, 3)
-        sc = StandardScaler().fit(X[lab])
-        m = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000).fit(sc.transform(X[lab]), y[lab],
-                                                                                     sample_weight=wt[lab])
+            f1 += hit(by_taste, 1)
+            f3 += hit(by_taste, 3)
+            s1 += hit(by_shape, 1)
+            s3 += hit(by_shape, 3)
         r3 = lambda a: round(a / n, 3) if n else None  # noqa: E731
-        use = bool(n >= SWITCH_MIN_SCENES and r3(shape3) >= r3(frame3) + SWITCH_MARGIN)
-        rep.update(trained=True, compared=n, frame={"top1": r3(frame1), "top3": r3(frame3)},
-                   shape={"top1": r3(shape1), "top3": r3(shape3)}, use_shape=use,
-                   verdict=("shape picks win — Peaks now ranks moments by shape" if use else
-                            f"not better yet — Peaks keeps frame picks{'' if n >= SWITCH_MIN_SCENES else f' (compared on {n} of the {SWITCH_MIN_SCENES} scenes it needs)'}"),
-                   weights=self._zoom_words(names, m.coef_[0]))
-        return self._zoom_store_model((sc, m, names), rep)
+        return n, r3(f1), r3(f3), r3(s1), r3(s3)
 
     @staticmethod
     def _zoom_words(names, coef) -> list[dict]:
@@ -413,7 +480,8 @@ class ZoomMixin:
         for n, w in sorted(zip(names, coef), key=lambda x: -abs(x[1])):
             if abs(w) < 0.25:
                 continue
-            word = WORDS.get(n) or (f"◇ {n.split(':', 1)[1].replace('-', ' ')}" if n.startswith("concept:") else n)
+            word = WORDS.get(n) or SENSE_WORDS.get(n) or (
+                f"◇ {n.split(':', 1)[1].replace('-', ' ')}" if n.startswith("concept:") else n)
             out.append({"feature": n, "words": word, "weight": round(float(w), 2)})
         return out[:6]
 

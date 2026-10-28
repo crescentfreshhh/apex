@@ -22,7 +22,8 @@ import numpy as np
 WORD_GATE = 0.3          # |effect size| a term needs between two tiers to be shown
 WORD_MIN_N = 5           # graded scenes per tier before words are tried at all
 CLUSTER_MIN_N = 5        # scenes sharing a trait before its disagreement rate counts
-GROUP_NAMES = {"look": "Look", "file": "File", "who": "Performers / studio", "picture": "Picture"}
+GROUP_NAMES = {"look": "Look", "file": "File", "who": "Performers / studio", "picture": "Picture",
+               "sound": "Sound", "motion": "Motion"}
 
 
 def _tier(c: str) -> str:
@@ -68,8 +69,10 @@ class ArbiterMixin:
         if b not in m.classes_ or a not in m.classes_ or a == b:
             return {"scene_id": sid, "ok": False, "reason": "only one tier to compare"}
         pics = self._picture_entries()
+        sen = self._sense_rows([sid]) if getattr(m, "use_senses", ()) else {}
         ex = m.explain(a, b, feats[0], feats[1], who=who_of(row),
-                       own=None if honest else mine, pic=picture_features(pics.get(sid)))
+                       own=None if honest else mine, pic=picture_features(pics.get(sid)),
+                       senses={k: v[0] for k, v in sen.items()})
         facts = self._arb_facts(row, a, b, rows, pics, names)
         for g in ex["groups"]:
             g["label"] = GROUP_NAMES.get(g["group"], g["group"])
@@ -367,8 +370,10 @@ class ArbiterMixin:
                 f = feats.get(r["scene_id"])
                 if f is None:
                     continue
+                sen = self._sense_rows([r["scene_id"]]) if getattr(m, "use_senses", ()) else {}
                 ex = m.explain(a, b, f[0], f[1], who=who_of(r), own=r["tier"],
-                               pic=picture_features(pics.get(r["scene_id"])))
+                               pic=picture_features(pics.get(r["scene_id"])),
+                               senses={k: v[0] for k, v in sen.items()})
                 for g in ex["groups"]:
                     tot[g["group"]] = tot.get(g["group"], 0.0) + abs(g["push"])
                 n += 1
