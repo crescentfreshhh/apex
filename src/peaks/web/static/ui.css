@@ -1151,3 +1151,13 @@ body.picks-off .pick-chip, body.picks-off .pick-mk { display: none !important; }
 .pick-span.done { background: rgba(74,200,136,.25); border-color: var(--ok); }
 body.picks-off .pick-span { display: none !important; }
 .htab tr.on td { color: var(--fg); font-weight: 600; } .q.neg { opacity: .7; }
+
+/* the Lab + the moment-shape card: plain comparison tables */
+.htab.cmp-t td:nth-child(3) { display: table-cell; }
+.htab.cmp-t td:not(:first-child), .htab.cmp-t th:not(:first-child) { text-align: right; white-space: nowrap; }
+.lab-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.lab-card .row { margin-top: 8px; gap: 8px; }
+.lab-win { color: var(--ok); font-weight: 600; }
+.lab-prog { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin: 4px 0 8px; }
+.lab-prog i { display: block; height: 100%; background: var(--gold); }
+.lab-err { color: var(--bad, #e0604d); }

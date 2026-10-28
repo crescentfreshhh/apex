@@ -1,7 +1,7 @@
 """Frame embedders.
 
 Two real channels (see docs/ARCHITECTURE.md):
-  - DINOv2  → visual *structure* (positions, angles, body type)
+  - DINOv2 / DINOv3 → visual *structure* (positions, angles, body type)
   - CLIP    → *nameable* attributes (outfits, heels, ...) and open-vocab text
 
 Plus a deterministic FakeEmbedder so the whole pipeline (sampler → cache →
@@ -94,7 +94,17 @@ DINO_BACKBONES = (
     "dinov2_vitb14",
     "dinov2_vitl14",
     "dinov2_vitg14",
+    "dinov3_vitl16",       # DINOv3 (2025): sharper features, same role — try it in the Lab first
+    "dinov3_vith16plus",
 )
+
+# DINOv3 weights live on Hugging Face behind Meta's licence: accept it on the
+# model page once, then give the container a read token (env HF_TOKEN).
+DINOV3_REPOS = {
+    "dinov3_vitl16": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+    "dinov3_vith16plus": "facebook/dinov3-vith16plus-pretrain-lvd1689m",
+}
+DINOV3_DIMS = {"dinov3_vitl16": 1024, "dinov3_vith16plus": 1280}
 
 
 def dino_cache_name(model_name: str) -> str:
@@ -103,7 +113,23 @@ def dino_cache_name(model_name: str) -> str:
     their different-dim vectors never collide (e.g. "dinov2-vitb14")."""
     if model_name in ("dinov2_vits14", "dinov2"):
         return "dinov2"
+    if model_name.startswith("dinov3_"):
+        return "dinov3-" + model_name.replace("dinov3_", "").replace("_", "-")
     return "dinov2-" + model_name.replace("dinov2_", "").replace("_", "-")
+
+
+def dino_label(model_name: str) -> str:
+    """"dinov3_vitl16" → "DINOv3 ViT-L/16" for people."""
+    fam, _, arch = model_name.partition("_")
+    arch = arch.replace("vit", "").replace("16plus", "+/16").upper()
+    for n in ("14", "16"):
+        if arch.endswith(n) and "/" not in arch:
+            arch = arch[: -len(n)] + "/" + n
+    return f"{fam.replace('dinov', 'DINOv')} ViT-{arch}"
+
+
+class DinoV3Unavailable(RuntimeError):
+    """The DINOv3 weights couldn't be fetched — usually the licence or token."""
 
 
 class DinoV2Embedder(Embedder):
@@ -165,6 +191,71 @@ class DinoV2Embedder(Embedder):
             feats = self.model(t)
             feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
+
+
+class DinoV3Embedder(DinoV2Embedder):
+    """DINOv3 ViT features (the pooled CLS token) through Hugging Face
+    transformers, fp16 on a GPU. Same preprocessing and API as DINOv2, so the
+    raw ffmpeg pipeline, the cache and everything downstream are unchanged."""
+
+    def __init__(self, model_name: str = "dinov3_vitl16", device: str | None = None):
+        import torch  # lazy
+
+        try:
+            from transformers import AutoModel
+        except ImportError as exc:  # pragma: no cover — the image ships it
+            raise DinoV3Unavailable("DINOv3 needs the transformers package (pip install 'transformers>=4.56')") from exc
+        if model_name not in DINOV3_REPOS:
+            raise ValueError(f"unknown DINOv3 backbone: {model_name}")
+        self._torch = torch
+        self.name = dino_cache_name(model_name)
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._half = self.device.startswith("cuda")
+        repo = DINOV3_REPOS[model_name]
+        try:
+            m = AutoModel.from_pretrained(repo, torch_dtype=torch.float16 if self._half else torch.float32)
+        except OSError as exc:
+            raise DinoV3Unavailable(
+                f"couldn't fetch {repo}: accept Meta's DINOv3 licence on huggingface.co/{repo} "
+                f"and set the container's HF_TOKEN to a read token ({exc.__class__.__name__})") from exc
+        self.model = m.eval().to(self.device)
+        self.dim = int(m.config.hidden_size)
+        self._build_transform()
+        self._mean_t = torch.tensor(self._MEAN, device=self.device).view(1, 3, 1, 1)
+        self._std_t = torch.tensor(self._STD, device=self.device).view(1, 3, 1, 1)
+
+    def _forward(self, x):
+        if self._half:
+            x = x.half()
+        out = self.model(pixel_values=x)
+        feats = out.pooler_output if getattr(out, "pooler_output", None) is not None else out.last_hidden_state[:, 0]
+        return self._torch.nn.functional.normalize(feats.float(), dim=1)
+
+    def embed_images(self, images: Sequence["Image"]) -> np.ndarray:
+        torch = self._torch
+        if not images:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        batch = torch.stack([self.transform(im.convert("RGB")) for im in images])
+        with torch.no_grad():
+            feats = self._forward(batch.to(self.device))
+        return feats.cpu().numpy().astype(np.float32)
+
+    def embed_array(self, frames: np.ndarray) -> np.ndarray:
+        torch = self._torch
+        if frames.shape[0] == 0:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        t = torch.from_numpy(np.ascontiguousarray(frames))
+        with torch.no_grad():
+            t = t.to(self.device, non_blocking=True).permute(0, 3, 1, 2).float().div_(255.0)
+            feats = self._forward((t - self._mean_t) / self._std_t)
+        return feats.cpu().numpy().astype(np.float32)
+
+
+def make_dino(model_name: str = "dinov2_vits14", device: str | None = None) -> Embedder:
+    """The structure channel for a backbone name — DINOv2 via torch.hub, DINOv3 via transformers."""
+    if model_name.startswith("dinov3_"):
+        return DinoV3Embedder(model_name, device=device)
+    return DinoV2Embedder(model_name, device=device)
 
 
 def clip_cache_name(model_name: str) -> str:
@@ -261,8 +352,8 @@ class ClipEmbedder(Embedder):
 
 _REGISTRY = {
     "fake": FakeEmbedder,
-    "dino": DinoV2Embedder,
-    "dinov2": DinoV2Embedder,
+    "dino": make_dino,
+    "dinov2": make_dino,
     "clip": ClipEmbedder,
 }
 

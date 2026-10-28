@@ -1,11 +1,12 @@
 """Moment zoom: picks become stretches of time, judged by how they unfold.
 
-The main index samples a frame every 8 s and Peaks picks single frames. Here
+The main index samples a frame every few seconds and Peaks picks single frames. Here
 each scene's candidate moments — its top taste picks, plus wherever you saved a
 moment — get a dense look: a frame every ZOOM_STEP s over ±ZOOM_HALF s, decoded
 in one ffmpeg run per window and embedded with the active model. They're kept in
 the embedding cache under their own namespace ("<model>@zoom"), so the main
-index is untouched.
+index is untouched. When the library itself is sampled at least that densely
+(say every 2 s) the windows are simply read out of the main index instead.
 
 Each window is described by its shape (peaks.moment_shape: build-up, hold,
 movement, and your concepts), and a small model learns which shapes you save
@@ -34,6 +35,18 @@ SWITCH_MIN_SCENES = 30
 SWITCH_MARGIN = 0.02
 
 
+class _Lazy:
+    """Builds the embedder / sampler on first use — a dense library never needs them."""
+
+    def __init__(self, make):
+        self._make, self._obj = make, None
+
+    def __getattr__(self, name):
+        if self._obj is None:
+            self._obj = self._make()
+        return getattr(self._obj, name)
+
+
 class ZoomMixin:
     # --- state ---------------------------------------------------------------------------
 
@@ -46,7 +59,17 @@ class ZoomMixin:
         return EmbeddingCache(self.cfg.embedding.cache_dir)
 
     def _zoom_path(self) -> Path:
-        return self._state_dir() / "zoom.json"
+        # one file per model: after a backbone switch (the Lab) zooming starts over
+        # on the new index, and switching back finds the old work where it was
+        model = self._model_name()
+        legacy = self._state_dir() / "zoom.json"
+        if legacy.exists() and not (self._state_dir() / f"zoom-{model}.json").exists():
+            try:
+                if json.loads(legacy.read_text()).get("ns", f"{model}@zoom") == f"{model}@zoom":
+                    return legacy
+            except (OSError, ValueError):
+                pass
+        return self._state_dir() / f"zoom-{model}.json"
 
     def _zoom_state(self) -> dict:
         try:
@@ -59,6 +82,7 @@ class ZoomMixin:
     def _zoom_save(self, d: dict) -> None:
         from .. import atomic
 
+        d["ns"] = self._zoom_ns()
         p = self._zoom_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         atomic.write_json(p, d, indent=1)
@@ -167,11 +191,19 @@ class ZoomMixin:
         if key is None:
             raise LookupError(f"scene {sid} isn't embedded")
         cands = self.zoom_candidates(sid, saved)
-        embedder = embedder or self._embedder()
-        sampler = sampler or self._zoom_sampler()
         times, vecs = [], []
         seen = set()
-        for c in cands:
+        dense = self._zoom_dense(key)
+        if dense is not None:                                  # the index is already this dense: read it
+            it, iv = dense
+            inside = np.zeros(len(it), bool)
+            for c in cands:
+                inside |= (it >= c["c"] - ZOOM_HALF) & (it < c["c"] + ZOOM_HALF)
+            times, vecs = list(it[inside]), list(iv[inside])
+        todo = [] if dense is not None else cands
+        embedder = embedder or (self._embedder() if todo else None)
+        sampler = sampler or (self._zoom_sampler() if todo else None)
+        for c in todo:
             frames = sampler.window_frames(row["path"], c["c"] - ZOOM_HALF, 2 * ZOOM_HALF, ZOOM_STEP)
             frames = [(t, im) for t, im in frames if round(t, 1) not in seen]
             if not frames:
@@ -191,13 +223,35 @@ class ZoomMixin:
         self.__dict__.pop("_zoom_rows_cache", None)
         return d["scenes"][sid]
 
+    def _zoom_dense(self, key: str):
+        """(times, vecs) straight from the main index when it was sampled at least
+        as densely as a zoom (e.g. a 2 s library) — no decoding, no embedding."""
+        from ..cache import EmbeddingCache
+
+        cache, model = EmbeddingCache(self.cfg.embedding.cache_dir), self._model_name()
+        try:
+            iv = cache.peek_meta(key, model).get("interval")
+            if iv is None or float(iv) > ZOOM_STEP + 1e-6:
+                return None
+            times, vecs, _ = cache.load(key, model)
+        except (OSError, KeyError, ValueError, TypeError):
+            return None
+        return np.asarray(times, np.float32), vecs
+
+    def _zoom_library_dense(self) -> bool:
+        try:
+            return float(self._active_sampling()[1] or 99) <= ZOOM_STEP + 1e-6
+        except Exception:  # noqa: BLE001
+            return False
+
     def run_zoom(self, job=None, limit: int | None = None) -> dict:
         log = job.log if job else print
-        todo = self.zoom_todo()[: limit or self.zoom_settings()["per_run"]]
+        per_run = self.zoom_settings()["per_run"] * (40 if self._zoom_library_dense() else 1)   # reading is cheap
+        todo = self.zoom_todo()[: limit or per_run]
         saved = self._zoom_saved()
         if not todo:
             return {"zoomed": 0}
-        embedder, sampler = self._embedder(), self._zoom_sampler()
+        embedder, sampler = _Lazy(self._embedder), _Lazy(self._zoom_sampler)
         done = failed = 0
         t0 = time.time()
         for i, row in enumerate(todo):
@@ -363,8 +417,11 @@ class ZoomMixin:
             out.append({"feature": n, "words": word, "weight": round(float(w), 2)})
         return out[:6]
 
+    def _zoom_model_path(self) -> Path:
+        return self._zoom_path().with_name(self._zoom_path().stem.replace("zoom", "moment_model", 1) + ".npz")
+
     def _zoom_store_model(self, fitted, rep: dict) -> dict:
-        p = self._state_dir() / "moment_model.npz"
+        p = self._zoom_model_path()
         if fitted is not None:
             sc, m, names = fitted
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -379,15 +436,16 @@ class ZoomMixin:
         """(names, mean, scale, coef, intercept) when shape ranking is on, else None."""
         if not (self._zoom_state().get("model") or {}).get("use_shape"):
             return None
+        p = self._zoom_model_path()
         hit = self.__dict__.get("_zoom_model_cache")
-        if hit is not None:
-            return hit
+        if hit is not None and hit[0] == p:
+            return hit[1]
         try:
-            z = np.load(self._state_dir() / "moment_model.npz")
+            z = np.load(p)
             hit = ([str(x) for x in z["names"]], z["mean"], z["scale"], z["coef"], float(z["icpt"][0]))
         except (OSError, ValueError, KeyError):
             return None
-        self._zoom_model_cache = hit
+        self._zoom_model_cache = (p, hit)
         return hit
 
     # --- spans for the players ------------------------------------------------------------------

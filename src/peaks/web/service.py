@@ -40,6 +40,7 @@ from .momentcheck import MomentCheckMixin
 from .trend import TrendMixin
 from .concepts import ConceptsMixin
 from .zoom import ZoomMixin
+from .lab import LabMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -54,7 +55,7 @@ TIER_RANK_SORT = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anom
 class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin, DupeQueueMixin,
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
-              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin):
+              ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -257,7 +258,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "clip_model": self._active_clip_model(),
             # curated to the top-tier backbones/variants the GUI offers; the
             # smaller models still validate (for env overrides) but aren't shown.
-            "dino_options": ["dinov2_vitl14", "dinov2_vitg14"],
+            "dino_options": ["dinov2_vitl14", "dinov2_vitg14", "dinov3_vitl16", "dinov3_vith16plus"],
             "clip_options": ["ViT-H-14"],
             "dino_saved": bool(s.get("dino_model")),
             "clip_saved": bool(s.get("clip_model")),
@@ -281,7 +282,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         backbone_changed = False
         if dino_model is not None:
             if dino_model and dino_model not in DINO_BACKBONES:
-                raise ValueError(f"unknown DINOv2 backbone: {dino_model}")
+                raise ValueError(f"unknown DINO backbone: {dino_model}")
             backbone_changed = (dino_model or None) != s.get("dino_model")
             if dino_model:
                 s["dino_model"] = dino_model

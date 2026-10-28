@@ -202,7 +202,7 @@ async function refreshDashboard() {
       api("/api/stats"), api("/api/capabilities"), api("/api/memory").catch(() => null),
     ]);
     $("#conn").textContent = "Stash connected"; $("#conn-dot")?.classList.remove("off");
-    const dino = (stats.dino_model || "").replace("dinov2_", "") || stats.model;
+    const dino = (stats.dino_model || "").replace("dinov2_", "").replace("dinov3_", "v3 ") || stats.model;
     const clip = `${stats.clip_model || "?"} · ${stats.clip_cached ? stats.clip_cached.toLocaleString() + " cached" : "not embedded"}`;
     $("#stat-cards").innerHTML = [
       ["Cached scenes", stats.cached_scenes],
@@ -2949,6 +2949,7 @@ wireTabs("#ins-tabs", (t) => {
   if (t === "health") openHealth();
   if (t === "arbiter") openArbiter();
   if (t === "moments") openMoments();
+  if (t === "lab") openLab();
 });
 
 // --- Library health: saves, the model's view of each tier, the trim pool -------------
@@ -3207,7 +3208,7 @@ function zoomCard(z) {
   const md = z.model || {}, run = z.running;
   const status = run ? `zooming… ${(run.progress || {}).done ?? 0} of ${(run.progress || {}).total ?? "?"}`
     : `${(z.zoomed || 0).toLocaleString()} of ${(z.embedded || 0).toLocaleString()} scenes zoomed`;
-  const cmp = md.trained ? `<table class="htab"><thead><tr><th></th><th>First pick</th><th>Top 3</th></tr></thead><tbody>
+  const cmp = md.trained ? `<table class="htab cmp-t"><thead><tr><th></th><th>First pick</th><th>Top 3</th></tr></thead><tbody>
       <tr class="${md.use_shape ? "" : "on"}"><td>Frame picks <span class="faint small">(single frames)</span></td><td>${pc(md.frame.top1)}</td><td>${pc(md.frame.top3)}</td></tr>
       <tr class="${md.use_shape ? "on" : ""}"><td>Shape picks <span class="faint small">(how the moment unfolds)</span></td><td>${pc(md.shape.top1)}</td><td>${pc(md.shape.top3)}</td></tr></tbody></table>
       <p class="small">${esc(md.verdict || "")} <span class="faint">· compared on ${md.compared} scene(s) it didn't learn from</span></p>`
@@ -3231,6 +3232,67 @@ document.addEventListener("click", async (e) => {
     try { const r = await api("/api/moments/train", { method: "POST" }); toast(r.verdict || r.reason || "Trained"); }
     catch (err) { toast(err.message, true); }
     openMoments();
+  }
+});
+
+// --- the Lab: a new model has to beat the current one on your library first ---------------------
+let labPoll = null;
+async function openLab() {
+  const box = $("#lab-body"); if (!box) return;
+  clearTimeout(labPoll);
+  let d;
+  try { d = await api("/api/lab"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  const run = d.running;
+  box.innerHTML = `<p class="faint small">Before Peaks swaps its eyes, the new model is tried on a sample of <b>your</b> library — up to
+      ${d.sample_cap} graded scenes plus every scene with saved moments, at your sampling. Both models are judged on exactly the same
+      scenes: grading (each scene graded by a model that never saw it) and finding your saved moments. A switch is only offered on a
+      clear win. Now using <b>${esc(d.active_label)}</b>.</p>
+    <div class="lab-grid">${d.candidates.map((c) => labCard(c, run)).join("")}</div>`;
+  if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden) openLab(); }, 4000);
+}
+function labCard(c, run) {
+  const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
+  const t = c.trial, mine = run && run.status === "running" && (run.progress || {}).cand === c.id;
+  const pr = mine ? run.progress || {} : null;
+  const row = (name, f) => `<tr><td>${name}</td><td>${f(t.current)}</td><td>${f(t.new)}</td></tr>`;
+  const g = (s) => s.grading, m = (s) => s.moments;
+  const table = t ? `<table class="htab cmp-t"><thead><tr><th></th><th>${esc(t.against_label || t.against)}</th><th>${esc(c.label)}</th></tr></thead><tbody>
+      ${row("Grades right", (s) => (g(s) ? pc(g(s).accuracy) : "—"))}
+      ${row("Within one tier", (s) => (g(s) ? pc(g(s).within_one) : "—"))}
+      ${row("Sureness <span class='faint small'>(log-loss, lower is better)</span>", (s) => (g(s) ? g(s).log_loss.toFixed(2) : "—"))}
+      ${row("Finds your moments <span class='faint small'>(top 3, 15 s)</span>", (s) => (m(s) ? pc(m(s).top3) : "—"))}
+      ${row("… spot on <span class='faint small'>(4 s)</span>", (s) => (m(s) ? pc(m(s).tight) : "—"))}
+      ${row("… first pick", (s) => (m(s) ? pc(m(s).top1) : "—"))}</tbody></table>
+    <p class="small ${t.win ? "lab-win" : ""}">${esc(t.verdict)}</p>
+    <p class="faint small">${t.scenes} scenes${t.new.moments ? ` · ${t.new.moments.n} saved moments` : ""}${t.paired ? ` · graded right by only one: ${t.paired.only_candidate} new vs ${t.paired.only_current} current` : ""}
+      · tried ${new Date(t.at * 1000).toLocaleDateString()}${c.stale ? " · <b>the active model changed since — run it again</b>" : ""}</p>
+    ${t.win && !c.active && !c.stale ? `<p class="small">Switching re-embeds the library with ${esc(c.label)}${t.switch_hours != null ? ` — ${t.switch_hours < 1 ? "<b>under an hour</b>" : `about <b>${Math.round(t.switch_hours)} h</b>`} at the speed measured here` : ""}.
+      The sample is already done, and the current cache stays on disk, so switching back is instant.</p>` : ""}` : "";
+  const err = c.error && !mine ? `<p class="small lab-err">Last try failed: ${esc(c.error)}</p>` : "";
+  return `<div class="card pad lab-card"><h3>${esc(c.label)}${c.active ? ' <span class="q">active</span>' : ""}</h3>
+    ${mine ? `<p class="small">${pr.stage === "judging" ? "Judging…" : `Embedding the sample… ${pr.done ?? 0} of ${pr.total ?? "?"}`}</p>
+      <div class="lab-prog"><i style="width:${pr.total ? Math.round(100 * (pr.done || 0) / pr.total) : 4}%"></i></div>` : ""}
+    ${table || (mine ? "" : '<p class="faint small">Not tried yet.</p>')}${err}
+    <div class="row">${c.active ? "" : `<button class="btn sm" data-lab-run="${c.id}" ${run && run.status === "running" ? "disabled" : ""}>${t ? "Run again" : "Run trial"}</button>`}
+      ${t && t.win && !c.active && !c.stale ? `<button class="btn sm pri" data-lab-switch="${c.id}">Switch to ${esc(c.label)}</button>` : ""}</div>
+    <p class="faint small">Needs Meta's DINOv3 licence accepted on Hugging Face and the container's <code>HF_TOKEN</code> set.</p></div>`;
+}
+document.addEventListener("click", async (e) => {
+  const r = e.target.closest("[data-lab-run]"), s = e.target.closest("[data-lab-switch]");
+  if (r) {
+    r.disabled = true;
+    try { await api(`/api/lab/${r.dataset.labRun}/run`, { method: "POST" }); toast("Trial started — it runs in the background"); }
+    catch (err) { toast(err.message, true); }
+    openLab();
+  } else if (s) {
+    if (!confirm("Switch Peaks to this model? The library is re-embedded in the background; the old cache stays.")) return;
+    s.disabled = true;
+    try {
+      const out = await api(`/api/lab/${s.dataset.labSwitch}/switch`, { method: "POST" });
+      toast(out.embed ? "Switched — re-embedding in the background (Activity)" : "Switched — the next embed pass fills it in");
+      loadModels();
+    } catch (err) { toast(err.message, true); }
+    openLab();
   }
 });
 

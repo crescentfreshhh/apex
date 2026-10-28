@@ -1858,6 +1858,37 @@ def create_app(cfg=None):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(503, str(exc))
 
+    # --- the Lab: a new model has to win on your library first ---------------------
+
+    @app.get("/api/lab")
+    def lab_get():
+        d = service.lab()
+        j = jobs.running("lab")
+        d["running"] = j.as_dict() if j is not None else None
+        return d
+
+    @app.post("/api/lab/{cand}/run")
+    def lab_run(cand: str):
+        busy = [k for k in _PICTURE_WAIT_FOR if jobs.running(k)]
+        if busy:
+            raise HTTPException(409, f"waits for the running {busy[0]} job to finish")
+        try:
+            return jobs.start("lab", lambda job: service.run_lab(cand, job=job)).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/lab/{cand}/switch")
+    def lab_switch(cand: str):
+        try:
+            out = service.lab_switch(cand)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        try:                                        # fill the new model's cache now (the sample is already in)
+            out["embed"] = jobs.start("embed", lambda job: service.run_embed(job)).as_dict()
+        except RuntimeError:
+            out["embed"] = None                     # one's running — the next pass picks it up
+        return out
+
     # --- concepts: Peaks learns your words ------------------------------------------
 
     @app.get("/api/concepts")

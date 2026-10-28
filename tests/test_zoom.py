@@ -148,3 +148,30 @@ def test_no_signal_keeps_frame_picks(tmp_path, monkeypatch):
     assert not rep["use_shape"] and "not better yet" in (rep.get("verdict") or rep.get("reason", "not better yet"))
     sid = next(iter(saved))
     assert svc.scene_picks(sid)[0]["shape"] is False                       # spans, ranked by taste
+
+
+def test_a_dense_library_is_zoomed_straight_from_the_index(tmp_path, monkeypatch):
+    """Sampled every 2 s already: the windows are read out of the main index —
+    no decoding, no embedding — and the shape model still learns from them."""
+    import peaks.web.service as svc_mod
+    from peaks.cache import EmbeddingCache
+
+    svc, stash, saved, sampler = _svc(tmp_path, monkeypatch)
+    cache = EmbeddingCache(svc.cfg.embedding.cache_dir)
+    plan = sampler.plan
+    for key in cache.keys("dinov2"):
+        sid = cache.peek_meta(key, "dinov2")["scene_id"]
+        t = np.arange(0, 300, 2.0, dtype=np.float32)
+        real = FakeEmbedder(plan).embed_images([(sid, float(x)) for x in t])
+        cache.save(key, "dinov2", t, real, meta={"scene_id": sid, "interval": 2.0})
+
+    def boom(*_a, **_k):
+        raise AssertionError("a dense library must not decode or embed")
+    monkeypatch.setattr(svc_mod.Service, "_zoom_sampler", lambda self: boom())
+    monkeypatch.setattr(svc_mod.Service, "_embedder", lambda self, model=None: boom())
+    r = svc.run_zoom(limit=200)
+    assert r["zoomed"] >= 30 and not r["failed"] and sampler.calls == []
+    sid = next(iter(saved))
+    w = svc._zoom_windows(sid)
+    assert w and all(len(x["span"]) == 3 for x in w)
+    assert svc.zoom_status()["model"]["use_shape"]

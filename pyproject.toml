@@ -20,6 +20,7 @@ ml = [
     "torch",          # DINOv2 / CLIP inference
     "open_clip_torch",  # the CLIP channel
     "torchvision",    # DINOv2 image transforms
+    "transformers>=4.56",  # DINOv3 (Hugging Face weights, gated by Meta's licence)
     "pillow",
     "scikit-learn",   # the Tier-2 taste classifier
     "av>=12",         # sparse (seek-based) sampling; bundles ffmpeg libs
