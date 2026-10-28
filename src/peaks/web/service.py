@@ -43,6 +43,7 @@ from .zoom import ZoomMixin
 from .lab import LabMixin
 from .settle import FAST_RETRAIN, SettleMixin
 from .hear import HearMixin
+from .motion import MotionMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -58,7 +59,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
-              HearMixin):
+              HearMixin, MotionMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5750,7 +5751,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tier_model import sense_row
 
         out = {}
-        for name, fn in (("sound", self.sound_scene_vector),):
+        for name, fn in (("sound", self.sound_scene_vector), ("motion", self.motion_scene_vector)):
             vecs = []
             for sid in sids:
                 try:

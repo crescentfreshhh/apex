@@ -760,7 +760,7 @@
         </div>
         <div class="sec" data-sec="upgrades" hidden>
           <h2>Upgrades (Prowlarr)</h2>
-          <p class="lead">Peaks searches your Prowlarr indexers for better copies of keepers that need one, and keeps only healthy torrents of the same scene that beat your copy. It never downloads on its own: <b>Grab</b> asks Prowlarr to send that one release to the download client set up in Prowlarr. Peaks still never talks to qBittorrent except to read.</p>
+          <p class="lead">Peaks searches your Prowlarr indexers for better copies of keepers that need one, and keeps only healthy torrents of the same scene that beat your copy. It never downloads on its own: <b>Grab</b> fetches that one release through Prowlarr and adds it to your seedbox qBittorrent, in the category below, so your pull brings it home. Apart from that add (and the purge's deletes), Peaks only reads qBittorrent.</p>
           <div class="field"><div class="l"><b>Prowlarr</b><span>URL and API key (Prowlarr → Settings → General)</span></div>
             <div><div class="row"><input id="upg-url" placeholder="http://prowlarr:9696" style="min-width:260px" />
               <input id="upg-key" type="password" placeholder="API key" autocomplete="off" style="min-width:220px" />

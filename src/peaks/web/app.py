@@ -777,6 +777,26 @@ def create_app(cfg=None):
     def hear_settings(body: dict = Body(...)):
         return service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
 
+    # --- motion: Peaks watches how moments move -------------------------------------
+
+    @app.get("/api/motion")
+    def motion_get():
+        d = service.motion_status()
+        j = jobs.running("motion")
+        d["running"] = j.as_dict() if j is not None else None
+        return d
+
+    @app.post("/api/motion")
+    def motion_run():
+        try:
+            return jobs.start("motion", service.run_motion).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/motion/settings")
+    def motion_settings(body: dict = Body(...)):
+        return service.save_motion_settings(on=body.get("on"), per_run=body.get("per_run"))
+
     # --- taste (explicit thumbs → personalized ranking) ---------------------
 
     @app.get("/api/labels")
@@ -1903,7 +1923,7 @@ def create_app(cfg=None):
 
     @app.post("/api/lab/{cand}/run")
     def lab_run(cand: str):
-        busy = [k for k in (*_PICTURE_WAIT_FOR, "zoom", "hear") if jobs.running(k)]
+        busy = [k for k in (*_PICTURE_WAIT_FOR, "zoom", "hear", "motion") if jobs.running(k)]
         if busy:
             raise HTTPException(409, f"waits for the running {busy[0]} job to finish")
         try:
@@ -2677,7 +2697,7 @@ def _start_zoom(service: Service, jobs: JobManager):
     10 minutes, and only with the index already in memory (never loads it just to look)."""
     import time as _t
 
-    if _t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab")):
+    if _t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion")):
         return None
     _zoom_next["at"] = _t.time() + 600
     if not service.index_loaded() or not service.zoom_due():
@@ -2688,7 +2708,7 @@ def _start_zoom(service: Service, jobs: JobManager):
         return None
 
 
-_HEAR_WAIT_FOR = (*_ZOOM_WAIT_FOR, "hear", "lab")
+_HEAR_WAIT_FOR = (*_ZOOM_WAIT_FOR, "hear", "lab", "motion")
 _hear_next = {"at": 0.0}
 
 
@@ -2707,6 +2727,28 @@ def _start_hear(service: Service, jobs: JobManager):
         _hear_next["at"] = _t.time() + 3600
     try:
         return jobs.start("hear", service.run_hear)
+    except RuntimeError:
+        return None
+
+
+_MOTION_WAIT_FOR = (*_HEAR_WAIT_FOR, "motion")
+_motion_next = {"at": 0.0}
+
+
+def _start_motion(service: Service, jobs: JobManager):
+    """Watch zoomed moments move when nothing else runs (zoom and hearing first).
+    Checked at most every 10 minutes; backs off an hour after a failure."""
+    import time as _t
+
+    if _t.time() < _motion_next["at"] or any(jobs.running(k) for k in _MOTION_WAIT_FOR):
+        return None
+    _motion_next["at"] = _t.time() + 600
+    if not service.index_loaded() or not service.motion_due():
+        return None
+    if getattr(service, "_motion_error", None):
+        _motion_next["at"] = _t.time() + 3600
+    try:
+        return jobs.start("motion", service.run_motion)
     except RuntimeError:
         return None
 
@@ -2843,6 +2885,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 pass
             try:   # hearing: Peaks listens to scenes, when nothing else runs
                 _start_hear(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # motion: Peaks watches candidate moments move, the heaviest — last
+                _start_motion(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             try:   # files the pull just brought in: scan exactly where they landed

@@ -295,6 +295,63 @@ class ClapAudioEmbedder:
             return self._norm(self.model.get_text_features(**inputs))
 
 
+class MotionUnavailable(RuntimeError):
+    """The V-JEPA 2.1 video encoder couldn't be loaded (network, torch.hub)."""
+
+
+VJEPA_ENTRY = "vjepa2_1_vit_large_384"
+
+
+class MotionEmbedder:
+    """V-JEPA 2.1 (Meta, self-supervised video): a clip of 16 frames → one
+    vector of how it moves. Loaded through torch.hub like DINOv2 (weights cached
+    in TORCH_HOME); fp16 on a GPU. Tokens are mean-pooled, then L2-normalised."""
+
+    name = "vjepa21-l"
+    size = 384
+    _MEAN = (0.485, 0.456, 0.406)
+    _STD = (0.229, 0.224, 0.225)
+
+    def __init__(self, entry: str = VJEPA_ENTRY, device: str | None = None):
+        import torch  # lazy
+
+        self._torch = torch
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            out = torch.hub.load("facebookresearch/vjepa2", entry)
+        except Exception as exc:  # noqa: BLE001 — network, missing deps, a renamed entry…
+            raise MotionUnavailable(f"couldn't load V-JEPA 2.1 ({entry}) through torch.hub: {exc}") from exc
+        enc = out[0] if isinstance(out, (tuple, list)) else out      # some entries return (encoder, predictor)
+        self._half = self.device.startswith("cuda")
+        self.model = enc.eval().to(self.device)
+        if self._half:
+            self.model = self.model.half()
+        self.dim = int(getattr(enc, "embed_dim", 0) or 1024)
+        self._mean = torch.tensor(self._MEAN, device=self.device).view(1, 3, 1, 1, 1)
+        self._std = torch.tensor(self._STD, device=self.device).view(1, 3, 1, 1, 1)
+
+    def embed_clips(self, clips: Sequence[Sequence["Image"]]) -> np.ndarray:
+        """Clips of equal length, each a list of size×size frames → (n, dim)."""
+        torch = self._torch
+        if not clips:
+            return np.zeros((0, self.dim), np.float32)
+        arr = np.stack([np.stack([np.asarray(im.convert("RGB").resize((self.size, self.size)), np.uint8)
+                                  for im in clip]) for clip in clips])            # (B, T, H, W, C)
+        x = torch.from_numpy(arr).to(self.device).permute(0, 4, 1, 2, 3).float().div_(255.0)   # (B, C, T, H, W)
+        x = (x - self._mean) / self._std
+        if self._half:
+            x = x.half()
+        with torch.no_grad():
+            out = self.model(x)
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        if out.dim() == 3:                                    # (B, tokens, D) → pooled
+            out = out.mean(dim=1)
+        out = torch.nn.functional.normalize(out.float(), dim=1)
+        self.dim = int(out.shape[1])
+        return out.cpu().numpy().astype(np.float32)
+
+
 def make_dino(model_name: str = "dinov2_vits14", device: str | None = None) -> Embedder:
     """The structure channel for a backbone name — DINOv2 via torch.hub, DINOv3 via transformers."""
     if model_name.startswith("dinov3_"):

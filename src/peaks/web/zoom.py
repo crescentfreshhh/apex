@@ -26,8 +26,9 @@ import numpy as np
 
 from ..moment_shape import FEATURES, WORDS, shape_features, span
 from .hear import SOUND_WORDS
+from .motion import MOTION_WORDS
 
-SENSE_WORDS = {**SOUND_WORDS}
+SENSE_WORDS = {**SOUND_WORDS, **MOTION_WORDS}
 
 ZOOM_HALF = 20.0          # seconds either side of a candidate
 ZOOM_STEP = 2.0           # one frame every … seconds inside a window
@@ -317,9 +318,9 @@ class ZoomMixin:
         return out
 
     def _window_senses(self, sid: str, centre: float, peak: float) -> dict:
-        """Sound (and later motion) features of one window; {} when not heard/seen."""
+        """Sound and motion features of one window; {} when not heard/seen."""
         out = {}
-        for fn in (self.sound_window_features,):
+        for fn in (self.sound_window_features, self.motion_window_features):
             try:
                 f = fn(sid, centre, peak, ZOOM_HALF)
             except Exception:  # noqa: BLE001 — a sense is extra, never in the way
@@ -331,13 +332,14 @@ class ZoomMixin:
     def _zoom_feature_groups(self) -> dict[str, list[str]]:
         """Feature columns by group: the shape (+ your concepts), then each sense."""
         from .hear import SOUND_FEATURES
+        from .motion import MOTION_FEATURES
 
         shape = list(FEATURES)
         try:
             shape += [f"concept:{slug}" for slug, _ in self.trained_concepts()]
         except Exception:  # noqa: BLE001
             pass
-        return {"shape": shape, "sound": list(SOUND_FEATURES)}
+        return {"shape": shape, "sound": list(SOUND_FEATURES), "motion": list(MOTION_FEATURES)}
 
     def _zoom_feature_names(self) -> list[str]:
         return [n for cols in self._zoom_feature_groups().values() for n in cols]

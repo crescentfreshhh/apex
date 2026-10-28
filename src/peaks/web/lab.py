@@ -83,7 +83,7 @@ class LabMixin:
         sets = mm.get("sets") or {}
         tier = (self._tier_model_state().get("report") or {})
         out = []
-        for sid, label, status in (("sound", "Hearing", self.hear_status),):
+        for sid, label, status in (("sound", "Hearing", self.hear_status), ("motion", "Motion", self.motion_status)):
             try:
                 st = status()
             except Exception as exc:  # noqa: BLE001

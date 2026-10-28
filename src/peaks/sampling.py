@@ -414,14 +414,18 @@ class FrameSampler:
             raise SamplerError(f"no frame decoded for {path}@{time}s")
         return PILImage.open(BytesIO(out.stdout)).convert("RGB")
 
-    def window_frames(self, path: str, start: float, duration: float, step: float) -> list[tuple[float, "Image"]]:
+    def window_frames(self, path: str, start: float, duration: float, step: float,
+                      size: int | None = None) -> list[tuple[float, "Image"]]:
         """Frames every `step` s over [start, start + duration) in one ffmpeg run —
-        the moment zoom's dense look at a stretch (frame i is from start + i*step)."""
+        the moment zoom's dense look at a stretch (frame i is from start + i*step).
+        `size`: square frames of that side (short side scaled, centre cropped) —
+        what a video model takes, decoded once at its own size."""
         from PIL import Image as PILImage  # lazy
 
         if duration <= 0 or step <= 0:
             return []
-        scale = self._scale_filter()
+        scale = (f"scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}"
+                 if size else self._scale_filter())
         cmd = [
             self.ffmpeg, "-v", "error", *self._input_args(),
             "-ss", f"{max(0.0, start):g}", "-i", path, "-t", f"{duration:g}",

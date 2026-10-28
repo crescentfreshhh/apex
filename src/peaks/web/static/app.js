@@ -3313,13 +3313,16 @@ function senseCard(x) {
   const pc = (v) => (v == null ? "—" : Math.round(100 * v) + "%");
   const st = x.status || {}, m = x.moments || {}, g = x.grading || {};
   const cov = st.heard ?? st.seen;
-  const verdict = (inUse, w, wo) => inUse ? '<b class="lab-win">in use</b>' : (w == null ? '<span class="faint">not tested yet</span>' : '<span class="faint">not better yet</span>');
+  const verdict = (inUse, w, wo) => inUse ? '<b class="lab-win">in use</b>'
+    : w == null ? '<span class="faint">not tested yet</span>'
+    : (wo != null && w >= wo + 0.02) ? '<span class="faint" title="Better than without it, but no better than what Peaks already uses">helps — nothing extra yet</span>'
+    : '<span class="faint">not better yet</span>';
   return `<div class="card pad lab-card"><h3>${esc(x.label)} ${st.settings && !st.settings.on ? '<span class="q">off</span>' : ""}</h3>
     <p class="faint small">${SENSE_DESC[x.id] || ""}</p>
     <p class="small">${cov != null ? `${cov.toLocaleString()} of ${(st.embedded ?? 0).toLocaleString()} scenes ${x.id === "sound" ? "heard" : "seen"}` : "—"}</p>
     <table class="htab cmp-t"><thead><tr><th></th><th>without</th><th>with</th><th></th></tr></thead><tbody>
-      <tr><td>Finds your moments <span class="faint small">(top 3)</span></td><td>${pc((m.without || {}).top3)}</td><td>${pc((m.with || {}).top3)}</td><td>${verdict(m.in_use, m.with)}</td></tr>
-      <tr><td>Grades right</td><td>${pc(g.without)}</td><td>${pc(g.with)}</td><td>${verdict(g.in_use, g.with)}</td></tr></tbody></table>
+      <tr><td>Finds your moments <span class="faint small">(top 3)</span></td><td>${pc((m.without || {}).top3)}</td><td>${pc((m.with || {}).top3)}</td><td>${verdict(m.in_use, (m.with || {}).top3, (m.without || {}).top3)}</td></tr>
+      <tr><td>Grades right</td><td>${pc(g.without)}</td><td>${pc(g.with)}</td><td>${verdict(g.in_use, g.with, g.without)}</td></tr></tbody></table>
     ${st.error ? `<p class="small lab-err">Last run failed: ${esc(st.error)}</p>` : ""}
     <div class="row"><button class="btn sm" data-sense-run="${x.id}">Run now</button>
       <button class="btn sm ghost" data-sense-on="${x.id}" data-on="${st.settings && st.settings.on ? 0 : 1}">${st.settings && st.settings.on ? "Turn off" : "Turn on"}</button></div></div>`;
