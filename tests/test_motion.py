@@ -159,3 +159,17 @@ def test_the_motion_api(tmp_path, monkeypatch):
     d = c.get("/api/motion").json()
     assert d["seen"] == 0 and d["embedded"] >= 30 and d["running"] is None
     assert c.post("/api/motion/settings", json={"on": False}).json()["on"] is False
+
+
+def test_a_broken_motion_model_stops_early_and_says_why(tmp_path, monkeypatch):
+    svc, stash, saved, _ = _zoom_svc(tmp_path, monkeypatch)
+    svc.run_zoom(limit=200)
+
+    class Broken(FakeVJEPA):
+        def embed_clips(self, clips):
+            raise RuntimeError("expected input[1, 3, 16, 384, 384] to have 4 dimensions")
+    _wire(svc, monkeypatch, Broken(), FakeSampler())
+    r = svc.run_motion(limit=500)
+    assert r["seen"] == 0 and r["failed"] == 5
+    st = svc.motion_status()
+    assert "failed the same way" in st["last_run"]["stopped"] and "4 dimensions" in st["error"]

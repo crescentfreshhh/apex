@@ -153,3 +153,72 @@ def test_search_by_sound(tmp_path, monkeypatch):
     assert r["sound"] == "moaning" and r["total"] >= 1
     assert c.get("/api/hear").json()["heard"] >= 30
     assert c.post("/api/hear/settings", json={"on": False}).json()["on"] is False
+
+
+def test_a_broken_model_stops_early_and_says_why_on_the_card(tmp_path, monkeypatch):
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    for sid in stash.s:
+        stash.s[sid]["path"] = f"/data/{sid}.mp4"
+
+    class Broken(FakeClap):
+        def embed_audio(self, blocks):
+            raise ValueError("You have to specify either text or audios")
+    _wire(svc, monkeypatch, lambda p: _blocks(30), clap=Broken())
+    r = svc.run_hear(limit=500)
+    assert r["heard"] == 0 and r["failed"] == 5                         # stopped after 5, not 36
+    st = svc.hear_status()
+    assert st["last_run"]["failed"] == 5 and "failed the same way" in st["last_run"]["stopped"]
+    assert "specify either text or audios" in st["error"]
+
+
+def test_the_last_run_is_on_the_card_with_its_first_errors(tmp_path, monkeypatch):
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    for sid in stash.s:
+        stash.s[sid]["path"] = f"/data/{sid}.mp4"
+
+    def plan(p):
+        if p.endswith("/4.mp4"):
+            raise OSError("moov atom not found")
+        return _blocks(30)
+    _wire(svc, monkeypatch, plan)
+    svc.run_hear(limit=500)
+    lr = svc.hear_status()["last_run"]
+    assert lr["done"] >= 30 and lr["failed"] == 1 and lr["stopped"] is None
+    assert lr["first_errors"] == ["scene 4: OSError: moov atom not found"]
+
+
+def test_clap_uses_the_feature_extractor_not_the_renamed_processor_argument(monkeypatch):
+    import types
+
+    from peaks import embedding as E
+
+    class T:
+        def __init__(self, a):
+            self.a = a
+
+        def to(self, _):
+            return self
+
+    class Proc:
+        class feature_extractor:
+            sampling_rate = 48000
+
+            def __new__(cls, arrs, sampling_rate=None, return_tensors=None):
+                assert sampling_rate == 48000
+                return {"input_features": T(np.stack(arrs)), "is_longer": T(np.zeros(len(arrs)))}
+
+        def __call__(self, **k):
+            raise ValueError("You have to specify either text or audios")
+
+    seen = {}
+
+    class Model:
+        def get_audio_features(self, **k):
+            seen.update(k)
+            return types.SimpleNamespace(float=lambda: "feats")
+    emb = object.__new__(E.ClapAudioEmbedder)
+    emb.processor, emb.model, emb.sr, emb.dim, emb.device = Proc(), Model(), 48000, 4, "cpu"
+    emb._torch = types.SimpleNamespace(no_grad=lambda: __import__("contextlib").nullcontext())
+    emb._norm = lambda f: np.ones((2, 4), np.float32)
+    out = emb.embed_audio([np.zeros(10, np.float32), np.zeros(10, np.float32)])
+    assert out.shape == (2, 4) and set(seen) == {"input_features", "is_longer"}

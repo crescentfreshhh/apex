@@ -3149,17 +3149,17 @@ async function loadSettleCard() {
   if (!d.ok) { box.innerHTML = ""; return; }
   const n = (x) => (x ?? 0).toLocaleString(), t = d.threshold;
   const pts = (d.history || []).map((h) => ({ d: new Date(h.at * 1000).toLocaleDateString(), unsettled: h.unsettled }));
-  const cal = t.measured ? `Peaks is right ${Math.round(100 * t.accuracy)}% of the time above ${Math.round(100 * t.t)}% sure (checked on ${n(t.above)} of your grades, each judged without its own grade), so those count as settled — they wait in Likely keepers as suggestions.`
+  const cal = t.measured ? `Peaks is right ${Math.round(100 * t.accuracy)}% of the time above ${Math.round(100 * t.t)}% sure (checked on ${n(t.above)} of your grades, each judged without its own grade) — those disagreements are marked “sure”, the rest “leaning”.`
     : `Not enough grades yet to measure where Peaks is right 9 times in 10 — it uses ${Math.round(100 * t.t)}% sure until it can.`;
   box.innerHTML = `<div class="panel stat-card settle-card"><h3>Settling your library</h3>
     <div class="settle-top"><div><span class="settle-n">${n(d.unsettled)}</span><span class="settle-l">question${d.unsettled === 1 ? "" : "s"} left</span></div>
-      <div class="settle-parts"><span><b>${n(d.unsure)}</b> Peaks can't call yet</span><span><b>${n(d.disagree)}</b> grades it disagrees with</span>
-        <span><b>${n(d.sure)}</b> it's sure about <a href="#" data-settle-likely>(Likely keepers)</a></span>
-        ${d.unembedded ? `<span class="faint">${n(d.unembedded)} not analysed yet</span>` : ""}</div>
+      <div class="settle-parts"><span><b>${n(d.disagree)}</b> grades Peaks disagrees with <span class="faint">(${n(d.disagree_sure)} confidently)</span></span>
+        ${d.drain ? `<span><b>${n(d.drain)}</b> ${esc(gradeName("merveilleuse"))} to place</span>` : ""}
+        <span><b>${n(d.agree)}</b> grades it agrees with</span></div>
       <button class="btn pri" data-settle-start ${d.unsettled ? "" : "disabled"}>Start settling</button></div>
     ${d.projection ? `<p class="small">At the rate your answers have been settling others (about ${d.projection.per_answer} each), that's roughly <b>${n(d.projection.answers)} more answers</b>.</p>` : ""}
     ${pts.length > 1 ? lineChart(pts, { y: "unsettled", fmtY: (v) => Math.round(v).toLocaleString(), h: 110 }) : ""}
-    <p class="faint small">${esc(cal)} Peaks never grades anything itself.</p></div>`;
+    <p class="faint small">${esc(cal)} Only graded scenes — unreviewed ones are left to <a href="#" data-settle-likely>Likely keepers</a> and Quality check. Peaks never grades anything itself.</p></div>`;
 }
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-settle-start]")) { cat.view = "settle"; cat.tier = ""; go("catalogue"); openCatalogue(); }
@@ -3173,7 +3173,7 @@ function rvSettleBanner(r) {
   box.className = "rv-settle " + s.kind;
   box.innerHTML = s.kind === "disagree"
     ? `<span>⚖ ${esc(s.why)} — keep yours or grade again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
-    : `<span>? ${esc(s.why)} — your grade teaches it the most here</span>`;
+    : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`;
 }
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-settle-keep]"); if (!b) return;
@@ -3413,8 +3413,7 @@ async function sxSide(sense) {
       <button class="btn sm ghost" data-sx-del="${esc(x.slug)}" data-sense="${sense}" title="Forget it">✕</button></div>`).join("")
       : `<p class="faint small">None yet. Save your likes under a word and search it as <code>${sense}: word</code>.</p>`}
     <h3>Coverage</h3>
-    <p class="small">${c != null ? `${c.toLocaleString()} of ${(cov.embedded || 0).toLocaleString()} scenes ${SX_WORD[sense].verb}` : "—"}</p>
-    ${cov && cov.error ? `<p class="small lab-err">${esc(cov.error)}</p>` : ""}
+    ${senseCoverage(sense, cov)}
     <button class="btn sm ghost" data-sense-run="${sense}">Run ${SX_WORD[sense].run} now</button>`;
 }
 async function sxAnswer(sense, label) {
@@ -3504,6 +3503,20 @@ const SENSE_DESC = {
   sound: "Listens to each scene: loudness, how much is happening, rhythm, and what it sounds like (CLAP — open weights, no token). Also lets you search by sound: type <code>sound: …</code> in search.",
   motion: "Watches how your candidate moments move, 4-second clips at a time (V-JEPA 2.1 — open weights, no token).",
 };
+// coverage with its denominator named, and what the last run actually did
+function senseCoverage(sense, st) {
+  if (!st) return '<p class="small">—</p>';
+  const n = (v) => (v ?? 0).toLocaleString();
+  const c = st.heard ?? st.seen;
+  const of = sense === "sound" ? `${n(st.embedded)} scenes in your library`
+    : `${n(st.embedded)} zoomed scenes <span class="faint">(motion watches the moments zoom found)</span>`;
+  const r = st.last_run;
+  const last = r ? `<p class="small ${r.failed && !r.done ? "lab-err" : ""}">Last run ${new Date(r.at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })} ·
+      ${n(r.done)} ${sense === "sound" ? "heard" : "watched"}${r.silent ? ` (${n(r.silent)} without sound)` : ""} · ${n(r.failed)} failed${r.stopped ? ` — stopped: ${esc(r.stopped)}` : ""}</p>
+      ${(r.first_errors || []).length && !r.stopped ? `<p class="small lab-err">${r.first_errors.map(esc).join("<br>")}</p>` : ""}` : "";
+  return `<p class="small">${c != null ? `${sense === "sound" ? "Heard" : "Seen"} ${n(c)} of ${of}` : "—"}</p>${last}
+    ${st.error && !(r && r.stopped === st.error) ? `<p class="small lab-err">${esc(st.error)}</p>` : ""}`;
+}
 function senseCard(x) {
   const pc = (v) => (v == null ? "—" : Math.round(100 * v) + "%");
   const st = x.status || {}, m = x.moments || {}, g = x.grading || {};
@@ -3514,11 +3527,11 @@ function senseCard(x) {
     : '<span class="faint">not better yet</span>';
   return `<div class="card pad lab-card"><h3>${esc(x.label)} ${st.settings && !st.settings.on ? '<span class="q">off</span>' : ""}</h3>
     <p class="faint small">${SENSE_DESC[x.id] || ""}</p>
-    <p class="small">${cov != null ? `${cov.toLocaleString()} of ${(st.embedded ?? 0).toLocaleString()} scenes ${x.id === "sound" ? "heard" : "seen"}` : "—"}</p>
+    ${senseCoverage(x.id, st)}
     <table class="htab cmp-t"><thead><tr><th></th><th>without</th><th>with</th><th></th></tr></thead><tbody>
       <tr><td>Finds your moments <span class="faint small">(top 3)</span></td><td>${pc((m.without || {}).top3)}</td><td>${pc((m.with || {}).top3)}</td><td>${verdict(m.in_use, (m.with || {}).top3, (m.without || {}).top3)}</td></tr>
       <tr><td>Grades right</td><td>${pc(g.without)}</td><td>${pc(g.with)}</td><td>${verdict(g.in_use, g.with, g.without)}</td></tr></tbody></table>
-    ${st.error ? `<p class="small lab-err">Last run failed: ${esc(st.error)}</p>` : ""}
+
     <div class="row"><button class="btn sm" data-sense-run="${x.id}">Run now</button>
       <button class="btn sm ghost" data-sense-on="${x.id}" data-on="${st.settings && st.settings.on ? 0 : 1}">${st.settings && st.settings.on ? "Turn off" : "Turn on"}</button></div></div>`;
 }
@@ -3992,7 +4005,7 @@ function tdBoard() {
     card("Confirm", "saved", "Saved → Légendaire", j.saved, "you saved moments in these", "job"),
     card("Confirm", "reject", "Suggested to let go", j.reject, "passed over or among your weakest", "job"),
     card("Grade", "new", "New scenes", j.new, `${n(b.likely)} look like keepers`, "job"),
-    ...(b.settle != null ? [card("Settle", "settle", "Settle the library", b.settle, "questions left — most to learn first", "view")] : []),
+    ...(b.settle != null ? [card("Settle", "settle", "Settle the library", b.settle, "your grades Peaks questions", "view")] : []),
     ...(DRAINING.size ? [card("Second opinion", "drain", `Drain ${[...DRAINING].map((t) => TIER_NAMES[t]).join(" + ")}`, j.drain, "left to re-grade before it retires", "job")] : []),
     card("Second opinion", "promote", "Promotion candidates", j.promote, "Peaks rates them above your grade", "job"),
     card("Second opinion", "second", "Second look", j.second, "Peaks rates them below your grade", "job"),
@@ -4362,7 +4375,7 @@ const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, vie
               focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false,
               isNew: false, sortTouched: false, sortDir: "" };
 const CAT_VIEWS = [
-  ["settle", "Settle the library", "The questions left before your library is settled, most to learn first: scenes Peaks can't call yet, and grades it confidently disagrees with (every fifth). Answer in Review."],
+  ["settle", "Settle the library", "Graded scenes only: every grade Peaks' honest verdict disagrees with (surest first — keep yours or re-grade), and the scenes left in a retiring tier to place. Answer in Review."],
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
   ["drain", "Drain", "Every scene left in a tier being retired, with the tier it looks most like"],

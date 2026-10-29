@@ -280,10 +280,9 @@ class ClapAudioEmbedder:
         if not blocks:
             return np.zeros((0, self.dim), np.float32)
         arrs = [np.asarray(b, np.float32) for b in blocks]
-        try:                                   # newer transformers: audio=, older: audios=
-            inputs = self.processor(audio=arrs, sampling_rate=self.sr, return_tensors="pt")
-        except TypeError:
-            inputs = self.processor(audios=arrs, sampling_rate=self.sr, return_tensors="pt")
+        # the feature extractor directly: the processor's own call has renamed its audio
+        # argument across transformers versions (audios= / audio=), the extractor hasn't
+        inputs = self.processor.feature_extractor(arrs, sampling_rate=self.sr, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
         with self._torch.no_grad():
             return self._norm(self.model.get_audio_features(**inputs))

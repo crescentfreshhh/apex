@@ -19,6 +19,8 @@ import time
 
 import numpy as np
 
+from .hear import SenseRun
+
 MOTION_NS = "vjepa21-l@motion"
 MOTION_PER_RUN = 100
 CLIP_FRAMES = 16          # frames per clip
@@ -123,7 +125,7 @@ class MotionMixin:
         except Exception:  # noqa: BLE001
             seen = total = None
         return {"seen": seen, "embedded": total, "settings": self.motion_settings(),
-                "error": getattr(self, "_motion_error", None)}
+                "error": getattr(self, "_motion_error", None), "last_run": self.sense_last_run("motion")}
 
     def motion_due(self) -> bool:
         return self.motion_settings()["on"] and bool(self.motion_todo())
@@ -180,25 +182,33 @@ class MotionMixin:
             raise
         self._motion_error = None
         sampler = self._motion_sampler()
-        done = failed = 0
+        done = 0
+        run = SenseRun()
         t0 = time.time()
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
                 log("stopped — the rest waits for the next run")
+                run.stopped = "you stopped it"
                 break
             try:
                 self.motion_scene(row, embedder, sampler)
                 done += 1
+                run.ok()
             except Exception as exc:  # noqa: BLE001 — one unreadable file mustn't stop the run
-                failed += 1
                 log(f"scene {row['scene_id']}: {exc}")
+                if run.fail(row["scene_id"], exc):           # the same failure every time: stop, say so
+                    self._motion_error = run.stopped
+                    log(run.stopped)
+                    break
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
-        log(f"watched {done} scene(s){f', {failed} unreadable' if failed else ''}")
+        log(f"watched {done} scene(s){f', {run.failed} unreadable' if run.failed else ''}")
+        self._sense_record("motion", {"done": done, **run.summary()})
         del embedder
-        self._senses_retrain(log)
-        return {"seen": done, "failed": failed}
+        if done:
+            self._senses_retrain(log)
+        return {"seen": done, "failed": run.failed}
 
     # --- what the moment model and the tier model get --------------------------------------
 

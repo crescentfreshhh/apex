@@ -31,6 +31,36 @@ SOUND_WORDS = {"loud_peak": "loud", "loud_rise": "it gets louder", "onset_mean":
 BATCH = 16
 
 
+FAIL_FAST = 5            # this many failures in a row, all the same, and nothing done: stop the run
+
+
+class SenseRun:
+    """Counts a background run's failures and stops it early when every scene so
+    far has failed the same way (a broken model, not a bad file)."""
+
+    def __init__(self):
+        self.failed, self.streak, self.errors, self.stopped = 0, 0, [], None
+        self._msgs: set[str] = set()
+
+    def ok(self) -> None:
+        self.streak = 0
+
+    def fail(self, sid, exc) -> bool:
+        msg = f"{type(exc).__name__}: {exc}"[:300]
+        self.failed += 1
+        self.streak += 1
+        self._msgs.add(msg)
+        if len(self.errors) < 3:
+            self.errors.append(f"scene {sid}: {msg}")
+        if self.streak >= FAIL_FAST and len(self._msgs) == 1 and self.failed == self.streak:
+            self.stopped = f"every scene failed the same way — {msg}"
+            return True
+        return False
+
+    def summary(self) -> dict:
+        return {"failed": self.failed, "first_errors": self.errors, "stopped": self.stopped}
+
+
 class HearMixin:
     # --- settings / state ----------------------------------------------------------------
 
@@ -88,7 +118,7 @@ class HearMixin:
         except Exception:  # noqa: BLE001
             heard = total = None
         return {"heard": heard, "embedded": total, "settings": self.hear_settings(),
-                "error": getattr(self, "_hear_error", None)}
+                "error": getattr(self, "_hear_error", None), "last_run": self.sense_last_run("hear")}
 
     def hear_due(self) -> bool:
         return self.hear_settings()["on"] and bool(self.hear_todo())
@@ -156,26 +186,61 @@ class HearMixin:
             self._hear_error = str(exc)
             raise
         self._hear_error = None
-        done = silent = failed = 0
+        done = silent = 0
+        run = SenseRun()
         t0 = time.time()
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
                 log("stopped — the rest waits for the next run")
+                run.stopped = "you stopped it"
                 break
             try:
                 r = self.hear_scene(row, embedder)
                 done += 1
                 silent += bool(r.get("no_audio"))
+                run.ok()
             except Exception as exc:  # noqa: BLE001 — one unreadable file mustn't stop the run
-                failed += 1
                 log(f"scene {row['scene_id']}: {exc}")
+                if run.fail(row["scene_id"], exc):           # the same failure every time: stop, say so
+                    self._hear_error = run.stopped
+                    log(run.stopped)
+                    break
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
-        log(f"heard {done} scene(s){f', {silent} without sound' if silent else ''}{f', {failed} unreadable' if failed else ''}")
+        log(f"heard {done} scene(s){f', {silent} without sound' if silent else ''}{f', {run.failed} unreadable' if run.failed else ''}")
+        self._sense_record("hear", {"done": done, "silent": silent, **run.summary()})
         del embedder
-        self._senses_retrain(log)
-        return {"heard": done, "silent": silent, "failed": failed}
+        if done > silent:
+            self._senses_retrain(log)
+        return {"heard": done, "silent": silent, "failed": run.failed}
+
+    # --- what the last run did, for the Lab cards -----------------------------------------
+
+    def _senses_runs_path(self):
+        return self._state_dir() / "senses_runs.json"
+
+    def _sense_record(self, kind: str, rec: dict) -> None:
+        import json
+
+        from .. import atomic
+
+        p = self._senses_runs_path()
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        d[kind] = {"at": time.time(), **rec}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        atomic.write_json(p, d, indent=1)
+
+    def sense_last_run(self, kind: str) -> dict | None:
+        import json
+
+        try:
+            return json.loads(self._senses_runs_path().read_text()).get(kind)
+        except (OSError, ValueError):
+            return None
 
     def _senses_retrain(self, log) -> None:
         """New sense data: the moment model and the tier model re-decide what helps."""
