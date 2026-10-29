@@ -163,3 +163,19 @@ def test_dinov3_names_and_a_clear_licence_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(AutoModel=AutoModel))
     with pytest.raises(E.DinoV3Unavailable, match="HF_TOKEN"):
         E.get_embedder("dino", model_name="dinov3_vitl16")
+
+
+def test_the_sample_is_held_at_half_precision_without_changing_the_verdict(tmp_path, monkeypatch):
+    """The trial keeps the sample in float16 (half the memory) and widens one scene
+    at a time to score — the same numbers as scoring float32 copies."""
+    svc, _, saved, _, _ = _lab_svc(tmp_path, monkeypatch)
+    rows = svc.lab_sample()
+    svc._lab_embed(CAND, rows)
+    half = svc._lab_vectors(NS, rows)
+    assert half and all(v.dtype == np.float16 for _, v in half.values())
+    full = {k: (t, v.astype(np.float32)) for k, (t, v) in half.items()}
+    graded = [r for r in rows if r["scene_id"] in half]
+    g16, g32 = svc._lab_grading(half, graded), svc._lab_grading(full, graded)
+    assert g16["accuracy"] == g32["accuracy"] and abs(g16["log_loss"] - g32["log_loss"]) < 1e-3
+    m16, m32 = svc._lab_moments(half, saved, set(half)), svc._lab_moments(full, saved, set(half))
+    assert {k: m16[k] for k in ("top1", "top3", "tight")} == {k: m32[k] for k in ("top1", "top3", "tight")}

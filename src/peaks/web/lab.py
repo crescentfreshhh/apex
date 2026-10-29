@@ -185,7 +185,8 @@ class LabMixin:
             t, v, _ = cache.load(k, ns)
             if len(t):
                 v = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
-                out[r["scene_id"]] = (np.asarray(t, np.float32), v.astype(np.float32))
+                # float16 halves the sample held in memory; scoring widens one scene at a time
+                out[r["scene_id"]] = (np.asarray(t, np.float32), v.astype(np.float16))
         return out
 
     # --- judging -------------------------------------------------------------------------------
@@ -233,7 +234,7 @@ class LabMixin:
                     items.append((sid, s))
         if len(items) < MIN_SAVES or len(set(owner)) < 2:
             return None
-        B, owner = np.stack(bank), np.array(owner)
+        B, owner = np.stack(bank).astype(np.float32), np.array(owner)
         top1 = top3 = tight = 0
         found = []
         picks_of: dict[str, list[float]] = {}
@@ -241,7 +242,7 @@ class LabMixin:
             if sid not in picks_of:
                 t, v = vecs[sid]
                 others = owner != sid
-                score = (v @ B[others].T).max(axis=1) if others.any() else np.zeros(len(t))
+                score = (v.astype(np.float32) @ B[others].T).max(axis=1) if others.any() else np.zeros(len(t))
                 picks: list[float] = []
                 for j in np.argsort(-score):
                     if all(abs(float(t[j]) - p) >= PICK_GAP for p in picks):
@@ -336,10 +337,11 @@ class LabMixin:
         paired = self._lab_paired(side["current"]["grading"], side["candidate"]["grading"])
         paired_m = self._lab_paired(side["current"]["moments"], side["candidate"]["moments"])
         verdict = self._lab_verdict(dino_label(cand), side["current"], side["candidate"], paired, paired_m)
+        sample_frames = sum(len(v[0]) for v in new_v.values())
+        del cur_v, new_v                                # the sample's frames go back before anything else runs
         # the switch estimate: the candidate's measured speed over the whole library
         idx = self.index(self._model_name())
         fps = (speed["frames"] / speed["seconds"]) if speed["frames"] and speed["seconds"] else None
-        sample_frames = sum(len(v[0]) for v in new_v.values())
         est = (max(0, idx.size - sample_frames) / fps / 3600) if fps else None
         trial = {"candidate": cand, "against": active, "against_label": dino_label(active), "at": time.time(), "scenes": len(both),
                  "current": side["current"], "new": side["candidate"], "paired": paired, "paired_moments": paired_m,
