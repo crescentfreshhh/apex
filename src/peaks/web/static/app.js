@@ -64,7 +64,7 @@ function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
 const VIEWS = ["foryou", "board", "explore", "performers", "studios", "upgrades", "floor", "catalogue", "review", "dupes",
-  "statistics", "taste", "activity", "seedbox", "dashboard", "perfreview"];
+  "statistics", "lab", "taste", "activity", "seedbox", "dashboard", "perfreview"];
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
   if (!VIEWS.includes(name)) name = "foryou";
@@ -97,6 +97,7 @@ function go(name) {
   if (name === "dupes") openDupes();
   if (name === "statistics") openStatistics();
   if (name === "taste") openTaste();
+  if (name === "lab") openLabPage();
   if (name === "dashboard") { loadTierNames(); loadTierTags(); }
   if (name === "seedbox") openSeedbox();
   if (name === "perfreview") openPerfReview();
@@ -2347,8 +2348,8 @@ function renderStatistics(st, metrics, storage) {
       </div>`;
   }
 
-  body.innerHTML = '<div id="settle-card"></div>' + buildCard + freshCard + perfCard + sceneCard + coverageCard + storageCard(storage);
-  loadSettleCard();
+  body.innerHTML = '<div id="settle-mini"></div>' + buildCard + freshCard + perfCard + sceneCard + coverageCard + storageCard(storage);
+  loadSettleMini();
 
   const slider = $("#stats-floor");
   if (slider) {
@@ -3066,7 +3067,7 @@ document.addEventListener("click", (ev) => {
     const v = say.parentElement.querySelector("[data-arg-say]").value.trim(); if (!v) return;
     api("/api/concepts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: v }) })
       .then(async (c) => {
-        go("taste"); document.querySelector('#taste-tabs [data-tab="concepts"]')?.click();
+        labTab("concepts");
         await loadConcepts(true); cxTeach(c.slug);
         toast(`“${c.name}” — mark a few frames and Peaks learns it`);
       }).catch((err) => toast(err.message, true));
@@ -3134,6 +3135,13 @@ document.addEventListener("mouseout", (ev) => {
 });
 
 // --- settling the library: the questions left ------------------------------------------------
+async function loadSettleMini() {                 // Insights → Overview: one line, the card lives in the Lab
+  const box = $("#settle-mini"); if (!box) return;
+  let d; try { d = await api("/api/settle"); } catch { return; }
+  if (!d.ok) return;
+  box.innerHTML = `<p class="small settle-mini"><b>${(d.unsettled || 0).toLocaleString()}</b> question${d.unsettled === 1 ? "" : "s"} left before your library is settled ·
+    <a href="#/lab" data-lab-tab="settle">Lab → Settle</a></p>`;
+}
 async function loadSettleCard() {
   const box = $("#settle-card"); if (!box) return;
   let d;
@@ -3283,6 +3291,193 @@ document.addEventListener("click", async (e) => {
     catch (err) { toast(err.message, true); }
     openMoments();
   }
+});
+
+// --- the Lab page: everything experimental in one place ---------------------------------------
+let labCur = "sound";
+function openLabPage() { labShow(labCur); }
+function labShow(t) {
+  labCur = t;
+  if (t === "sound" || t === "motion") sxOpen(t);
+  else { sxStop(); }
+  if (t === "concepts") loadConcepts(true);
+  if (t === "moments") openMoments();
+  if (t === "models") openLab();
+  if (t === "settle") loadSettleCard();
+}
+wireTabs("#labx-tabs", labShow);
+function labTab(t) {
+  go("lab");
+  document.querySelector(`#labx-tabs [data-tab="${t}"]`)?.click();
+}
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-lab-tab]"); if (!a) return;
+  e.preventDefault(); labTab(a.dataset.labTab);
+});
+
+// --- Lab → Sound / Motion: one clip at a time, "more of this" / "less of this" ------------------
+const SX = {};
+const SX_WORD = { sound: { start: "Start listening", verb: "heard", api: "/api/hear", run: "Hearing" },
+                  motion: { start: "Start watching", verb: "seen", api: "/api/motion", run: "Motion" } };
+function sxS(sense) {
+  return SX[sense] ||= { mode: "discover", concept: null, deck: [], i: 0, more: 0, less: 0, started: false, hist: [], taste: null };
+}
+function sxStop() { for (const k of ["sound", "motion"]) { const v = $(`#sx-v-${k}`); if (v) v.pause(); } }
+async function sxOpen(sense) {
+  sxStop();
+  const box = $(`#sx-${sense}`); if (!box) return;
+  const st = sxS(sense);
+  if (!box.dataset.built) {
+    box.dataset.built = "1";
+    box.innerHTML = `<div class="sx-grid">
+      <div class="sx-main">
+        <div class="seg sx-modes" data-sx-sense="${sense}"></div>
+        <div class="sx-player"><video id="sx-v-${sense}" playsinline preload="auto"></video>
+          <div class="sx-start"><button class="btn pri xl" data-sx-start="${sense}">▶ ${SX_WORD[sense].start}</button>
+            <p class="faint small">${sense === "sound" ? "Sound on — each clip is about 10 seconds." : "Each clip is about 8 seconds."}</p></div></div>
+        <div class="sx-meta"><b class="sx-title"></b><span class="sx-why faint small"></span><span class="grow"></span><span class="sx-count faint small"></span></div>
+        <div class="sx-ctl">
+          <button class="btn sx-less" data-sx="less" data-sense="${sense}">◀ Less of this <kbd>H</kbd></button>
+          <button class="btn ghost" data-sx="skip" data-sense="${sense}">Skip <kbd>S</kbd></button>
+          <button class="btn pri sx-more" data-sx="more" data-sense="${sense}">More of this ▶ <kbd>L</kbd></button></div>
+        <div class="sx-ctl2"><button class="btn ghost sm" data-sx="replay" data-sense="${sense}">↺ Again <kbd>R</kbd></button>
+          <button class="btn ghost sm" data-sx="undo" data-sense="${sense}">Undo <kbd>Z</kbd></button>
+          <button class="btn ghost sm" data-sx="open" data-sense="${sense}">Open the scene</button></div>
+        <div class="sx-strip"></div>
+      </div>
+      <aside class="sx-side card pad"></aside></div>`;
+  }
+  await sxSide(sense);
+  if (!st.deck.length) await sxLoad(sense, true);
+  sxRender(sense);
+}
+async function sxLoad(sense, reset) {
+  const st = sxS(sense);
+  const qs = new URLSearchParams({ mode: st.mode, n: 12 });
+  if (st.mode === "teach" && st.concept) qs.set("concept", st.concept);
+  let d; try { d = await api(`/api/lab/${sense}/deck?` + qs); } catch (e) { toast(e.message, true); return; }
+  st.note = d.note || d.reason || "";
+  if (d.taste) st.taste = d.taste;
+  const have = new Set(st.deck.map((x) => x.scene_id + "@" + x.t));
+  const fresh = d.items.filter((x) => !have.has(x.scene_id + "@" + x.t));
+  if (reset) { st.deck = fresh; st.i = 0; } else st.deck.push(...fresh);
+}
+function sxModes(sense) {
+  const st = sxS(sense), el = document.querySelector(`.sx-modes[data-sx-sense="${sense}"]`); if (!el) return;
+  const cs = (st.concepts || []);
+  el.innerHTML = `<span data-sx-mode="discover" class="${st.mode === "discover" ? "on" : ""}">Discover</span>
+    <span data-sx-mode="more" class="${st.mode === "more" ? "on" : ""}">More like my picks</span>
+    ${st.mode === "teach" && st.concept ? `<span class="on">Teach “${esc((cs.find((c) => c.slug === st.concept) || {}).name || st.concept)}”</span>` : ""}`;
+}
+function sxRender(sense) {
+  const st = sxS(sense), box = $(`#sx-${sense}`); if (!box) return;
+  sxModes(sense);
+  const it = st.deck[st.i], v = $(`#sx-v-${sense}`);
+  box.querySelector(".sx-start").hidden = st.started;
+  box.querySelector(".sx-title").textContent = it ? it.title : (st.note || "Nothing to play yet");
+  box.querySelector(".sx-why").textContent = it ? ` · ${fmt(it.start)}–${fmt(it.end)} · ${it.why}` : "";
+  box.querySelector(".sx-count").textContent = `${st.more} more · ${st.less} less this session`;
+  box.querySelectorAll("[data-sx]").forEach((b) => { b.disabled = !it && b.dataset.sx !== "undo"; });
+  box.querySelector(".sx-strip").innerHTML = st.deck.slice(st.i + 1, st.i + 9).map((x, k) =>
+    `<button class="sx-thumb" data-sx-jump="${st.i + 1 + k}" data-sense="${sense}" title="${esc(x.title)} · ${fmt(x.start)}">
+      ${x.thumb ? `<img loading="lazy" src="${x.thumb}" alt="" onerror="this.style.visibility='hidden'" />` : ""}<span>${fmt(x.start)}</span></button>`).join("");
+  if (st.note && it) box.querySelector(".sx-why").textContent += ` · ${st.note}`;
+  if (it && st.started) sxPlay(sense, it, v);
+}
+function sxPlay(sense, it, v) {
+  if (v.dataset.src !== it.stream) { v.dataset.src = it.stream; v.src = it.stream; }
+  const go2 = () => { try { v.currentTime = it.start; } catch {} v.play().catch(() => {}); };
+  if (v.readyState >= 1) go2(); else v.addEventListener("loadedmetadata", go2, { once: true });
+  v.ontimeupdate = () => {
+    if (v.currentTime >= it.end) { v.pause(); v.closest(".sx-player").classList.add("asks"); }
+    else v.closest(".sx-player").classList.remove("asks");
+  };
+}
+async function sxSide(sense) {
+  const st = sxS(sense);
+  let t = null, cov = null;
+  try { t = await api(`/api/lab/${sense}/taste`); } catch {}
+  try { cov = await api(SX_WORD[sense].api); } catch {}
+  st.taste = t; st.concepts = (t && t.concepts) || [];
+  const side = document.querySelector(`#sx-${sense} .sx-side`); if (!side) return;
+  const c = cov ? (cov.heard ?? cov.seen) : null;
+  side.innerHTML = `<h3>Your ${sense} taste</h3>
+    <p class="small">${t ? (t.trained ? `Learned from <b>${t.likes}</b> more · ${t.dislikes} less.` : `Not yet — mark <b>${t.needs}</b> more “more of this”.`) : "—"}</p>
+    <p class="faint small">It steers “More like my picks”, and Peaks' picks use it where it helps on your library.</p>
+    <div class="row"><input id="sx-name-${sense}" placeholder="Save my likes as… (e.g. ${sense === "sound" ? "breathless" : "slow grind"})" maxlength="60" />
+      <button class="btn sm" data-sx-save="${sense}">Save</button></div>
+    <h3>Named ${sense} concepts</h3>
+    ${st.concepts.length ? st.concepts.map((x) => `<div class="sx-cx"><b>${esc(x.name)}</b><span class="faint small">${x.yes} more · ${x.no} less</span>
+      <span class="grow"></span><button class="btn sm ghost" data-sx-teach="${esc(x.slug)}" data-sense="${sense}">Teach</button>
+      <button class="btn sm ghost" data-sx-cat="${esc(x.slug)}">In Catalogue</button>
+      <button class="btn sm ghost" data-sx-del="${esc(x.slug)}" data-sense="${sense}" title="Forget it">✕</button></div>`).join("")
+      : `<p class="faint small">None yet. Save your likes under a word and search it as <code>${sense}: word</code>.</p>`}
+    <h3>Coverage</h3>
+    <p class="small">${c != null ? `${c.toLocaleString()} of ${(cov.embedded || 0).toLocaleString()} scenes ${SX_WORD[sense].verb}` : "—"}</p>
+    ${cov && cov.error ? `<p class="small lab-err">${esc(cov.error)}</p>` : ""}
+    <button class="btn sm ghost" data-sense-run="${sense}">Run ${SX_WORD[sense].run} now</button>`;
+}
+async function sxAnswer(sense, label) {
+  const st = sxS(sense), it = st.deck[st.i]; if (!it) return;
+  if (label) {
+    st.hist.push({ it, i: st.i, label });
+    if (label > 0) st.more++; else st.less++;
+    api(`/api/lab/${sense}/mark`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_id: it.scene_id, t: it.t, label, concept: st.mode === "teach" ? st.concept : null }) })
+      .then((t) => { st.taste = t; if (label > 0 && t.trained && st.mode === "discover" && t.likes === 3) toast("Peaks has a first idea of your taste — try “More like my picks”"); })
+      .catch((e) => toast(e.message, true));
+  }
+  st.i++;
+  if (st.deck.length - st.i < 4) await sxLoad(sense, false);
+  sxRender(sense);
+}
+async function sxUndo(sense) {
+  const st = sxS(sense), h = st.hist.pop(); if (!h) return;
+  if (h.label > 0) st.more--; else st.less--;
+  try { await api(`/api/lab/${sense}/mark`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scene_id: h.it.scene_id, t: h.it.t, label: 0, concept: st.mode === "teach" ? st.concept : null }) }); } catch {}
+  st.deck.splice(st.i, 0, h.it); sxRender(sense);
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-sx],[data-sx-start],[data-sx-mode],[data-sx-jump],[data-sx-save],[data-sx-teach],[data-sx-cat],[data-sx-del]");
+  if (!b) return;
+  const sense = b.dataset.sense || b.dataset.sxStart || b.dataset.sxSave || b.closest("[data-sx-sense]")?.dataset.sxSense
+    || (b.closest(".sx") || {}).id?.replace("sx-", "");
+  const st = sxS(sense);
+  if (b.dataset.sxStart) { st.started = true; sxRender(sense); }
+  else if (b.dataset.sxMode) { st.mode = b.dataset.sxMode; st.concept = null; await sxLoad(sense, true); sxRender(sense); }
+  else if (b.dataset.sxJump) { st.i = +b.dataset.sxJump; st.started = true; sxRender(sense); }
+  else if (b.dataset.sxTeach) { st.mode = "teach"; st.concept = b.dataset.sxTeach; st.started = true; await sxLoad(sense, true); sxRender(sense); }
+  else if (b.dataset.sxCat) { await loadConcepts(); cat.view = ""; cat.tier = ""; go("catalogue"); $("#cat-sort").value = "concept:" + b.dataset.sxCat; openCatalogue(); }
+  else if (b.dataset.sxDel) {
+    try { await api(`/api/concepts/${encodeURIComponent(b.dataset.sxDel)}`, { method: "DELETE" }); } catch (err) { toast(err.message, true); }
+    sxSide(sense); loadConcepts();
+  } else if (b.dataset.sxSave) {
+    const inp = $(`#sx-name-${sense}`), v = inp.value.trim(); if (!v) return inp.focus();
+    try { const c = await api(`/api/lab/${sense}/concepts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: v }) });
+      toast(`Saved “${c.name}” — search it as ${sense}: ${c.name}`); inp.value = ""; sxSide(sense); loadConcepts();
+    } catch (err) { toast(err.message, true); }
+  } else {
+    const a = b.dataset.sx, it = st.deck[st.i];
+    if (a === "more") sxAnswer(sense, 1);
+    else if (a === "less") sxAnswer(sense, -1);
+    else if (a === "skip") sxAnswer(sense, 0);
+    else if (a === "undo") sxUndo(sense);
+    else if (a === "replay" && it) { st.started = true; sxRender(sense); }
+    else if (a === "open" && it) { sxStop(); openViewer({ scene_id: it.scene_id, stream: it.stream, key: (it.thumb || "").split("key=")[1]?.split("&")[0], time: it.start }); }
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (!$("#lab")?.classList.contains("active") || !["sound", "motion"].includes(labCur)) return;
+  if (e.target.closest("input,textarea,select") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const st = sxS(labCur); if (!st.started) return;
+  const k = e.key.toLowerCase();
+  if (k === "l" || k === "arrowright") { e.preventDefault(); sxAnswer(labCur, 1); }
+  else if (k === "h" || k === "arrowleft") { e.preventDefault(); sxAnswer(labCur, -1); }
+  else if (k === "s") { e.preventDefault(); sxAnswer(labCur, 0); }
+  else if (k === "z") { e.preventDefault(); sxUndo(labCur); }
+  else if (k === "r") { e.preventDefault(); sxRender(labCur); }
+  else if (k === " ") { e.preventDefault(); const v = $(`#sx-v-${labCur}`); if (v.paused) v.play().catch(() => {}); else v.pause(); }
 });
 
 // --- the Lab: a new model has to beat the current one on your library first ---------------------
@@ -4219,15 +4414,17 @@ async function loadConcepts(render = false) {
   if (sel) {
     const cur = sel.value;
     sel.querySelectorAll("option[data-cx]").forEach((o) => o.remove());
-    for (const c of cxTrained()) sel.insertAdjacentHTML("beforeend", `<option data-cx value="concept:${esc(c.slug)}">Most “${esc(c.name)}”</option>`);
+    for (const c of cxTrained()) sel.insertAdjacentHTML("beforeend", `<option data-cx value="concept:${esc(c.slug)}">Most ${CX_ICON[c.kind] || ""}“${esc(c.name)}”</option>`);
     if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
   }
   if (render) renderConcepts();
 }
 loadConcepts();
+const CX_ICON = { sound: "🔊 ", motion: "〰 " };
 function renderConcepts() {
   const box = $("#cx-list"); if (!box) return;
-  box.innerHTML = cxList.length ? cxList.map((c) => `<div class="cx-row" data-cx="${esc(c.slug)}">
+  const vis = cxList.filter((c) => (c.kind || "visual") === "visual");   // sound & motion concepts live in their explorers
+  box.innerHTML = vis.length ? vis.map((c) => `<div class="cx-row" data-cx="${esc(c.slug)}">
       <b>${esc(c.name)}</b>
       <span class="faint small">${c.yes} yes · ${c.no} no${c.accuracy != null ? ` · right ${Math.round(c.accuracy * 100)}% on marks it didn't learn from` : ""}</span>
       <span class="cx-rel ${c.reliability === "taught well" ? "ok" : c.reliability === "getting there" ? "mid" : ""}">${esc(c.reliability)}</span>
@@ -5812,7 +6009,7 @@ const CMDS = [
   ["For You", "page", () => go("foryou")], ["Megaboard", "page", () => go("board")],
   ["Search moments", "page", () => go("explore")], ["Performers", "page", () => go("performers")],
   ["Catalogue", "page", () => go("catalogue")], ["Review queue", "page", () => go("review")],
-  ["Duplicates", "page", () => go("dupes")], ["Insights", "page", () => go("statistics")],
+  ["Duplicates", "page", () => go("dupes")], ["Insights", "page", () => go("statistics")], ["Lab", "page", () => go("lab")],
   ["Taste — teach", "page", () => go("taste")], ["Activity", "page", () => go("activity")],
   ["Settings", "page", () => go("dashboard")],
   ["Ingest new files", "run", () => { go("activity"); startIngest(); }],
@@ -6730,7 +6927,7 @@ async function checkWarm(start) {
     if (warmWasLoading) {                       // it just finished: fill the open page
       warmWasLoading = false;
       const v = document.querySelector(".view.active")?.id;
-      if (v && ["foryou", "board", "explore", "performers", "statistics", "taste"].includes(v)) go(v);
+      if (v && ["foryou", "board", "explore", "performers", "statistics", "lab", "taste"].includes(v)) go(v);
     }
   }
 }

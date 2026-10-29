@@ -24,9 +24,10 @@ from ..audio import ENV_FEATURES, decode_audio, envelope
 
 CLAP_NS, ENV_NS = "clap-audio", "audio-env"
 HEAR_PER_RUN = 300
-SOUND_FEATURES: tuple[str, ...] = ("loud_peak", "loud_rise", "onset_mean", "rhythm", "sound_taste")
+SOUND_FEATURES: tuple[str, ...] = ("loud_peak", "loud_rise", "onset_mean", "rhythm", "sound_taste", "sound_like")
 SOUND_WORDS = {"loud_peak": "loud", "loud_rise": "it gets louder", "onset_mean": "a lot happening",
-               "rhythm": "a steady rhythm", "sound_taste": "sounds like your moments"}
+               "rhythm": "a steady rhythm", "sound_taste": "sounds like your moments",
+               "sound_like": "sounds like what you picked in the Lab"}
 BATCH = 16
 
 
@@ -248,7 +249,8 @@ class HearMixin:
                 taste = float((cv[cm] @ bank[0][others].T).max())
         return {"loud_peak": float(loud[m].max() - np.median(loud)), "loud_rise": rise,
                 "onset_mean": float(ef[m, ENV_FEATURES.index("onset")].mean()),
-                "rhythm": float(ef[m, ENV_FEATURES.index("rhythm")].mean()), "sound_taste": taste}
+                "rhythm": float(ef[m, ENV_FEATURES.index("rhythm")].mean()), "sound_taste": taste,
+                **self.sense_window_likes("sound", sid, centre, half)}
 
     def sound_scene_vector(self, sid: str) -> np.ndarray | None:
         """[unit mean of all CLAP blocks, unit mean of the loudest 10 %] — the tier model's sound group."""

@@ -721,8 +721,18 @@ def create_app(cfg=None):
         q: str, top_k: int = 60, taste: bool = False, per_scene: int = 3,
         min_score: float = 0.0, neg_weight: float = 0.5, enrich: int = 300,
     ):
-        if q.strip().lower().startswith("sound:"):           # search what scenes sound like
-            return search_sound(q.split(":", 1)[1].strip(), top_k=top_k, enrich=enrich)
+        head, _, rest = q.partition(":")
+        if head.strip().lower() in ("sound", "motion") and rest.strip():
+            sense, what = head.strip().lower(), rest.strip()
+            key = service.sense_concept_key(sense, what)      # one of your named sound / motion concepts
+            if key:
+                out = _search_payload(service, service.sense_concept_search(key, top_k=top_k), enrich=enrich)
+                out["concept"] = what
+                out[sense] = what
+                return out
+            if sense == "sound":                               # else: what it sounds like, in words
+                return search_sound(what, top_k=top_k, enrich=enrich)
+            raise HTTPException(404, f"no motion concept called “{what}” — save one in Lab → Motion")
         # one of your trained concepts, by name: search with what Peaks learned from you
         slug = next((s for s, nm in service.trained_concepts() if nm.strip().lower() == q.strip().lower()), None)
         if slug:
@@ -776,6 +786,42 @@ def create_app(cfg=None):
     @app.post("/api/hear/settings")
     def hear_settings(body: dict = Body(...)):
         return service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
+
+    # --- the Lab's explorers: more of this / less of this ---------------------------
+
+    def _sense_ok(sense: str):
+        if sense not in ("sound", "motion"):
+            raise HTTPException(404, "unknown sense")
+
+    @app.get("/api/lab/{sense}/deck")
+    def lab_deck(sense: str, mode: str = "discover", n: int = Query(12, ge=1, le=40), concept: str | None = None):
+        _sense_ok(sense)
+        try:
+            return service.sense_deck(sense, mode=mode, n=n, concept=concept)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/lab/{sense}/mark")
+    def lab_mark(sense: str, body: dict = Body(...)):
+        _sense_ok(sense)
+        try:
+            return service.sense_mark(sense, str(body["scene_id"]), float(body["t"]), int(body.get("label", 1)),
+                                      concept=body.get("concept") or None)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/lab/{sense}/taste")
+    def lab_taste(sense: str):
+        _sense_ok(sense)
+        return {**service.sense_taste(sense), "concepts": service.sense_concepts(sense)}
+
+    @app.post("/api/lab/{sense}/concepts")
+    def lab_concept_save(sense: str, body: dict = Body(...)):
+        _sense_ok(sense)
+        try:
+            return service.sense_concept_save(sense, body.get("name", ""))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
 
     # --- motion: Peaks watches how moments move -------------------------------------
 

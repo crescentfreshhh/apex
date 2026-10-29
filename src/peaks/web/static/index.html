@@ -36,6 +36,7 @@
     <button class="nav tab" data-view="floor"><span class="ic">▦</span>Floor<span class="ct hot" id="nav-ct-floor" hidden></span></button>
     <button class="nav tab" data-view="upgrades"><span class="ic">⬆</span>Upgrades<span class="ct hot" id="nav-ct-upg" hidden></span></button>
     <button class="nav tab" data-view="statistics"><span class="ic">◔</span>Insights</button>
+    <button class="nav tab" data-view="lab"><span class="ic">⚗</span>Lab</button>
     <div class="grp">Taste</div>
     <button class="nav tab" data-view="taste"><span class="ic">✦</span>Taste</button>
     <div class="grp">System</div>
@@ -105,18 +106,10 @@
       </div>
     </div>
     <div class="card pad tq" id="taste-quality"></div>
+    <p class="faint small moved">Concepts moved to the <a href="#/lab" data-lab-tab="concepts">Lab →</a></p>
     <div class="seg tabs" id="taste-tabs">
       <span class="on" data-tab="teach">Teach</span><span data-tab="picker">Picker</span>
-      <span data-tab="labels">Labels</span><span data-tab="concepts">Concepts</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
-    </div>
-    <div class="panel" id="cx-panel" data-pane="concepts" hidden>
-      <p class="cap">Name something you look for, in your own words — “close framing”, “slow build”, “flat lighting” — then mark a few frames
-        yes or no. Peaks learns it, uses it in search and Catalogue filters, and argues in it when it explains a grade (only when it
-        really separates your tiers).</p>
-      <div class="row"><input id="cx-new" placeholder="A new concept, in your words…" maxlength="60" style="min-width:280px" />
-        <button id="cx-add" class="btn pri sm">Teach it</button></div>
-      <div id="cx-list" class="cx-list"></div>
-      <div id="cx-teach" class="cx-teach" hidden></div>
+      <span data-tab="labels">Labels</span><span data-tab="picture">Picture</span><span data-tab="manage">Undo &amp; reset</span>
     </div>
     <div class="panel" id="pic-panel" data-pane="picture" hidden>
       <div class="seg pic-mode" id="pic-mode"><span class="on" data-mode="pair">Compare two</span><span data-mode="one">Rate one</span></div>
@@ -430,16 +423,35 @@
     </div>
   </section>
 
+  <!-- LAB: everything experimental — explore sound & motion, concepts, moments, models, settling -->
+  <section id="lab" class="view">
+    <div class="head"><h1>Lab</h1><span class="sub2">Teach Peaks what you like the sound and movement of, and see what it's learning.</span></div>
+    <div class="seg tabs" id="labx-tabs"><span class="on" data-tab="sound">Sound</span><span data-tab="motion">Motion</span><span data-tab="concepts">Concepts</span><span data-tab="moments">Moments</span><span data-tab="models">Models &amp; senses</span><span data-tab="settle">Settle</span></div>
+    <div id="sx-sound" class="sx" data-pane="sound"><p class="dim">Loading…</p></div>
+    <div id="sx-motion" class="sx" data-pane="motion" hidden><p class="dim">Loading…</p></div>
+    <div class="panel" id="cx-panel" data-pane="concepts" hidden>
+      <p class="cap">Name something you look for, in your own words — “close framing”, “slow build”, “flat lighting” — then mark a few frames
+        yes or no. Peaks learns it, uses it in search and Catalogue filters, and argues in it when it explains a grade (only when it
+        really separates your tiers).</p>
+      <div class="row"><input id="cx-new" placeholder="A new concept, in your words…" maxlength="60" style="min-width:280px" />
+        <button id="cx-add" class="btn pri sm">Teach it</button></div>
+      <div id="cx-list" class="cx-list"></div>
+      <div id="cx-teach" class="cx-teach" hidden></div>
+    </div>
+    <div id="moments-body" data-pane="moments" hidden><p class="dim">Checking Peaks' picks…</p></div>
+    <div id="lab-body" data-pane="models" hidden><p class="dim">Opening the Lab…</p></div>
+    <div data-pane="settle" hidden><div id="settle-card"><p class="dim">Counting…</p></div></div>
+  </section>
+
   <!-- INSIGHTS: statistics + storage + taste coverage -->
   <section id="statistics" class="view">
     <div class="head"><h1>Insights</h1><span id="stats-status" class="sub2"></span><span class="grow"></span>
       <button id="btn-stats-refresh" class="btn ghost" title="Recompute">↻ Refresh</button></div>
-    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="arbiter">Arbiter</span><span data-tab="moments">Moments</span><span data-tab="health">Library health</span><span data-tab="coverage">Taste coverage</span><span data-tab="lab">Lab</span></div>
+    <div class="seg tabs" id="ins-tabs"><span class="on" data-tab="overview">Overview</span><span data-tab="arbiter">Arbiter</span><span data-tab="health">Library health</span><span data-tab="coverage">Taste coverage</span></div>
+    <p class="faint small moved">Moments, model trials, sound &amp; motion and settling are in the <a href="#/lab" data-lab-tab="sound">Lab →</a></p>
     <div id="stats-body" class="dim" data-pane="overview">Crunching your library…</div>
     <div id="arbiter-body" data-pane="arbiter" hidden><p class="dim">Asking for honest verdicts…</p></div>
-    <div id="moments-body" data-pane="moments" hidden><p class="dim">Checking Peaks' picks…</p></div>
     <div id="health-body" data-pane="health" hidden><p class="dim">Reading your library…</p></div>
-    <div id="lab-body" data-pane="lab" hidden><p class="dim">Opening the Lab…</p></div>
     <div id="experimental" data-pane="coverage" hidden>
       <div class="toolbar">
         <label id="exp-floor-wrap" class="muted" title="A scene counts as 'covered' if its best moment scores at or above this. Shared with the board + Statistics.">Taste floor

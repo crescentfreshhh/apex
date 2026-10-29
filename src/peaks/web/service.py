@@ -44,6 +44,7 @@ from .lab import LabMixin
 from .settle import FAST_RETRAIN, SettleMixin
 from .hear import HearMixin
 from .motion import MotionMixin
+from .senses_explore import SenseExploreMixin
 
 
 class IndexMemoryError(RuntimeError):
@@ -59,7 +60,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
-              HearMixin, MotionMixin):
+              HearMixin, MotionMixin, SenseExploreMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}

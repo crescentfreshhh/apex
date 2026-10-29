@@ -95,13 +95,22 @@ class ConceptsMixin:
     # --- the list ------------------------------------------------------------------------
 
     def concepts(self) -> list[dict]:
+        """Visual concepts, then your named sound / motion concepts (kind tells them apart)."""
+        out = self._visual_concepts()
+        try:
+            out += self.sense_concepts()
+        except Exception:  # noqa: BLE001 — the senses are extra
+            pass
+        return out
+
+    def _visual_concepts(self) -> list[dict]:
         reg = self._cx_reg()
         store = self._cx_store()
         out = []
         for slug, v in sorted(reg.items(), key=lambda kv: kv[1].get("created", 0)):
             pos, neg = store.counts(slug)
             rep = v.get("report") or {}
-            out.append({"slug": slug, "name": v.get("name", slug), "yes": pos, "no": neg,
+            out.append({"slug": slug, "name": v.get("name", slug), "kind": "visual", "yes": pos, "no": neg,
                         "trained": bool(rep.get("trained")), "accuracy": rep.get("accuracy"),
                         "reliability": rep.get("reliability") or reliability(None, pos + neg),
                         "trained_at": rep.get("at")})
@@ -117,9 +126,11 @@ class ConceptsMixin:
             if slug not in reg:
                 reg[slug] = {"name": name, "created": time.time(), "report": None}
                 self._cx_save_reg(reg)
-        return next(c for c in self.concepts() if c["slug"] == slug)
+        return next(c for c in self._visual_concepts() if c["slug"] == slug)
 
     def concept_delete(self, name_or_slug: str) -> dict:
+        if (name_or_slug or "").split(":", 1)[0] in ("sound", "motion"):
+            return self.sense_concept_delete(name_or_slug)
         slug = self._cx_slug_of(name_or_slug)
         from ..labels import LabelStore
 
@@ -265,6 +276,8 @@ class ConceptsMixin:
 
     def concept_scene_scores(self, name_or_slug: str) -> dict[str, float]:
         """scene_id → how strongly the scene shows the concept (mean of its top 10% frames)."""
+        if (name_or_slug or "").split(":", 1)[0] in ("sound", "motion"):
+            return self.sense_concept_scene_scores(name_or_slug)
         slug = self._cx_slug_of(name_or_slug)
         probs = self._cx_frame_probs(slug)
         if probs is None:
@@ -301,4 +314,4 @@ class ConceptsMixin:
 
     def trained_concepts(self) -> list[tuple[str, str]]:
         """[(slug, name)] of concepts with a probe for the active model."""
-        return [(c["slug"], c["name"]) for c in self.concepts() if self._cx_probe(c["slug"]) is not None]
+        return [(c["slug"], c["name"]) for c in self._visual_concepts() if self._cx_probe(c["slug"]) is not None]

@@ -1172,3 +1172,36 @@ body.picks-off .pick-span { display: none !important; }
 .rv-settle.disagree { border-color: var(--gold); }
 .rv-settle span { flex: 1; min-width: 180px; }
 .lab-h { margin: 18px 0 4px; }
+
+/* the Lab page: sound & motion explorers */
+.moved { margin: 4px 0 10px; }
+.sx-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+@media (max-width: 960px) { .sx-grid { grid-template-columns: minmax(0, 1fr); } }
+.sx-main { min-width: 0; display: grid; gap: 10px; }
+.sx-modes { justify-self: start; }
+.sx-player { position: relative; background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; max-width: 100%; }
+.sx-player video { width: 100%; height: 100%; display: block; object-fit: contain; }
+.sx-player.asks { box-shadow: 0 0 0 2px var(--gold); }
+.sx-start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  background: rgba(0, 0, 0, .55); text-align: center; padding: 16px; }
+.sx-start[hidden] { display: none !important; }
+.sx-meta { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.sx-ctl { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; }
+.sx-ctl .btn { padding-block: 12px; font-size: 15px; }
+.sx-ctl2 { display: flex; gap: 8px; flex-wrap: wrap; }
+.sx-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.sx-thumb { flex: 0 0 auto; width: 112px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); padding: 0;
+  cursor: pointer; overflow: hidden; color: var(--dim); font-size: 11px; }
+.sx-thumb img { width: 112px; height: 63px; object-fit: cover; display: block; }
+.sx-thumb span { display: block; padding: 2px 4px; }
+.sx-side h3 { margin: 12px 0 4px; } .sx-side h3:first-child { margin-top: 0; }
+.sx-side .row input { flex: 1; min-width: 0; }
+.sx-cx { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.settle-mini { margin: 0 0 12px; }
+@media (max-width: 600px) {
+  .sx-ctl { grid-template-columns: 1fr 1fr; }
+  .sx-ctl [data-sx="skip"] { grid-column: 1 / -1; order: 3; }
+  .sx-ctl .btn { white-space: normal; }
+  .sx-main kbd { display: none; }
+}
+.sx, .sx-grid, .sx-main > * { min-width: 0; max-width: 100%; }

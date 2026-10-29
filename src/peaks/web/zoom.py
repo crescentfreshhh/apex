@@ -339,7 +339,14 @@ class ZoomMixin:
             shape += [f"concept:{slug}" for slug, _ in self.trained_concepts()]
         except Exception:  # noqa: BLE001
             pass
-        return {"shape": shape, "sound": list(SOUND_FEATURES), "motion": list(MOTION_FEATURES)}
+        sense = {}
+        for k, base in (("sound", SOUND_FEATURES), ("motion", MOTION_FEATURES)):
+            try:
+                extra = self.sense_concept_feature_names(k)        # your named sound / motion concepts
+            except Exception:  # noqa: BLE001
+                extra = []
+            sense[k] = list(base) + extra
+        return {"shape": shape, **sense}
 
     def _zoom_feature_names(self) -> list[str]:
         return [n for cols in self._zoom_feature_groups().values() for n in cols]
@@ -483,7 +490,9 @@ class ZoomMixin:
             if abs(w) < 0.25:
                 continue
             word = WORDS.get(n) or SENSE_WORDS.get(n) or (
-                f"◇ {n.split(':', 1)[1].replace('-', ' ')}" if n.startswith("concept:") else n)
+                f"◇ {n.split(':', 1)[1].replace('-', ' ')}" if n.startswith("concept:")
+                else f"{'🔊' if n.startswith('sound:') else '〰'} {n.split(':', 1)[1].replace('-', ' ')}"
+                if n.startswith(("sound:", "motion:")) else n)
             out.append({"feature": n, "words": word, "weight": round(float(w), 2)})
         return out[:6]
 

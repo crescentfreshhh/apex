@@ -14,6 +14,7 @@ motion group — each kept only where the honest held-out test says it helps.
 
 from __future__ import annotations
 
+import hashlib
 import time
 
 import numpy as np
@@ -24,9 +25,10 @@ CLIP_FRAMES = 16          # frames per clip
 CLIP_FPS = 4.0            # → 4-second clips
 CLIP_EVERY = 4.0          # a clip centred every … seconds across a window
 WINDOW_HALF = 20.0        # the zoom window: ±20 s around a candidate
-MOTION_FEATURES: tuple[str, ...] = ("motion_taste", "motion_change_mean", "motion_change_max")
+MOTION_FEATURES: tuple[str, ...] = ("motion_taste", "motion_change_mean", "motion_change_max", "motion_like")
 MOTION_WORDS = {"motion_taste": "moves like your moments", "motion_change_mean": "the movement keeps changing",
-                "motion_change_max": "a change of pace"}
+                "motion_change_max": "a change of pace", "motion_like": "moves like what you picked in the Lab"}
+EXPLORE_WINDOWS = 2       # extra windows per scene, away from the picks, so the Lab's explorer sees more
 
 
 def cut_clips(frames: list, start: float, fps: float = CLIP_FPS, n: int = CLIP_FRAMES,
@@ -53,7 +55,8 @@ class MotionMixin:
 
     def motion_settings(self) -> dict:
         m = self._settings().get("motion") or {}
-        return {"on": bool(m.get("on", True)), "per_run": int(m.get("per_run") or MOTION_PER_RUN)}
+        return {"on": bool(m.get("on", True)), "per_run": int(m.get("per_run") or MOTION_PER_RUN),
+                "explore_windows": int(m.get("explore_windows", EXPLORE_WINDOWS))}
 
     def save_motion_settings(self, on: bool | None = None, per_run: int | None = None) -> dict:
         s = dict(self._settings())
@@ -87,9 +90,29 @@ class MotionMixin:
                     done = cache.peek_meta(e["key"], MOTION_NS).get("centers")
                 except Exception:  # noqa: BLE001
                     done = None
-            if done is None or sorted(round(c, 1) for c in done) != sorted(round(c, 1) for c in e.get("centers") or []):
+            want = self._motion_centers(sid, e, rows[sid])
+            if done is None or sorted(round(c, 1) for c in done) != sorted(round(c, 1) for c in want):
                 out.append(rows[sid])
         return sorted(out, key=lambda r: r["scene_id"] not in saved)
+
+    def _motion_centers(self, sid: str, entry: dict, row: dict) -> list[float]:
+        """The zoom's candidate windows plus a few explore windows elsewhere in the
+        scene (the same ones every time, from the scene id) — so the Lab's motion
+        explorer isn't limited to Peaks' own picks."""
+        cs = [float(c) for c in entry.get("centers") or []]
+        k = int(self.motion_settings().get("explore_windows", EXPLORE_WINDOWS))
+        dur = float(row.get("duration") or 0)
+        if k <= 0 or dur < 4 * WINDOW_HALF:
+            return cs
+        rng = np.random.default_rng(int(hashlib.sha1(str(sid).encode()).hexdigest()[:8], 16))
+        extra: list[float] = []
+        for _ in range(40):
+            if len(extra) >= k:
+                break
+            c = round(float(rng.uniform(WINDOW_HALF, dur - WINDOW_HALF)), 1)
+            if all(abs(c - x) >= 2 * WINDOW_HALF for x in cs + extra):
+                extra.append(c)
+        return cs + extra
 
     def motion_status(self) -> dict:
         try:
@@ -125,7 +148,8 @@ class MotionMixin:
         if not e:
             raise LookupError(f"scene {sid} isn't zoomed yet")
         times, vecs = [], []
-        for c in e.get("centers") or []:
+        centers = self._motion_centers(sid, e, row)
+        for c in centers:
             start = max(0.0, float(c) - WINDOW_HALF)
             frames = sampler.window_frames(row["path"], start, 2 * WINDOW_HALF, 1.0 / CLIP_FPS, size=embedder.size)
             clips = cut_clips([im for _, im in frames], start)
@@ -138,7 +162,7 @@ class MotionMixin:
         order = np.argsort(times)
         V = np.concatenate(vecs)[order] if vecs else np.zeros((0, embedder.dim), np.float32)
         self._motion_cache().save(e["key"], MOTION_NS, np.asarray(times, np.float32)[order], V,
-                                  meta={"scene_id": sid, "centers": list(e.get("centers") or [])})
+                                  meta={"scene_id": sid, "centers": centers})
         self.__dict__.pop("_motion_bank_cache", None)
         self.__dict__.get("_motion_vec_memo", {}).pop(str(sid), None)
         return {"clips": len(times)}
@@ -226,7 +250,7 @@ class MotionMixin:
             if others.any():
                 taste = float((vw @ bank[0][others].T).max())
         return {"motion_taste": taste, "motion_change_mean": float(change.mean()),
-                "motion_change_max": float(change.max())}
+                "motion_change_max": float(change.max()), **self.sense_window_likes("motion", sid, centre, half)}
 
     def motion_scene_vector(self, sid: str) -> np.ndarray | None:
         memo = self.__dict__.setdefault("_motion_vec_memo", {})
