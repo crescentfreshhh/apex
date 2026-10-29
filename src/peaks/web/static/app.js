@@ -22,7 +22,49 @@ if (INSTALLED) {
 }
 // writes that change what the library-management counts show
 const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train|keep)|verdicts\/|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
-const api = async (path, opts) => {
+// --- the page cache: never wait on a page you've seen ---------------------------
+// GETs remember their last answer (in memory, and in IndexedDB so a reopened app
+// draws at once). `swr(path, render)` draws from that copy immediately and again
+// when the fresh answer differs; identical GETs in flight share one request; a
+// write that changes the library forgets every copy, so a grade is never shown
+// stale after you made it. Live/progress endpoints and anything a delete depends
+// on (Duplicates) are never served from a copy.
+const SWR = new Map();                  // path -> { data, text, at }
+const INFLIGHT = new Map();             // path -> Promise
+const SWR_SKIP = /^\/api\/(jobs|perf|memory|duplicates|dupes|login|logout)|\/progress|\/status|[?&](refresh|fresh)=/;
+const swrDB = (() => {
+  let db = null;
+  const open = () => db || (db = new Promise((res) => {
+    try {
+      const r = indexedDB.open("peaks-pages", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("p");
+      r.onsuccess = () => res(r.result); r.onerror = () => res(null);
+    } catch { res(null); }
+  }));
+  const tx = async (mode, fn) => {
+    try {
+      const d = await open(); if (!d) return null;
+      return await new Promise((res) => {
+        const t = d.transaction("p", mode), q = fn(t.objectStore("p"));
+        t.oncomplete = () => res(q && q.result); t.onerror = () => res(null); t.onabort = () => res(null);
+      });
+    } catch { return null; }
+  };
+  return {
+    get: (k) => tx("readonly", (st) => st.get(k)),
+    put: (k, v) => tx("readwrite", (st) => st.put(v, k)),
+    clear: () => tx("readwrite", (st) => st.clear()),
+  };
+})();
+function swrForget() { SWR.clear(); swrDB.clear(); }
+let swrBusy = 0;
+function swrDot(d) {
+  swrBusy = Math.max(0, swrBusy + d);
+  let el = document.getElementById("swr-dot");
+  if (!el && document.body) { el = document.createElement("div"); el.id = "swr-dot"; el.title = "updating…"; document.body.appendChild(el); }
+  if (el) el.classList.toggle("on", swrBusy > 0);
+}
+async function rawApi(path, opts) {
   const r = await fetch(path, opts);
   if (r.status === 401) { location.reload(); throw new Error("session expired"); }
   if (!r.ok) {
@@ -30,10 +72,71 @@ const api = async (path, opts) => {
     try { msg = (await r.json()).detail || msg; } catch {}
     throw new Error(msg);
   }
-  const method = ((opts && opts.method) || "GET").toUpperCase();
-  if (method !== "GET" && LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar();
   return r.headers.get("content-type")?.includes("json") ? r.json() : r;
+}
+const api = async (path, opts) => {
+  const method = ((opts && opts.method) || "GET").toUpperCase();
+  if (method === "GET" && !(opts && opts.body)) {
+    if (INFLIGHT.has(path)) return INFLIGHT.get(path);
+    const p = rawApi(path, opts).then((d) => {
+      if (!SWR_SKIP.test(path) && d && typeof d === "object" && !(d instanceof Response)) {
+        try { const text = JSON.stringify(d); SWR.set(path, { data: d, text, at: Date.now() }); swrDB.put(path, text); } catch {}
+      }
+      return d;
+    }).finally(() => INFLIGHT.delete(path));
+    INFLIGHT.set(path, p);
+    return p;
+  }
+  const out = await rawApi(path, opts);
+  swrForget();                         // any change: no copy outlives it
+  if (LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar();
+  return out;
 };
+// the last answer for a GET, from memory or IndexedDB (null if none)
+async function swrPeek(path) {
+  const hit = SWR.get(path); if (hit) return hit;
+  if (SWR_SKIP.test(path)) return null;
+  const text = await swrDB.get(path);
+  if (!text) return null;
+  try { const v = { data: JSON.parse(text), text, at: 0 }; SWR.set(path, v); return v; } catch { return null; }
+}
+// draw from the last answer now, and again when the fresh one differs.
+// render(data, cached) — `cached` is true for the instant draw.
+const SWR_FRESH_MS = 5000;               // answered this recently (a prefetch): no second request
+async function swr(path, render) {
+  const hit = await swrPeek(path);
+  if (hit) { try { render(hit.data, true); } catch (e) { console.warn(e); } }
+  if (hit && Date.now() - hit.at < SWR_FRESH_MS && !INFLIGHT.has(path)) return hit.data;
+  swrDot(+1);
+  try {
+    const d = await api(path);
+    const now = SWR.get(path);
+    if (!hit || !now || now.text !== hit.text) render(d, false);
+    return d;
+  } catch (e) {
+    if (!hit) throw e;               // shown from the copy: keep it, say nothing
+    return hit.data;
+  } finally { swrDot(-1); }
+}
+// the same for a page built from several answers; `optional` ones may fail (null)
+async function swrAll(paths, render, optional = []) {
+  const hits = await Promise.all(paths.map(swrPeek));
+  const have = hits.every((h, i) => h || optional.includes(paths[i]));
+  if (have) { try { render(hits.map((h) => (h ? h.data : null)), true); } catch (e) { console.warn(e); } }
+  if (have && hits.every((h) => !h || Date.now() - h.at < SWR_FRESH_MS)) return hits.map((h) => (h ? h.data : null));
+  swrDot(+1);
+  try {
+    const ds = await Promise.all(paths.map((p) => (optional.includes(p) ? api(p).catch(() => null) : api(p))));
+    const changed = !have || paths.some((p, i) => (SWR.get(p) || {}).text !== (hits[i] || {}).text);
+    if (changed) render(ds, false);
+    return ds;
+  } catch (e) {
+    if (!have) throw e;
+    return hits.map((h) => (h ? h.data : null));
+  } finally { swrDot(-1); }
+}
+// warm a page's answers before you open it (hover, idle)
+function prefetch(paths) { for (const p of paths) if (!INFLIGHT.has(p)) api(p).catch(() => {}); }
 const toast = (msg, bad) => {
   const t = $("#toast");
   t.textContent = msg; t.className = bad ? "bad" : ""; t.hidden = false;
@@ -103,6 +206,25 @@ function go(name) {
   if (name === "perfreview") openPerfReview();
 }
 document.querySelectorAll(".nav[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
+// pointing at a page starts loading it; once the app is idle, the usual pages are warmed
+const VIEW_PREFETCH = {
+  statistics: () => STATS_PATHS, lab: () => ["/api/lab"], upgrades: () => ["/api/upgrades"],
+  performers: () => ["/api/performers/directory"], activity: () => ["/api/stats", "/api/capabilities"],
+  studios: () => ["/api/studios?" + new URLSearchParams({ q: ($("#st-search")?.value || "").trim(), sort: $("#st-sort")?.value || "" })],
+};
+function prefetchView(name) {
+  const f = VIEW_PREFETCH[name]; if (!f) return;
+  const fresh = (p) => { const h = SWR.get(p); return h && Date.now() - h.at < 30000; };
+  prefetch(f().filter((p) => !fresh(p)));
+}
+document.querySelectorAll(".nav[data-view], .tab-b[data-tab-view]").forEach((b) => {
+  const v = () => b.dataset.view || b.dataset.tabView;
+  b.addEventListener("pointerenter", () => prefetchView(v()));
+  b.addEventListener("touchstart", () => prefetchView(v()), { passive: true });
+});
+(window.requestIdleCallback || ((f) => setTimeout(f, 2500)))(() => {
+  setTimeout(() => ["lab", "performers", "statistics"].forEach(prefetchView), 4000);
+});
 // phones: the bottom tab bar (More opens the full menu)
 document.querySelectorAll(".tab-b[data-tab-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.tabView)));
 $("#tab-more")?.addEventListener("click", (e) => { e.stopPropagation(); document.body.classList.toggle("nav-open"); });
@@ -198,10 +320,49 @@ $("#set-nav")?.addEventListener("click", (e) => {
 
 // --- dashboard --------------------------------------------------------------
 async function refreshDashboard() {
+  loadSpeed();
   try {
-    const [stats, caps, mem] = await Promise.all([
-      api("/api/stats"), api("/api/capabilities"), api("/api/memory").catch(() => null),
-    ]);
+    await swrAll(["/api/stats", "/api/capabilities"], ([stats, caps]) => drawDashboard(stats, caps, dashMem));
+    api("/api/memory").then((m) => { dashMem = m; const s = SWR.get("/api/stats"), c = SWR.get("/api/capabilities");
+      if (s && c) drawDashboard(s.data, c.data, m); }).catch(() => {});
+  } catch (e) {
+    $("#conn").textContent = "disconnected"; $("#conn-dot")?.classList.add("off");
+    toast("Cannot reach backend: " + e.message, true);
+  }
+  if (typeof refreshReels === "function") refreshReels();
+  if (typeof refreshCollections === "function") refreshCollections();
+  if (typeof loadSchedule === "function") loadSchedule();
+  if (typeof loadHistory === "function") loadHistory();
+  if (typeof loadCrashReport === "function") loadCrashReport();
+  if (typeof reattachJobs === "function") reattachJobs();
+}
+let dashMem = null;
+// Activity → Speed: how long each page's answers take (last 30 min), the memory
+// purges, and what was running — so a lag can be pinned on a route or a purge
+async function loadSpeed() {
+  let d;
+  try { d = await api("/api/perf?minutes=30"); } catch { return; }
+  const slow = d.routes.filter((r) => r.p95_ms >= 1000);
+  const sum = $("#speed-sum");
+  if (sum) sum.textContent = (slow.length ? `${slow.length} slow route${slow.length > 1 ? "s" : ""}` : "all quick") +
+    (d.purges.length ? ` · ${d.purges.length} memory purge${d.purges.length > 1 ? "s" : ""}` : "") +
+    (d.running.length ? ` · running: ${d.running.join(", ")}` : "") + " · last 30 min";
+  const ms = (x) => (x >= 1000 ? (x / 1000).toFixed(1) + " s" : x + " ms");
+  const tone = (x) => (x >= 3000 ? "bad" : x >= 1000 ? "warn" : "");
+  const body = $("#speed-body"); if (!body) return;
+  body.innerHTML = `<table class="speed-t"><thead><tr><th>Route</th><th>calls</th><th>typical</th><th>slow (p95)</th><th>worst</th></tr></thead><tbody>
+    ${d.routes.slice(0, 25).map((r) => `<tr><td><code>${esc(r.route.replace(/^GET /, "").replace("/api/", "/"))}</code></td><td>${r.n}</td><td>${ms(r.p50_ms)}</td>
+      <td class="${tone(r.p95_ms)}">${ms(r.p95_ms)}</td><td class="${tone(r.max_ms)}">${ms(r.max_ms)}</td></tr>`).join("")
+      || '<tr><td colspan="5" class="dim">No requests yet.</td></tr>'}</tbody></table>
+    <h4>Memory purges</h4>${d.purges.length ? `<ul class="speed-p">${d.purges.map((p) => `<li>${new Date(p.t * 1000).toLocaleTimeString()} ·
+      <b>${p.level}</b> · freed ${p.freed_mb} MB (${(p.rss_before_mb / 1024).toFixed(1)} → ${(p.rss_after_mb / 1024).toFixed(1)} GB)
+      ${p.dropped.length ? "· " + esc(p.dropped.join("; ")) : ""}</li>`).join("")}</ul>`
+      : '<p class="dim">None — pages kept their caches.</p>'}
+    ${d.memory && d.memory.limit_mb ? `<p class="dim">Memory now ${(d.memory.rss_mb / 1024).toFixed(1)} of ${(d.memory.limit_mb / 1024).toFixed(1)} GB (purges start at 90%).</p>` : ""}`;
+}
+$("#speed-panel")?.addEventListener("toggle", (e) => { if (e.target.open) loadSpeed(); });
+function drawDashboard(stats, caps, mem) {
+  {
     $("#conn").textContent = "Stash connected"; $("#conn-dot")?.classList.remove("off");
     const dino = (stats.dino_model || "").replace("dinov2_", "").replace("dinov3_", "v3 ") || stats.model;
     const clip = `${stats.clip_model || "?"} · ${stats.clip_cached ? stats.clip_cached.toLocaleString() + " cached" : "not embedded"}`;
@@ -219,16 +380,7 @@ async function refreshDashboard() {
     const nf = stats.failures || 0;
     $("#fail-panel").hidden = nf === 0;
     $("#fail-count").textContent = nf ? `· ${nf}` : "";
-  } catch (e) {
-    $("#conn").textContent = "disconnected"; $("#conn-dot")?.classList.add("off");
-    toast("Cannot reach backend: " + e.message, true);
   }
-  if (typeof refreshReels === "function") refreshReels();
-  if (typeof refreshCollections === "function") refreshCollections();
-  if (typeof loadSchedule === "function") loadSchedule();
-  if (typeof loadHistory === "function") loadHistory();
-  if (typeof loadCrashReport === "function") loadCrashReport();
-  if (typeof reattachJobs === "function") reattachJobs();
 }
 
 // recurring-embed schedule + how much of the library is embedded
@@ -708,7 +860,7 @@ function embedQuery() {
 async function startEmbed() {
   const q = embedQuery();
   const url = "/api/embed" + (q ? "?" + q : "");
-  const r = await fetch(url, { method: "POST" });
+  const r = await fetch(url, { method: "POST" }); swrForget();
   if (r.status === 409) {
     let d = null;
     try { d = (await r.clone().json()).detail; } catch { /* not json */ }
@@ -1461,16 +1613,23 @@ let perfLoaded = false;
 let perfDir = [], perfList = [], perfShown = 0, perfDirTries = 0;
 const perfFilters = new Set();
 const pfold = (t) => String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+function perfSet(d) {
+  perfDir = d.performers || [];
+  perfDir.forEach((p) => { p._names = [p.name, ...(p.aliases || [])].map(fold); });
+  perfAffinities = perfDir.map((p) => p.taste && p.taste.affinity).filter((a) => a != null).sort((x, y) => y - x);
+}
 async function openPerformers(refresh) {
   const grid = $("#perf-grid"); if (!grid) return;
   showPerfDetail(false);   // always land on the directory
   if (perfLoaded && !refresh) { renderPerformers(); return; }
-  if (!perfDir.length) grid.innerHTML = '<p class="dim">Reading performers…</p>';
+  if (!perfDir.length) {
+    const hit = !refresh && await swrPeek("/api/performers/directory");   // last visit's directory, at once
+    if (hit) { perfSet(hit.data); renderPerformers(); }
+    else grid.innerHTML = '<p class="dim">Reading performers…</p>';
+  }
   try {
     const d = await api("/api/performers/directory" + (refresh ? "?refresh=true" : ""));
-    perfDir = d.performers || [];
-    perfDir.forEach((p) => { p._names = [p.name, ...(p.aliases || [])].map(fold); });
-    perfAffinities = perfDir.map((p) => p.taste && p.taste.affinity).filter((a) => a != null).sort((x, y) => y - x);
+    perfSet(d);
     perfLoaded = true;
     renderPerformers();
     // Peaks' own figures (moments, taste) are built in the background the first time
@@ -1832,10 +1991,12 @@ async function openStudios() {
   $("#st-detail").hidden = true; $("#st-grid").hidden = false; $("#st-bar").hidden = false;
   const q = $("#st-search").value.trim();
   $("#st-status").textContent = "loading…";
-  let d;
-  try { d = await api("/api/studios?" + new URLSearchParams({ q, sort: $("#st-sort").value })); }
-  catch (e) { $("#st-grid").innerHTML = `<p class="dim">${esc(e.message)}</p>`; $("#st-status").textContent = ""; return; }
+  try { await swr("/api/studios?" + new URLSearchParams({ q, sort: $("#st-sort").value }), (d) => drawStudios(d, q)); }
+  catch (e) { $("#st-grid").innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
   $("#st-status").textContent = "";
+  st.loaded = true;
+}
+function drawStudios(d, q) {
   $("#st-sub").textContent = q ? `${d.total} matching` : `${d.total} in your library`;
   $("#st-grid").innerHTML = d.studios.map((x) => `<button class="st-card" data-name="${esc(x.name)}">
       <span class="sc-img"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.cover)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
@@ -1843,7 +2004,6 @@ async function openStudios() {
       <span class="pf-tierbars">${tierBarsHTML(x.tiers)}</span>
       <span class="faint small">${plural(x.scenes, "scene")}${x.top ? ` · ${x.top} top-tier` : ""}${x.record ? ` · <span class="wr-${x.record.tone}">${esc(x.record.verdict)}</span>` : ""}</span>
     </button>`).join("") || '<p class="dim">No studios match.</p>';
-  st.loaded = true;
 }
 $("#st-search")?.addEventListener("input", () => { clearTimeout(st.t); st.t = setTimeout(openStudios, 200); });
 $("#st-sort")?.addEventListener("change", openStudios);
@@ -2242,21 +2402,19 @@ function statBoardBtn(metric, id, label) {
   if (id) qs.set("id", id);
   return `<a class="ghost stat-play" target="_blank" href="/megaboard/?${qs.toString()}">▶ ${esc(label || "Play")}</a>`;
 }
+const STATS_PATHS = ["/api/statistics", "/api/taste/metrics", "/api/storage"];
 async function openStatistics(refresh) {
   const body = $("#stats-body");
   if (!body) return;
-  if (!refresh && body.dataset.loaded) return;
   $("#stats-status").textContent = "";
-  body.innerHTML = '<p class="dim">Crunching your library…</p>';
+  if (refresh) swrForget();
+  if (!body.dataset.loaded) body.innerHTML = '<p class="dim">Crunching your library…</p>';
   try {
-    const [st, metrics, storage] = await Promise.all([
-      api("/api/statistics"),
-      api("/api/taste/metrics").catch(() => null),
-      api("/api/storage").catch(() => null),
-    ]);
-    renderStatistics(st, metrics, storage);
-    body.dataset.loaded = "1";
-  } catch (e) { body.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+    await swrAll(STATS_PATHS, ([st, metrics, storage]) => {
+      renderStatistics(st, metrics, storage);
+      body.dataset.loaded = "1";
+    }, STATS_PATHS.slice(1));
+  } catch (e) { if (!body.dataset.loaded) body.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
 $("#btn-stats-refresh")?.addEventListener("click", () => openStatistics(true));
 
@@ -3233,10 +3391,14 @@ document.addEventListener("click", (ev) => {
 // --- Insights → Moments -------------------------------------------------------------------
 async function openMoments() {
   const box = $("#moments-body"); if (!box) return;
-  box.innerHTML = '<p class="dim">Checking Peaks\' picks against your saves…</p>';
-  let m, z = null;
-  try { m = await api("/api/insights/moments"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
-  try { z = await api("/api/moments/zoom"); } catch { /* the zoom is extra */ }
+  if (!box.dataset.drawn) box.innerHTML = '<p class="dim">Checking Peaks\' picks against your saves…</p>';
+  try {
+    await swrAll(["/api/insights/moments", "/api/moments/zoom"], ([m, z]) => { drawMoments(m, z); box.dataset.drawn = "1"; },
+      ["/api/moments/zoom"]);                      // the zoom is extra
+  } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+function drawMoments(m, z) {
+  const box = $("#moments-body"); if (!box) return;
   const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
   const pair = (x) => `<div class="mc-pair ${x.rank ? "hit" : "miss"}">
       <figure><img loading="lazy" src="${x.saved_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>you saved ${fmt(x.saved)}</figcaption></figure>
@@ -3486,11 +3648,17 @@ document.addEventListener("keydown", (e) => {
 
 // --- the Lab: a new model has to beat the current one on your library first ---------------------
 let labPoll = null;
-async function openLab() {
+async function openLab(poll) {
   const box = $("#lab-body"); if (!box) return;
   clearTimeout(labPoll);
-  let d;
-  try { d = await api("/api/lab"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  try {
+    if (poll) drawLab(await api("/api/lab"));       // a running trial: just the fresh answer
+    else await swr("/api/lab", drawLab);
+  } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
+}
+function drawLab(d) {
+  const box = $("#lab-body"); if (!box) return;
+  clearTimeout(labPoll);
   const run = d.running;
   box.innerHTML = `<p class="faint small">Before Peaks swaps its eyes, the new model is tried on a sample of <b>your</b> library — up to
       ${d.sample_cap} graded scenes plus every scene with saved moments, at your sampling. Both models are judged on exactly the same
@@ -3501,7 +3669,7 @@ async function openLab() {
     <p class="faint small">Extra senses Peaks can learn from. Each runs in the background when nothing else does, and is used only where
       it makes Peaks better on your library — finding your moments, or grading — tested on scenes it didn't learn from.</p>
     <div class="lab-grid">${(d.senses || []).map(senseCard).join("")}</div>`;
-  if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden) openLab(); }, 4000);
+  if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden) openLab(true); }, 4000);
 }
 const SENSE_API = { sound: "/api/hear", motion: "/api/motion" };
 const SENSE_DESC = {
@@ -4654,7 +4822,13 @@ async function loadSidebar() {
   if (side.busy) { side.again = true; return; }
   side.busy = true;
   try {
-    const d = await api("/api/catalogue/summary");
+    await swr("/api/catalogue/summary", drawSidebar);
+  } catch { /* Stash unreachable — keep the last numbers */ }
+  side.busy = false;
+  if (side.again) { side.again = false; refreshSidebar(); }
+}
+function drawSidebar(d) {
+  {
     applyTierState(d.tier_state);
     side.views = d.views; side.model = d.model;
     const set = (id, v) => { const el = $(id); if (el) el.textContent = v ? (+v).toLocaleString() : ""; };
@@ -4670,9 +4844,7 @@ async function loadSidebar() {
     }
     if (!cat.model) cat.model = d.model;
     renderCatTriage();
-  } catch { /* Stash unreachable — keep the last numbers */ }
-  side.busy = false;
-  if (side.again) { side.again = false; refreshSidebar(); }
+  }
 }
 setInterval(() => { if (!document.hidden) refreshSidebar(0); }, 30000);
 // kept for existing callers: counts now come from the library-wide summary
@@ -5632,7 +5804,7 @@ $("#btn-cat-new")?.addEventListener("click", () => {
 });
 // POST that may come back 409 needs_confirm: ask, then retry with confirm=true
 async function postConfirmed(url) {
-  const r = await fetch(url, { method: "POST" });
+  const r = await fetch(url, { method: "POST" }); swrForget();
   if (r.status === 409) {
     let d = null;
     try { d = (await r.clone().json()).detail; } catch { /* not json */ }
@@ -7011,8 +7183,8 @@ async function loadCrashReport() {
 const upg = { data: null, tab: "found", open: new Set() };
 async function openUpgrades() {
   $("#upg-status").textContent = "loading…";
-  try { upg.data = await api("/api/upgrades"); } catch (e) { $("#upg-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
-  renderUpgrades();
+  try { await swr("/api/upgrades", (d) => { upg.data = d; renderUpgrades(); }); }
+  catch (e) { $("#upg-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
 function upgSize(b) { return b ? fmtBytes(b) : "size ?"; }
 function upgRelHTML(c, r, best) {
