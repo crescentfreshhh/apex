@@ -120,6 +120,28 @@ def parse_showinfo_times(stderr_text: str) -> list[float]:
     return [round(float(m), 3) for m in _SHOWINFO_PTS.findall(stderr_text)]
 
 
+
+def background_priority() -> None:
+    """preexec_fn for the decoders background jobs spawn (ingest, Hearing,
+    Motion): low CPU priority and idle-class disk I/O, so the web server —
+    and you switching pages — always comes first. Best-effort, never raises."""
+    import os
+    import platform
+
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    nr = {"x86_64": 251, "aarch64": 30, "arm64": 30}.get(platform.machine())
+    if nr:
+        try:
+            import ctypes
+
+            # ioprio_set(IOPRIO_WHO_PROCESS, self, IOPRIO_CLASS_IDLE << 13)
+            ctypes.CDLL(None, use_errno=True).syscall(nr, 1, 0, 3 << 13)
+        except Exception:  # noqa: BLE001
+            pass
+
 class SamplerError(RuntimeError):
     pass
 
@@ -433,7 +455,7 @@ class FrameSampler:
             "-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "-",
         ]
         try:
-            out = subprocess.run(cmd, capture_output=True, check=True)
+            out = subprocess.run(cmd, capture_output=True, check=True, preexec_fn=background_priority)
         except FileNotFoundError as exc:
             raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
         except subprocess.CalledProcessError as exc:
@@ -582,7 +604,7 @@ class FrameSampler:
         ]
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=background_priority
             )
         except FileNotFoundError as exc:
             raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
@@ -658,7 +680,7 @@ class FrameSampler:
         ]
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=background_priority
             )
         except FileNotFoundError as exc:
             raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
@@ -735,7 +757,8 @@ class FrameSampler:
                 str(tmpdir / "f-%06d.jpg"),
             ]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                      preexec_fn=background_priority)
             except FileNotFoundError as exc:
                 raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
             except subprocess.CalledProcessError as exc:

@@ -8,6 +8,7 @@ added scenes once the GPU is gone).
 
 from __future__ import annotations
 
+import sys
 import threading
 from pathlib import Path
 
@@ -298,12 +299,53 @@ def create_app(cfg=None):
     service = Service(cfg)
     jobs = JobManager()
     app = FastAPI(title="peaks", docs_url="/api/docs")
+    from .compress import TextGzip
+
+    app.add_middleware(TextGzip)                 # JSON/JS/CSS only: video and ranges untouched
+    # background jobs share this interpreter; a short switch interval lets a
+    # page request take its turn quickly instead of queueing behind them
+    sys.setswitchinterval(0.001)
 
     # crash forensics (diagnostics only): native crash traces, a health
     # heartbeat and a clean-exit marker in crash.log next to settings.json
     from . import forensics
 
     forensics.enable(service._settings_path().parent)
+
+    # --- page snapshots: costly GETs computed once per data version --------------
+    # Any write (POST/PUT/DELETE) bumps the version: the next read recomputes, so
+    # you never see a stale grade after your own action. Between writes a snapshot
+    # is served at once; past `ttl` it's still served, and refreshed behind it
+    # (job progress shows up within a minute without anyone waiting for it).
+    _refreshing: set = set()
+
+    def _bump_version():
+        service._data_version = service.__dict__.get("_data_version", 0) + 1
+
+    def _snap(key: str, fn, ttl: float = 60.0):
+        import time as _t
+
+        snaps = service.__dict__.setdefault("_snapshots", {})
+        ver = service.__dict__.get("_data_version", 0)
+        hit = snaps.get(key)
+        if hit is not None and hit[0] == ver:
+            if _t.monotonic() - hit[1] > ttl and key not in _refreshing:
+                _refreshing.add(key)
+
+                def _bg():
+                    try:
+                        val = fn()
+                        if service.__dict__.get("_data_version", 0) == ver:
+                            service.__dict__.setdefault("_snapshots", {})[key] = (ver, _t.monotonic(), val)
+                    except Exception:  # noqa: BLE001 — the old snapshot stays; the next read retries
+                        pass
+                    finally:
+                        _refreshing.discard(key)
+                threading.Thread(target=_bg, daemon=True, name=f"peaks-snap-{key}").start()
+            return hit[2]
+        val = fn()
+        service.__dict__.setdefault("_snapshots", {})[key] = (ver, _t.monotonic(), val)
+        return val
 
     @app.middleware("http")
     async def _count_requests(request: Request, call_next):
@@ -314,9 +356,17 @@ def create_app(cfg=None):
             return await call_next(request)
         forensics.note_request(p if not p.startswith("/api/scene/") else "/api/scene/…")
         t0 = _time.monotonic()
+        write = request.method not in ("GET", "HEAD", "OPTIONS")
+        if write:
+            _bump_version()                       # page snapshots are stale from here on
         resp = await call_next(request)
-        if not p.startswith("/api/jobs"):
-            forensics.note_duration(request.method, p, _time.monotonic() - t0)
+        if write:
+            _bump_version()                       # …and anything computed during the write
+        secs = _time.monotonic() - t0
+        resp.headers["Server-Timing"] = f"app;dur={secs * 1000:.0f}"
+        if not p.startswith(("/api/jobs", "/api/perf")):
+            route = getattr(request.scope.get("route"), "path", None)
+            forensics.note_duration(request.method, p, secs, route=route)
         return resp
 
     @app.on_event("shutdown")
@@ -420,7 +470,7 @@ def create_app(cfg=None):
     def statistics():
         """Everything the Statistics tab renders — build health, the freshness
         timeline, peak leaderboards, and standout scene."""
-        return service.statistics()
+        return _snap("statistics", service.statistics)
 
     @app.get("/api/stats/board")
     def stats_board(metric: str, id: str | None = None, count: int = 1500):
@@ -1391,7 +1441,7 @@ def create_app(cfg=None):
     @app.get("/api/catalogue/summary")
     def catalogue_summary():
         try:
-            return service.library_summary()
+            return _snap("summary", service.library_summary)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable
             raise HTTPException(503, str(exc))
 
@@ -1929,7 +1979,7 @@ def create_app(cfg=None):
 
     @app.get("/api/insights/moments")
     def insights_moments():
-        return service.moment_insights()
+        return _snap("moments", service.moment_insights)
 
     @app.get("/api/scene/{scene_id}/picks")
     def scene_picks(scene_id: str):
@@ -1964,7 +2014,7 @@ def create_app(cfg=None):
 
     @app.get("/api/lab")
     def lab_get():
-        d = service.lab()
+        d = dict(_snap("lab", service.lab))
         j = jobs.running("lab")
         d["running"] = j.as_dict() if j is not None else None
         return d
@@ -2064,7 +2114,7 @@ def create_app(cfg=None):
     @app.get("/api/insights/arbiter")
     def insights_arbiter():
         try:
-            return service.arbiter_summary()
+            return _snap("arbiter", service.arbiter_summary)
         except Exception as exc:  # noqa: BLE001 — Stash unreachable etc.
             raise HTTPException(503, str(exc))
 
@@ -2520,6 +2570,19 @@ def create_app(cfg=None):
         """RSS vs the watchdog's soft limit (for diagnosing OOMs)."""
         return service.memory_status()
 
+    @app.get("/api/perf")
+    def perf(minutes: float = 30):
+        """The Speed panel: per-route timings, recent memory purges, what's running."""
+        import time as _t
+
+        from . import memwatch
+
+        since = _t.time() - minutes * 60 if minutes > 0 else None
+        return {"routes": forensics.perf_summary(since),
+                "purges": [p for p in memwatch.PURGES if since is None or p["t"] >= since][::-1],
+                "memory": service.memory_status(),
+                "running": [j.kind for j in jobs.list() if j.status == "running"]}
+
     @app.post("/api/memory/shed")
     def memory_shed(drop_indexes: bool = True):
         """Manually shed caches (and idle indexes) and trim — the watchdog's action."""
@@ -2648,21 +2711,32 @@ def _start_memwatch(app, service: Service) -> None:
         return  # no detectable limit (or disabled) → nothing to police against
 
     stop = threading.Event()
-    soft = int(limit * 0.9)  # nudge caches out a little before the hard soft-limit
+    policy = memwatch.PurgePolicy(limit)
 
     def _loop():
         while not stop.wait(interval):
             try:
-                rss = memwatch.rss_bytes()
-                if rss >= limit:
-                    service.shed_memory(drop_indexes=True)
-                elif rss >= soft:
-                    service.shed_memory(drop_indexes=False)
+                watch_once(service, policy)
             except Exception:  # noqa: BLE001 — a watchdog must never crash the app
                 pass
 
     threading.Thread(target=_loop, daemon=True, name="peaks-memwatch").start()
     app.state._memwatch_stop = stop
+
+
+def watch_once(service: Service, policy) -> dict | None:
+    """One watchdog check: the policy says whether (and how hard) to purge;
+    a soft purge keeps the page path warm, the hard limit sheds everything."""
+    from . import memwatch
+
+    level = policy.decide(memwatch.rss_bytes())
+    if level is None:
+        return None
+    r = service.shed_memory(drop_indexes=True, keep_hot=(level == "soft"))
+    dropped = list(r.get("dropped_indexes") or [])
+    dropped = (["idle indexes: " + ", ".join(dropped)] if dropped else []) + \
+        (["metadata, board & taste scores, page snapshots"] if level == "hard" else [])
+    return policy.record(level, r.get("before", 0), r.get("after", 0), dropped)
 
 
 def _start_dupe_drain(service: Service, jobs: JobManager):

@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 CLEAN = "[clean-exit]"
@@ -115,11 +115,38 @@ def note_request(path: str) -> None:
 SLOW_SEC = 3.0
 
 
-def note_duration(method: str, path: str, secs: float) -> None:
+def note_duration(method: str, path: str, secs: float, route: str | None = None) -> None:
     """Log any request slower than SLOW_SEC — so 'the board hangs for 20 s'
-    shows up in docker logs / crash.log as the exact route and time."""
+    shows up in docker logs / crash.log as the exact route and time — and keep
+    the last few hundred timings per route for the Speed panel."""
     if secs >= SLOW_SEC:
         _write(f"{_stamp()} [slow] {secs:.1f}s {method} {path}")
+    key = f"{method} {route or path}"
+    with _state["lock"]:
+        q = _timings.get(key)
+        if q is None:
+            q = _timings[key] = deque(maxlen=TIMING_KEEP)
+        q.append((time.time(), secs))
+
+
+TIMING_KEEP = 200
+_timings: dict = {}
+
+
+def perf_summary(since: float | None = None) -> list[dict]:
+    """Per route: count, median, 95th percentile, max and the last time (ms),
+    slowest first — over the kept timings (newer than `since`, if given)."""
+    with _state["lock"]:
+        items = [(k, [d for t, d in q if since is None or t >= since]) for k, q in _timings.items()]
+    out = []
+    for k, ds in items:
+        if not ds:
+            continue
+        s = sorted(ds)
+        pct = lambda f: s[min(len(s) - 1, int(f * len(s)))]   # noqa: E731
+        out.append({"route": k, "n": len(s), "p50_ms": round(pct(0.5) * 1000), "p95_ms": round(pct(0.95) * 1000),
+                    "max_ms": round(s[-1] * 1000), "last_ms": round(ds[-1] * 1000)})
+    return sorted(out, key=lambda r: -r["p95_ms"])
 
 
 class busy:

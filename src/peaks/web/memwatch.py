@@ -98,3 +98,55 @@ def malloc_trim() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:  # noqa: BLE001 — musl / non-Linux / no libc
         pass
+
+
+# --- the watchdog's policy: tiered, and never a purge loop -------------------
+#
+# A purge empties caches pages read; with jobs holding memory near the line,
+# purging every check (20 s) meant every page rebuilt them from Stash and disk.
+# So: a soft purge keeps the page path warm (metadata, board/taste scores) and
+# drops only what's big and off it; it waits a cooldown between runs, and a
+# purge that freed little isn't repeated until memory has grown again. The hard
+# limit still sheds everything — the OOM guard is unchanged.
+
+import time as _time
+from collections import deque
+
+MB = 1024 * 1024
+PURGES: deque = deque(maxlen=50)          # recent purges, newest last (for the Speed panel)
+
+
+class PurgePolicy:
+    def __init__(self, limit: int, soft_frac: float = 0.9, cooldown: float = 300.0,
+                 hard_gap: float = 60.0, small: int = 100 * MB, regrow: int = 500 * MB,
+                 clock=_time.monotonic):
+        self.limit, self.soft = limit, int(limit * soft_frac)
+        self.cooldown, self.hard_gap, self.small, self.regrow = cooldown, hard_gap, small, regrow
+        self.clock = clock
+        self.last_t: float | None = None
+        self.last_after = 0
+        self.last_freed = None
+
+    def decide(self, rss: int) -> str | None:
+        """'hard', 'soft' or None for this check."""
+        if rss < self.soft:
+            return None
+        since = None if self.last_t is None else self.clock() - self.last_t
+        # the last purge freed little: purging again frees little too, until memory grows
+        futile = self.last_freed is not None and self.last_freed < self.small and rss < self.last_after + self.regrow
+        if rss >= self.limit:
+            if since is not None and (since < self.hard_gap or futile):
+                return None
+            return "hard"
+        if since is not None and (since < self.cooldown or futile):
+            return None
+        return "soft"
+
+    def record(self, level: str, before: int, after: int, dropped=None) -> dict:
+        self.last_t, self.last_after = self.clock(), after
+        self.last_freed = max(0, before - after)
+        entry = {"t": _time.time(), "level": level, "rss_before_mb": round(before / MB),
+                 "rss_after_mb": round(after / MB), "freed_mb": round(self.last_freed / MB),
+                 "dropped": list(dropped or [])}
+        PURGES.append(entry)
+        return entry

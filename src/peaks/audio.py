@@ -45,7 +45,10 @@ def decode_audio(path: str, sr: int, ffmpeg: str = "ffmpeg", block: float = 10.0
 def _blocks(path, sr, ffmpeg, block, hop):
     cmd = [ffmpeg, "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        from .sampling import background_priority
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                preexec_fn=background_priority)
     except FileNotFoundError as exc:
         raise AudioError(f"{ffmpeg} not found") from exc
     nb, nh = int(block * sr), int(hop * sr)

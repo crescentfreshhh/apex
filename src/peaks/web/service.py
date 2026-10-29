@@ -2131,21 +2131,27 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "indexes": resident,
         }
 
-    def shed_memory(self, drop_indexes: bool = True) -> dict:
+    def shed_memory(self, drop_indexes: bool = True, keep_hot: bool = False) -> dict:
         """Release derived caches (and, if asked, idle model indexes) and hand the
         freed pages back to the OS. The watchdog calls this under memory pressure;
-        everything shed here rebuilds lazily on next use. Returns a small report."""
+        everything shed here rebuilds lazily on next use. `keep_hot` (the
+        watchdog's soft purge) keeps what pages read on every open — Stash
+        metadata, board/taste scores, page snapshots: small, and slow to rebuild.
+        Returns a small report."""
         import gc
 
         from . import memwatch
 
         before = memwatch.rss_bytes()
-        self._invalidate_taste_caches()          # taste + board score/universe caches
-        with self._meta_lock:
-            self._meta = {}
-        self._pool = None
+        if not keep_hot:
+            self._invalidate_taste_caches()          # taste + board score/universe caches
+            with self._meta_lock:
+                self._meta = {}
+            self._pool = None
+            self.__dict__.pop("_snapshots", None)
         self._vocab_cache = None
-        self._perf_stats_cache = None
+        if not keep_hot:
+            self._perf_stats_cache = None            # the Performers page's table
         self._perf_centroids = {}
         dropped: list[str] = []
         if drop_indexes:
@@ -2161,6 +2167,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "freed_mb": round(max(0, before - after) / 1048576, 1),
             "rss_mb": round(after / 1048576, 1),
             "dropped_indexes": dropped,
+            "before": before,
+            "after": after,
         }
 
     def search_by_frame(
