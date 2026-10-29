@@ -276,6 +276,29 @@ class ClapAudioEmbedder:
         feats = self._torch.nn.functional.normalize(feats.float(), dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
+    def _embeds(self, out, kind: str):
+        """The projected embeddings from get_{audio,text}_features. Older transformers
+        return the tensor; newer ones return an output object (pooled output, maybe
+        before the projection into the shared sound/words space)."""
+        torch = self._torch
+        if torch.is_tensor(out):
+            return out
+        feats = None
+        for name in (f"{kind}_embeds", "pooler_output"):
+            v = getattr(out, name, None)
+            if v is not None:
+                feats = v
+                break
+        if feats is None:
+            h = getattr(out, "last_hidden_state", None)
+            if h is None:
+                h = out[0]
+            feats = h.mean(dim=1) if h.dim() == 3 else h
+        proj = getattr(self.model, f"{kind}_projection", None)
+        if feats.shape[-1] != self.dim and proj is not None:   # not projected yet: same space as the other side
+            feats = proj(feats)
+        return feats
+
     def embed_audio(self, blocks: Sequence[np.ndarray]) -> np.ndarray:
         if not blocks:
             return np.zeros((0, self.dim), np.float32)
@@ -285,13 +308,13 @@ class ClapAudioEmbedder:
         inputs = self.processor.feature_extractor(arrs, sampling_rate=self.sr, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
         with self._torch.no_grad():
-            return self._norm(self.model.get_audio_features(**inputs))
+            return self._norm(self._embeds(self.model.get_audio_features(**inputs), "audio"))
 
     def embed_text(self, prompts: Sequence[str]) -> np.ndarray:
         inputs = self.processor(text=list(prompts), return_tensors="pt", padding=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
         with self._torch.no_grad():
-            return self._norm(self.model.get_text_features(**inputs))
+            return self._norm(self._embeds(self.model.get_text_features(**inputs), "text"))
 
 
 class MotionUnavailable(RuntimeError):
@@ -350,10 +373,11 @@ class MotionEmbedder:
                     f"code itself — Meta's repo may have changed)" if entry in VJEPA_WEIGHTS else "")
             raise MotionUnavailable(f"couldn't load V-JEPA 2.1 ({entry}) through torch.hub: {exc}{hint}") from exc
         enc = out[0] if isinstance(out, (tuple, list)) else out      # some entries return (encoder, predictor)
+        # mixed precision through autocast, not a half-precision model: parts of the
+        # encoder (positions, attention) compute in float32, and a .half() model makes
+        # query/key and value disagree on dtype
         self._half = self.device.startswith("cuda")
         self.model = enc.eval().to(self.device)
-        if self._half:
-            self.model = self.model.half()
         self.dim = int(getattr(enc, "embed_dim", 0) or 1024)
         self._mean = torch.tensor(self._MEAN, device=self.device).view(1, 3, 1, 1, 1)
         self._std = torch.tensor(self._STD, device=self.device).view(1, 3, 1, 1, 1)
@@ -367,9 +391,10 @@ class MotionEmbedder:
                                   for im in clip]) for clip in clips])            # (B, T, H, W, C)
         x = torch.from_numpy(arr).to(self.device).permute(0, 4, 1, 2, 3).float().div_(255.0)   # (B, C, T, H, W)
         x = (x - self._mean) / self._std
-        if self._half:
-            x = x.half()
-        with torch.no_grad():
+        import contextlib
+
+        amp = torch.autocast("cuda", dtype=torch.float16) if self._half else contextlib.nullcontext()
+        with torch.no_grad(), amp:
             out = self.model(x)
         if isinstance(out, (tuple, list)):
             out = out[0]

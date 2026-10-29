@@ -218,7 +218,52 @@ def test_clap_uses_the_feature_extractor_not_the_renamed_processor_argument(monk
             return types.SimpleNamespace(float=lambda: "feats")
     emb = object.__new__(E.ClapAudioEmbedder)
     emb.processor, emb.model, emb.sr, emb.dim, emb.device = Proc(), Model(), 48000, 4, "cpu"
-    emb._torch = types.SimpleNamespace(no_grad=lambda: __import__("contextlib").nullcontext())
+    emb._torch = types.SimpleNamespace(no_grad=lambda: __import__("contextlib").nullcontext(),
+                                       is_tensor=lambda x: True)
     emb._norm = lambda f: np.ones((2, 4), np.float32)
     out = emb.embed_audio([np.zeros(10, np.float32), np.zeros(10, np.float32)])
     assert out.shape == (2, 4) and set(seen) == {"input_features", "is_longer"}
+
+
+def test_clap_reads_newer_transformers_output_objects_and_projects_them(monkeypatch):
+    """Newer transformers return an output object (pooled, maybe unprojected) from
+    get_audio_features / get_text_features instead of a tensor."""
+    import types
+
+    from peaks import embedding as E
+
+    class T:
+        def __init__(self, a):
+            self.a = np.asarray(a, np.float32)
+            self.shape = self.a.shape
+
+        def to(self, _):
+            return self
+
+        def dim(self):
+            return self.a.ndim
+
+    proj_calls = []
+
+    class Model:
+        def audio_projection(self, x):
+            proj_calls.append(x.shape)
+            return T(x.a[:, :4])
+
+        def get_audio_features(self, **k):
+            return types.SimpleNamespace(pooler_output=T(np.ones((2, 8))))       # 8-d: not projected yet
+
+    class Proc:
+        class feature_extractor:
+            sampling_rate = 48000
+
+            def __new__(cls, arrs, sampling_rate=None, return_tensors=None):
+                return {"input_features": T(np.stack(arrs))}
+    emb = object.__new__(E.ClapAudioEmbedder)
+    emb.processor, emb.model, emb.sr, emb.dim, emb.device = Proc(), Model(), 48000, 4, "cpu"
+    emb._torch = types.SimpleNamespace(no_grad=lambda: __import__("contextlib").nullcontext(),
+                                       is_tensor=lambda x: False)
+    got = {}
+    emb._norm = lambda f: got.setdefault("shape", f.shape) and np.ones(f.shape, np.float32)
+    out = emb.embed_audio([np.zeros(10, np.float32), np.zeros(10, np.float32)])
+    assert proj_calls == [(2, 8)] and got["shape"] == (2, 4) and out.shape == (2, 4)
