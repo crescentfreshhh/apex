@@ -139,6 +139,7 @@ def _catalogue_models():
     class GradeIn(BaseModel):
         scene_id: str
         grade: str
+        no_learn: bool = False           # "Reject, don't learn": 1★, left out of everything Peaks learns
 
     class RestoreIn(BaseModel):
         scene_id: str
@@ -1299,7 +1300,7 @@ def create_app(cfg=None):
     @app.post("/api/catalogue/grade")
     def catalogue_grade(body: GradeIn):
         try:
-            return service.grade_scene(body.scene_id, body.grade)
+            return service.grade_scene(body.scene_id, body.grade, no_learn=body.no_learn)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except LookupError as exc:

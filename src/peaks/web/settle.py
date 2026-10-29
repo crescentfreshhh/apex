@@ -151,6 +151,8 @@ class SettleMixin:
             if p is None or p.get("from") == "who":
                 continue                             # not embedded yet: nothing honest to say
             graded = train_class(r["tier"])
+            if r.get("no_learn"):
+                continue                             # a reject for your own reasons: never questioned
             if graded:                               # every grade the honest verdict disagrees with
                 ru = rules.get(sid)
                 if p["tier"] != graded and not (ru and ru.get("grade") == r["tier"]):

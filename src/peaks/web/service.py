@@ -2601,7 +2601,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     if len(picked) == 3:
                         break
                 tier_rows += [WeakLabel(key, t, 1, self._TIER_WEAK[r["tier"]], "tier") for t in picked]
-            elif r["tier"] == "rejected":
+            elif r["tier"] == "rejected" and not r.get("no_learn"):
                 for i in rng.choice(end - start, size=min(3, end - start), replace=False):
                     rej_rows.append(WeakLabel(key, float(times[int(i)]), 0, 0.3, "reject"))
 
@@ -4894,6 +4894,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "created_at": m.get("created_at") or "",
             "size": m.get("size"),
             "fingerprint": m.get("fingerprint"),
+            "no_learn": tier == "rejected" and self._is_no_learn(sid, m.get("fingerprint")),
             "phash": m.get("phash"),
             "tag_state": tag_state(tier, m.get("tags") or [], bool(m.get("organized")),
                                    self.tier_tag_names(), self._retired_tag_names()),
@@ -5527,7 +5528,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self.invalidate_meta(sid)
         return count
 
-    def grade_scene(self, scene_id: str, grade: str, source: str = "catalogue") -> dict:
+    def grade_scene(self, scene_id: str, grade: str, source: str = "catalogue", no_learn: bool = False) -> dict:
         """Apply one of the user's grades (peaks.tiers.GRADES) in Stash.
 
         Renamer-safe write order for the tagged tiers (16/17/18):
@@ -5555,6 +5556,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             rejected_at[sid] = time.time()        # a running ingest drops it once this sticks
         else:
             rejected_at.pop(sid, None)
+        # "Reject, don't learn": a reject for a reason Peaks can't see — 1★ like any
+        # reject, but left out of everything Peaks learns from. Any other grade clears it.
+        self._set_no_learn(sid, cur.get("fingerprint"), grade == "reject" and no_learn)
         if o is not None:
             self.set_o_count(sid, o, current=prev["o_counter"])
         tag_ids = self._tier_tag_list(prev["tag_ids"], grade)
@@ -5569,7 +5573,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         # (kept for an undo)
         self.__dict__.setdefault("_expo_undo", {})[sid] = self.exposure().reset(sid)
         row = self._cat_update_row(sid)
-        self._log_scene("grade", row, grade=grade, source=source,
+        self._log_scene("grade", row, grade=grade + (" (don't learn)" if grade == "reject" and no_learn else ""),
+                        source=source,
                         before={"rating100": prev["rating100"], "o_counter": prev["o_counter"],
                                 "tier": tier_of(prev["rating100"], prev["o_counter"])},
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
@@ -5618,6 +5623,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         cleared, not set to a value."""
         sid = str(scene_id)
         self.__dict__.setdefault("_rejected_at", {}).pop(sid, None)     # undone: not a reject any more
+        if not (rating100 and int(rating100) <= 20):
+            self._set_no_learn(sid, None, False)
         self.set_o_count(sid, int(o_counter or 0))
         unrated = rating100 is None or int(rating100) <= 0
         self.client().update_scene(
@@ -5746,6 +5753,53 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             out[sid] = (vis[sid], quality_features(r["quality"]))
         return out
 
+    # --- "Reject, don't learn" --------------------------------------------------
+
+    def _no_learn_path(self):
+        return self._state_dir() / "no_learn.json"
+
+    def _no_learn(self) -> dict:
+        """{scene_id: fingerprint} of rejects Peaks must not learn from (cached by mtime)."""
+        import json
+
+        p = self._no_learn_path()
+        try:
+            mt = p.stat().st_mtime
+        except OSError:
+            return {}
+        hit = self.__dict__.get("_no_learn_cache")
+        if hit and hit[0] == mt:
+            return hit[1]
+        try:
+            d = json.loads(p.read_text()).get("scenes") or {}
+        except (OSError, ValueError):
+            d = {}
+        self._no_learn_cache = (mt, d)
+        return d
+
+    def _no_learn_fps(self) -> set:
+        return {fp for fp in self._no_learn().values() if fp}
+
+    def _is_no_learn(self, sid: str, fp: str | None = None) -> bool:
+        d = self._no_learn()
+        return str(sid) in d or bool(fp and fp in self._no_learn_fps())
+
+    def _set_no_learn(self, sid: str, fp: str | None, on: bool) -> None:
+        d = dict(self._no_learn())
+        sid = str(sid)
+        if on == (sid in d) and (not on or d.get(sid) == fp):
+            return
+        if on:
+            d[sid] = fp
+        else:
+            d.pop(sid, None)
+        p = self._no_learn_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        atomic.write_json(p, {"scenes": d}, indent=1)
+        self.__dict__.pop("_no_learn_cache", None)
+        self._tier_preds = None
+        self.__dict__.pop("_who_cache", None)
+
     def _sense_rows(self, sids: list) -> dict[str, np.ndarray]:
         """Extra senses for the tier model, one row per scene (None ids: deleted
         rejects — missing): {"sound": rows, ...}. A sense nobody has yet is left out."""
@@ -5782,7 +5836,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._tier_training = True
         try:
             everything = self._catalogue_all()
-            rows = [r for r in everything if train_class(r["tier"])]
+            rows = [r for r in everything if train_class(r["tier"]) and not r.get("no_learn")]
             feats = self._scene_features(rows)
             self._remember_rejects(rows, feats)
             train = [r for r in rows if r["scene_id"] in feats]
@@ -5795,7 +5849,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             # rejects deleted from the library live on as remembered features
             live = {r["fingerprint"] for r in everything if r.get("fingerprint")}
             mem = self.reject_memory()
-            mfps, mv, mq = mem.rows(exclude=live)
+            mfps, mv, mq = mem.rows(exclude=live | self._no_learn_fps())
             mwho = mem.who(mfps)
             remembered = 0 if mv is None else len(mv)
             if remembered:
@@ -5932,11 +5986,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         reason lines and the Library health tables. Cached per grading state."""
         from ..tier_model import WhoEncoder, train_class, who_of
 
-        graded = [(who_of(r), train_class(r["tier"])) for r in rows if train_class(r["tier"])]
+        graded = [(who_of(r), train_class(r["tier"])) for r in rows if train_class(r["tier"]) and not r.get("no_learn")]
         try:
             live = {r["fingerprint"] for r in rows if r.get("fingerprint")}
             mem = self.reject_memory()
-            fps, _, _ = mem.rows(exclude=live)
+            fps, _, _ = mem.rows(exclude=live | self._no_learn_fps())
             graded += [(w, "reject") for w in mem.who(fps) if w is not None]
         except Exception:  # noqa: BLE001 — no memory yet
             pass

@@ -696,7 +696,7 @@ class LibraryMixin:
 
         mem = self.reject_memory()
         have = mem.fingerprints()
-        rejects = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint")]
+        rejects = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint") and not r.get("no_learn")]
         todo = [r for r in rejects if r["fingerprint"] not in have]
         # remembered before performers/studio were kept: fill them in while knowable
         stale = [r for r in rejects if r["fingerprint"] in have]

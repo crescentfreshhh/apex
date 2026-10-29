@@ -894,7 +894,11 @@ function tierOf(rating100, o) {
   const t = ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
   return RETIRED.has(t) ? "anomaly" : t;
 }
-function gradeName(g) { return g === "reject" ? "Reject (1★)" : TIER_NAMES[g]; }
+function gradeName(g) { return g === "reject" ? "Reject (1★)" : g === NO_LEARN ? "Reject, don't learn" : TIER_NAMES[g]; }
+// "Reject, don't learn": 1★ like any reject, but Peaks learns nothing from it — for
+// reasons Peaks can't see. Its own button and key (N) everywhere you grade.
+const NO_LEARN = "reject-nl";
+const NO_LEARN_TIP = "Reject (1★) for your own reasons — Peaks won't learn from it: not in grading, performer or studio records, or your taste (N)";
 const gradeKey = (k) => k >= "1" && k <= String(GRADES.length);
 function applyTierState(st) {
   if (!st) return;
@@ -948,9 +952,10 @@ function tierTally(tiers, { compact = false } = {}) {
 // grade undo stack, shared by the Catalogue and the viewer's grade menu
 const gradeUndo = [];
 async function applyGrade(sid, grade, undoKey = "Z") {
+  const nl = grade === NO_LEARN;
   const r = await api("/api/catalogue/grade", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scene_id: String(sid), grade }),
+    body: JSON.stringify({ scene_id: String(sid), grade: nl ? "reject" : grade, no_learn: nl }),
   });
   const entry = { sid: String(sid), prev: r.previous, grade };
   gradeUndo.push(entry);
@@ -3839,7 +3844,7 @@ function tdShow() {
     <div class="dim small">${esc(sub)}${x.duration ? " · " + fmt(x.duration) : ""}${x.size ? " · " + fmtBytes(x.size) : ""}</div>
     <div class="td-q">${esc(TD_QUESTION[x.job] || "What tier is it?")}</div>
     <div class="td-why">${why}</div>
-    <div class="td-grades">${RV_GRADES.map(([g], k) => `<button data-g="${g}" class="g-${g} ${g === x.pick ? "sug" : ""} ${g === cur ? "cur" : ""}" title="${esc(gradeName(g))} (${k + 1})"><b>${k + 1}</b>${esc(TD_SHORT[g])}</button>`).join("")}</div>
+    <div class="td-grades">${RV_GRADES.map(([g], k) => `<button data-g="${g}" class="g-${g} ${g === x.pick ? "sug" : ""} ${g === cur ? "cur" : ""}" title="${esc(gradeName(g))} (${k + 1})"><b>${k + 1}</b>${esc(TD_SHORT[g])}</button>`).join("")}<button data-g="${NO_LEARN}" class="g-reject g-nl" title="${esc(NO_LEARN_TIP)}"><b>N</b>Rej ⊘</button></div>
     <div class="td-actions">
       ${x.pick ? `<button class="btn pri sm" id="td-accept">✓ ${esc(gradeName(x.pick))} <kbd>Enter</kbd></button>` : ""}
       ${TD_KEEPABLE.has(x.job) ? `<button class="btn sm" id="td-keep" title="It's right where it is — don't suggest it again unless something new happens">Keep as ${esc(gradeName(cur))} <kbd>0</kbd></button>` : ""}
@@ -4045,6 +4050,7 @@ document.addEventListener("keydown", (e) => {
   }
   const x = td.queue[0];
   if (gradeKey(k)) { e.preventDefault(); tdAnswer(RV_GRADES[+k - 1][0]); }
+  else if (k === "n") { e.preventDefault(); tdAnswer(NO_LEARN); }
   else if (k === "enter" && x && x.pick) { e.preventDefault(); tdAnswer(x.pick); }
   else if (k === "s") { e.preventDefault(); tdSkip(); }
   else if (k === "u") { e.preventDefault(); tdUndo(); }
@@ -5149,7 +5155,8 @@ function catCardHTML(r, i) {
   const sug = r.suggest ? r.suggest.grade : (p && r.tier === "unreviewed" ? p.tier : null);
   const short = { legendaire: "Lég", exceptionnelle: "Exc", merveilleuse: "Mer", reject: "Rej" };
   const grades = GRADES.map((g, k) =>
-    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1}) — ${esc(GRADE_HELP[g] || "")}"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("");
+    `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1}) — ${esc(GRADE_HELP[g] || "")}"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("")
+    + `<button class="cat-g g-reject g-nl ${r.no_learn ? "cur" : ""}" data-g="${NO_LEARN}" title="${esc(NO_LEARN_TIP)}"><b>N</b><span>Rej ⊘</span></button>`;
   const predLine = p
     ? `<div class="cat-pred">${predHTML(p)}` + (keeperHTML(p) ? ` · ${keeperHTML(p)}` : "") +
       (p.from === "who" ? ` <span class="faint" title="Not embedded yet: this guess comes only from how you've graded these performers and this studio">(from performer/studio history — not seen yet)</span>` : "") + `</div>`
@@ -5419,6 +5426,7 @@ document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (gradeKey(k)) { e.preventDefault(); gradeCat(cat.focus, GRADES[+k - 1]); }
+  else if (k === "n") { e.preventDefault(); gradeCat(cat.focus, NO_LEARN); }
   else if (k === "j" || k === "arrowdown") { e.preventDefault(); focusCat(cat.focus + 1); }
   else if (k === "k" || k === "arrowup") { e.preventDefault(); focusCat(cat.focus - 1); }
   else if (k === "enter") { e.preventDefault(); watchCat(cat.focus); }
@@ -6318,7 +6326,9 @@ function renderReview() {
   const sug = r.suggest ? r.suggest.grade : (r.pred ? r.pred.tier : null);
   $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) =>
     `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(GRADE_HELP[g] || "")}"><span class="k">${k + 1}</span>
-      <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${d}</span></button>`).join("");
+      <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${d}</span></button>`).join("")
+    + `<button class="g g-reject g-nl ${r.no_learn ? "cur" : ""}" data-g="${NO_LEARN}" title="${esc(NO_LEARN_TIP)}"><span class="k">N</span>
+      <span class="n"><span class="nl">Reject, don't learn</span><span class="ns">Rej ⊘</span></span><span class="d">1★ · Peaks learns nothing from it</span></button>`;
   const order = ["legendaire", "exceptionnelle", "merveilleuse", "reject"].filter(liveTier);
   $("#rv-probs").innerHTML = r.pred ? order.map((c) => {
     const p = Math.round(100 * (probs[c] || 0)), t = c === "reject" ? "rejected" : c;
@@ -6536,6 +6546,7 @@ document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase(), v = $("#rv-v");
   if (gradeKey(k)) { e.preventDefault(); rvGrade(RV_GRADES[+k - 1][0]); }
+  else if (k === "n") { e.preventDefault(); rvGrade(NO_LEARN); }
   else if (k === "0") { e.preventDefault(); rvKeep(); }
   else if (k === "j") { e.preventDefault(); rvMove(1); }
   else if (k === "k") { e.preventDefault(); rvMove(-1); }
@@ -6717,7 +6728,7 @@ async function prStart() {
 function prNote(r, fresh, grade) {
   if (!pr.active || rv.source !== "catalogue" || !(r.performer_ids || []).includes(pr.active.pid)) return;
   const prev = pr.active.changes[r.scene_id]?.from ?? r.tier;
-  pr.active.changes[r.scene_id] = { from: prev, to: fresh.tier, size: +r.size || 0, reject: grade === "reject" };
+  pr.active.changes[r.scene_id] = { from: prev, to: fresh.tier, size: +r.size || 0, reject: grade === "reject" || grade === NO_LEARN };
 }
 async function prFinish() {
   const a = pr.active; if (!a) return;

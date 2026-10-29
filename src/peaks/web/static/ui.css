@@ -1210,3 +1210,10 @@ body.picks-off .pick-span { display: none !important; }
 .dupe-reject { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0 10px; padding: 8px 12px;
   border: 1px solid var(--bad, #e0604d); border-radius: 8px; color: var(--bad, #e0604d); font-size: 13px; }
 .dupe-reject span { flex: 1; min-width: 200px; }
+
+/* "Reject, don't learn" */
+.g-nl { border-style: dashed !important; }
+/* the grade row holds every live grade plus "Reject, don't learn" on one line */
+@media (min-width: 701px) {
+  .rv-grades { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+}
