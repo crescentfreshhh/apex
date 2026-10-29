@@ -187,8 +187,15 @@ def test_keeper_missing_its_own_tier_tag_gets_it(svc, tagged):
     assert tagged.s["4"]["organized"]
 
 
-def test_rejected_or_unreviewed_copies_set_nothing(svc, tagged):
+def test_keeping_a_copy_of_a_scene_you_rejected_carries_the_reject(svc, tagged):
+    """You rejected one copy and no copy is a keeper: the kept copy is graded 1★
+    first — never left unreviewed, where it could slip back in."""
     tagged.s["5"].update(rating100=20)                      # a reject
+    r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
+    assert r["carried_grade"] == "reject" and tagged.s["4"]["rating100"] == 20
+
+
+def test_unreviewed_copies_alone_set_nothing(svc, tagged):
     r = svc.resolve_duplicate(None, "4", ["5"], confirm=True)
     assert r["carried_grade"] is None and tagged.s["4"]["rating100"] is None
 
@@ -329,3 +336,66 @@ def test_queue_api_starts_the_worker(queued, stash, monkeypatch):
     assert client.post("/api/duplicates/queue/nope/undo").status_code == 404
     assert client.post("/api/duplicates/queue/stop").json()["paused"] is True
     assert client.post("/api/duplicates/queue/resume").json()["paused"] is False
+
+
+
+# --- the page shows today's grades, and a scene you rejected goes whole ------------------
+
+def test_the_page_rereads_grades_and_drops_deleted_copies(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    _wait(client, client.post("/api/duplicates/scan").json())
+    b = next(g for g in client.get("/api/duplicates").json()["groups"] if g["keep"] in ("4", "5"))
+    assert all(r["tier"] == "unreviewed" for r in b["scenes"])
+    stash.s["4"].update(rating100=100, o_counter=17)          # graded after the scan…
+    b = next(g for g in client.get("/api/duplicates").json()["groups"] if "4" in {r["scene_id"] for r in g["scenes"]})
+    assert {r["scene_id"]: r["tier"] for r in b["scenes"]}["4"] == "exceptionnelle"   # …and it shows
+    assert b["best_grade"] == "exceptionnelle"
+    del stash.s["5"]                                           # a copy deleted elsewhere
+    groups = client.get("/api/duplicates").json()["groups"]
+    assert not any("4" in {r["scene_id"] for r in g["scenes"]} for g in groups)       # a group of one is gone
+
+
+def test_a_rejected_copy_with_no_keeper_grade_means_delete_all(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    _wait(client, client.post("/api/duplicates/scan").json())
+    stash.s["5"].update(rating100=20)                          # you rejected one copy since
+    d = client.get("/api/duplicates").json()
+    b = next(g for g in d["groups"] if "5" in {r["scene_id"] for r in g["scenes"]})
+    assert b["action"] == "delete_all" and b["keep"] is None and b["rejected"] == ["5"]
+    assert b["reclaim"] == 4_100_000_000 and "rejected scene 5" in b["keep_why"]
+    a = next(g for g in d["groups"] if "1" in {r["scene_id"] for r in g["scenes"]})
+    assert a["action"] == "keep" and a["keep"] == "2"         # a Légendaire copy: kept as before, the reject only goes
+
+
+def test_delete_all_through_the_queue(queued, stash):
+    svc = queued
+    stash.s["5"].update(rating100=20)
+    svc.refresh_duplicate_picks()
+    svc.dupe_queue_add(None, ["4", "5"])
+    r = svc.drain_dupe_queue(None, sleep=lambda s: None)
+    assert r == {"resolved": 1, "failed": 0}
+    assert "4" not in stash.s and "5" not in stash.s
+    assert len(svc.reject_memory()) == 0                      # deleted as duplicates, not remembered rejects
+
+
+def test_delete_all_refuses_when_a_copy_was_regraded_since(queued, stash):
+    svc = queued
+    stash.s["5"].update(rating100=20)
+    svc.refresh_duplicate_picks()
+    svc.dupe_queue_add(None, ["4", "5"])
+    stash.s["5"].update(rating100=100, o_counter=17)          # changed your mind before it ran
+    r = svc.drain_dupe_queue(None, sleep=lambda s: None)
+    assert r == {"resolved": 0, "failed": 1}
+    assert "4" in stash.s and "5" in stash.s
+    assert "re-graded since" in svc.dupe_queue_status()["failed"][0]["error"]
+
+
+def test_the_page_falls_back_when_stash_is_down(svc, stash, monkeypatch):
+    client = _api(svc, monkeypatch)
+    _wait(client, client.post("/api/duplicates/scan").json())
+
+    def down(ids):
+        raise ConnectionError("Stash unreachable")
+    monkeypatch.setattr(stash, "scene_details", down)
+    d = client.get("/api/duplicates").json()
+    assert d["stale"] is True and len(d["groups"]) == 2

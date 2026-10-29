@@ -1205,3 +1205,8 @@ body.picks-off .pick-span { display: none !important; }
   .sx-main kbd { display: none; }
 }
 .sx, .sx-grid, .sx-main > * { min-width: 0; max-width: 100%; }
+
+/* duplicates: a scene you already rejected */
+.dupe-reject { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0 10px; padding: 8px 12px;
+  border: 1px solid var(--bad, #e0604d); border-radius: 8px; color: var(--bad, #e0604d); font-size: 13px; }
+.dupe-reject span { flex: 1; min-width: 200px; }

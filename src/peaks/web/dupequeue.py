@@ -58,7 +58,7 @@ class DupeQueueMixin:
     def _dq_open_ids(self) -> set[str]:
         """Scene ids in queued / running items (keepers and copies)."""
         return {s for it in self._dq()["items"] if it["status"] in ("queued", "running")
-                for s in (it["keep"], *it["delete"])}
+                for s in (it["keep"], *it["delete"]) if s}
 
     # --- the duplicates view --------------------------------------------------------
 
@@ -94,14 +94,15 @@ class DupeQueueMixin:
 
     # --- queue actions ----------------------------------------------------------------
 
-    def dupe_queue_add(self, keep: str, delete: list[str], delete_file: bool = True,
+    def dupe_queue_add(self, keep: str | None, delete: list[str], delete_file: bool = True,
                        now: float | None = None) -> dict:
-        keep = str(keep)
+        """Queue one group. `keep` None deletes every copy (a scene you rejected)."""
+        keep = str(keep) if keep else None
         delete = [str(s) for s in dict.fromkeys(delete or []) if str(s) != keep]
-        if not delete:
+        if not delete or (keep is None and len(delete) < 2):
             raise ValueError("nothing to delete")
         with self._dq_lock():
-            if self._dq_open_ids() & {keep, *delete}:
+            if self._dq_open_ids() & ({keep, *delete} - {None}):
                 raise ValueError("these copies overlap a group that's already queued")
             g = self._dq_take_group(keep, delete)
             rows = {r["scene_id"]: r for r in (g or {}).get("scenes", [])}
@@ -109,7 +110,7 @@ class DupeQueueMixin:
                   "delete_file": bool(delete_file), "status": "queued",
                   "queued_at": time.time() if now is None else now,
                   "not_before": (time.time() if now is None else now) + UNDO_SECONDS,
-                  "title": (rows.get(keep) or {}).get("title") or f"Scene {keep}",
+                  "title": (rows.get(keep or delete[0]) or {}).get("title") or f"Scene {keep or delete[0]}",
                   "bytes": sum(int(rows.get(s, {}).get("size") or 0) for s in delete),
                   "group": g}
             self._dq()["items"].append(it)
@@ -120,7 +121,7 @@ class DupeQueueMixin:
         cached = getattr(self, "_dupe_cache", None) or {}
         added, skipped = 0, 0
         for g in list(cached.get("groups") or []):
-            keep = g["keep"]
+            keep = g["keep"]                                   # None: you rejected it, every copy goes
             others = [r["scene_id"] for r in g["scenes"] if r["scene_id"] != keep]
             try:
                 self.dupe_queue_add(keep, others, delete_file=delete_file)
@@ -210,10 +211,14 @@ class DupeQueueMixin:
                 continue
             if job is not None:
                 left = sum(1 for x in self._dq()["items"] if x["status"] == "queued")
-                job.log(f"keeping {it['keep']} ({it['title']}), deleting {', '.join(it['delete'])} · {left} more queued")
+                job.log(f"keeping {it['keep']} ({it['title']}), deleting {', '.join(it['delete'])} · {left} more queued"
+                        if it["keep"] else f"deleting every copy of {it['title']} ({', '.join(it['delete'])}) · {left} more queued")
             try:
-                res = self.resolve_duplicate(job, it["keep"], it["delete"], confirm=True,
-                                             delete_file=it["delete_file"])
+                if it["keep"]:
+                    res = self.resolve_duplicate(job, it["keep"], it["delete"], confirm=True,
+                                                 delete_file=it["delete_file"])
+                else:
+                    res = self.delete_duplicate_group(job, it["delete"], confirm=True, delete_file=it["delete_file"])
                 upd = {"status": "done", "result": {k: res.get(k) for k in (
                     "deleted", "freed_bytes", "carried_grade", "files_deleted", "refused")}}
                 done += 1

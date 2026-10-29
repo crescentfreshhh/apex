@@ -5589,7 +5589,8 @@ function dupeCopyHTML(r, g) {
       <div class="dim">${r.size ? fmtBytes(r.size) : "size ?"} · ${r.duration ? fmt(r.duration) : "?"}${added ? " · added " + esc(added) : ""}</div>
       <div class="dim dupe-path" title="${esc(r.path)}">${esc(r.path)}</div>
     </div>
-    <button class="${rec ? "primary" : "ghost"} dupe-keep">Keep this, delete ${g.scenes.length === 2 ? "the other" : "the others"}</button>
+    <button class="${rec ? "primary" : "ghost"} dupe-keep">${g.action === "delete_all" ? "Keep this (stays rejected)"
+      : `Keep this, delete ${g.scenes.length === 2 ? "the other" : "the others"}`}</button>
   </div>`;
 }
 function renderDupes() {
@@ -5597,13 +5598,16 @@ function renderDupes() {
   if (!d || !d.groups) { box.innerHTML = ""; return; }
   setDupeCount(d.groups.length);
   $("#dupe-status").textContent = `${plural(d.groups.length, "group")} · ${fmtBytes(d.reclaim)} reclaimable` +
-    (d.ignored ? ` · ${d.ignored} marked not duplicates` : "") + ` · checked ${d.checked_at}`;
+    (d.ignored ? ` · ${d.ignored} marked not duplicates` : "") + ` · checked ${d.checked_at}` +
+    (d.stale ? " · ⚠ grades may be out of date (Stash unreachable)" : "");
   box.innerHTML = d.groups.length ? d.groups.map((g, gi) => `<div class="dupe-group" data-g="${gi}">
       <div class="dupe-head"><b>${esc(g.scenes[0].title)}</b>
         <span class="dim">${g.scenes.length} copies · ${fmtBytes(g.reclaim)} to reclaim${g.best_grade ? " · graded " + esc(TIER_NAMES[g.best_grade]) : ""}</span>
         <span class="grow"></span>${(g.unmeasured || []).length ? `<button class="ghost dupe-measure" title="Measure the picture of the copies that aren't yet, so the recommendation can go by it">◎ Measure ${plural(g.unmeasured.length, "copy", "copies")}</button>` : ""}
         <button class="ghost dupe-compare" title="Watch the copies side by side, at the same moment">⧉ Compare copies</button>
         <button class="ghost dupe-ignore">Not duplicates</button></div>
+      ${g.action === "delete_all" ? `<div class="dupe-reject"><span>✕ You rejected scene ${esc(g.rejected[0])} — this whole group is a reject. Delete all copies?</span>
+        <button class="primary dupe-delall">Delete all copies</button></div>` : ""}
       <div class="dupe-copies">${g.scenes.map((r) => dupeCopyHTML(r, g)).join("")}</div></div>`).join("")
     : '<p class="dim">No duplicates at this accuracy. 🎉</p>';
 }
@@ -5725,6 +5729,7 @@ $("#dupe-list")?.addEventListener("click", async (e) => {
     // no dialog, no waiting: the decision is queued and the group leaves the list
     dupeKeep(g, copy.dataset.sid);
   }
+  if (e.target.closest(".dupe-delall")) dupeKeep(g, null);           // a scene you rejected: every copy goes
 });
 // one copy, playing in its own card (a second click on another copy stops this one)
 function stopDupeCopies() {
@@ -5761,7 +5766,7 @@ async function measureDupeGroup(g, btn) {
     toast(`Measured ${plural(j.result.measured, "copy", "copies")}${j.result.failed ? ` · ${j.result.failed} couldn't be read` : ""}`);
   } catch (err) { toast(err.message, true); btn.disabled = false; btn.textContent = "◎ Measure again"; }
 }
-async function dupeKeep(g, keep) {
+async function dupeKeep(g, keep) {                 // keep null: delete every copy
   const others = g.scenes.filter((r) => r.scene_id !== keep).map((r) => r.scene_id);
   const df = dupeDeleteFiles();
   dupe.data.groups = dupe.data.groups.filter((x) => x !== g);
@@ -5771,7 +5776,8 @@ async function dupeKeep(g, keep) {
     const r = await api("/api/duplicates/queue", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keep, delete: others, delete_file: df }) });
     renderDupeQueue(r);
-    toast(`Queued: keeping 1, ${df ? "deleting" : "removing"} ${plural(others.length, "copy", "copies")} — Undo in the bar for 5 s`);
+    toast(keep ? `Queued: keeping 1, ${df ? "deleting" : "removing"} ${plural(others.length, "copy", "copies")} — Undo in the bar for 5 s`
+      : `Queued: ${df ? "deleting" : "removing"} all ${others.length} copies — Undo in the bar for 5 s`);
   } catch (err) {
     toast(err.message, true);
     dupe.data.groups.push(g); dupe.data.groups.sort((x, y) => y.reclaim - x.reclaim);

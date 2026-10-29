@@ -175,7 +175,7 @@ def _catalogue_models():
         delete_file: bool = True
 
     class DupeQueueIn(BaseModel):
-        keep: str
+        keep: str | None = None          # None: delete every copy (a scene you rejected)
         delete: list[str]
         delete_file: bool = True
 
@@ -1783,7 +1783,8 @@ def create_app(cfg=None):
             raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
         try:
             item = service.dupe_queue_add(body.keep, body.delete, delete_file=body.delete_file)
-            service.picture_note_keep(body.keep, body.delete)      # your choice teaches picture quality
+            if body.keep:                                           # your choice teaches picture quality
+                service.picture_note_keep(body.keep, body.delete)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         _dupe_drain()

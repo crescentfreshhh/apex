@@ -912,12 +912,23 @@ class LibraryMixin:
         """One duplicate group as the page shows it: the copies (each with a
         stream to watch it), the recommended copy and why, what deleting the
         others frees, and each copy's picture."""
-        keep, keep_by, keep_why = self._dupe_keeper_why(rows)
         size = {r["scene_id"]: int(r.get("size") or 0) for r in rows}
+        best = self.dupe_best_grade(rows)
+        rejected = [r["scene_id"] for r in rows if r.get("tier") == "rejected"]
+        action = "keep"
+        if rejected and not best:
+            # you already rejected this scene: every copy goes (keeping one would
+            # keep a scene you said no to, and the reject purge would take it later)
+            keep, keep_by = None, "reject"
+            keep_why = f"you rejected scene {rejected[0]} — the whole group goes"
+            action = "delete_all"
+        else:
+            keepable = [r for r in rows if r.get("tier") != "rejected"] or rows
+            keep, keep_by, keep_why = self._dupe_keeper_why(keepable)   # a rejected copy is never the keeper
         scenes = [{**r, "stream": self.stream_url(r["scene_id"], start=0)} for r in rows]
         return {"scenes": scenes, "keep": keep, "keep_by": keep_by, "keep_why": keep_why,
-                "best_grade": self.dupe_best_grade(rows),
-                "reclaim": sum(size.values()) - size[keep],
+                "best_grade": best, "rejected": rejected, "action": action,
+                "reclaim": sum(size.values()) - (size[keep] if keep else 0),
                 "picture": {r["scene_id"]: pics[r["scene_id"]] for r in rows if r["scene_id"] in pics},
                 "unmeasured": [r["scene_id"] for r in rows if self._pic_wanted(r)]}
 
@@ -928,8 +939,11 @@ class LibraryMixin:
             return False
 
     def refresh_duplicate_picks(self) -> dict | None:
-        """The cached groups with their recommendation re-judged on the current
-        picture scores (copies measured since the scan count at once)."""
+        """The cached groups with every copy re-read from Stash — today's grades,
+        not the scan's — and the recommendation re-judged on them and on the
+        current picture scores. A copy gone from Stash drops out (and a group of
+        one with it). If Stash can't be reached, the catalogue's rows stand in and
+        the page says the grades may be stale."""
         d = self.cached_duplicates()
         if not d or not d.get("groups"):
             return d
@@ -937,10 +951,32 @@ class LibraryMixin:
             pics = self.picture_scores()
         except Exception:  # noqa: BLE001
             pics = {}
-        groups = [self._dupe_group([{k: v for k, v in r.items() if k != "stream"} for r in g["scenes"]], pics)
-                  for g in d["groups"]]
+        ids = list(dict.fromkeys(r["scene_id"] for g in d["groups"] for r in g["scenes"]))
+        fresh, stale = {}, False
+        try:
+            client = self.client()
+            for i in range(0, len(ids), 100):
+                fresh.update(client.scene_details(ids[i:i + 100]))
+        except Exception:  # noqa: BLE001 — Stash down: fall back, and say so
+            stale = True
+        known = {} if not stale else {r["scene_id"]: r for r in self._catalogue_all()}
+        groups = []
+        for g in d["groups"]:
+            rows = []
+            for r in g["scenes"]:
+                sid = r["scene_id"]
+                if not stale:
+                    m = fresh.get(sid)
+                    if m is None:
+                        continue                               # deleted since the scan
+                    row = self._cat_put_row(sid, m) if self._in_catalogue(sid) else self._cat_row(sid, m)
+                else:
+                    row = known.get(sid) or {k: v for k, v in r.items() if k != "stream"}
+                rows.append({k: v for k, v in row.items() if k != "stream"})
+            if len(rows) >= 2:
+                groups.append(self._dupe_group(rows, pics))
         groups = self.dupe_queue_hide(groups)          # decided since the scan
-        d = {**d, "groups": groups, "reclaim": sum(g["reclaim"] for g in groups)}
+        d = {**d, "groups": groups, "reclaim": sum(g["reclaim"] for g in groups), "stale": stale}
         self._dupe_cache = d
         return d
 
@@ -1013,6 +1049,10 @@ class LibraryMixin:
     def cached_duplicates(self) -> dict | None:
         return getattr(self, "_dupe_cache", None)
 
+    def _in_catalogue(self, sid: str) -> bool:
+        cached = getattr(self, "_cat_cache", None)
+        return bool(cached) and any(r["scene_id"] == str(sid) for r in cached[1])
+
     def resolve_duplicate(self, job, keep_id: str, delete_ids: list[str], confirm: bool = False,
                           delete_file: bool = True) -> dict:
         """Keep one copy, delete the others (files included). If any copy
@@ -1043,17 +1083,51 @@ class LibraryMixin:
                      or kept_tags != [best]):
             self.grade_scene(keep_id, best, source="duplicate")
             carried = best
+        elif not best and kept_tier != "rejected" and any(
+                tier_of(m.get("rating100"), m.get("o_counter")) == "rejected" for s, m in fresh.items() if s != keep_id):
+            # you rejected a copy and no copy is a keeper: the kept one inherits the
+            # reject — never left unreviewed, so it can't slip back in
+            self.grade_scene(keep_id, "reject", source="duplicate")
+            carried = "reject"
         res = self.delete_scenes(job, delete_ids, confirm=True, reason="duplicate",
                                  keep_ids={keep_id}, delete_file=delete_file)
         keep_row = self._cat_update_row(keep_id)
         self._log_scene("duplicate", keep_row, detail=(
             f"kept this copy, deleted {res['deleted']}"
-            + (f", made it {best} (highest {best_from} in the group)" if carried else "")))
+            + (", it inherited the reject" if carried == "reject"
+               else f", made it {best} (highest {best_from} in the group)" if carried else "")))
         cached = getattr(self, "_dupe_cache", None)
         if cached:
             cached["groups"] = [g for g in cached["groups"]
                                 if keep_id not in {s["scene_id"] for s in g["scenes"]}]
         return {**res, "kept": keep_id, "carried_grade": carried}
+
+    def delete_duplicate_group(self, job, scene_ids: list[str], confirm: bool = False,
+                               delete_file: bool = True) -> dict:
+        """Delete every copy of a scene you rejected. Re-read from Stash first: at
+        least one copy must still be 1★ and none may carry a keeper grade — if a
+        copy was re-graded since, nothing is deleted."""
+        from ..tiers import tier_of
+
+        if not confirm:
+            raise PermissionError("deleting removes the files from disk — confirm first")
+        ids = [str(s) for s in dict.fromkeys(scene_ids or [])]
+        if len(ids) < 2:
+            raise ValueError("a duplicate group has at least two copies")
+        self.require_op("scenesDestroy")
+        fresh = self.client().scene_details(ids)
+        rows = [self._cat_row(s, m) for s, m in fresh.items()]
+        tiers = {s: tier_of(m.get("rating100"), m.get("o_counter")) for s, m in fresh.items()}
+        if "rejected" not in tiers.values() or self.dupe_best_tier(rows)[0]:
+            raise ValueError("a copy was re-graded since — reopen Duplicates and decide again")
+        res = self.delete_scenes(job, list(fresh), confirm=True, reason="duplicate", delete_file=delete_file)
+        for s in fresh:
+            self._log_scene("duplicate", {"scene_id": s, **(next((r for r in rows if r["scene_id"] == s), {}))},
+                            detail="deleted with its group — you had rejected this scene")
+        cached = getattr(self, "_dupe_cache", None)
+        if cached:
+            cached["groups"] = [g for g in cached["groups"] if not set(ids) & {x["scene_id"] for x in g["scenes"]}]
+        return {**res, "kept": None, "carried_grade": None}
 
     # --- ingest: new files end to end (the user's Stash routine, then Peaks) ----
     # scan (phashes on) → identify → auto tag, each with Stash's saved task
