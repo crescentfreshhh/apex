@@ -1,5 +1,5 @@
-"""Settling the library: the 9-in-10 threshold, what's left to ask, the order
-questions come in, rulings, and the progress history."""
+"""Settling the library — graded scenes only: the 9-in-10 threshold, what's left
+to ask (disagreements and scenes in a retiring tier), the order, rulings, history."""
 
 import os
 import sys
@@ -14,13 +14,14 @@ from test_catalogue import _triage_svc  # noqa: E402
 pytest.importorskip("sklearn")
 
 
-def _library(tmp_path, monkeypatch, n_cluster=8, n_wrong=1, mix=0.8, br=33e6):
-    """The triage library plus unsure scenes: `n_cluster` near-identical ones that
-    look half Exceptionnelle, half Légendaire, and one lone unsure scene that looks
-    like nothing else; and `n_wrong` Exceptionnelle-looking scenes graded Légendaire."""
+def _library(tmp_path, monkeypatch, n_cluster=8, n_wrong=1, mix=0.8, br=33e6, drain=True):
+    """The triage library (Merveilleuse draining unless `drain=False`), plus unreviewed
+    scenes Peaks can't call — `n_cluster` look-alikes between Exceptionnelle and
+    Légendaire and one lone odd one — and `n_wrong` Exceptionnelle-looking scenes
+    graded Légendaire."""
     from peaks.cache import EmbeddingCache
 
-    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    svc, stash = _triage_svc(tmp_path, monkeypatch, settings={"draining_tiers": ["merveilleuse"]} if drain else None)
     cache = EmbeddingCache(svc.cfg.embedding.cache_dir)
     keys = {cache.peek_meta(k, "dinov2")["scene_id"]: k for k in cache.keys("dinov2")}
     look = lambda sid: cache.load(keys[sid], "dinov2")[1].mean(axis=0)  # noqa: E731
@@ -63,36 +64,62 @@ def test_spread_order_spreads_the_picks():
     assert spread_order(np.array([1.0, 0.99, 0.98, 0.6]), X, 2) == [0, 3]       # not three look-alikes
 
 
-def test_what_is_left_and_the_order_questions_come_in(tmp_path, monkeypatch):
+def test_only_graded_scenes_are_questions(tmp_path, monkeypatch):
+    """Every honest disagreement and every scene left in a retiring tier — and no
+    unreviewed scene, however unsure Peaks is about it."""
+    from peaks.tier_model import train_class
+
     svc, stash, (wrong,), new = _library(tmp_path, monkeypatch)
-    st = svc.settle_state()
-    assert st["ok"] and st["disagree"] == 1 and st["unsure"] >= 5
-    assert st["unsettled"] == st["unsure"] + st["disagree"]
     rows = svc._catalogue_all()
-    q = svc.settle_queue(rows, svc._tier_predictions(rows))
+    preds = svc._tier_predictions(rows)
+    merv = [r["scene_id"] for r in rows if r["tier"] == "merveilleuse"]
+    expect = {r["scene_id"] for r in rows if train_class(r["tier"]) and r["scene_id"] in preds
+              and preds[r["scene_id"]]["tier"] != train_class(r["tier"])}
+    st = svc.settle_state()
+    assert st["ok"] and wrong in expect and st["disagree"] == len(expect)
+    assert st["drain"] == len(merv) > 0 and st["unsettled"] == st["disagree"] + st["drain"]
+    assert st["agree"] + st["disagree"] == sum(1 for r in rows if train_class(r["tier"]) and r["scene_id"] in preds)
+    q = svc.settle_queue(rows, preds)
     ids = [r["scene_id"] for r in q]
-    assert ids[0].startswith("c")                          # representative + unsure first
-    assert ids.index("lone") < ids.index(sorted((i for i in ids if i.startswith("c")), key=ids.index)[-1])  # spread out
-    assert wrong in ids and ids.index(wrong) == 4          # every 5th question is a disagreement
+    assert set(ids) == expect | set(merv)
+    assert set(new).isdisjoint(ids) and {"u1", "u2", "u3"}.isdisjoint(ids)     # unreviewed: never
+    assert ids.index(wrong) <= 1                                               # interleaved, not last
     info = svc.settle_info(wrong)
     assert info["kind"] == "disagree" and info["peaks"] == "exceptionnelle" and "You said" in info["why"]
-    assert svc.settle_info(ids[0])["kind"] == "unsure" and "Peaks unsure" in svc.settle_info(ids[0])["why"]
-    assert {"u1", "u2"}.isdisjoint(ids)                      # Peaks is sure about these: settled
+    d = svc.settle_info(merv[0])
+    assert d["kind"] == "drain" and "retiring" in d["why"] and d["peaks"] in ("exceptionnelle", "legendaire")
+
+
+def test_every_disagreement_counts_sure_or_leaning(tmp_path, monkeypatch):
+    import peaks.web.settle as settle
+
+    svc, stash, (wrong,), _ = _library(tmp_path, monkeypatch, drain=False)
+    rows = svc._catalogue_all()
+    monkeypatch.setattr(settle, "calibrate", lambda oof: {"t": 0.999, "measured": True, "accuracy": 0.9, "above": 20, "n": 36})
+    st = svc.settle_state()
+    assert st["disagree"] >= 1 and st["disagree_sure"] == 0                    # leaning ones count too
+    svc.settle_queue(rows, svc._tier_predictions(rows))
+    assert svc.settle_info(wrong)["sure"] is False and "leaning" in svc.settle_info(wrong)["why"]
+    monkeypatch.setattr(settle, "calibrate", lambda oof: {"t": 0.0, "measured": True, "accuracy": 0.9, "above": 20, "n": 36})
+    assert svc.settle_state()["disagree_sure"] == svc.settle_state()["disagree"]
+    svc.settle_queue(rows, svc._tier_predictions(rows))
+    assert "sure" in svc.settle_info(wrong)["why"]
 
 
 def test_a_ruling_settles_a_disagreement_until_you_regrade(tmp_path, monkeypatch):
     svc, stash, (wrong,), _ = _library(tmp_path, monkeypatch)
-    before = svc.settle_state()["unsettled"]
+    before = svc.settle_state()
     svc.settle_rule(wrong)
-    assert svc.settle_state()["disagree"] == 0 and svc.settle_state()["unsettled"] == before - 1
+    after = svc.settle_state()
+    assert after["disagree"] == before["disagree"] - 1 and after["unsettled"] == before["unsettled"] - 1
     svc.settle_unrule(wrong)
-    assert svc.settle_state()["disagree"] == 1
+    assert svc.settle_state()["disagree"] == before["disagree"]
     svc.settle_rule(wrong)
     stash.s[wrong]["o_counter"] = 17                        # graded again → the ruling no longer applies…
     svc._cat_cache = None
     svc.__dict__.pop("_cat_cache", None)
     st = svc.settle_state()
-    assert st["disagree"] == 0                               # … and the new grade agrees with Peaks
+    assert st["disagree"] == before["disagree"] - 1          # … and the new grade agrees with Peaks
 
 
 def test_history_projection_and_the_api(tmp_path, monkeypatch):
@@ -115,9 +142,9 @@ def test_history_projection_and_the_api(tmp_path, monkeypatch):
     d = c.get("/api/settle").json()
     assert d["ok"] and d["unsettled"] >= 1 and d["threshold"]["t"] > 0
     cat = c.get("/api/catalogue", params={"view": "settle", "limit": 50}).json()
-    assert cat["views"]["settle"] == d["unsettled"] and cat["items"][0]["settle"]["kind"] == "unsure"
+    assert cat["views"]["settle"] == d["unsettled"] and {x["settle"]["kind"] for x in cat["items"]} == {"disagree", "drain"}
     assert c.post(f"/api/settle/rule/{wrong}").json()["ruled"]
-    assert c.get("/api/settle").json()["disagree"] == 0
+    assert c.get("/api/settle").json()["disagree"] == d["disagree"] - 1
     assert c.delete(f"/api/settle/rule/{wrong}").json()["ruled"] is False
     assert c.post("/api/settle/rule/nope").status_code == 404
 

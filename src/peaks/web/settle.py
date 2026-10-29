@@ -1,20 +1,18 @@
-"""Settling the library: how many questions are left, and which to ask first.
+"""Settling the library: your grades, checked once and for all.
 
-A scene is settled when you've graded it, or when Peaks would grade it right
-about 9 times in 10 — measured on your own grades with the honest (out-of-fold)
-verdicts, not assumed. Peaks never grades anything itself: a "sure" scene just
-waits in the Likely list as a one-click suggestion.
-
+Only graded scenes take part — unreviewed scenes are left to Likely keepers and
+Quality check (most of them end up rejected, so asking about them wastes time).
 What's left are the questions:
 
-  - unsure: an ungraded scene Peaks can't call yet;
-  - disagree: a scene you graded that Peaks confidently grades otherwise, until
-    you rule on it ("Keep mine") or grade it again.
+  - disagree: every grade Peaks' honest verdict (from a model that never saw
+    that grade) disagrees with — confident or just leaning, surest first —
+    until you rule on it ("Keep mine") or grade it again;
+  - drain: a scene in a tier being retired (Merveilleuse): which live tier?
+    Asked most-to-learn first: uncertain and representative, spread out so a
+    session isn't twenty look-alikes.
 
-They're asked most-to-learn first: an unsure scene that looks like many other
-unsure scenes teaches the most (uncertainty × how representative it is), and the
-picks are spread out so one session isn't twenty near-identical scenes. Every
-fifth question is a disagreement.
+The two kinds are interleaved. The calibration (where Peaks is right 9 times in
+10 on your grades) labels each disagreement "sure" or "leaning".
 """
 
 from __future__ import annotations
@@ -28,8 +26,7 @@ import numpy as np
 TARGET = 0.90             # "right about 9 times in 10"
 MIN_ABOVE = 20            # graded scenes above a threshold before it's trusted
 FALLBACK = 0.90
-DISAGREE_EVERY = 5        # every n-th question is a disagreement
-NEIGHBOURS = 10           # for "how representative": mean similarity to the closest unsure scenes
+NEIGHBOURS = 10           # for "how representative": mean similarity to the closest open questions
 SPREAD = 0.6              # how hard a pick down-weights its look-alikes
 QUEUE = 200               # questions ordered per request (the rest follow as they're answered)
 FAST_RETRAIN = 10         # grades between retrains while you're settling
@@ -148,19 +145,22 @@ class SettleMixin:
         rules = self.rulings()
         drain = set(draining())
         t = cal["t"]
-        unsure, disagree, sure = [], [], []
+        disagree, drains, agree = [], [], 0
         for r in rows:
             sid, p = r["scene_id"], preds.get(r["scene_id"])
             if p is None or p.get("from") == "who":
                 continue                             # not embedded yet: nothing honest to say
             graded = train_class(r["tier"])
-            if graded:
+            if graded:                               # every grade the honest verdict disagrees with
                 ru = rules.get(sid)
-                if p["tier"] != graded and p["conf"] >= t and not (ru and ru.get("grade") == r["tier"]):
+                if p["tier"] != graded and not (ru and ru.get("grade") == r["tier"]):
                     disagree.append(r)
-            elif r["tier"] == "unreviewed" or r["tier"] in drain:
-                (sure if p["conf"] >= t else unsure).append(r)
-        return {"unsure": unsure, "disagree": disagree, "sure": sure}
+                else:
+                    agree += 1
+            elif r["tier"] in drain:                 # a retiring tier: which live tier is it?
+                drains.append(r)
+            # unreviewed scenes are never questions here — most of them end up rejected
+        return {"disagree": disagree, "drain": drains, "agree": agree, "t": t}
 
     def settle_state(self, log: bool = True) -> dict:
         """The counter and its context, for the Insights card and the sidebar."""
@@ -172,10 +172,11 @@ class SettleMixin:
         preds = self._tier_predictions(rows)
         cal = calibrate(getattr(m, "oof", None) or {})
         c = self._settle_classify(rows, preds, cal)
-        n = len(c["unsure"]) + len(c["disagree"])
+        n = len(c["disagree"]) + len(c["drain"])
         self._settle_last = n
-        out = {"ok": True, "unsettled": n, "unsure": len(c["unsure"]), "disagree": len(c["disagree"]),
-               "sure": len(c["sure"]), "threshold": cal, "scenes": len(rows),
+        out = {"ok": True, "unsettled": n, "disagree": len(c["disagree"]),
+               "disagree_sure": sum(1 for r in c["disagree"] if preds[r["scene_id"]]["conf"] >= cal["t"]),
+               "drain": len(c["drain"]), "agree": c["agree"], "threshold": cal, "scenes": len(rows),
                "unembedded": sum(1 for r in rows if r["scene_id"] not in preds or preds[r["scene_id"]].get("from") == "who"),
                "history": self.settle_history()[-400:], "projection": None}
         h = out["history"]
@@ -207,12 +208,13 @@ class SettleMixin:
         cal = calibrate(getattr(st["model"], "oof", None) or {})
         c = self._settle_classify(pool, preds, cal)
         names = self.tier_display_names()
+        nm = lambda c_: names.get(c_, c_)  # noqa: E731
         info: dict[str, dict] = {}
-        unsure = c["unsure"]
+        drains = c["drain"]
         order: list[dict] = []
-        if unsure:
-            vecs = self._settle_vectors(unsure)
-            have = [r for r in unsure if r["scene_id"] in vecs]
+        if drains:                                    # most to learn first, spread out
+            vecs = self._settle_vectors(drains)
+            have = [r for r in drains if r["scene_id"] in vecs]
             X = np.stack([vecs[r["scene_id"]] for r in have]) if have else None
             unc = np.array([1.0 - _margin(preds[r["scene_id"]]) for r in have])
             if X is not None and len(have) > 1:
@@ -224,29 +226,33 @@ class SettleMixin:
                 rep = np.ones(len(have))
             value = unc * (0.25 + rep)
             order = [have[j] for j in spread_order(value, X, min(QUEUE, len(have)))]
-            order += [r for r in unsure if r["scene_id"] not in vecs][: max(0, QUEUE - len(order))]
+            order += [r for r in drains if r["scene_id"] not in vecs][: max(0, QUEUE - len(order))]
         dis = sorted(c["disagree"], key=lambda r: -preds[r["scene_id"]]["conf"])
+        # the two kinds interleaved in proportion, so neither waits for the other to run out
         out: list[dict] = []
-        di = 0
-        for r in order:
-            if (len(out) + 1) % DISAGREE_EVERY == 0 and di < len(dis):
+        di = oi = 0
+        while di < len(dis) or oi < len(order):
+            if oi >= len(order) or (di < len(dis) and di * len(order) <= oi * len(dis)):
                 out.append(dis[di])
                 di += 1
-            out.append(r)
-        out += dis[di:]
+            else:
+                out.append(order[oi])
+                oi += 1
+        drain_ids = {r["scene_id"] for r in drains}
         for r in out:
             p = preds[r["scene_id"]]
             top = sorted((p.get("probs") or {}).items(), key=lambda kv: -kv[1])[:2]
-            if r in c["disagree"]:
-                info[r["scene_id"]] = {"kind": "disagree", "peaks": p["tier"], "conf": p["conf"],
-                                       "yours": r["tier"],
-                                       "why": f"You said {names.get(r['tier'], r['tier'])} · Peaks says "
-                                              f"{names.get(p['tier'], p['tier'])} ({round(100 * p['conf'])}%)"}
-            else:
-                info[r["scene_id"]] = {"kind": "unsure", "peaks": p["tier"], "conf": p["conf"],
+            if r["scene_id"] in drain_ids:
+                info[r["scene_id"]] = {"kind": "drain", "peaks": p["tier"], "conf": p["conf"],
                                        "top": [{"tier": k, "p": v} for k, v in top],
-                                       "why": "Peaks unsure: " + " / ".join(
-                                           f"{names.get(k, k)} {round(100 * v)}%" for k, v in top)}
+                                       "why": f"{nm(r['tier'])} is retiring · Peaks leans " + " / ".join(
+                                           f"{nm(k)} {round(100 * v)}%" for k, v in top)}
+            else:
+                sure = p["conf"] >= c["t"]
+                info[r["scene_id"]] = {"kind": "disagree", "peaks": p["tier"], "conf": p["conf"], "sure": sure,
+                                       "yours": r["tier"],
+                                       "why": f"You said {nm(r['tier'])} · Peaks says {nm(p['tier'])} "
+                                              f"({round(100 * p['conf'])}%, {'sure' if sure else 'leaning'})"}
         self._settle_info = info
         return out
 
@@ -255,7 +261,7 @@ class SettleMixin:
         if st["model"] is None:
             return 0
         c = self._settle_classify(pool, preds, calibrate(getattr(st["model"], "oof", None) or {}))
-        n = len(c["unsure"]) + len(c["disagree"])
+        n = len(c["disagree"]) + len(c["drain"])
         if len(pool) >= len(self._catalogue_all()):          # the whole library: the floor shows it
             self._settle_last = n
         return n
