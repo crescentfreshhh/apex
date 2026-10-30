@@ -202,3 +202,52 @@ def test_many_saved_scenes_in_one_tier_never_crowd_out_the_others(tmp_path, monk
     assert len(sample) <= len(top)
     assert len([c for c, n in per.items() if c]) == 3 and all(n >= share for c, n in per.items() if c), per
     # the old order: saves first, then the cut — nothing but the saves' tier was left
+
+
+def test_an_interrupted_trial_resumes_counting_what_is_already_embedded(tmp_path, monkeypatch):
+    """A re-pull or a stop mid-trial keeps every scene already embedded; the next
+    run says so and its progress starts there, not at zero."""
+    import peaks.pipeline as pipeline
+    import peaks.web.service as svc_mod
+
+    svc, _, _, _, cache = _lab_svc(tmp_path, monkeypatch)
+
+    class Job:
+        cancelled, progress = False, None
+
+        def __init__(self):
+            self.lines = []
+
+        def log(self, m):
+            self.lines.append(m)
+    j = Job()
+    j.cancelled = True
+    svc.run_lab(CAND, job=j)                                   # stopped part-way: some scenes embedded
+    first = len(cache.keys(NS))
+    assert 0 < first
+
+    # the real _lab_embed (the fixture fakes it), with the embedding itself stubbed
+    from peaks.web.lab import LabMixin
+    monkeypatch.setattr(svc_mod.Service, "_lab_embed", LabMixin._lab_embed)
+    monkeypatch.setattr(svc_mod.Service, "_lab_embedder", lambda self, cand: type("E", (), {"name": NS})())
+    sig = svc._lab_sampler()
+    sig = getattr(sig, "interval_signature", sig.interval)
+    for k in cache.keys(NS):                                    # the fixture's entries, at the library's sampling
+        t, v, meta = cache.load(k, NS)
+        cache.save(k, NS, t, v, meta={**meta, "interval": sig})
+    seen = {}
+
+    def fake_library(scenes, sampler, embedder, cache_, **kw):
+        seen["start"] = dict(j2.progress)
+        return {"embedded": 0, "frames": 0}
+    monkeypatch.setattr(pipeline, "embed_library", fake_library)
+    j2 = Job()
+    rows = svc.lab_sample()
+    svc._lab_embed(CAND, rows, job=j2)
+    idx = svc.index(svc._model_name())
+    key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+    have = sum(1 for r in rows if key_of.get(r["scene_id"]) and cache.has(key_of[r["scene_id"]], NS, interval=sig))
+    assert have > 0 and seen["start"]["done"] == have
+    assert any(m.startswith(f"resuming — {have} of") for m in j2.lines)
+    card = next(c for c in svc.lab()["candidates"] if c["id"] == CAND)
+    assert card["sample"]["done"] == have and card["sample"]["total"] == len(rows)

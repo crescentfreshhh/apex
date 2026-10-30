@@ -136,7 +136,10 @@ class SenseExploreMixin:
     def _se_scene_ids(self, sense: str) -> list[str]:
         if sense == "sound":
             return list(self._hear_keys())
-        return list(self._zoom_state()["scenes"])
+        from .motion import MOTION_NS
+
+        watched = set(self._motion_cache().keys(MOTION_NS))     # one directory listing, not a look per scene
+        return [sid for sid, e in self._zoom_view()["scenes"].items() if e.get("key") in watched]
 
     def _se_signature(self, sense: str):
         try:

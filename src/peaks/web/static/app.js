@@ -3750,6 +3750,8 @@ function labCard(c, run) {
     ${mine ? `<p class="small">${pr.stage === "judging" ? "Judging…" : `Embedding the sample… ${pr.done ?? 0} of ${pr.total ?? "?"}`}</p>
       <div class="lab-prog"><i style="width:${pr.total ? Math.round(100 * (pr.done || 0) / pr.total) : 4}%"></i></div>` : ""}
     ${table || (mine ? "" : '<p class="faint small">Not tried yet.</p>')}${err}
+    ${!mine && c.sample && c.sample.done && c.sample.done < c.sample.total
+      ? `<p class="small">Sample: <b>${c.sample.done.toLocaleString()} of ${c.sample.total.toLocaleString()}</b> embedded with ${esc(c.label)} — ${t ? "Run again" : "Run trial"} carries on from here.</p>` : ""}
     <div class="row">${c.active ? "" : `<button class="btn sm" data-lab-run="${c.id}" ${run && run.status === "running" ? "disabled" : ""}>${t ? "Run again" : "Run trial"}</button>`}
       ${t && t.win && !c.active && !c.stale ? `<button class="btn sm pri" data-lab-switch="${c.id}">Switch to ${esc(c.label)}</button>` : ""}</div>
     <p class="faint small">Needs Meta's DINOv3 licence accepted on Hugging Face and the container's <code>HF_TOKEN</code> set.</p></div>`;

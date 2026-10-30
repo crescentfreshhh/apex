@@ -72,14 +72,15 @@ class LabMixin:
             t = d["trials"].get(c)
             out.append({"id": c, "label": dino_label(c), "kind": "dino", "active": c == active,
                         "trial": t, "stale": bool(t and t.get("against") != active),
-                        "error": (d.get("errors", {}).get(c) or {}).get("error")})
+                        "error": (d.get("errors", {}).get(c) or {}).get("error"),
+                        "sample": self.lab_sample_progress(c) if c != active else None})
         return {"active": active, "active_label": dino_label(active), "candidates": out,
                 "sample_cap": SAMPLE_CAP, "senses": self.lab_senses()}
 
     def lab_senses(self) -> list[dict]:
         """The extra senses (hearing, motion): coverage, and what the honest tests
         say they add to finding moments and to grading."""
-        mm = (self._zoom_state().get("model") or {})
+        mm = (self._zoom_view().get("model") or {})
         sets = mm.get("sets") or {}
         tier = (self._tier_model_state().get("report") or {})
         out = []
@@ -138,25 +139,61 @@ class LabMixin:
 
         return make_dino(cand, device=self.cfg.embedding.device or None)
 
+    def _lab_sampler(self):
+        from ..sampling import FrameSampler
+
+        s = self.cfg.sampling
+        mode, iv = self._active_sampling()
+        return FrameSampler(interval_seconds=iv, mode=mode, hwaccel=s.hwaccel, pipeline=s.pipeline,
+                            scene_timeout=s.scene_timeout)
+
+    def lab_sample_progress(self, cand: str) -> dict | None:
+        """How much of the trial sample is already embedded with `cand` at the
+        library's sampling — the work a next run carries on from."""
+        from ..cache import EmbeddingCache
+        from ..embedding import dino_cache_name
+
+        try:
+            rows = self.lab_sample()
+            idx = self.index(self._model_name())
+            key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+            sampler = self._lab_sampler()
+            sig = getattr(sampler, "interval_signature", sampler.interval)
+            cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+            ns = dino_cache_name(cand)
+            done = sum(1 for r in rows if key_of.get(r["scene_id"]) and cache.has(key_of[r["scene_id"]], ns, interval=sig))
+            return {"done": done, "total": len(rows)}
+        except Exception:  # noqa: BLE001 — a progress line, never an error
+            return None
+
     def _lab_embed(self, cand: str, rows: list[dict], job=None) -> dict:
         """Embed the sample with the candidate into its own namespace, at the
         library's sampling. Resumable: cached scenes are skipped. Returns
         {embedded, frames, seconds} for the speed estimate."""
         from ..cache import EmbeddingCache
-        from ..pipeline import embed_library
-        from ..sampling import FrameSampler
+        from ..embedding import dino_cache_name, dino_label
+        from ..pipeline import embed_library, scene_key
 
-        s, e = self.cfg.sampling, self.cfg.embedding
-        mode, iv = self._active_sampling()
-        sampler = FrameSampler(interval_seconds=iv, mode=mode, hwaccel=s.hwaccel, pipeline=s.pipeline,
-                               scene_timeout=s.scene_timeout)
+        e = self.cfg.embedding
+        sampler = self._lab_sampler()
         embedder = self._lab_embedder(cand)
         cache = EmbeddingCache(e.cache_dir)
         want = {r["scene_id"] for r in rows}
         scenes = [sc for sc in self.scenes() if str(sc.id) in want]
         log = job.log if job else print
+        # what an earlier (interrupted) run already embedded is kept and skipped: count it,
+        # so a resumed trial starts where it left off rather than looking like zero
+        sig = getattr(sampler, "interval_signature", sampler.interval)
+        ns = dino_cache_name(cand)
+        idx = self.index(self._model_name())
+        key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        already = sum(1 for sc in scenes
+                      if (k := key_of.get(str(sc.id)) or (scene_key(sc) if getattr(sc, "fingerprint", None) else None))
+                      and cache.has(k, ns, interval=sig))
+        if already:
+            log(f"resuming — {already} of {len(scenes)} already embedded with {dino_label(cand)}, carrying on")
         if job is not None:
-            job.progress = {"total": len(scenes), "done": 0, "stage": "embedding", "cand": cand}
+            job.progress = {"total": len(scenes), "done": already, "stage": "embedding", "cand": cand}
 
         def _log(msg):
             log(msg)

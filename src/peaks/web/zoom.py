@@ -83,6 +83,23 @@ class ZoomMixin:
         d.setdefault("scenes", {})
         return d
 
+    def _zoom_view(self) -> dict:
+        """The zoom state for reading — parsed once per change of the file, not on
+        every call (it holds every zoomed scene; per-scene loops used to re-parse
+        it thousands of times). Read-only: to change it, use `_zoom_state` + save."""
+        p = self._zoom_path()
+        try:
+            st = p.stat()
+            sig = (str(p), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = (str(p), None, None)
+        hit = self.__dict__.get("_zoom_view_cache")
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        d = self._zoom_state()
+        self._zoom_view_cache = (sig, d)
+        return d
+
     def _zoom_save(self, d: dict) -> None:
         from .. import atomic
 
@@ -152,7 +169,7 @@ class ZoomMixin:
         """Scenes to zoom, most useful first: ones you've saved in (they teach the
         model), then unreviewed, then keepers. Rejects never. A scene is redone
         when a new save isn't covered yet."""
-        st = self._zoom_state()["scenes"]
+        st = self._zoom_view()["scenes"]
         saved = self._zoom_saved()
         idx = self.index(self._model_name())
         have = {str(m.get("scene_id")) for m in idx.key_meta.values()}
@@ -284,7 +301,7 @@ class ZoomMixin:
 
     def _zoom_windows(self, sid: str, entry: dict | None = None) -> list[dict]:
         """A zoomed scene's windows with their shape: [{c, kind, span, feats, x}]."""
-        entry = entry or self._zoom_state()["scenes"].get(sid)
+        entry = entry or self._zoom_view()["scenes"].get(sid)
         if not entry:
             return []
         try:
@@ -359,7 +376,7 @@ class ZoomMixin:
         for x in self._mc_read("pick_feedback.jsonl"):
             fb.setdefault(x["scene_id"], []).append((float(x["t"]), int(x["label"])))
         rows, X, y, wt, grp = [], [], [], [], []
-        for sid, entry in self._zoom_state()["scenes"].items():
+        for sid, entry in self._zoom_view()["scenes"].items():
             ws = self._zoom_windows(sid, entry)
             sv = saved.get(sid, [])
             for w in ws:
@@ -513,7 +530,7 @@ class ZoomMixin:
 
     def _zoom_model(self):
         """(names, mean, scale, coef, intercept) when shape ranking is on, else None."""
-        if not (self._zoom_state().get("model") or {}).get("use_shape"):
+        if not (self._zoom_view().get("model") or {}).get("use_shape"):
             return None
         p = self._zoom_model_path()
         hit = self.__dict__.get("_zoom_model_cache")
@@ -544,13 +561,13 @@ class ZoomMixin:
             else:
                 w["score"] = float(w["feats"]["peak"])
         ws.sort(key=lambda w: -w["score"])
-        key = (self._zoom_state()["scenes"].get(sid) or {}).get("key")
+        key = (self._zoom_view()["scenes"].get(sid) or {}).get("key")
         return [{"t": w["span"][1], "start": w["span"][0], "end": w["span"][2], "score": round(w["score"], 4),
                  "shape": mdl is not None, "key": key,
                  "thumb": f"/api/frame?key={key}&t={w['span'][1]:g}" if key else None} for w in ws]
 
     def zoom_status(self) -> dict:
-        d = self._zoom_state()
+        d = self._zoom_view()
         try:
             idx = self.index(self._model_name())
             total = len({str(m.get("scene_id")) for m in idx.key_meta.values()})

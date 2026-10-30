@@ -79,7 +79,7 @@ class MotionMixin:
     def motion_todo(self) -> list[dict]:
         """Zoomed scenes whose candidate windows aren't all watched yet — saves first."""
         cache = self._motion_cache()
-        zoomed = self._zoom_state()["scenes"]
+        zoomed = self._zoom_view()["scenes"]
         saved = self._zoom_saved()
         rows = {r["scene_id"]: r for r in self._catalogue_all() if r["tier"] != "rejected" and r.get("path")}
         out = []
@@ -118,7 +118,7 @@ class MotionMixin:
 
     def motion_status(self) -> dict:
         try:
-            zoomed = self._zoom_state()["scenes"]
+            zoomed = self._zoom_view()["scenes"]
             cache = self._motion_cache()
             seen = sum(1 for e in zoomed.values() if cache.has(e["key"], MOTION_NS))
             total = len(zoomed)
@@ -146,7 +146,7 @@ class MotionMixin:
 
     def motion_scene(self, row: dict, embedder, sampler) -> dict:
         sid = row["scene_id"]
-        e = self._zoom_state()["scenes"].get(sid)
+        e = self._zoom_view()["scenes"].get(sid)
         if not e:
             raise LookupError(f"scene {sid} isn't zoomed yet")
         times, vecs = [], []
@@ -213,7 +213,7 @@ class MotionMixin:
     # --- what the moment model and the tier model get --------------------------------------
 
     def _motion_load(self, sid: str):
-        e = self._zoom_state()["scenes"].get(str(sid))
+        e = self._zoom_view()["scenes"].get(str(sid))
         cache = self._motion_cache()
         if not e or not cache.has(e["key"], MOTION_NS):
             return None
