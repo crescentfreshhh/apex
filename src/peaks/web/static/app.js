@@ -6344,7 +6344,7 @@ async function pollJobTray() {
       : p.total ? Math.round(100 * (p.done || 0) / p.total) : (typeof p.pct === "number" ? Math.round(100 * p.pct) : null);
     const detail = p.total ? `${(p.done || 0).toLocaleString()} / ${p.total.toLocaleString()}` : (p.stage || dur(j.elapsed));
     return `<div class="tray-job fam-${jobFam(j.kind)}"><div class="row between"><b>${esc(JOB_LABEL[j.kind] || j.kind)}</b><span class="muted">${pct != null ? pct + "%" : ""}</span></div>
-      <div class="muted small">${esc(detail)}${tm.eta_s != null ? ` · ~${dur(tm.eta_s)} left` : ""}</div><div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div></div>`;
+      <div class="muted small">${tm.stopping ? `⏸ ${esc(tm.stage)}…` : esc(detail) + (tm.eta_s != null ? ` · ~${dur(tm.eta_s)} left` : "")}</div><div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div></div>`;
   }).join("");
 }
 $("#job-tray")?.addEventListener("click", () => { go("activity"); setTimeout(() => $("#actlog")?.scrollIntoView({ block: "start", behavior: "smooth" }), 50); });
@@ -6391,6 +6391,9 @@ function drawActlog(d) {
     const pct = j.pct != null ? Math.round(1000 * j.pct) / 10 : null;
     const items = j.total != null ? `${(j.done ?? 0).toLocaleString()} / ${j.total.toLocaleString()}` : "";
     const speed = j.per_item_s != null ? `${j.per_item_s < 10 ? j.per_item_s.toFixed(1) : Math.round(j.per_item_s)} s each · ${j.rate_per_min}/min` : "";
+    if (j.stopping) return `<div class="actlog-job waiting fam-${j.family}">
+      <div class="row between"><span><span class="actlog-tag">${esc(j.label)}</span></span>
+        <span class="small muted">⏸ ${esc(j.stage)} — stopping now${items ? ` · ${items}` : ""}</span></div></div>`;
     return `<div class="actlog-job fam-${j.family}">
       <div class="row between"><span><span class="actlog-tag">${esc(j.label)}</span>${j.stage ? ` <span class="muted small">${esc(j.stage)}</span>` : ""}</span>
         <span class="small">${pct != null ? `<b>${pct}%</b>` : ""}${j.eta_s != null ? ` · <b>~${dur(j.eta_s)} left</b>` : ""}</span></div>

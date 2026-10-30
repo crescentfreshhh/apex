@@ -248,3 +248,42 @@ def test_embed_library_jpeg_branch_still_works(tmp_path):
     assert stats["embedded"] == 1 and stats["frames"] == 3
     _, _, meta = cache.load("k1", "fake")
     assert meta["pipeline"] == "jpeg"
+
+
+class _CountingEmbedder(FakeEmbedder):
+    def __init__(self, *a, after=None, **k):
+        super().__init__(*a, **k)
+        self.calls = 0
+        self.after = after          # (callable) run after each embed call
+
+    def embed_array(self, frames):
+        self.calls += 1
+        out = super().embed_array(frames)
+        if self.after:
+            self.after(self.calls)
+        return out
+
+
+def test_a_stop_mid_scene_stops_now_and_caches_nothing_half_done(tmp_path):
+    """A paused trial must free the GPU within a batch, not after its in-flight
+    scenes (thousands of frames each at 2 s sampling) — for both paths."""
+    for workers in (1, 3):
+        stop = {"on": False}
+
+        def after(n):
+            if n == 3:                       # three batches into the first long scene
+                stop["on"] = True
+        emb = _CountingEmbedder(dim=8, after=after)
+        emb.raw_resize, emb.raw_crop = 16, 16
+        sampler = _RawStubSampler(n_frames=200)            # a long scene: 50 batches of 4
+        cache = EmbeddingCache(tmp_path / f"w{workers}")
+        scenes = [_scene(str(i), f"k{i}") for i in range(6)]
+        stats = embed_library(scenes, sampler, emb, cache, batch_size=4, workers=workers,
+                              log=lambda *_: None, should_stop=lambda: stop["on"])
+        assert emb.calls <= 4, (workers, emb.calls)        # stopped within a batch
+        assert stats["embedded"] == 0 and cache.keys("fake") == []   # nothing half-done saved
+        stop["on"] = False
+        emb.after = None
+        again = embed_library(scenes, sampler, emb, cache, batch_size=4, workers=workers,
+                              log=lambda *_: None)
+        assert again["embedded"] == 6                       # done next time

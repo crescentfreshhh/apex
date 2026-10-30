@@ -204,12 +204,22 @@ def embed_library(
             else:
                 frame_iter = sampler.iter_frames(scene.path)
                 embed_batch = embedder.embed_images
+            stopped = False
             for ts, img in frame_iter:
                 times.append(ts)
                 batch.append(img)
                 if len(batch) >= batch_size:
+                    if should_stop and should_stop():     # paused mid-scene: leave it for next time
+                        stopped = True
+                        break
                     chunks.append(embed_batch(batch))
                     batch = []
+            if stopped:
+                close = getattr(frame_iter, "close", None)
+                if close:
+                    close()
+                log(f"  ⏹ stop requested — scene {scene.id} left for next time")
+                break
             if batch:
                 chunks.append(embed_batch(batch))
             vecs = (
@@ -289,14 +299,23 @@ def _embed_library_parallel(
     started_all = _time.monotonic()
     processed = 0
 
+    def _stopping() -> bool:
+        return bool(should_stop and should_stop())
+
     def _decode(scene: Scene):
         times: list[float] = []
         frames: list[np.ndarray] = []
-        for ts, arr in sampler.iter_frames_raw(
+        it = sampler.iter_frames_raw(
             scene.path, resize_short=embedder.raw_resize, crop=embedder.raw_crop
-        ):
+        )
+        for ts, arr in it:
             times.append(ts)
             frames.append(arr)
+            if len(frames) % 32 == 0 and _stopping():   # paused: drop this scene, now
+                close = getattr(it, "close", None)
+                if close:
+                    close()
+                return None
         stacked = (
             np.stack(frames)
             if frames
@@ -316,12 +335,19 @@ def _embed_library_parallel(
                 skips["skipped_rejected"] = skips.get("skipped_rejected", 0) + 1
             log(f"  - scene {scene.id} skipped: rejected")
             return
+        if _stopping():                                   # paused: in-flight scenes wait for next time
+            future.cancel()
+            return
         try:
-            times, frames = future.result()
-            chunks = [
-                embedder.embed_array(frames[i : i + batch_size])
-                for i in range(0, len(frames), batch_size)
-            ]
+            got = future.result()
+            if got is None or _stopping():
+                return
+            times, frames = got
+            chunks = []
+            for i in range(0, len(frames), batch_size):
+                if _stopping():                           # not cached: done again next run
+                    return
+                chunks.append(embedder.embed_array(frames[i : i + batch_size]))
             vecs = (
                 np.concatenate(chunks, axis=0)
                 if chunks

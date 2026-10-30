@@ -129,3 +129,12 @@ def test_the_feed_merges_every_jobs_lines_in_time_order(tmp_path, monkeypatch):
     gate.set()
     _wait(jm)
     assert (tmp_path / "job_history.jsonl").exists()
+
+
+def test_a_job_asked_to_pause_says_so_while_it_winds_down():
+    j = Job(id="lab-1", kind="lab")
+    j.progress = {"done": 112, "total": 400}
+    j.paused_for = "Ingest"
+    j.request_cancel()
+    t = j.timing()
+    assert t["stage"] == "pausing for Ingest" and t["stopping"] and t["eta_s"] is None

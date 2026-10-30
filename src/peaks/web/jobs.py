@@ -73,6 +73,11 @@ class Job:
         if counted and rate:
             out["per_item_s"] = round(1.0 / rate, 2)
             out["rate_per_min"] = round(rate * 60, 1)
+        if self.status == "running" and self.cancelled:          # asked to stop: it's winding down
+            pf = getattr(self, "paused_for", None)
+            out["stage"] = f"pausing for {pf}" if pf else "stopping"
+            out["stopping"] = True
+            return out
         if self.status == "running":
             if isinstance(p.get("eta_s"), (int, float)):
                 out["eta_s"] = round(p["eta_s"])
