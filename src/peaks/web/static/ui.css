@@ -1267,3 +1267,5 @@ body.picks-off .pick-span { display: none !important; }
   .actlog-ln { grid-template-columns: auto 1fr; }
   .actlog-ln .actlog-tag { display: none; }
 }
+.orph-added { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; }
+.orph-added .btn { padding: 0 6px; }

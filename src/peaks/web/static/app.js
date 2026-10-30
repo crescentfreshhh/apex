@@ -5399,15 +5399,28 @@ function renderCatList() {
 const orph = { got: {}, done: {}, busy: false };
 function orphHTML(sid) {
   const d = orph.got[sid], done = orph.done[sid];
-  if (done) return `<span class="orph-done">✓ Added <b>${esc(done.name)}</b></span> <button class="btn sm ghost" data-orph-undo="${esc(sid)}">Undo</button>`;
-  const search = `<span class="orph-search"><input type="search" placeholder="Someone else…" data-orph-q="${esc(sid)}" autocomplete="off" /><span class="orph-res"></span></span>`;
-  if (!d) return `<span class="faint small">Who is this? looking…</span>`;
-  if (!d.suggestions.length) return `<span class="faint small">Who is this? ${esc(d.reason || "no look-alikes yet")}</span> ${search}`;
-  return `<span class="orph-h">Who is this?</span> ${d.suggestions.map((x) => `<span class="orph-s s-${x.strength}" title="looks most like ${esc(x.via.title)}${x.studio ? " · has scenes at this studio" : ""}">
+  const added = done ? done.added : [];
+  const have = new Set(added.map((a) => String(a.id)));
+  const chips = added.length ? `<span class="orph-done">✓ ${added.map((a) => `<span class="orph-added"><b>${esc(a.name)}</b>
+      <button class="btn sm ghost" data-orph-rm="${esc(sid)}" data-pid="${esc(a.id)}" title="Take ${esc(a.name)} off this scene">✕</button></span>`).join(" ")}</span>` : "";
+  const search = `<span class="orph-search"><input type="search" placeholder="${added.length ? "Add another…" : "Someone else…"}" data-orph-q="${esc(sid)}" autocomplete="off" /><span class="orph-res"></span></span>`;
+  if (!d) return `${chips}<span class="faint small">${added.length ? "" : "Who is this? "}looking…</span>`;
+  const sugg = d.suggestions.filter((x) => !have.has(String(x.id)));
+  const head = added.length ? "" : `<span class="orph-h">Who is this?</span> `;
+  if (!sugg.length) return `${chips} ${added.length ? "" : `<span class="faint small">Who is this? ${esc(d.reason || "no look-alikes yet")}</span>`} ${search}`;
+  return `${chips} ${head}${sugg.map((x) => `<span class="orph-s s-${x.strength}" title="looks most like ${esc(x.via.title)}${x.studio ? " · has scenes at this studio" : ""}">
       <img src="${x.via.cover}" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
       <span><b>${esc(x.name)}</b><i>${x.strength}${x.studio ? " · same studio" : ""}</i></span>
       <button class="btn sm pri" data-orph-add="${esc(sid)}" data-pid="${esc(x.id)}" data-name="${esc(x.name)}" title="Add ${esc(x.name)} to this scene in Stash">Add</button>
       <button class="btn sm ghost" data-orph-no="${esc(sid)}" data-pid="${esc(x.id)}" title="Not them — don't suggest again for this scene">✕</button></span>`).join("")} ${search}`;
+}
+// every performer added here, and the scene's list before the first one (each can be taken off again)
+function orphNote(sid, r, id, name, created = false) {
+  const d = orph.done[sid] || (orph.done[sid] = { base: r.previous, added: [] });
+  if (!d.added.some((a) => String(a.id) === String(id))) d.added.push({ id: String(id), name, created });
+  const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
+  orphPaint(sid);
+  document.querySelector(`.orph[data-sid="${CSS.escape(sid)}"] [data-orph-q]`)?.focus();      // ready for the next name
 }
 function orphPaint(sid) { const el = document.querySelector(`.orph[data-sid="${CSS.escape(sid)}"]`); if (el) el.innerHTML = orphHTML(sid); }
 async function orphLoadAll() {
@@ -5427,9 +5440,7 @@ async function orphAdd(sid, pid, name) {
   try {
     const r = await api(`/api/scene/${encodeURIComponent(sid)}/performers/add`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_id: pid }) });
-    orph.done[sid] = { name, previous: r.previous };
-    const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
-    orphPaint(sid);
+    orphNote(sid, r, pid, name);
     toast(`${name} added in Stash`);
   } catch (e) { toast(e.message, true); }
 }
@@ -5439,9 +5450,7 @@ async function orphCreate(sid, name, btn) {
   try {
     const r = await api(`/api/orphans/${encodeURIComponent(sid)}/create-performer`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-    orph.done[sid] = { name: r.performer.name, previous: r.previous, created: r.created };
-    const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
-    orphPaint(sid);
+    orphNote(sid, r, r.performer.id, r.performer.name, r.created);
     toast(r.created ? `Created ${r.performer.name} in Stash and added to this scene` : `${r.performer.name} was already in Stash — added`);
   } catch (err) { if (btn) btn.disabled = false; toast(err.message, true); }
 }
@@ -5458,15 +5467,19 @@ document.addEventListener("click", async (e) => {
     try { orph.got[sid] = await api(`/api/orphans/${encodeURIComponent(sid)}/suggest`); } catch { orph.got[sid] = { suggestions: [] }; }
     return orphPaint(sid);
   }
-  const un = e.target.closest("[data-orph-undo]");
-  if (un) {
-    const sid = un.dataset.orphUndo, d = orph.done[sid]; if (!d) return;
+  const rm = e.target.closest("[data-orph-rm]");
+  if (rm) {                                                  // take one of them off again
+    const sid = rm.dataset.orphRm, d = orph.done[sid]; if (!d) return;
+    const gone = d.added.find((a) => a.id === rm.dataset.pid); if (!gone) return;
+    const keep = d.added.filter((a) => a !== gone);
     try {
       const r = await api(`/api/scene/${encodeURIComponent(sid)}/performers/set`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_ids: d.previous }) });
-      delete orph.done[sid];
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ performer_ids: [...d.base, ...keep.map((a) => a.id)] }) });
+      d.added = keep;
+      if (!keep.length) delete orph.done[sid];
       const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
-      orphPaint(sid); toast(d.created ? `Undone — ${d.name} stays in Stash with no scenes` : "Undone");
+      orphPaint(sid); toast(gone.created ? `${gone.name} taken off — stays in Stash with no scenes` : `${gone.name} taken off`);
     } catch (err) { toast(err.message, true); }
     return;
   }
