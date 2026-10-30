@@ -3856,7 +3856,10 @@ function pickSetup(v, sid, picks, host, track) {
       else { m.style.left = (100 * a).toFixed(2) + "%"; m.style.width = (100 * w).toFixed(2) + "%"; }
       m.title = `Peaks pick ${fmt(p.start)}–${fmt(p.end)}`; track.appendChild(m);
     }
-    if (own.length) { own.forEach((x) => x.classList.toggle("done", doneAt(+x.dataset.t))); return; }
+    if (own.length) {                                        // each tick is one pick: coloured by identity
+      own.forEach((x) => x.classList.toggle("done", x.dataset.pi != null ? !!(st.picks[+x.dataset.pi] || {}).done : doneAt(+x.dataset.t)));
+      return;
+    }
     if (!dur) return;
     track.querySelectorAll(".pick-mk").forEach((x) => x.remove());
     for (const p of st.picks) {
@@ -3896,11 +3899,14 @@ async function pickAnswer(v, label, t) {
   const p = st.picks.find((x) => x.t === t);
   if (!p || pickAt(v) !== p) return toast("You've moved off that moment — it'll ask again when you're on one");
   p.done = true; st.shown = null; st.chip.hidden = true; st.draw();
+  const cached = (typeof rvPickCache !== "undefined") && rvPickCache.get(st.sid);
+  const mark = (on) => { for (const x of (cached && cached.list) || []) if (Math.abs(+x.t - p.t) < 0.01) x.answered = on; };
+  mark(true);                                              // coming back to this scene: still answered
   try {
     const qs = new URLSearchParams(pparam({ t: p.t.toFixed(2), label, scene_id: st.sid, pick: "true" }));
     const c = await api("/api/label?" + qs, { method: "POST" });
     toast(label ? `👍 ${fmt(p.t)} is your kind — noted` : `👎 ${fmt(p.t)} isn't your kind — noted`); updateTasteUI(c);
-  } catch (e) { p.done = false; st.draw(); toast(e.message, true); }
+  } catch (e) { p.done = false; mark(false); st.draw(); toast(e.message, true); }
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, textarea, select") || (e.key !== "+" && e.key !== "-" && e.key !== "=")) return;
@@ -6490,8 +6496,7 @@ function renderReview() {
   const total = rv.source === "catalogue" ? Math.max(cat.total || 0, rv.items.length) : rv.items.length;
   $("#rv-pos").innerHTML = `<b>${esc(rv.label)}</b> · ${rv.i + 1} of ${total.toLocaleString()}`
     + (rv.note ? ` <span class="rv-note">↪ ${esc(rv.note)}</span>` : "");
-  // player: start at the best moment, peaks marked on the timeline
-  rv.peaks = (r.moments || []).map((m) => m.t).sort((a, b) => a - b);
+  // player: start at the best moment, Peaks' picks marked on the timeline
   let start = (r.moments && r.moments.length) ? r.moments.reduce((a, b) => ((b.score || 0) > (a.score || 0) ? b : a)).t : 0;
   if (rv.startAt && rv.startAt.sid === r.scene_id) {
     start = rv.startAt.t; rv.startAt = null;
@@ -6502,23 +6507,17 @@ function renderReview() {
     v.src = r.stream;
     v.onloadedmetadata = () => { v.currentTime = start; v.play().catch(() => {}); };
   }
-  const dur = r.duration || 1;
-  $("#rv-nopeaks").hidden = rv.peaks.length > 0;
-  $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
-    rv.peaks.map((t) => `<span class="pk" style="left:calc(16px + (100% - 32px) * ${(t / dur).toFixed(4)})" data-t="${t}" title="${fmt(t)}"></span>`).join("");
-  if ((r.moments || []).some((m) => m.score != null)) {
-    pickSetup(v, r.scene_id, r.moments, $("#rv-v").parentElement, $("#rv-scrub"));
-    api(`/api/scene/${encodeURIComponent(r.scene_id)}/picks`).then((ps) => {        // which you've answered before
-      const st = pickW.get(v);
-      if (!st || st.sid !== r.scene_id) return;
-      if (ps.some((x) => x.start != null)) {                 // a zoomed scene: its picks are spans
-        pickSetup(v, r.scene_id, ps, $("#rv-v").parentElement, $("#rv-scrub"));
-        return;
-      }
-      for (const p of st.picks) if (ps.some((x) => x.answered && Math.abs(x.t - p.t) <= 1)) p.done = true;
-      st.draw(); pickTick(v);
-    }).catch(() => {});
-  }
+  // one list drives the ticks, ←/→, the spans and the "your kind of moment?" chip: the
+  // scene's picks from the server (spans for a zoomed scene, with what you've answered);
+  // the catalogue's frame moments only stand in until they arrive
+  const tok = rv.pickTok = (rv.pickTok || 0) + 1;
+  const known = rvPickCache.get(r.scene_id);
+  rvPicksApply(v, r, known && known.list ? known.list : (r.moments || []));
+  rvPicksGet(r.scene_id).then((ps) => {
+    if (tok !== rv.pickTok || (rv.items[rv.i] || {}).scene_id !== r.scene_id) return;   // a reply for a scene you left
+    if (ps.length) rvPicksApply(v, r, ps);
+  }).catch(() => {});
+  const nx = rv.items[rv.i + 1]; if (nx) rvPicksGet(nx.scene_id).catch(() => {});      // the next one, ready
   rvSettleBanner(r);
   // grades: current one outlined, the model's pick highlighted
   const cur = r.tier === "rejected" ? "reject" : r.tier;
@@ -6628,6 +6627,32 @@ function rvExit() {
     if (ci >= 0) focusCat(ci);
   } else go("catalogue");
 }
+// the picks of a scene, fetched once (the next scene's ahead of time); thumbnails preloaded
+const rvPickCache = new Map();              // sid -> {p: Promise, list: [...] | null}
+function rvPicksGet(sid) {
+  let e = rvPickCache.get(sid);
+  if (!e) {
+    e = { list: null };
+    e.p = api(`/api/scene/${encodeURIComponent(sid)}/picks`).then((ps) => {
+      e.list = ps;
+      for (const p of ps) if (p.thumb) { const im = new Image(); im.src = p.thumb; }
+      return ps;
+    }).catch((err) => { rvPickCache.delete(sid); throw err; });
+    rvPickCache.set(sid, e);
+    if (rvPickCache.size > 40) rvPickCache.delete(rvPickCache.keys().next().value);
+  }
+  return e.p;
+}
+function rvPicksApply(v, r, picks) {
+  const dur = r.duration || 1;
+  const list = picks.map((p) => ({ ...p, at: p.start != null ? +p.start : +p.t }));   // where ←/→ and a click land
+  rv.peaks = [...new Set(list.map((p) => p.at))].sort((a, b) => a - b);
+  $("#rv-nopeaks").hidden = rv.peaks.length > 0;
+  $("#rv-scrub").innerHTML = `<div class="rv-track"><i id="rv-prog"></i></div>` +
+    list.map((p, i) => `<span class="pk${p.answered ? " done" : ""}" style="left:calc(16px + (100% - 32px) * ${(p.t / dur).toFixed(4)})" data-pi="${i}" data-t="${p.t}" data-at="${p.at}" title="${fmt(p.t)}"></span>`).join("");
+  if (list.some((p) => p.score != null)) pickSetup(v, r.scene_id, list, $("#rv-v").parentElement, $("#rv-scrub"));
+  else { pickW.delete(v); $("#rv-v").parentElement.querySelector(".pick-chip")?.remove(); }
+}
 function rvJump(dir) {
   const v = $("#rv-v"), t = v.currentTime;
   if (!rv.peaks.length) { v.currentTime = Math.max(0, t + 30 * dir); rvLanded(v.currentTime); return; }   // not embedded yet
@@ -6684,7 +6709,7 @@ function rvSeekTo(e) {
   const pk = e.type === "pointerdown" ? e.target.closest(".pk") : null;
   const box = $("#rv-scrub .rv-track").getBoundingClientRect();   // the bar itself, not the band's padding
   const frac = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
-  v.currentTime = pk ? +pk.dataset.t : frac * (v.duration || r.duration || 0);
+  v.currentTime = pk ? +(pk.dataset.at ?? pk.dataset.t) : frac * (v.duration || r.duration || 0);
   const bar = $("#rv-prog"); if (bar) bar.style.width = (100 * frac).toFixed(2) + "%";
 }
 $("#rv-scrub")?.addEventListener("pointerdown", (e) => {
