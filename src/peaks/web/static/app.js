@@ -1111,13 +1111,13 @@ function tierTally(tiers, { compact = false } = {}) {
 
 // grade undo stack, shared by the Catalogue and the viewer's grade menu
 const gradeUndo = [];
-async function applyGrade(sid, grade, undoKey = "Z") {
+async function applyGrade(sid, grade, undoKey = "Z", { settle = false } = {}) {
   const nl = grade === NO_LEARN;
   const r = await api("/api/catalogue/grade", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scene_id: String(sid), grade: nl ? "reject" : grade, no_learn: nl }),
+    body: JSON.stringify({ scene_id: String(sid), grade: nl ? "reject" : grade, no_learn: nl, settle }),
   });
-  const entry = { sid: String(sid), prev: r.previous, grade };
+  const entry = { sid: String(sid), prev: r.previous, grade, settled: !!r.settled };
   gradeUndo.push(entry);
   toast(`${gradeName(grade)} — ${undoKey} to undo`);
   if (r.in_ingest) {                       // still in the running ingest: once the reject sticks, it's dropped
@@ -1148,7 +1148,8 @@ async function undoGrade() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scene_id: u.sid, ...u.prev }),
     });
-    toast(`Undone (${gradeName(u.grade)})`);
+    if (u.settled) await api(`/api/settle/rule/${encodeURIComponent(u.sid)}`, { method: "DELETE" }).catch(() => {});
+    toast(`Undone (${gradeName(u.grade)})${u.settled ? " — Settle will ask again" : ""}`);
     return r.scene;
   } catch (e) { gradeUndo.push(u); toast(e.message, true); return null; }
 }
@@ -3343,7 +3344,7 @@ function rvSettleBanner(r) {
   if (!s) return;
   box.className = "rv-settle " + s.kind;
   box.innerHTML = s.kind === "disagree"
-    ? `<span>⚖ ${esc(s.why)} — keep yours or grade again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
+    ? `<span>⚖ ${esc(s.why)} — keep yours (Keep mine, or press your grade) or grade again; either way it won't be asked again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
     : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`;
 }
 document.addEventListener("click", async (e) => {
@@ -6580,7 +6581,8 @@ async function rvKeep() {
 async function rvGrade(grade) {
   const r = rv.items[rv.i]; if (!r) return;
   try {
-    const fresh = await applyGrade(r.scene_id, grade);
+    // answering a Settle question by grading: your grade is the ruling, not asked again
+    const fresh = await applyGrade(r.scene_id, grade, "Z", { settle: !!(r.settle && r.settle.kind === "disagree") });
     prNote(r, fresh, grade);
     rv.graded.add(r.scene_id);
     rv.items[rv.i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred };

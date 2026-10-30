@@ -98,6 +98,19 @@ class SettleMixin:
         self._settle_log(answer=True)
         return {"ruled": True, "scene_id": str(sid), "grade": row["tier"]}
 
+    def settle_ruling_for(self, sid: str) -> bool:
+        """You answered a Settle question by grading it: whatever you chose is
+        your ruling (for that grade), so it isn't asked again — unless it now
+        agrees with Peaks, which needs no ruling. Rejects and unreviewed aren't
+        questions at all."""
+        from ..tier_model import train_class
+
+        row = next((r for r in self._catalogue_all() if r["scene_id"] == str(sid)), None)
+        if row is None or not train_class(row["tier"]) or row.get("no_learn"):
+            return False
+        self.settle_rule(sid)
+        return True
+
     def settle_unrule(self, sid: str) -> dict:
         d = self.rulings()
         d.pop(str(sid), None)

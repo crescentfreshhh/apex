@@ -141,6 +141,7 @@ def _catalogue_models():
         scene_id: str
         grade: str
         no_learn: bool = False           # "Reject, don't learn": 1★, left out of everything Peaks learns
+        settle: bool = False             # an answer to a Settle question: the grade is your ruling
 
     class RestoreIn(BaseModel):
         scene_id: str
@@ -1350,7 +1351,10 @@ def create_app(cfg=None):
     @app.post("/api/catalogue/grade")
     def catalogue_grade(body: GradeIn):
         try:
-            return service.grade_scene(body.scene_id, body.grade, no_learn=body.no_learn)
+            out = service.grade_scene(body.scene_id, body.grade, no_learn=body.no_learn)
+            if body.settle:
+                out = {**out, "settled": service.settle_ruling_for(body.scene_id)}
+            return out
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except LookupError as exc:

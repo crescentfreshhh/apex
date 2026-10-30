@@ -166,3 +166,28 @@ def test_settling_retrains_sooner(tmp_path, monkeypatch):
             break
         time.sleep(0.02)
     assert started
+
+
+def test_answering_by_grading_is_a_ruling_and_undo_takes_it_back(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, stash, (wrong,), _ = _library(tmp_path, monkeypatch, drain=False)
+    c = TestClient(app_mod.create_app(svc.cfg))
+    before = c.get("/api/settle").json()["disagree"]
+    grade = lambda g, settle: c.post("/api/catalogue/grade", json={"scene_id": wrong, "grade": g, "settle": settle}).json()  # noqa: E731
+    r = grade("legendaire", False)                               # graded from the Catalogue: not an answer
+    assert not r.get("settled") and c.get("/api/settle").json()["disagree"] == before
+    r = grade("legendaire", True)                                # re-confirmed in Settle: your grade stands
+    assert r["settled"] and c.get("/api/settle").json()["disagree"] == before - 1
+    svc.train_tier_model()                                       # still settled after a retrain
+    assert c.get("/api/settle").json()["disagree"] == before - 1
+    c.delete(f"/api/settle/rule/{wrong}")                        # what undo does
+    assert c.get("/api/settle").json()["disagree"] == before
+    r = grade("merveilleuse", True)                              # a third grade, neither yours nor Peaks'
+    assert r["settled"] and c.get("/api/settle").json()["disagree"] == before - 1
+    assert svc.rulings()[wrong]["grade"] == "merveilleuse"
+    r = c.post("/api/catalogue/grade", json={"scene_id": wrong, "grade": "reject", "no_learn": True,
+                                              "settle": True}).json()       # "reject, don't learn": never a question
+    assert r["settled"] is False
