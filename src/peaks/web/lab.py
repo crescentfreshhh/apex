@@ -147,6 +147,24 @@ class LabMixin:
         return FrameSampler(interval_seconds=iv, mode=mode, hwaccel=s.hwaccel, pipeline=s.pipeline,
                             scene_timeout=s.scene_timeout)
 
+    @staticmethod
+    def _lab_drop_broken(cache, ns: str, keys: list[str]) -> int:
+        """Delete cached trial scenes whose vectors hold NaN / inf (DINOv3 in float16
+        overflowed), so the run embeds them again. Returns how many."""
+        n = 0
+        for k in keys:
+            if not cache.has(k, ns):
+                continue
+            try:
+                _, v, _ = cache.load(k, ns)
+                ok = bool(np.isfinite(np.asarray(v, np.float32)).all())
+            except (OSError, ValueError, KeyError):
+                ok = False
+            if not ok:
+                cache.delete(k, ns)
+                n += 1
+        return n
+
     def lab_sample_progress(self, cand: str) -> dict | None:
         """How much of the trial sample is already embedded with `cand` at the
         library's sampling — the work a next run carries on from."""
@@ -187,6 +205,9 @@ class LabMixin:
         ns = dino_cache_name(cand)
         idx = self.index(self._model_name())
         key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        bad = self._lab_drop_broken(cache, ns, [key_of[str(sc.id)] for sc in scenes if str(sc.id) in key_of])
+        if bad:
+            log(f"{bad} scene(s) were embedded with broken (NaN) frames by an earlier version — embedding them again")
         already = sum(1 for sc in scenes
                       if (k := key_of.get(str(sc.id)) or (scene_key(sc) if getattr(sc, "fingerprint", None) else None))
                       and cache.has(k, ns, interval=sig))
@@ -220,6 +241,9 @@ class LabMixin:
             if not k or not cache.has(k, ns):
                 continue
             t, v, _ = cache.load(k, ns)
+            v = np.asarray(v, np.float32)
+            ok = np.isfinite(v).all(axis=1)                 # a broken frame never reaches judging
+            t, v = np.asarray(t)[ok], v[ok]
             if len(t):
                 v = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
                 # float16 halves the sample held in memory; scoring widens one scene at a time

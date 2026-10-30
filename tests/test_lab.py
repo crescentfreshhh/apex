@@ -251,3 +251,23 @@ def test_an_interrupted_trial_resumes_counting_what_is_already_embedded(tmp_path
     assert any(m.startswith(f"resuming — {have} of") for m in j2.lines)
     card = next(c for c in svc.lab()["candidates"] if c["id"] == CAND)
     assert card["sample"]["done"] == have and card["sample"]["total"] == len(rows)
+
+
+def test_broken_nan_frames_are_redone_and_never_judged(tmp_path, monkeypatch):
+    """DINOv3 in float16 overflowed and cached NaN frames; a trial drops those
+    scenes so they're embedded again, and judging never sees a NaN."""
+    svc, _, _, _, cache = _lab_svc(tmp_path, monkeypatch)
+    svc.run_lab(CAND)
+    keys = cache.keys(NS)
+    t, v, meta = cache.load(keys[0], NS)
+    v = np.array(v, np.float32)
+    v[2] = np.nan
+    cache.save(keys[0], NS, t, v, meta=meta)
+    sid = meta["scene_id"]
+    vecs = svc._lab_vectors(NS, [{"scene_id": sid}])
+    assert np.isfinite(vecs[sid][1].astype(np.float32)).all() and len(vecs[sid][0]) == len(t) - 1
+    from peaks.web.lab import LabMixin
+    assert LabMixin._lab_drop_broken(cache, NS, keys) == 1 and not cache.has(keys[0], NS)
+    assert LabMixin._lab_drop_broken(cache, NS, keys) == 0
+    tr = svc.run_lab(CAND)                                       # judged fine; the scene embedded again
+    assert "verdict" in tr and cache.has(keys[0], NS)

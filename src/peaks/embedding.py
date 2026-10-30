@@ -210,10 +210,15 @@ class DinoV3Embedder(DinoV2Embedder):
         self._torch = torch
         self.name = dino_cache_name(model_name)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self._half = self.device.startswith("cuda")
+        # DINOv3's activations outgrow float16 (they overflow to inf, and the frame's
+        # vector comes out NaN): bfloat16 keeps float32's range at half the memory;
+        # a GPU without it runs float32
+        bf16 = self.device.startswith("cuda") and bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+        self._dtype = torch.bfloat16 if bf16 else torch.float32
+        self._half = bf16
         repo = DINOV3_REPOS[model_name]
         try:
-            m = AutoModel.from_pretrained(repo, torch_dtype=torch.float16 if self._half else torch.float32)
+            m = AutoModel.from_pretrained(repo, torch_dtype=self._dtype)
         except OSError as exc:
             raise DinoV3Unavailable(
                 f"couldn't fetch {repo}: accept Meta's DINOv3 licence on huggingface.co/{repo} "
@@ -225,11 +230,14 @@ class DinoV3Embedder(DinoV2Embedder):
         self._std_t = torch.tensor(self._STD, device=self.device).view(1, 3, 1, 1)
 
     def _forward(self, x):
-        if self._half:
-            x = x.half()
-        out = self.model(pixel_values=x)
+        torch = self._torch
+        out = self.model(pixel_values=x.to(self._dtype))
         feats = out.pooler_output if getattr(out, "pooler_output", None) is not None else out.last_hidden_state[:, 0]
-        return self._torch.nn.functional.normalize(feats.float(), dim=1)
+        feats = feats.float()
+        bad = ~torch.isfinite(feats).all(dim=1)
+        if bool(bad.any()):                      # never let a NaN frame into the cache
+            feats[bad] = 0.0
+        return torch.nn.functional.normalize(feats, dim=1)
 
     def embed_images(self, images: Sequence["Image"]) -> np.ndarray:
         torch = self._torch
