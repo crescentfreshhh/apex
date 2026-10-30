@@ -132,3 +132,24 @@ def test_a_concept_is_a_megaboard_channel(tmp_path, monkeypatch):
     assert all(x["score"] >= 0.9 for x in strong["items"]) and strong["total"] < d["total"] * 2
     assert c.get("/api/board/concept", params={"key": "untaught"}).status_code == 404
     assert c.get("/api/board/concept", params={"key": "nope"}).status_code == 404
+
+
+def test_name_random_frames_to_start_a_concept(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    stash.s["u3"]["rating100"] = 20
+    c = TestClient(app_mod.create_app(svc.cfg))
+    fr = c.get("/api/concepts-random", params={"n": 20}).json()
+    assert 0 < len(fr) <= 20 and len({x["scene_id"] for x in fr}) == len(fr)          # one per scene
+    assert all(x["scene_id"] != "u3" and x["thumb"].startswith("/api/frame") for x in fr)  # rejects left out
+    yes, no = fr[:6], fr[6:12]
+    r = c.post("/api/concepts-mark", json={"name": "Golden hour",
+                                           "items": [{**x, "label": 1} for x in yes] + [{**x, "label": 0} for x in no]}).json()
+    assert r["slug"] == "golden-hour" and r["yes"] == 6 and r["no"] == 6 and r["report"]["trained"]
+    r2 = c.post("/api/concepts-mark", json={"name": "golden hour", "items": [{**fr[12], "label": 1}]}).json()
+    assert r2["slug"] == "golden-hour" and r2["yes"] == 7                               # adds to the one you have
+    assert c.post("/api/concepts-mark", json={"name": "x", "items": []}).status_code == 400
+    assert c.post("/api/concepts-mark", json={"name": " ", "items": [fr[0]]}).status_code == 400

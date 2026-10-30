@@ -195,6 +195,42 @@ class ConceptsMixin:
         return [{"key": idx.keys[i], "t": round(float(idx.times[i]), 2), "scene_id": idx.scene_ids[i],
                  "thumb": f"/api/frame?key={idx.keys[i]}&t={float(idx.times[i]):g}"} for i in picked[:n]]
 
+    def concept_random_frames(self, n: int = 24) -> list[dict]:
+        """A fresh handful of random frames — one per scene, rejects left out — to
+        browse and name: the easy way to start a concept from what you see."""
+        idx = self.index(self._model_name())
+        if idx.size == 0:
+            return []
+        rejected = {r["scene_id"] for r in self._catalogue_all() if r["tier"] == "rejected"}
+        rng = np.random.default_rng()
+        out, seen = [], set()
+        for i in rng.permutation(idx.size)[: max(2000, n * 60)]:
+            sid = idx.scene_ids[int(i)]
+            if sid in seen or str(sid) in rejected:
+                continue
+            seen.add(sid)
+            k, t = idx.keys[int(i)], float(idx.times[int(i)])
+            out.append({"key": k, "t": round(t, 2), "scene_id": sid, "thumb": f"/api/frame?key={k}&t={t:g}"})
+            if len(out) >= n:
+                break
+        return out
+
+    def concept_label_many(self, name: str, items: list[dict]) -> dict:
+        """Mark several frames for a concept at once — creating the concept if it's
+        new — then train once (when there are enough of each)."""
+        from ..labels import LabelStore
+
+        c = self.concept_create(name)
+        slug = c["slug"]
+        with LabelStore.editing(self._cx_labels_path()) as store:
+            for x in items:
+                store.add(x["key"], float(x["t"]), 1 if int(x.get("label", 1)) else 0, slug, scene_id=x.get("scene_id"))
+            pos, neg = store.counts(slug)
+        out = {"slug": slug, "name": c["name"], "yes": pos, "no": neg}
+        if pos >= MIN_EACH and neg >= MIN_EACH:
+            out["report"] = self.concept_train(slug)
+        return out
+
     def concept_label(self, name_or_slug: str, key: str, t: float, label: int,
                       scene_id: str | None = None) -> dict:
         from ..labels import LabelStore

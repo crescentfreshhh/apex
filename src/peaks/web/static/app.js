@@ -4691,6 +4691,56 @@ document.addEventListener("click", async (e) => {
 });
 $("#cx-new")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#cx-add").click(); });
 
+// --- browse random frames, pick the ones that show something, and name it -----------
+document.addEventListener("input", (e) => { if (e.target.id === "cxr-name") cxR.name = e.target.value; });
+const cxR = { items: [], sel: new Set(), name: "", rest: false };
+async function cxBrowse() {
+  const box = $("#cx-rand"); if (!box) return;
+  box.hidden = false;
+  box.innerHTML = '<p class="dim">Picking random frames from your library…</p>';
+  try { cxR.items = await api("/api/concepts-random?n=24"); } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  cxR.sel.clear();
+  cxRender();
+}
+function cxRender() {
+  const box = $("#cx-rand"); if (!box) return;
+  const names = cxList.filter((c) => (c.kind || "visual") === "visual").map((c) => c.name);
+  box.innerHTML = `<div class="cx-teach-h"><b>Pick the frames that show something, then name it</b>
+      <span class="faint small">Click to pick · ${cxR.sel.size} picked</span><span class="grow"></span>
+      <button class="btn sm" data-cxr-more>🎲 New frames</button><button class="btn sm ghost" data-cxr-close>Close</button></div>
+    <div class="cx-grid">${cxR.items.map((x, i) => `<div class="cx-cell cxr ${cxR.sel.has(i) ? "yes" : ""}" data-cxr="${i}"><img loading="lazy" src="${x.thumb}" alt="" /></div>`).join("")}</div>
+    <div class="row cxr-bar"><input id="cxr-name" list="cxr-names" value="${esc(cxR.name)}" placeholder="Name it — a new concept, or one you have" maxlength="60" style="min-width:260px" />
+      <datalist id="cxr-names">${names.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>
+      <label class="small"><input type="checkbox" id="cxr-rest" ${cxR.rest ? "checked" : ""} /> the rest are <b>not</b> it</label>
+      <button class="btn pri sm" data-cxr-save ${cxR.sel.size ? "" : "disabled"}>Save ${cxR.sel.size || ""} as yes</button></div>`;
+}
+document.addEventListener("click", async (e) => {
+  if (e.target.closest("#cx-browse")) return cxBrowse();
+  if (e.target.id === "cxr-rest") { cxR.rest = e.target.checked; return; }
+  const cell = e.target.closest("[data-cxr]");
+  if (cell) {
+    const i = +cell.dataset.cxr;
+    cxR.sel.has(i) ? cxR.sel.delete(i) : cxR.sel.add(i);
+    cxRender();
+    return;
+  }
+  if (e.target.closest("[data-cxr-more]")) return cxBrowse();
+  if (e.target.closest("[data-cxr-close]")) { $("#cx-rand").hidden = true; return; }
+  if (e.target.closest("[data-cxr-save]")) {
+    const name = ($("#cxr-name")?.value || "").trim();
+    if (!name) { toast("Give it a name first", true); $("#cxr-name")?.focus(); return; }
+    const rest = $("#cxr-rest")?.checked;
+    const items = cxR.items.map((x, i) => ({ ...x, label: cxR.sel.has(i) ? 1 : 0 })).filter((x) => x.label || rest);
+    try {
+      const r = await api("/api/concepts-mark", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, items }) });
+      toast(`“${r.name}”: ${r.yes} yes · ${r.no} no${r.report && r.report.trained ? " — trained" : ""}`);
+      await loadConcepts(true);
+      cxBrowse();                                          // a fresh set: keep going, or switch names
+    } catch (err) { toast(err.message, true); }
+  }
+});
+
 function cfParams(f = cat.f) {
   const p = {};
   if (f.performers.length) {

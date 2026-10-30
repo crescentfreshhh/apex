@@ -1269,3 +1269,6 @@ body.picks-off .pick-span { display: none !important; }
 }
 .orph-added { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; }
 .orph-added .btn { padding: 0 6px; }
+.cx-rand { margin-top: 12px; }
+.cx-cell.cxr { cursor: pointer; }
+.cxr-bar { margin-top: 10px; gap: 10px; flex-wrap: wrap; align-items: center; }

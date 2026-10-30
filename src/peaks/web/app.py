@@ -2123,6 +2123,22 @@ def create_app(cfg=None):
         except LookupError as exc:
             raise HTTPException(404, str(exc))
 
+    @app.get("/api/concepts-random")
+    def concepts_random(n: int = 24):
+        return service.concept_random_frames(max(1, min(n, 96)))
+
+    @app.post("/api/concepts-mark")
+    def concepts_mark(body: dict = Body(...)):
+        """{name, items: [{key, t, scene_id, label}]}: name some frames — a new
+        concept or one you have — in one go."""
+        items = body.get("items") or []
+        if not isinstance(items, list) or not items:
+            raise HTTPException(400, "pick at least one frame")
+        try:
+            return service.concept_label_many(str(body.get("name") or ""), items)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(400, str(exc))
+
     @app.get("/api/concepts/{name}/teach")
     def concepts_teach(name: str, n: int = Query(12, ge=1, le=48)):
         try:
