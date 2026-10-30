@@ -104,8 +104,8 @@ class LabMixin:
 
     def lab_sample(self) -> list[dict]:
         """Graded scenes embedded with the current model: up to PER_TIER per tier
-        (a fixed, stable choice so re-runs compare like with like) plus every
-        scene with saved moments, SAMPLE_CAP in all."""
+        (a fixed, stable choice so re-runs compare like with like) plus the
+        scenes with saved moments, as many as fit — SAMPLE_CAP in all."""
         from ..tier_model import train_class
 
         idx = self.index(self._model_name())
@@ -117,19 +117,19 @@ class LabMixin:
             c = train_class(r["tier"])
             if c:
                 by_tier.setdefault(c, []).append(r)
+        # every tier gets its share first (grading needs 2+ tiers to judge), then your
+        # saved-moment scenes fill the room left — saves are mostly top-tier scenes,
+        # and with more of them than the cap they'd otherwise crowd the others out
+        per = min(PER_TIER, max(1, SAMPLE_CAP // max(1, len(by_tier))))
         pick: dict[str, dict] = {}
-        for r in sorted((r for r in rows if r["scene_id"] in saved), key=lambda r: _stable(r["scene_id"])):
-            pick[r["scene_id"]] = r
-        per = PER_TIER
         for c, rs in by_tier.items():
             for r in sorted(rs, key=lambda r: _stable(r["scene_id"]))[:per]:
-                pick.setdefault(r["scene_id"], r)
-        out = list(pick.values())
-        if len(out) > SAMPLE_CAP:                              # saved-moment scenes give way first, tiers stay balanced
-            graded = [r for r in out if train_class(r["tier"])]
-            rest = [r for r in out if not train_class(r["tier"])]
-            out = (graded + rest)[:SAMPLE_CAP]
-        return out
+                pick[r["scene_id"]] = r
+        for r in sorted((r for r in rows if r["scene_id"] in saved), key=lambda r: _stable(r["scene_id"])):
+            if len(pick) >= SAMPLE_CAP:
+                break
+            pick.setdefault(r["scene_id"], r)
+        return list(pick.values())
 
     # --- embedding the sample ----------------------------------------------------------------
 

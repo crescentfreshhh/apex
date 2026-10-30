@@ -179,3 +179,26 @@ def test_the_sample_is_held_at_half_precision_without_changing_the_verdict(tmp_p
     assert g16["accuracy"] == g32["accuracy"] and abs(g16["log_loss"] - g32["log_loss"]) < 1e-3
     m16, m32 = svc._lab_moments(half, saved, set(half)), svc._lab_moments(full, saved, set(half))
     assert {k: m16[k] for k in ("top1", "top3", "tight")} == {k: m32[k] for k in ("top1", "top3", "tight")}
+
+
+def test_many_saved_scenes_in_one_tier_never_crowd_out_the_others(tmp_path, monkeypatch):
+    """Your saves are mostly top-tier scenes; with more of them than the cap, the
+    sample used to be nearly all one tier — and grading couldn't be judged."""
+    import peaks.web.lab as lab
+    from peaks.tier_model import train_class
+
+    svc, _, _, _, _ = _lab_svc(tmp_path, monkeypatch)
+    rows = svc._catalogue_all()
+    top = [r["scene_id"] for r in rows if train_class(r["tier"]) == "legendaire"]
+    monkeypatch.setattr(type(svc), "_zoom_saved", lambda self: {sid: [60.0] for sid in top})
+    monkeypatch.setattr(lab, "PER_TIER", 10)
+    monkeypatch.setattr(lab, "SAMPLE_CAP", len(top))             # as many saves as the whole cap
+    sample = svc.lab_sample()
+    per = {}
+    for r in sample:
+        c = train_class(r["tier"])
+        per[c] = per.get(c, 0) + 1
+    share = min(10, len(top) // 3)
+    assert len(sample) <= len(top)
+    assert len([c for c, n in per.items() if c]) == 3 and all(n >= share for c, n in per.items() if c), per
+    # the old order: saves first, then the cut — nothing but the saves' tier was left
