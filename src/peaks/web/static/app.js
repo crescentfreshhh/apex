@@ -168,6 +168,21 @@ function ptag() { return PROFILE.isDefault() ? undefined : PROFILE.name; }
 // --- navigation: sidebar pages, remembered in the URL hash ----------------------
 const VIEWS = ["foryou", "board", "explore", "performers", "studios", "upgrades", "floor", "catalogue", "review", "dupes",
   "statistics", "lab", "taste", "activity", "seedbox", "dashboard", "perfreview"];
+// a video plays only where you can see it: not on a page you've left, not in a hidden
+// pane or the closed scene viewer. Leaving a page pauses its videos, and any play that
+// lands later (metadata loaded, picks arrived, autoplay) on a hidden one is stopped at once.
+function mediaVisible(v) {
+  if (!v || !v.isConnected || v.closest("[hidden]")) return false;
+  const view = v.closest(".view");
+  return !view || view.classList.contains("active");
+}
+function pauseHiddenMedia() {
+  document.querySelectorAll("video, audio").forEach((m) => { if (!m.paused && !mediaVisible(m)) m.pause(); });
+}
+document.addEventListener("play", (e) => {
+  const m = e.target;
+  if ((m instanceof HTMLMediaElement) && !mediaVisible(m)) m.pause();
+}, true);
 // show a page without side effects (used when another action lands on it)
 function showView(name) {
   if (!VIEWS.includes(name)) name = "foryou";
@@ -176,6 +191,8 @@ function showView(name) {
   document.querySelectorAll(".tab-b[data-tab-view]").forEach((x) => x.classList.toggle("on", x.dataset.tabView === name));
   $("#tab-more")?.classList.toggle("on", !["foryou", "review", "catalogue"].includes(name));
   document.querySelectorAll(".view").forEach((x) => x.classList.toggle("active", x.id === name));
+  if (name !== "lab" && typeof sxStop === "function") sxStop();
+  pauseHiddenMedia();
   const smart = $("#side-smart"); if (smart) smart.hidden = !["catalogue", "review"].includes(name);
   document.body.classList.remove("nav-open");
   $("#content")?.scrollTo(0, 0);
