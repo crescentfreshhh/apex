@@ -110,12 +110,13 @@ class Job:
         bits = [f"{k} {v}" for k, v in r.items() if isinstance(v, (int, float)) and not isinstance(v, bool)][:4]
         return {"id": self.id, "kind": self.kind, "status": self.status, "started": self.started,
                 "finished": self.finished, "elapsed_s": t["elapsed_s"], "done": t["done"], "total": t["total"],
-                "error": self.error, "result": " · ".join(bits)}
+                "error": self.error, "result": " · ".join(bits), "paused_for": getattr(self, "paused_for", None)}
 
 
 class JobManager:
     def __init__(self, history_path: str | Path | None = None):
         self._history_path = Path(history_path) if history_path else None
+        self.paused: dict[str, dict] = {}    # kind → {for, args, at}: background work waiting its turn
         self._jobs: dict[str, Job] = {}
         self._by_kind: dict[str, str] = {}  # kind -> current running job id
         self._lock = threading.Lock()
@@ -146,7 +147,7 @@ class JobManager:
             try:
                 result = target(job)
                 job.result = result if isinstance(result, dict) else None
-                status = "cancelled" if job.cancelled else "done"
+                status = ("paused" if getattr(job, "paused_for", None) else "cancelled") if job.cancelled else "done"
             except Exception as exc:  # noqa: BLE001 - surface to the UI
                 job.error = f"{type(exc).__name__}: {exc}"
                 job.log("ERROR: " + job.error)

@@ -3778,7 +3778,10 @@ document.addEventListener("click", async (e) => {
   const r = e.target.closest("[data-lab-run]"), s = e.target.closest("[data-lab-switch]");
   if (r) {
     r.disabled = true;
-    try { await api(`/api/lab/${r.dataset.labRun}/run`, { method: "POST" }); toast("Trial started — it runs in the background"); }
+    try {
+      const out = await api(`/api/lab/${r.dataset.labRun}/run`, { method: "POST" });
+      toast(out.queued ? `Queued — the trial starts as soon as the ${out.after} finishes` : "Trial started — it runs in the background");
+    }
     catch (err) { toast(err.message, true); }
     openLab();
   } else if (s) {
@@ -6368,10 +6371,11 @@ async function pollActlog() {
   for (const f of d.finished) {                         // a finished job: one summary line, once
     const key = f.id + ":" + f.started; if (actlog.fin.has(key)) continue;
     actlog.fin.add(key);
-    const ok = f.status === "done", stop = f.status === "cancelled";
+    const ok = f.status === "done", stop = f.status === "cancelled", pause = f.status === "paused";
     const n = f.total ? ` · ${(f.done ?? 0).toLocaleString()} / ${f.total.toLocaleString()}` : "";
-    actlog.lines.push({ t: f.finished || f.started, fam: f.family, kind: f.kind, sum: ok ? "ok" : stop ? "stop" : "bad",
-      msg: `${ok ? "✓" : stop ? "■" : "✗"} ${f.label} ${ok ? "finished" : stop ? "stopped" : "failed"} in ${dur(f.elapsed_s)}${n}`
+    actlog.lines.push({ t: f.finished || f.started, fam: f.family, kind: f.kind, sum: ok ? "ok" : stop || pause ? "stop" : "bad",
+      msg: `${ok ? "✓" : pause ? "⏸" : stop ? "■" : "✗"} ${f.label} ${ok ? "finished" : pause ? `paused for ${f.paused_for}` : stop ? "stopped" : "failed"} after ${dur(f.elapsed_s)}${n}`
+        + (pause ? " — picks up again when it's done" : "")
         + (f.result ? ` · ${f.result}` : "") + (f.error ? ` — ${f.error}` : "") });
   }
   actlog.lines.sort((a, b) => a.t - b.t);
@@ -6380,7 +6384,9 @@ async function pollActlog() {
 }
 function drawActlog(d) {
   const run = $("#actlog-run"); if (!run) return;
-  $("#actlog-sum").textContent = d.running.length ? `${plural(d.running.length, "job")} running` : "nothing running right now";
+  const nw = (d.waiting || []).length;
+  $("#actlog-sum").textContent = (d.running.length ? `${plural(d.running.length, "job")} running` : "nothing running right now")
+    + (nw ? ` · ${nw} waiting` : "");
   run.innerHTML = d.running.map((j) => {
     const pct = j.pct != null ? Math.round(1000 * j.pct) / 10 : null;
     const items = j.total != null ? `${(j.done ?? 0).toLocaleString()} / ${j.total.toLocaleString()}` : "";
@@ -6391,7 +6397,10 @@ function drawActlog(d) {
       <div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div>
       <div class="row between small muted"><span>${[items, speed].filter(Boolean).join(" · ")}</span>
         <span>running ${dur(j.elapsed_s)} <button class="btn sm ghost" data-actlog-stop="${esc(j.id)}">Stop</button></span></div></div>`;
-  }).join("") || '<p class="faint small">Nothing is running. Scheduled work (embeds, ingest, Hearing, Motion…) shows up here the moment it starts.</p>';
+  }).join("") + (d.waiting || []).map((w) => `<div class="actlog-job waiting fam-${w.family}">
+      <div class="row between"><span><span class="actlog-tag">${esc(w.label)}</span>${w.detail ? ` <span class="muted small">${esc(w.detail)}</span>` : ""}</span>
+        <span class="small muted">⏸ waiting — resumes after ${esc(w.after || "the running job")}</span></div></div>`).join("")
+    || '<p class="faint small">Nothing is running. Scheduled work (embeds, ingest, Hearing, Motion…) shows up here the moment it starts.</p>';
   const chips = $("#actlog-chips");
   const present = new Set([...actlog.lines.map((l) => l.fam), ...d.running.map((j) => j.family)]);
   chips.innerHTML = ACT_FAMS.filter(([f]) => present.has(f)).map(([f, label]) =>

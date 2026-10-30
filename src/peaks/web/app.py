@@ -775,7 +775,14 @@ def create_app(cfg=None):
         cut = _t.time() - hours * 3600
         finished = [{**h, "label": JOB_LABELS.get(h["kind"], h["kind"]), "family": JOB_FAMILY.get(h["kind"], "other")}
                     for h in jobs.history() if (h.get("finished") or 0) >= cut][:100]
-        return {"now": _t.time(), "running": running, "finished": finished, "lines": lines[-400:]}
+        from ..embedding import dino_label
+
+        waiting = [{"kind": k, "label": JOB_LABELS.get(k, k), "family": JOB_FAMILY.get(k, "other"),
+                    "after": e.get("for"), "since": e.get("at"),
+                    "detail": dino_label(e["args"]["cand"]) if k == "lab" and (e.get("args") or {}).get("cand") else None}
+                   for k, e in jobs.paused.items()]
+        return {"now": _t.time(), "running": running, "finished": finished, "waiting": waiting,
+                "lines": lines[-400:]}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
@@ -1627,6 +1634,7 @@ def create_app(cfg=None):
         missing = [op for op in ("metadataScan", "findJob") if not caps["ops"].get(op)]
         if missing:
             raise HTTPException(501, caps["reason"] or f"this Stash version lacks {', '.join(missing)}")
+        _make_way(jobs, "Ingest")
         try:
             job = jobs.start("ingest", lambda j: service.run_ingest(
                 j, embed_busy=lambda: jobs.running("embed") is not None))
@@ -2083,11 +2091,19 @@ def create_app(cfg=None):
 
     @app.post("/api/lab/{cand}/run")
     def lab_run(cand: str):
+        import time as _t
+
+        lib = [k for k in LIBRARY_WORK if jobs.running(k)]
+        if lib:                                     # library work first: the trial starts right after
+            jobs.paused["lab"] = {"for": JOB_LABELS.get(lib[0], lib[0]), "args": {"cand": cand}, "at": _t.time()}
+            return {"queued": True, "after": JOB_LABELS.get(lib[0], lib[0])}
         busy = [k for k in (*_PICTURE_WAIT_FOR, "zoom", "hear", "motion") if jobs.running(k)]
         if busy:
             raise HTTPException(409, f"waits for the running {busy[0]} job to finish")
         try:
-            return jobs.start("lab", lambda job: service.run_lab(cand, job=job)).as_dict()
+            j = jobs.start("lab", lambda job: service.run_lab(cand, job=job))
+            j.args = {"cand": cand}
+            return j.as_dict()
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
 
@@ -2851,15 +2867,66 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
         return None                                # warm-up first: never two big loads at once
     try:
         if service.embed_followup():
+            _make_way(jobs, "Embedding")
             jobs.start("embed", service.run_embed_followup)
             return "followup"
         if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
+            _make_way(jobs, "Embedding")
             jobs.start("embed", run)
             state["last"] = _t.time()
             return "scheduled"
     except RuntimeError:
         pass                                       # a run is already going
     return None
+
+
+# --- heavy jobs take turns -------------------------------------------------------------
+# Library work (an ingest, an embed pass) goes first: background work that can carry on
+# later — a Lab trial, Hearing, Motion, the zoom, picture — is asked to stop (each stops
+# between scenes and resumes from its cache), and is started again once the library
+# work is done.
+PAUSABLE = ("lab", "hear", "motion", "zoom", "picture")
+LIBRARY_WORK = ("ingest", "embed", "warmup", "sync", "backup", "restore")
+
+
+def _make_way(jobs: JobManager, for_what: str) -> list[str]:
+    import time as _t
+
+    paused = []
+    for k in PAUSABLE:
+        j = jobs.running(k)
+        if j is None or j.cancelled:
+            continue
+        j.paused_for = for_what
+        j.log(f"paused for {for_what} — resumes automatically when it's done")
+        jobs.paused[k] = {"for": for_what, "args": dict(getattr(j, "args", None) or {}), "at": _t.time()}
+        j.request_cancel()
+        paused.append(k)
+    return paused
+
+
+def _resume_paused(service: Service, jobs: JobManager) -> list[str]:
+    """Start again what made way, once no library work is running."""
+    if not jobs.paused or any(jobs.running(k) for k in LIBRARY_WORK):
+        return []
+    timers = {"hear": _hear_next, "motion": _motion_next, "zoom": _zoom_next}
+    out = []
+    for k, e in list(jobs.paused.items()):
+        if jobs.running(k):
+            continue
+        if k == "lab":
+            cand = (e.get("args") or {}).get("cand")
+            if cand:
+                try:
+                    j = jobs.start("lab", lambda job, c=cand: service.run_lab(c, job=job))
+                    j.args = {"cand": cand}
+                except RuntimeError:
+                    continue
+        elif k in timers:
+            timers[k]["at"] = 0.0                     # its own scheduler starts it this tick
+        jobs.paused.pop(k, None)
+        out.append(k)
+    return out
 
 
 def _env_int(name: str, default: int) -> int:
@@ -3002,6 +3069,7 @@ def _watch_go(service: Service, jobs: JobManager, force: bool = False):
         service.watch_succeeded()
         return out
 
+    _make_way(jobs, "Ingest")
     job = jobs.start("ingest", _ingest)
     service.watch_started(files)
     return job
@@ -3029,6 +3097,7 @@ def _seed_ingest_go(service: Service, jobs: JobManager):
             service.requeue_seed_ingest(pending)
             raise
 
+    _make_way(jobs, "Ingest")
     try:
         return jobs.start("ingest", _ingest)
     except RuntimeError:
@@ -3093,6 +3162,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 pass
             try:   # files the pull just brought in: scan exactly where they landed
                 _seed_ingest_go(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # background work that made way for an ingest / embed: its turn again
+                _resume_paused(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over
