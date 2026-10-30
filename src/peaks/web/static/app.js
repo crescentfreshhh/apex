@@ -3831,6 +3831,7 @@ function pickSetup(v, sid, picks, host, track) {
     const ans = e.target.closest("[data-pv]");
     if (ans) return pickAnswer(v, +ans.dataset.pv, +chip.dataset.t);
     if (e.target.closest("[data-pjump]")) {                 // back to the moment being asked about
+      rv.touched = true;
       const p = st.picks.find((x) => x.t === +chip.dataset.t);
       v.currentTime = Math.max(0, p && p.start != null ? p.start : +chip.dataset.t - PICK_PRE); v.play().catch(() => {});
     }
@@ -6666,25 +6667,36 @@ function renderReview() {
   $("#rv-pos").innerHTML = `<b>${esc(rv.label)}</b> · ${rv.i + 1} of ${total.toLocaleString()}`
     + (rv.note ? ` <span class="rv-note">↪ ${esc(rv.note)}</span>` : "");
   // player: start at the best moment, Peaks' picks marked on the timeline
-  let start = (r.moments && r.moments.length) ? r.moments.reduce((a, b) => ((b.score || 0) > (a.score || 0) ? b : a)).t : 0;
+  // the start is Peaks' best pick from the same list the ticks are drawn from
+  const known = rvPickCache.get(r.scene_id);
+  let start = rvBestStart(known && known.list ? known.list : (r.moments || []));
+  let pinned = false;                                   // a specific moment asked for: never moved
   if (rv.startAt && rv.startAt.sid === r.scene_id) {
-    start = rv.startAt.t; rv.startAt = null;
+    start = rv.startAt.t; rv.startAt = null; pinned = true;
     if (v.dataset.sid === r.scene_id) { v.currentTime = start; v.play().catch(() => {}); }
   }
-  if (v.dataset.sid !== r.scene_id) {
+  const fresh = v.dataset.sid !== r.scene_id;
+  if (fresh) {
     v.dataset.sid = r.scene_id;
+    rv.touched = false;
+    rv.start = start;
     v.src = r.stream;
-    v.onloadedmetadata = () => { v.currentTime = start; v.play().catch(() => {}); };
+    v.onloadedmetadata = () => { v.currentTime = rv.start; v.play().catch(() => {}); };
   }
   // one list drives the ticks, ←/→, the spans and the "your kind of moment?" chip: the
   // scene's picks from the server (spans for a zoomed scene, with what you've answered);
   // the catalogue's frame moments only stand in until they arrive
   const tok = rv.pickTok = (rv.pickTok || 0) + 1;
-  const known = rvPickCache.get(r.scene_id);
   rvPicksApply(v, r, known && known.list ? known.list : (r.moments || []));
   rvPicksGet(r.scene_id).then((ps) => {
     if (tok !== rv.pickTok || (rv.items[rv.i] || {}).scene_id !== r.scene_id) return;   // a reply for a scene you left
-    if (ps.length) rvPicksApply(v, r, ps);
+    if (!ps.length) return;
+    rvPicksApply(v, r, ps);
+    if (!fresh || pinned || rv.touched) return;          // you've moved the player: stay where you are
+    const best = rvBestStart(ps);
+    if (Math.abs(best - rv.start) < 0.5) return;
+    rv.start = best;                                     // not loaded yet: it simply starts there
+    if (v.readyState >= 1 && Math.abs(v.currentTime - best) > 2) { v.currentTime = best; v.play().catch(() => {}); }
   }).catch(() => {});
   const nx = rv.items[rv.i + 1]; if (nx) rvPicksGet(nx.scene_id).catch(() => {});      // the next one, ready
   rvSettleBanner(r);
@@ -6822,7 +6834,16 @@ function rvPicksApply(v, r, picks) {
   if (list.some((p) => p.score != null)) pickSetup(v, r.scene_id, list, $("#rv-v").parentElement, $("#rv-scrub"));
   else { pickW.delete(v); $("#rv-v").parentElement.querySelector(".pick-chip")?.remove(); }
 }
+// where a scene starts: its best pick you haven't answered (else its best), at the
+// start of the span when it's one — so the first thing you see is a tick, with its question
+function rvBestStart(list) {
+  if (!list || !list.length) return 0;
+  const open = list.filter((p) => !p.answered);
+  const best = (open.length ? open : list).reduce((a, b) => ((+b.score || 0) > (+a.score || 0) ? b : a));
+  return Math.max(0, best.start != null ? +best.start : +best.t);
+}
 function rvJump(dir) {
+  rv.touched = true;
   const v = $("#rv-v"), t = v.currentTime;
   if (!rv.peaks.length) { v.currentTime = Math.max(0, t + 30 * dir); rvLanded(v.currentTime); return; }   // not embedded yet
   const next = dir > 0 ? rv.peaks.find((p) => p > t + 1) : [...rv.peaks].reverse().find((p) => p < t - 1);
@@ -6874,6 +6895,7 @@ $("#rv-queue")?.addEventListener("click", (e) => { const q = e.target.closest("[
 // the whole bottom band of the player — the bar and everything below it — seeks
 // (click or drag); only clicks above it play/pause
 function rvSeekTo(e) {
+  rv.touched = true;
   const v = $("#rv-v"), r = rv.items[rv.i]; if (!r) return;
   const pk = e.type === "pointerdown" ? e.target.closest(".pk") : null;
   const box = $("#rv-scrub .rv-track").getBoundingClientRect();   // the bar itself, not the band's padding
