@@ -142,23 +142,26 @@ class JobManager:
             self._by_kind[kind] = job.id
 
         def _run():
+            status = "error"
             try:
                 result = target(job)
                 job.result = result if isinstance(result, dict) else None
-                job.status = "cancelled" if job.cancelled else "done"
+                status = "cancelled" if job.cancelled else "done"
             except Exception as exc:  # noqa: BLE001 - surface to the UI
                 job.error = f"{type(exc).__name__}: {exc}"
                 job.log("ERROR: " + job.error)
                 job.log(traceback.format_exc().splitlines()[-1])
-                job.status = "error"
             finally:
+                # finished time and history first, the status last: anyone who sees
+                # the job done also finds it in the history
                 job.finished = time.time()
-                self._remember(job)
+                self._remember(job, status)
+                job.status = status
 
         threading.Thread(target=_run, daemon=True, name=f"job-{job.id}").start()
         return job
 
-    def _remember(self, job: Job) -> None:
+    def _remember(self, job: Job, status: str | None = None) -> None:
         """Append a finished job to the history file (kept to the last HISTORY_KEEP)."""
         if not self._history_path:
             return
@@ -167,7 +170,7 @@ class JobManager:
                 p = self._history_path
                 p.parent.mkdir(parents=True, exist_ok=True)
                 lines = p.read_text().splitlines() if p.exists() else []
-                lines = (lines + [json.dumps(job.summary())])[-HISTORY_KEEP:]
+                lines = (lines + [json.dumps({**job.summary(), "status": status or job.status})])[-HISTORY_KEEP:]
                 tmp = p.with_suffix(".tmp")
                 tmp.write_text("\n".join(lines) + "\n")
                 tmp.replace(p)
