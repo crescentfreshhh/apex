@@ -179,10 +179,29 @@ class SearchIndex:
                 return self
         except Exception:  # noqa: BLE001 — any doubt: the full build below
             self.__init__(self.cache, self.model_name)
-        self._build_full(keys, on_progress)
-        if self.size:
+        self._build_full(keys, on_progress, stats=stats)
+        if self.size and not self.on_disk:
             snap.write_behind(self, self.cache, self.model_name, stats)
         return self
+
+    @property
+    def on_disk(self) -> bool:
+        """The matrix is a map of its file on the cache SSD (not process memory)."""
+        return isinstance(self.matrix, np.memmap) or getattr(self.matrix, "_mmap", None) is not None
+
+    def _writer(self, total: int, dim: int, bf16: bool, stats: dict | None):
+        if stats is None:
+            return None
+        from . import index_snapshot as snap
+
+        return snap.Writer.open(self.cache, self.model_name, total, dim, bf16)
+
+    def _finish(self, w, stats: dict, used: int) -> None:
+        """Commit a disk-built matrix and switch to its read-only map."""
+        try:
+            self.matrix = w.commit(self, stats, used)
+        except Exception:  # noqa: BLE001 — keep the (disk-backed) rows we built; no snapshot this time
+            w.abort()
 
     def _adopt(self, matrix, times, order: list[tuple[str, int, int, dict]], bf16: bool) -> None:
         """Take a finished matrix + per-scene row ranges (in row order)."""
@@ -230,32 +249,43 @@ class SearchIndex:
         bf16 = _index_dtype_for(total, man["dim"]) == "bfloat16"
         if bf16 != man["bf16"]:
             return False                                          # crossed the size line: rebuild
-        matrix = np.empty((total, man["dim"]), dtype=np.uint16 if bf16 else np.float32)
-        times_all = np.empty((total,), dtype=np.float32)
-        order, pos = [], 0
-        src, row_bytes, since = s["matrix"], matrix.itemsize * man["dim"], 0
-        for key, a, b in old:
-            n = b - a
-            matrix[pos:pos + n] = src[a:b]
-            times_all[pos:pos + n] = s["times"][a:b]
-            order.append((key, pos, pos + n, scenes[key]))
-            pos += n
-            since += n * row_bytes
-            if since >= _RELEASE_EVERY:               # done with those snapshot pages: let them go,
-                _release_mapped(src)                  # so the copy never holds two whole matrices
-                since = 0
-        _release_mapped(src)
-        for key, times, vecs, meta in loaded:
-            n = vecs.shape[0]
-            matrix[pos:pos + n] = _f32_to_bf16(vecs) if bf16 else vecs
-            times_all[pos:pos + n] = times.astype(np.float32)
-            order.append((key, pos, pos + n, meta))
-            pos += n
-        self._adopt(matrix, times_all, order, bf16)
-        snap.write_behind(self, self.cache, self.model_name, stats)
+        w = self._writer(total, man["dim"], bf16, stats)        # the new generation, on the SSD
+        try:
+            matrix = w.matrix if w else np.empty((total, man["dim"]), dtype=np.uint16 if bf16 else np.float32)
+            times_all = np.empty((total,), dtype=np.float32)
+            order, pos = [], 0
+            src, row_bytes, since = s["matrix"], matrix.itemsize * man["dim"], 0
+            for key, a, b in old:
+                n = b - a
+                matrix[pos:pos + n] = src[a:b]
+                times_all[pos:pos + n] = s["times"][a:b]
+                order.append((key, pos, pos + n, scenes[key]))
+                pos += n
+                since += n * row_bytes
+                if w:
+                    w.wrote(n * row_bytes)
+                if since >= _RELEASE_EVERY:               # done with those snapshot pages: let them go,
+                    _release_mapped(src)                  # so the copy never holds two whole matrices
+                    since = 0
+            _release_mapped(src)
+            for key, times, vecs, meta in loaded:
+                n = vecs.shape[0]
+                matrix[pos:pos + n] = _f32_to_bf16(vecs) if bf16 else vecs
+                times_all[pos:pos + n] = times.astype(np.float32)
+                order.append((key, pos, pos + n, meta))
+                pos += n
+            self._adopt(matrix, times_all, order, bf16)
+        except BaseException:
+            if w:
+                w.abort()
+            raise
+        if w:
+            self._finish(w, stats, total)
+        else:
+            snap.write_behind(self, self.cache, self.model_name, stats)
         return True
 
-    def _build_full(self, keys: list[str] | None = None, on_progress=None) -> "SearchIndex":
+    def _build_full(self, keys: list[str] | None = None, on_progress=None, stats: dict | None = None) -> "SearchIndex":
         """Load every cached scene for this model into one matrix.
 
         Vectors are L2-normalized at write time, so cosine similarity is just a
@@ -295,40 +325,55 @@ class SearchIndex:
         _, first_vecs, _ = self.cache.load(kept[0], self.model_name)
         dim = int(first_vecs.shape[1])
         self._bf16 = _index_dtype_for(total, dim) == "bfloat16"
-        matrix = np.empty((total, dim), dtype=np.uint16 if self._bf16 else np.float32)
-        times_all = np.empty((total,), dtype=np.float32)
-        all_keys: list[str] = []
-        all_scenes: list[str | None] = []
-        pos = 0
-        for done, key in enumerate(kept):
-            if on_progress and done % 100 == 0:
-                on_progress(done, len(kept))
-            try:
-                times, vecs, meta = self.cache.load(key, self.model_name)
-            except Exception:
-                continue
-            n = vecs.shape[0]
-            if n == 0:
-                continue
-            if pos + n > total:  # count grew between passes (mid-embed write)
-                n = total - pos
-                vecs, times = vecs[:n], times[:n]
-            matrix[pos : pos + n] = _f32_to_bf16(vecs) if self._bf16 else vecs
-            times_all[pos : pos + n] = times.astype(np.float32)
-            self._key_rows[key] = (pos, pos + n)
-            all_keys.extend([key] * n)
-            sid = meta.get("scene_id")
-            all_scenes.extend([sid] * n)
-            self.key_meta[key] = {"scene_id": sid, "path": meta.get("path")}
-            pos += n
-            if pos >= total:
-                break
+        w = self._writer(total, dim, self._bf16, stats)       # straight onto the SSD, when it can
+        matrix = w.matrix if w else np.empty((total, dim), dtype=np.uint16 if self._bf16 else np.float32)
+        try:
+            row_bytes = matrix.itemsize * dim
+            times_all = np.empty((total,), dtype=np.float32)
+            all_keys: list[str] = []
+            all_scenes: list[str | None] = []
+            pos = 0
+            for done, key in enumerate(kept):
+                if on_progress and done % 100 == 0:
+                    on_progress(done, len(kept))
+                try:
+                    times, vecs, meta = self.cache.load(key, self.model_name)
+                except Exception:
+                    continue
+                n = vecs.shape[0]
+                if n == 0:
+                    continue
+                if pos + n > total:  # count grew between passes (mid-embed write)
+                    n = total - pos
+                    vecs, times = vecs[:n], times[:n]
+                matrix[pos : pos + n] = _f32_to_bf16(vecs) if self._bf16 else vecs
+                times_all[pos : pos + n] = times.astype(np.float32)
+                if w:
+                    w.wrote(n * row_bytes)
+                self._key_rows[key] = (pos, pos + n)
+                all_keys.extend([key] * n)
+                sid = meta.get("scene_id")
+                all_scenes.extend([sid] * n)
+                self.key_meta[key] = {"scene_id": sid, "path": meta.get("path")}
+                pos += n
+                if pos >= total:
+                    break
+        except BaseException:
+            if w:
+                w.abort()
+            raise
 
         # trim if the live cache shrank between passes (any count drift)
         self.matrix = matrix[:pos]
         self.times = times_all[:pos]
         self.keys = all_keys
         self.scene_ids = all_scenes
+        if w:
+            if pos:
+                self._finish(w, stats, pos)
+            else:
+                w.abort()
+                self.matrix = np.zeros((0, dim), dtype=np.uint16 if self._bf16 else np.float32)
         return self
 
     # --- querying ------------------------------------------------------------

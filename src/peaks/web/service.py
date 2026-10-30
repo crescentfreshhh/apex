@@ -1940,8 +1940,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from .. import index_snapshot as snap
         from ..search import _index_dtype_for
 
+        # the matrix is built and kept on the cache SSD: only its per-row
+        # bookkeeping (key / scene / time) lives in memory
+        per_row = 24 if snap.enabled() else None
         try:
             man = json.loads((snap.snap_dir(cache, model) / "manifest.json").read_text())
+            if per_row:
+                return int(man["total"]) * per_row
             return int(man["total"]) * int(man["dim"]) * (2 if man["bf16"] else 4)
         except Exception:  # noqa: BLE001
             pass
@@ -1952,6 +1957,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             except OSError:
                 pass
         values = f16 // 2
+        if per_row:
+            return (values // 384 or 1) * per_row                 # rows ≈ values / dim (dim ≥ 384)
         return values * (2 if _index_dtype_for(values // 1024 or 1, 1024) == "bfloat16" else 4)
 
     def _index_room(self, cache, model: str, keys: list[str], old=None) -> bool:
@@ -2123,12 +2130,20 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         rss = memwatch.rss_bytes()
         limit = memwatch.soft_limit_bytes()
         with self._index_lock:
-            resident = sorted(self._index.keys())
+            idx = dict(self._index)
+        detail = []
+        for m, ix in sorted(idx.items()):
+            mat = getattr(ix, "matrix", None)
+            detail.append({"model": m, "rows": int(getattr(ix, "size", 0) or 0),
+                           "mb": round(getattr(mat, "nbytes", 0) / 1048576),
+                           "on_disk": bool(getattr(ix, "on_disk", False))})
         return {
-            "rss_mb": round(rss / 1048576, 1),
+            "rss_mb": round(rss / 1048576, 1),              # real (anonymous) memory
+            "file_mb": round(memwatch.file_rss_bytes() / 1048576, 1),   # mapped from files: cache
             "limit_mb": round(limit / 1048576, 1) if limit else None,
             "pct": round(100 * rss / limit, 1) if limit else None,
-            "indexes": resident,
+            "indexes": sorted(idx.keys()),
+            "index_detail": detail,
         }
 
     def shed_memory(self, drop_indexes: bool = True, keep_hot: bool = False) -> dict:

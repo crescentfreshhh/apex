@@ -1,7 +1,9 @@
 """Best-effort RAM self-policing for the web process.
 
-The dominant resident cost is the in-memory `SearchIndex.matrix` (N frames x dim
-float32) — and there's one per embedding model, so a DINO + a CLIP index on a
+The search index (`SearchIndex.matrix`, N frames x dim) is mapped from its file
+on the cache SSD, so it is page cache, not process memory; what's policed here
+is real (anonymous) memory. It used to be the dominant resident cost — one per
+embedding model, so a DINO + a CLIP index on a
 large library can be many GB apiece. On a memory-capped host (e.g. a 24 GB
 Unraid container) that runs the box out of RAM and the process gets OOM-killed.
 
@@ -27,14 +29,38 @@ except (ValueError, OSError, AttributeError):
     _PAGE = 4096
 
 
+def _status_kb(field: str) -> int | None:
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith(field + ":"):
+                    return int(line.split()[1])
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+    return None
+
+
 def rss_bytes() -> int:
-    """Resident set size of this process, in bytes (0 if unreadable)."""
+    """This process's *real* memory, in bytes: its anonymous resident pages
+    (heap, models, arrays) — not pages it has mapped from files, like the search
+    index on the cache SSD, which the kernel drops whenever it needs the RAM.
+    Falls back to the whole resident set where /proc doesn't say (0 if unreadable)."""
+    kb = _status_kb("RssAnon")
+    if kb is not None:
+        return kb * 1024
     try:
         with open("/proc/self/statm") as f:
             # fields are in pages: size, resident, shared, ...
             return int(f.read().split()[1]) * _PAGE
     except Exception:  # noqa: BLE001 — best-effort
         return 0
+
+
+def file_rss_bytes() -> int:
+    """Resident pages mapped from files (the on-disk index, libraries): cache,
+    not a requirement — reclaimed by the kernel under pressure."""
+    kb = _status_kb("RssFile")
+    return (kb or 0) * 1024
 
 
 def cgroup_limit_bytes() -> int | None:

@@ -75,8 +75,11 @@ def read(cache, model: str) -> dict | None:
         times = np.load(d / f"times-{gen}.npy")
     except (OSError, ValueError, KeyError):
         return None
-    if matrix.shape[0] != man.get("total") or times.shape[0] != man.get("total"):
+    total = man.get("total")
+    if not isinstance(total, int) or matrix.shape[0] < total or times.shape[0] != total:
         return None
+    if matrix.shape[0] > total:                # built a little big (the library shrank mid-build)
+        matrix = matrix[:total]
     return {"man": man, "matrix": matrix, "times": times}
 
 
@@ -142,6 +145,115 @@ def write(index, cache, model: str, stats: dict[str, list[int]]) -> bool:
         return False
     finally:
         lk.release()
+
+
+def _drop_pages(arr) -> None:
+    """Write a writable map's dirty pages to disk and let them go from memory
+    (they're re-read from the file when touched)."""
+    import mmap
+
+    try:
+        arr.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+    mm = getattr(arr, "_mmap", None)
+    if mm is not None and hasattr(mm, "madvise") and hasattr(mmap, "MADV_DONTNEED"):
+        try:
+            mm.madvise(mmap.MADV_DONTNEED)
+        except (OSError, ValueError):
+            pass
+
+
+class Writer:
+    """Builds the index matrix straight into its snapshot file on disk (the
+    cache SSD), so a build or a patch never holds the matrix in process memory:
+    rows are written through a map, flushed and dropped as they go, and the
+    finished file is then mapped read-only — the kernel keeps its pages cached
+    while RAM is free and drops them when it isn't.
+
+    `Writer.open(...)` returns None where that isn't possible (snapshots off, a
+    filesystem without mmap); callers then build in memory as before."""
+
+    def __init__(self, d: Path, total: int, dim: int, bf16: bool):
+        self.d, self.bf16 = d, bf16
+        self.lock = _lock(d)
+        self.lock.acquire()
+        try:
+            self.gen = f"{int(time.time() * 1000):x}"
+            self.tmp = d / f"matrix-{self.gen}.npy.tmp"
+            self.matrix = np.lib.format.open_memmap(self.tmp, mode="w+", dtype=np.uint16 if bf16 else np.float32,
+                                                    shape=(max(1, int(total)), int(dim)))
+        except BaseException:
+            self.lock.release()
+            raise
+        self.since = 0
+        self.closed = False
+
+    @classmethod
+    def open(cls, cache, model: str, total: int, dim: int, bf16: bool) -> "Writer | None":
+        if not enabled() or total <= 0 or dim <= 0:
+            return None
+        d = snap_dir(cache, model)
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            return cls(d, total, dim, bf16)
+        except (OSError, ValueError):
+            return None
+
+    def wrote(self, nbytes: int) -> None:
+        self.since += int(nbytes)
+        if self.since >= _FLUSH_EVERY:
+            _drop_pages(self.matrix)
+            self.since = 0
+
+    def commit(self, index, stats: dict[str, list[int]], used: int):
+        """Finish: times + manifest written, older generations removed; returns
+        the matrix mapped read-only (`used` rows)."""
+        try:
+            _drop_pages(self.matrix)
+            del self.matrix
+            name = self.d / f"matrix-{self.gen}.npy"
+            os.replace(self.tmp, name)
+            tt = self.d / f"times-{self.gen}.npy.tmp"
+            _save_flushed(tt, np.asarray(index.times[:used], dtype=np.float32))
+            os.replace(tt, self.d / f"times-{self.gen}.npy")
+            scenes = {}
+            for key, (a, b) in index._key_rows.items():
+                if key not in stats:
+                    continue
+                m = index.key_meta.get(key) or {}
+                scenes[key] = {"st": stats[key], "rows": [int(a), int(b)],
+                               "scene_id": m.get("scene_id"), "path": m.get("path")}
+            man = {"gen": self.gen, "model": self.d.name, "total": int(used), "dim": int(index.dim),
+                   "bf16": bool(self.bf16), "scenes": scenes, "written": time.time()}
+            tmp = self.d / "manifest.json.tmp"
+            tmp.write_text(json.dumps(man))
+            os.replace(tmp, self.d / "manifest.json")   # the commit
+            for f in self.d.iterdir():                   # older generations (a mapped one stays valid)
+                if f.suffix in (".npy", ".tmp") and self.gen not in f.name:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+            mapped = np.load(name, mmap_mode="r")
+            return mapped[:used] if mapped.shape[0] > used else mapped
+        finally:
+            self.closed = True
+            self.lock.release()
+
+    def abort(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            del self.matrix
+        except AttributeError:
+            pass
+        try:
+            self.tmp.unlink()
+        except OSError:
+            pass
+        self.lock.release()
 
 
 def write_behind(index, cache, model: str, stats: dict[str, list[int]]) -> None:

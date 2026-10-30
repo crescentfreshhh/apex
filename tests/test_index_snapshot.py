@@ -122,3 +122,80 @@ def test_rewrite_keeps_a_mapped_matrix_valid(cache):
     time.sleep(0.01)
     snap.write(a, cache, MODEL, snap.file_stats(cache, MODEL, cache.keys(MODEL)))   # generation 2
     assert float(np.asarray(mapped.matrix[0], dtype=np.float32)[0]) == float(np.asarray(a.matrix[0], dtype=np.float32)[0])
+
+
+# --- the matrix lives on the SSD: built there, patched there, never copied into memory ---
+
+def _gens(cache):
+    return sorted(f.name for f in snap.snap_dir(cache, MODEL).iterdir() if f.suffix in (".npy", ".tmp"))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_full_build_and_patch_are_mapped_from_disk_and_match(cache, monkeypatch, dtype):
+    monkeypatch.setenv("PEAKS_INDEX_DTYPE", dtype)
+    q = _vecs(np.random.default_rng(4), 1)[0]
+    built = SearchIndex(cache, MODEL).build()
+    assert built.on_disk and len(_gens(cache)) == 2 and not any(g.endswith(".tmp") for g in _gens(cache))
+    monkeypatch.setenv("PEAKS_INDEX_SNAPSHOT", "0")
+    in_ram = SearchIndex(cache, MODEL).build()
+    assert not in_ram.on_disk and _search(built, q) == _search(in_ram, q)
+    monkeypatch.delenv("PEAKS_INDEX_SNAPSHOT")
+
+    old_gens = _gens(cache)
+    rng = np.random.default_rng(8)
+    cache.save("k50", MODEL, np.arange(6, dtype=np.float32), _vecs(rng, 6), meta={"scene_id": "150", "path": "/d/50.mp4"})
+    time.sleep(0.01)
+    patched = SearchIndex(cache, MODEL).build()
+    assert patched.on_disk and "k50" in patched._key_rows
+    assert set(_gens(cache)).isdisjoint(old_gens)                       # the old generation is gone…
+    assert _search(built, q)                                            # …yet the old map still reads
+    monkeypatch.setenv("PEAKS_INDEX_SNAPSHOT", "0")
+    assert sorted(_search(patched, q)) == sorted(_search(SearchIndex(cache, MODEL).build(), q))
+
+
+def test_a_build_that_shrank_midway_still_loads(cache, monkeypatch):
+    real = cache.load
+    calls = {"n": 0}
+
+    def flaky(key, model):
+        calls["n"] += 1
+        if key == "k11":
+            raise OSError("gone")                                       # counted, then unreadable
+        return real(key, model)
+    monkeypatch.setattr(cache, "load", flaky)
+    idx = SearchIndex(cache, MODEL).build()
+    assert idx.on_disk and "k11" not in idx._key_rows
+    monkeypatch.setattr(cache, "load", real)
+    cnt = Counting(cache)
+    again = SearchIndex(cnt, MODEL).build()                            # k11 read back in; the rest from disk
+    assert cnt.loads == 1 and again.size == idx.size + 16
+
+
+def test_a_failed_build_releases_the_snapshot_and_leaves_no_temp(cache):
+    import threading
+
+    def boom(done, total):
+        raise RuntimeError("stop")                                      # inside the build, writer open
+    with pytest.raises(RuntimeError):
+        SearchIndex(cache, MODEL)._build_full(cache.keys(MODEL), on_progress=boom, stats={})
+    assert not any(g.endswith(".tmp") for g in _gens(cache)) if snap.snap_dir(cache, MODEL).exists() else True
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("idx", SearchIndex(cache, MODEL).build()))
+    t.start(); t.join(10)
+    assert "idx" in out and out["idx"].on_disk                          # no lock left held
+
+
+def test_mapped_pages_are_not_counted_as_real_memory(tmp_path):
+    from peaks.web import memwatch
+
+    if memwatch._status_kb("RssAnon") is None:
+        pytest.skip("no /proc/self/status")
+    arr = np.lib.format.open_memmap(tmp_path / "big.npy", mode="w+", dtype=np.uint8, shape=(256 << 20,))
+    arr[:] = 1
+    arr.flush()
+    del arr
+    m = np.load(tmp_path / "big.npy", mmap_mode="r")
+    anon0, file0 = memwatch.rss_bytes(), memwatch.file_rss_bytes()
+    assert int(m[:: 4096].sum()) == (256 << 20) // 4096                 # touch every page
+    assert memwatch.file_rss_bytes() - file0 > 200 << 20
+    assert memwatch.rss_bytes() - anon0 < 32 << 20

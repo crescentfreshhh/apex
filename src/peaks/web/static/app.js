@@ -358,7 +358,15 @@ async function loadSpeed() {
       <b>${p.level}</b> · freed ${p.freed_mb} MB (${(p.rss_before_mb / 1024).toFixed(1)} → ${(p.rss_after_mb / 1024).toFixed(1)} GB)
       ${p.dropped.length ? "· " + esc(p.dropped.join("; ")) : ""}</li>`).join("")}</ul>`
       : '<p class="dim">None — pages kept their caches.</p>'}
-    ${d.memory && d.memory.limit_mb ? `<p class="dim">Memory now ${(d.memory.rss_mb / 1024).toFixed(1)} of ${(d.memory.limit_mb / 1024).toFixed(1)} GB (purges start at 90%).</p>` : ""}`;
+    ${speedMemHTML(d.memory)}`;
+}
+function speedMemHTML(m) {
+  if (!m) return "";
+  const gb = (mb) => (mb / 1024).toFixed(1) + " GB";
+  return `<h4>Memory</h4><p class="dim">Real memory <b>${gb(m.rss_mb)}</b>${m.limit_mb ? ` of ${gb(m.limit_mb)} (purges start at 90%)` : ""}
+      · cached from the SSD ${gb(m.file_mb || 0)} <span class="faint">(the kernel frees this whenever it needs the room)</span></p>
+    ${(m.index_detail || []).length ? `<ul class="speed-p">${m.index_detail.map((x) => `<li><code>${esc(x.model)}</code> · ${x.rows.toLocaleString()} moments ·
+      ${gb(x.mb)} · ${x.on_disk ? "on the SSD (mapped)" : "<b>in memory</b>"}</li>`).join("")}</ul>` : '<p class="dim">No search index loaded.</p>'}`;
 }
 $("#speed-panel")?.addEventListener("toggle", (e) => { if (e.target.open) loadSpeed(); });
 function drawDashboard(stats, caps, mem) {
