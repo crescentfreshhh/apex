@@ -13,6 +13,20 @@ import threading
 from pathlib import Path
 
 from .jobs import JobManager
+
+# what each background job is called, and its colour family in the Activity log
+JOB_LABELS = {"embed": "Embedding", "ingest": "Ingest", "score": "Writing markers", "sync": "Syncing",
+              "fix": "Retrying failed", "reel": "Exporting video", "playlist": "Building board",
+              "library": "Updating Stash", "dupes": "Finding duplicates", "train": "Training taste",
+              "taste-measure": "Measuring taste", "warmup": "Starting up", "backup": "Backing up",
+              "restore": "Restoring", "perf-photos": "Performer photos", "hear": "Hearing", "motion": "Motion",
+              "zoom": "Moment zoom", "lab": "Model trial", "picture": "Picture quality",
+              "picture-dupes": "Picture: duplicates", "upgrades": "Upgrades search", "seedbox": "Seedbox"}
+JOB_FAMILY = {"ingest": "ingest", "embed": "embed", "fix": "embed", "warmup": "embed", "hear": "hear",
+              "motion": "motion", "zoom": "zoom", "lab": "zoom", "library": "stash", "dupes": "stash",
+              "score": "stash", "sync": "sync", "backup": "sync", "restore": "sync", "train": "taste",
+              "taste-measure": "taste", "playlist": "taste", "reel": "taste", "picture": "picture",
+              "picture-dupes": "picture", "perf-photos": "picture", "upgrades": "upgrades", "seedbox": "upgrades"}
 from .service import IndexMemoryError, Service
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -298,7 +312,7 @@ def create_app(cfg=None):
     from fastapi.staticfiles import StaticFiles
 
     service = Service(cfg)
-    jobs = JobManager()
+    jobs = JobManager(history_path=service._state_dir() / "job_history.jsonl")
     app = FastAPI(title="peaks", docs_url="/api/docs")
     from .compress import TextGzip
 
@@ -729,6 +743,27 @@ def create_app(cfg=None):
     @app.get("/api/jobs")
     def list_jobs():
         return [j.as_dict(log_tail=1) for j in jobs.list()]
+
+    @app.get("/api/activity/feed")
+    def activity_feed(since: float = 0.0, hours: float = 24.0):
+        """The central Activity log: every running job with its progress, speed
+        and time left; recent finished jobs; and all jobs' log lines newer than
+        `since`, merged in time order."""
+        import time as _t
+
+        lines = []
+        running = []
+        for j in jobs.list():
+            for t, msg in j.lines(since or None):
+                lines.append({"t": t, "kind": j.kind, "job": j.id, "msg": msg})
+            if j.status == "running":
+                running.append({"id": j.id, "kind": j.kind, "label": JOB_LABELS.get(j.kind, j.kind),
+                                "family": JOB_FAMILY.get(j.kind, "other"), "started": j.started, **j.timing()})
+        lines.sort(key=lambda x: x["t"])
+        cut = _t.time() - hours * 3600
+        finished = [{**h, "label": JOB_LABELS.get(h["kind"], h["kind"]), "family": JOB_FAMILY.get(h["kind"], "other")}
+                    for h in jobs.history() if (h.get("finished") or 0) >= cut][:100]
+        return {"now": _t.time(), "running": running, "finished": finished, "lines": lines[-400:]}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):

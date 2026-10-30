@@ -31,7 +31,7 @@ const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bu
 // on (Duplicates) are never served from a copy.
 const SWR = new Map();                  // path -> { data, text, at }
 const INFLIGHT = new Map();             // path -> Promise
-const SWR_SKIP = /^\/api\/(jobs|perf|memory|duplicates|dupes|login|logout)|\/progress|\/status|[?&](refresh|fresh)=/;
+const SWR_SKIP = /^\/api\/(jobs|activity|perf|memory|duplicates|dupes|login|logout)|\/progress|\/status|[?&](refresh|fresh)=/;
 const swrDB = (() => {
   let db = null;
   const open = () => db || (db = new Promise((res) => {
@@ -184,7 +184,7 @@ function showView(name) {
 // open a page and load what it shows
 function go(name) {
   showView(name);
-  if (name === "activity") { refreshDashboard(); loadRenamerMoves(); loadCleanup(); loadCopies(); loadWatch(); }
+  if (name === "activity") { pollActlog(); refreshDashboard(); loadRenamerMoves(); loadCleanup(); loadCopies(); loadWatch(); }
   if (name === "foryou") openForYou();
   if (name === "performers") openPerformers();
   if (name === "studios") openStudios();
@@ -6208,7 +6208,22 @@ refreshDashboard();  // conn status + job reattach (runs even though it's not th
 const JOB_LABEL = { embed: "Embedding", ingest: "Ingest", score: "Writing markers", sync: "Syncing",
   fix: "Retrying failed", reel: "Exporting video", playlist: "Building board", library: "Updating Stash",
   dupes: "Finding duplicates", train: "Training taste", "taste-measure": "Measuring taste",
-  warmup: "Starting up", backup: "Backing up", restore: "Restoring", "perf-photos": "Performer photos" };
+  warmup: "Starting up", backup: "Backing up", restore: "Restoring", "perf-photos": "Performer photos",
+  hear: "Hearing", motion: "Motion", zoom: "Moment zoom", lab: "Model trial", picture: "Picture quality",
+  "picture-dupes": "Picture: duplicates", upgrades: "Upgrades search", seedbox: "Seedbox" };
+// one colour per task family — the tray and the Activity log share it
+const JOB_FAMILY = { ingest: "ingest", embed: "embed", fix: "embed", warmup: "embed", hear: "hear", motion: "motion",
+  zoom: "zoom", lab: "zoom", library: "stash", dupes: "stash", score: "stash", sync: "sync", backup: "sync",
+  restore: "sync", train: "taste", "taste-measure": "taste", playlist: "taste", reel: "taste", picture: "picture",
+  "picture-dupes": "picture", "perf-photos": "picture", upgrades: "upgrades", seedbox: "upgrades" };
+const jobFam = (k) => JOB_FAMILY[k] || "other";
+// "1 h 12 m", "4 m 05 s", "38 s"
+function dur(s) {
+  if (s == null || !isFinite(s)) return "";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  return h ? `${h} h ${String(m).padStart(2, "0")} m` : m ? `${m} m ${String(x).padStart(2, "0")} s` : `${x} s`;
+}
 async function pollJobTray() {
   const tray = $("#job-tray");
   if (!tray || document.hidden) return;
@@ -6226,14 +6241,91 @@ async function pollJobTray() {
   if (badge) { badge.hidden = !running.length; badge.textContent = running.length || ""; }
   tray.hidden = !running.length;
   tray.innerHTML = running.slice(0, 3).map((j) => {
-    const p = j.progress || {};
-    const pct = p.total ? Math.round(100 * (p.done || 0) / p.total) : (typeof p.pct === "number" ? Math.round(100 * p.pct) : null);
-    const detail = p.total ? `${(p.done || 0).toLocaleString()} / ${p.total.toLocaleString()}` : (p.stage || `${Math.round(j.elapsed)}s`);
-    return `<div class="tray-job"><div class="row between"><b>${esc(JOB_LABEL[j.kind] || j.kind)}</b><span class="muted">${pct != null ? pct + "%" : ""}</span></div>
-      <div class="muted small">${esc(detail)}</div><div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div></div>`;
+    const p = j.progress || {}, tm = j.timing || {};
+    const pct = tm.pct != null ? Math.round(100 * tm.pct)
+      : p.total ? Math.round(100 * (p.done || 0) / p.total) : (typeof p.pct === "number" ? Math.round(100 * p.pct) : null);
+    const detail = p.total ? `${(p.done || 0).toLocaleString()} / ${p.total.toLocaleString()}` : (p.stage || dur(j.elapsed));
+    return `<div class="tray-job fam-${jobFam(j.kind)}"><div class="row between"><b>${esc(JOB_LABEL[j.kind] || j.kind)}</b><span class="muted">${pct != null ? pct + "%" : ""}</span></div>
+      <div class="muted small">${esc(detail)}${tm.eta_s != null ? ` · ~${dur(tm.eta_s)} left` : ""}</div><div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div></div>`;
   }).join("");
 }
-$("#job-tray")?.addEventListener("click", () => go("activity"));
+$("#job-tray")?.addEventListener("click", () => { go("activity"); setTimeout(() => $("#actlog")?.scrollIntoView({ block: "start", behavior: "smooth" }), 50); });
+
+// --- Activity → the central log: everything running, how far, how fast, how long left ---
+const actlog = { since: 0, lines: [], fin: new Set(), off: new Set(), timer: 0, busy: false };
+try { (JSON.parse(localStorage.getItem("peaks.actlog.off") || "[]")).forEach((f) => actlog.off.add(f)); } catch {}
+const ACT_FAMS = [["ingest", "Ingest"], ["embed", "Embedding"], ["hear", "Hearing"], ["motion", "Motion"], ["zoom", "Zoom & Lab"],
+  ["stash", "Stash & duplicates"], ["sync", "Sync & backup"], ["taste", "Taste"], ["picture", "Picture"],
+  ["upgrades", "Upgrades & seedbox"], ["other", "Other"]];
+const hhmmss = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+async function pollActlog() {
+  clearTimeout(actlog.timer);
+  const open = $("#activity")?.classList.contains("active");
+  actlog.timer = setTimeout(pollActlog, open && !document.hidden ? 2000 : 10000);
+  if (!open || actlog.busy || !$("#actlog")) return;
+  actlog.busy = true;
+  let d;
+  try { d = await api("/api/activity/feed?" + new URLSearchParams({ since: actlog.since })); }
+  catch { actlog.busy = false; return; }
+  actlog.busy = false;
+  for (const x of d.lines) actlog.lines.push({ t: x.t, fam: jobFam(x.kind), kind: x.kind, msg: x.msg });
+  if (d.lines.length) actlog.since = d.lines[d.lines.length - 1].t;
+  for (const f of d.finished) {                         // a finished job: one summary line, once
+    const key = f.id + ":" + f.started; if (actlog.fin.has(key)) continue;
+    actlog.fin.add(key);
+    const ok = f.status === "done", stop = f.status === "cancelled";
+    const n = f.total ? ` · ${(f.done ?? 0).toLocaleString()} / ${f.total.toLocaleString()}` : "";
+    actlog.lines.push({ t: f.finished || f.started, fam: f.family, kind: f.kind, sum: ok ? "ok" : stop ? "stop" : "bad",
+      msg: `${ok ? "✓" : stop ? "■" : "✗"} ${f.label} ${ok ? "finished" : stop ? "stopped" : "failed"} in ${dur(f.elapsed_s)}${n}`
+        + (f.result ? ` · ${f.result}` : "") + (f.error ? ` — ${f.error}` : "") });
+  }
+  actlog.lines.sort((a, b) => a.t - b.t);
+  if (actlog.lines.length > 1500) actlog.lines.splice(0, actlog.lines.length - 1500);
+  drawActlog(d);
+}
+function drawActlog(d) {
+  const run = $("#actlog-run"); if (!run) return;
+  $("#actlog-sum").textContent = d.running.length ? `${plural(d.running.length, "job")} running` : "nothing running right now";
+  run.innerHTML = d.running.map((j) => {
+    const pct = j.pct != null ? Math.round(1000 * j.pct) / 10 : null;
+    const items = j.total != null ? `${(j.done ?? 0).toLocaleString()} / ${j.total.toLocaleString()}` : "";
+    const speed = j.per_item_s != null ? `${j.per_item_s < 10 ? j.per_item_s.toFixed(1) : Math.round(j.per_item_s)} s each · ${j.rate_per_min}/min` : "";
+    return `<div class="actlog-job fam-${j.family}">
+      <div class="row between"><span><span class="actlog-tag">${esc(j.label)}</span>${j.stage ? ` <span class="muted small">${esc(j.stage)}</span>` : ""}</span>
+        <span class="small">${pct != null ? `<b>${pct}%</b>` : ""}${j.eta_s != null ? ` · <b>~${dur(j.eta_s)} left</b>` : ""}</span></div>
+      <div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div>
+      <div class="row between small muted"><span>${[items, speed].filter(Boolean).join(" · ")}</span>
+        <span>running ${dur(j.elapsed_s)} <button class="btn sm ghost" data-actlog-stop="${esc(j.id)}">Stop</button></span></div></div>`;
+  }).join("") || '<p class="faint small">Nothing is running. Scheduled work (embeds, ingest, Hearing, Motion…) shows up here the moment it starts.</p>';
+  const chips = $("#actlog-chips");
+  const present = new Set([...actlog.lines.map((l) => l.fam), ...d.running.map((j) => j.family)]);
+  chips.innerHTML = ACT_FAMS.filter(([f]) => present.has(f)).map(([f, label]) =>
+    `<button class="actlog-chip fam-${f} ${actlog.off.has(f) ? "off" : ""}" data-actlog-fam="${f}">${esc(label)}</button>`).join("");
+  const box = $("#actlog-stream");
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.innerHTML = actlog.lines.filter((l) => !actlog.off.has(l.fam)).slice(-600).map((l) =>
+    `<div class="actlog-ln fam-${l.fam}${l.sum ? " sum " + l.sum : ""}"><span class="ts">${hhmmss(l.t)}</span><span class="actlog-tag">${esc(JOB_LABEL[l.kind] || l.kind)}</span><span class="msg">${esc(l.msg)}</span></div>`).join("")
+    || '<p class="faint small">No activity in the last 24 hours.</p>';
+  if (atEnd) box.scrollTop = box.scrollHeight;          // follow along, unless you've scrolled up to read
+}
+document.addEventListener("click", async (e) => {
+  const c = e.target.closest("[data-actlog-fam]");
+  if (c) {
+    const f = c.dataset.actlogFam;
+    actlog.off.has(f) ? actlog.off.delete(f) : actlog.off.add(f);
+    try { localStorage.setItem("peaks.actlog.off", JSON.stringify([...actlog.off])); } catch {}
+    actlog.since = actlog.since;                         // no refetch needed: redraw from what we have
+    pollActlog();
+    return;
+  }
+  const s = e.target.closest("[data-actlog-stop]");
+  if (s) {
+    s.disabled = true;
+    try { await api(`/api/jobs/${encodeURIComponent(s.dataset.actlogStop)}/cancel`, { method: "POST" }); toast("Stopping…"); }
+    catch (err) { s.disabled = false; toast(err.message, true); }
+  }
+});
+pollActlog();
 pollJobTray();
 setInterval(pollJobTray, 4000);
 

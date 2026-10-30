@@ -498,6 +498,12 @@
       <button id="btn-ingest-stop" class="btn danger" hidden>Stop</button></div>
     <div id="crash-card" class="panel crash-card" hidden></div>
     <div class="cards" id="stat-cards"></div>
+    <div class="panel actlog" id="actlog">
+      <div class="row between"><h3>Activity log</h3><span id="actlog-sum" class="dim small"></span></div>
+      <div id="actlog-run" class="actlog-run"></div>
+      <div id="actlog-chips" class="actlog-chips"></div>
+      <div id="actlog-stream" class="actlog-stream" tabindex="0" aria-live="polite"></div>
+    </div>
     <details class="panel speed" id="speed-panel">
       <summary class="row between"><h3>Speed</h3><span id="speed-sum" class="dim small"></span></summary>
       <div id="speed-body" class="small"></div>

@@ -1238,3 +1238,32 @@ body.picks-off .pick-span { display: none !important; }
 @media (max-width: 700px) {
   .speed-t th:nth-child(2), .speed-t td:nth-child(2), .speed-t th:nth-child(3), .speed-t td:nth-child(3) { display: none; }
 }
+
+/* task colours — one per family, shared by the tray and the Activity log */
+.fam-ingest { --fam: #d4ae55; } .fam-embed { --fam: #6ea8fe; } .fam-hear { --fam: #3fc1b0; }
+.fam-motion { --fam: #a78bfa; } .fam-zoom { --fam: #f59e4b; } .fam-stash { --fam: #ef6b8a; }
+.fam-sync { --fam: #5fc77a; } .fam-taste { --fam: #f08bc6; } .fam-picture { --fam: #4cc4e8; }
+.fam-upgrades { --fam: #e0b84c; } .fam-other { --fam: #8a8a96; }
+.tray-job[class*="fam-"] { border-left: 3px solid var(--fam); padding-left: 7px; }
+.tray-job[class*="fam-"] .bar i { background: var(--fam); }
+
+/* Activity → the central log */
+.actlog-run { display: grid; gap: 8px; margin: 8px 0 10px; }
+.actlog-job { border: 1px solid var(--line); border-left: 4px solid var(--fam); border-radius: 8px; padding: 8px 10px; background: var(--panel2); }
+.actlog-job .bar i { background: var(--fam); }
+.actlog-job .row { gap: 8px; flex-wrap: wrap; }
+.actlog-tag { color: var(--fam); font-weight: 600; }
+.actlog-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.actlog-chip { border: 1px solid var(--fam); color: var(--fam); background: transparent; border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.actlog-chip.off { opacity: .35; border-style: dashed; }
+.actlog-stream { max-height: 340px; overflow-y: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.actlog-ln { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; border-left: 2px solid var(--fam); padding-left: 6px; }
+.actlog-ln .ts { color: var(--faint, #77777f); }
+.actlog-ln .msg { word-break: break-word; white-space: pre-wrap; }
+.actlog-ln.sum { font-weight: 600; }
+.actlog-ln.sum.ok .msg { color: #5fc77a; } .actlog-ln.sum.bad .msg { color: #ef6b6b; } .actlog-ln.sum.stop .msg { color: #e0b84c; }
+@media (max-width: 700px) {
+  .actlog-ln { grid-template-columns: auto 1fr; }
+  .actlog-ln .actlog-tag { display: none; }
+}
