@@ -100,3 +100,50 @@ def test_a_trial_asked_for_during_an_ingest_is_queued_and_shown(tmp_path, monkey
     assert feed["waiting"][0]["kind"] == "lab" and feed["waiting"][0]["after"] == "Ingest"
     assert feed["waiting"][0]["detail"] == "DINOv3 ViT-L/16"
     gate.set()
+
+
+def test_the_background_lane_runs_one_job_at_a_time_in_order(tmp_path):
+    jm = JobManager()
+    svc = FakeService()
+    gates = {k: threading.Event() for k in ("lab", "hear")}
+    lab = jm.start("lab", _bg(gates["lab"], []))
+    lab.args = {"cand": "dinov3_vitl16"}
+    jm.start("hear", _bg(gates["hear"], []))                     # (how it used to look)
+    app_mod._make_way(jm, "Ingest")
+    assert _wait(lambda: jm.running("lab") is None and jm.running("hear") is None)
+    assert set(jm.paused) == {"lab", "hear"}
+    # after the ingest: Hearing's own starter must not jump ahead of the trial
+    app_mod._hear_next["at"] = 0.0
+    assert app_mod._bg_turn_taken(jm, "hear")                     # the trial waits ahead of it
+    assert app_mod._resume_paused(svc, jm) == ["lab"] and "hear" in jm.paused   # one at a time, trial first
+    gate = threading.Event()
+    jm.start("lab", _bg(gate, []))                                # (the resumed trial, running)
+    assert app_mod._resume_paused(svc, jm) == []                  # nothing beside it
+    assert app_mod._bg_turn_taken(jm, "hear") and app_mod._bg_turn_taken(jm, "picture")
+    gate.set()
+    assert _wait(lambda: jm.running("lab") is None)
+    assert app_mod._resume_paused(svc, jm) == ["hear"] and not jm.paused
+    assert not app_mod._bg_turn_taken(jm, "hear")
+
+
+def test_a_trial_asked_for_while_hearing_runs_goes_next(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from peaks.config import Config
+
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PEAKS_SCHEDULER", "0")
+    monkeypatch.setenv("PEAKS_WARM_ON_START", "0")
+    made = {}
+    real = app_mod.JobManager
+    monkeypatch.setattr(app_mod, "JobManager", lambda *a, **k: made.setdefault("jm", real(*a, **k)))
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    c = TestClient(app_mod.create_app(cfg))
+    jm = made["jm"]
+    gate = threading.Event()
+    jm.start("hear", _bg(gate, []))
+    assert c.post("/api/lab/dinov3_vitl16/run").json() == {"queued": True, "after": "Hearing"}
+    w = c.get("/api/activity/feed").json()["waiting"][0]
+    assert w["kind"] == "lab" and w["queued"] and w["after"] == "Hearing"
+    gate.set()

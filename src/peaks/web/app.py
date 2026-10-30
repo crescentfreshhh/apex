@@ -778,7 +778,7 @@ def create_app(cfg=None):
         from ..embedding import dino_label
 
         waiting = [{"kind": k, "label": JOB_LABELS.get(k, k), "family": JOB_FAMILY.get(k, "other"),
-                    "after": e.get("for"), "since": e.get("at"),
+                    "after": e.get("for"), "since": e.get("at"), "queued": bool(e.get("queued")),
                     "detail": dino_label(e["args"]["cand"]) if k == "lab" and (e.get("args") or {}).get("cand") else None}
                    for k, e in jobs.paused.items()]
         return {"now": _t.time(), "running": running, "finished": finished, "waiting": waiting,
@@ -2095,11 +2095,14 @@ def create_app(cfg=None):
 
         lib = [k for k in LIBRARY_WORK if jobs.running(k)]
         if lib:                                     # library work first: the trial starts right after
-            jobs.paused["lab"] = {"for": JOB_LABELS.get(lib[0], lib[0]), "args": {"cand": cand}, "at": _t.time()}
+            jobs.paused["lab"] = {"for": JOB_LABELS.get(lib[0], lib[0]), "args": {"cand": cand}, "at": _t.time(),
+                                  "queued": True}
             return {"queued": True, "after": JOB_LABELS.get(lib[0], lib[0])}
         busy = [k for k in (*_PICTURE_WAIT_FOR, "zoom", "hear", "motion") if jobs.running(k)]
-        if busy:
-            raise HTTPException(409, f"waits for the running {busy[0]} job to finish")
+        if busy:                                    # another job has the lane: the trial goes next
+            jobs.paused["lab"] = {"for": JOB_LABELS.get(busy[0], busy[0]), "args": {"cand": cand},
+                                  "at": _t.time(), "queued": True}
+            return {"queued": True, "after": JOB_LABELS.get(busy[0], busy[0])}
         try:
             j = jobs.start("lab", lambda job: service.run_lab(cand, job=job))
             j.args = {"cand": cand}
@@ -2905,15 +2908,28 @@ def _make_way(jobs: JobManager, for_what: str) -> list[str]:
     return paused
 
 
+# background work shares one lane — never two at once; what waits goes in this order
+RESUME_ORDER = ("lab", "zoom", "hear", "motion", "picture")
+
+
+def _bg_turn_taken(jobs: JobManager, kind: str) -> bool:
+    """True when `kind` must not start now: another background job is running, or
+    paused work that goes before it is still waiting its turn."""
+    if any(jobs.running(k) for k in PAUSABLE if k != kind):
+        return True
+    rank = RESUME_ORDER.index(kind) if kind in RESUME_ORDER else len(RESUME_ORDER)
+    return any(k in jobs.paused for k in RESUME_ORDER[:rank])
+
+
 def _resume_paused(service: Service, jobs: JobManager) -> list[str]:
-    """Start again what made way, once no library work is running."""
-    if not jobs.paused or any(jobs.running(k) for k in LIBRARY_WORK):
+    """Start again — one at a time — what made way or was queued, once no library
+    work and no other background job is running."""
+    if not jobs.paused or any(jobs.running(k) for k in (*LIBRARY_WORK, *PAUSABLE)):
         return []
     timers = {"hear": _hear_next, "motion": _motion_next, "zoom": _zoom_next}
     out = []
-    for k, e in list(jobs.paused.items()):
-        if jobs.running(k):
-            continue
+    for k in [k for k in RESUME_ORDER if k in jobs.paused][:1]:
+        e = jobs.paused[k]
         if k == "lab":
             cand = (e.get("args") or {}).get("cand")
             if cand:
@@ -2947,7 +2963,7 @@ _PICTURE_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "
 def _start_picture(service: Service, jobs: JobManager):
     """Measure picture quality — new files from the last ingest, plus the library
     if you switched that on — when nothing heavy is running."""
-    if any(jobs.running(k) for k in _PICTURE_WAIT_FOR) or not service.picture_due():
+    if any(jobs.running(k) for k in _PICTURE_WAIT_FOR) or _bg_turn_taken(jobs, "picture") or not service.picture_due():
         return None
     try:
         return jobs.start("picture", service.run_picture)
@@ -2964,7 +2980,8 @@ def _start_zoom(service: Service, jobs: JobManager):
     10 minutes, and only with the index already in memory (never loads it just to look)."""
     import time as _t
 
-    if _t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion")):
+    if (_t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion"))
+            or _bg_turn_taken(jobs, "zoom")):
         return None
     _zoom_next["at"] = _t.time() + 600
     if not service.index_loaded() or not service.zoom_due():
@@ -2985,7 +3002,7 @@ def _start_hear(service: Service, jobs: JobManager):
     (no model, no network) so it doesn't retry in a loop."""
     import time as _t
 
-    if _t.time() < _hear_next["at"] or any(jobs.running(k) for k in _HEAR_WAIT_FOR):
+    if _t.time() < _hear_next["at"] or any(jobs.running(k) for k in _HEAR_WAIT_FOR) or _bg_turn_taken(jobs, "hear"):
         return None
     _hear_next["at"] = _t.time() + 600
     if not service.index_loaded() or not service.hear_due():
@@ -3007,7 +3024,7 @@ def _start_motion(service: Service, jobs: JobManager):
     Checked at most every 10 minutes; backs off an hour after a failure."""
     import time as _t
 
-    if _t.time() < _motion_next["at"] or any(jobs.running(k) for k in _MOTION_WAIT_FOR):
+    if _t.time() < _motion_next["at"] or any(jobs.running(k) for k in _MOTION_WAIT_FOR) or _bg_turn_taken(jobs, "motion"):
         return None
     _motion_next["at"] = _t.time() + 600
     if not service.index_loaded() or not service.motion_due():
@@ -3144,6 +3161,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
                 service.watch_check_failed(exc)
             _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
+            try:   # paused / queued background work goes before anything new starts
+                _resume_paused(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
             try:   # picture quality: new files, and the library once you've started it
                 _start_picture(service, jobs)
             except Exception:  # noqa: BLE001
@@ -3162,10 +3183,6 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 pass
             try:   # files the pull just brought in: scan exactly where they landed
                 _seed_ingest_go(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # background work that made way for an ingest / embed: its turn again
-                _resume_paused(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over

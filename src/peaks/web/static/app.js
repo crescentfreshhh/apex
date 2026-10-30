@@ -6399,7 +6399,7 @@ function drawActlog(d) {
         <span>running ${dur(j.elapsed_s)} <button class="btn sm ghost" data-actlog-stop="${esc(j.id)}">Stop</button></span></div></div>`;
   }).join("") + (d.waiting || []).map((w) => `<div class="actlog-job waiting fam-${w.family}">
       <div class="row between"><span><span class="actlog-tag">${esc(w.label)}</span>${w.detail ? ` <span class="muted small">${esc(w.detail)}</span>` : ""}</span>
-        <span class="small muted">⏸ waiting — resumes after ${esc(w.after || "the running job")}</span></div></div>`).join("")
+        <span class="small muted">⏸ waiting — ${w.queued ? "starts" : "resumes"} after ${esc(w.after || "the running job")}</span></div></div>`).join("")
     || '<p class="faint small">Nothing is running. Scheduled work (embeds, ingest, Hearing, Motion…) shows up here the moment it starts.</p>';
   const chips = $("#actlog-chips");
   const present = new Set([...actlog.lines.map((l) => l.fam), ...d.running.map((j) => j.family)]);
