@@ -3586,6 +3586,7 @@ async function sxSide(sense) {
     ${st.concepts.length ? st.concepts.map((x) => `<div class="sx-cx"><b>${esc(x.name)}</b><span class="faint small">${x.yes} more · ${x.no} less</span>
       <span class="grow"></span><button class="btn sm ghost" data-sx-teach="${esc(x.slug)}" data-sense="${sense}">Teach</button>
       <button class="btn sm ghost" data-sx-cat="${esc(x.slug)}">In Catalogue</button>
+      ${x.trained ? `<a class="btn sm ghost" href="/megaboard/?src=concept&key=${encodeURIComponent(x.slug)}" target="_blank" title="A megaboard of its best moments">▶ Board</a>` : ""}
       <button class="btn sm ghost" data-sx-del="${esc(x.slug)}" data-sense="${sense}" title="Forget it">✕</button></div>`).join("")
       : `<p class="faint small">None yet. Save your likes under a word and search it as <code>${sense}: word</code>.</p>`}
     <h3>Coverage</h3>
@@ -4634,7 +4635,8 @@ function renderConcepts() {
       <span class="cx-rel ${c.reliability === "taught well" ? "ok" : c.reliability === "getting there" ? "mid" : ""}">${esc(c.reliability)}</span>
       <span class="grow"></span>
       <button class="btn sm pri" data-cx-teach>Teach</button>
-      ${c.trained ? `<button class="btn sm ghost" data-cx-find>Find</button><button class="btn sm ghost" data-cx-cat>In Catalogue</button>` : ""}
+      ${c.trained ? `<button class="btn sm ghost" data-cx-find>Find</button><button class="btn sm ghost" data-cx-cat>In Catalogue</button>
+        <a class="btn sm ghost" href="/megaboard/?src=concept&key=${encodeURIComponent(c.slug)}" target="_blank" title="A megaboard of its strongest moments">▶ Megaboard</a>` : ""}
       <button class="btn sm ghost" data-cx-del title="Forget this concept and your marks for it">✕</button></div>`).join("")
     : '<p class="faint small">No concepts yet.</p>';
 }
@@ -4888,6 +4890,10 @@ function renderCatChips() {
     b.disabled = !tierOk;
     b.textContent = tierOk ? `${verb}: ${TIER_NAMES[cat.tier]}` : verb;
   }
+  // sorted by a concept: ▶ Board plays that concept's strongest moments
+  const cxs = catConceptSort();
+  const bb = $("#btn-cat-board");
+  if (bb && cxs) { bb.disabled = false; bb.textContent = `▶ Board: “${cxName(cxs)}”`; }
 }
 function renderCatTriage() {
   const m = side.model || cat.model || {}, rep = m.report;
@@ -5582,7 +5588,13 @@ $("#cat-views")?.addEventListener("click", (e) => {
   cat.view = cat.view === b.dataset.v ? "" : b.dataset.v;
   openCatalogue();
 });
+function catConceptSort() {
+  const v = ($("#cat-sort") || {}).value || "";
+  return v.startsWith("concept:") ? v.slice(8) : null;
+}
 $("#btn-cat-board")?.addEventListener("click", () => {
+  const cxs = catConceptSort();
+  if (cxs) { window.open("/megaboard/?" + new URLSearchParams({ src: "concept", key: cxs }), "_blank"); return; }
   if (!cat.tier) return;
   window.open("/megaboard/?src=" + encodeURIComponent("tier:" + cat.tier), "_blank");
 });

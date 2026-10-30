@@ -902,6 +902,7 @@ let boardSearch = null;                   // {q,min,per,neg,taste} when replayin
 let boardPerformer = null;                // {id,name,query} when playing a performer's best
 let boardStat = null;                     // {metric,id,label} when playing a Statistics-tab stat
 let boardStudio = null;                   // {name} when playing a studio's best moments
+let boardConceptNames = {};               // concept key → its name (for the status line)
 function fyReset() { fyState.exclude.clear(); fyState.queue = []; fyState.recent = []; fyState.refetching = false; }
 function fyBoardUrl(withExclude) {
   const ex = withExclude ? [...fyState.exclude].join(",") : "";
@@ -1514,6 +1515,19 @@ async function loadSource(src, opts = {}) {
       if (!State.apexes.length) return isStale(tok) ? undefined : showError("No embedded moments for this performer.");
       pickApex = makeQueuePicker(State.apexes);
       setStatus("🎬 " + (d.performer || "performer") + " · best of");
+    } else if (src.startsWith("concept:")) {
+      // one of your concepts (visual, or a named sound / motion one): its strongest moments
+      State.searchMode = true;
+      const key = src.slice(8);
+      const qs = new URLSearchParams({ key, per_scene: 3 });   // strongest first (the taste floor isn't a concept's strength)
+      let d;
+      try { d = await navApi(tok, "/api/board/concept?" + qs.toString()); }
+      catch (e) { return isStale(tok) ? undefined : showError("Couldn't load this concept.\n\n(" + e.message + ")"); }
+      State.apexes = (d.items || []).filter((h) => h.scene_id && h.stream).map(apexFromHit);
+      if (!State.apexes.length) return isStale(tok) ? undefined : showError(`No moments for “${d.concept || key}” yet.`);
+      pickApex = makeQueuePicker(State.apexes);
+      const icon = { sound: "🔊", motion: "〰" }[d.kind] || "✦";
+      setStatus(`${icon} ${d.concept} · ${State.apexes.length.toLocaleString()} moments`);
     } else if (src === "studio") {
       // the best moments of every scene from one studio (like a tier channel)
       State.searchMode = true;
@@ -1599,6 +1613,11 @@ async function initSources(initial) {
       opts.push(`<option value="collection:${esc(c.safe)}">Playlist: ${esc(c.name)} (${c.count})</option>`);
     for (const t of s.tiers || [])
       opts.push(`<option value="tier:${esc(t.key)}">${t.key === "unreviewed" || t.key === "unsaved" ? "" : "Tier: "}${esc(t.label)}</option>`);
+    const icon = { sound: "🔊 ", motion: "〰 " };
+    for (const c of s.concepts || []) {
+      boardConceptNames[c.key] = c.label;
+      opts.push(`<option value="concept:${esc(c.key)}">Concept: ${icon[c.kind] || ""}${esc(c.label)}</option>`);
+    }
     if (initial && initial.startsWith("tier:") && !(s.tiers || []).some((t) => "tier:" + t.key === initial)) {
       const label = initial.slice(5).split(",").map((k) => MB_TIER_NAMES[k] || k).join(" + ");
       opts.push(`<option value="${esc(initial)}">Tiers: ${esc(label)}</option>`);
@@ -1660,6 +1679,7 @@ async function main() {
     boardStat = { metric, id: params.get("id"), label: LABELS[metric] || metric };
   }
   else if (params.get("src") === "foryou") initial = "foryou";
+  else if (params.get("src") === "concept" && params.get("key")) initial = "concept:" + params.get("key");
   else if ((params.get("src") || "").startsWith("tier:")) initial = params.get("src");
   else if (params.get("collection")) initial = "collection:" + params.get("collection");
   const sel = await initSources(initial);

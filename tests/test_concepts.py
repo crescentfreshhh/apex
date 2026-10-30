@@ -103,3 +103,32 @@ def test_concepts_argue_filter_sort_and_search(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["concept"] == "golden look" and r.json()["items"]
     assert c.get("/api/search/text", params={"q": "something else"}).status_code == 400   # still needs CLIP
     assert [x["name"] for x in c.get("/api/concepts").json()] == ["Golden look"]
+
+
+def test_a_concept_is_a_megaboard_channel(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, _ = _triage_svc(tmp_path, monkeypatch)
+    svc.concept_create("Golden look")
+    svc.concept_create("Untaught")
+    leg, exc = _frames(svc, 18), _frames(svc, 17)
+    _teach(svc, "Golden look", leg[::10][:6], exc[::10][:6])
+    c = TestClient(app_mod.create_app(svc.cfg))
+    src = c.get("/api/board/sources").json()
+    assert {"key": "golden-look", "label": "Golden look", "kind": "visual"} in src["concepts"]
+    assert all(x["key"] != "untaught" for x in src["concepts"])            # only trained ones are channels
+    d = c.get("/api/board/concept", params={"key": "golden-look", "per_scene": 2}).json()
+    rows = {r["scene_id"]: r for r in svc._catalogue_all()}
+    assert d["concept"] == "Golden look" and d["total"] > 12 and all(x["stream"] for x in d["items"])
+    per = {}
+    for x in d["items"]:
+        per[x["scene_id"]] = per.get(x["scene_id"], 0) + 1
+    assert max(per.values()) <= 2                                          # spread across scenes
+    top = [x for x in d["items"][:6]]
+    assert all(rows[x["scene_id"]]["o_counter"] == 18 for x in top)        # strongest first
+    strong = c.get("/api/board/concept", params={"key": "golden-look", "min_score": 0.9}).json()
+    assert all(x["score"] >= 0.9 for x in strong["items"]) and strong["total"] < d["total"] * 2
+    assert c.get("/api/board/concept", params={"key": "untaught"}).status_code == 404
+    assert c.get("/api/board/concept", params={"key": "nope"}).status_code == 404

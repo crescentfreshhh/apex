@@ -1530,8 +1530,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                  for t in ("legendaire", "exceptionnelle", "merveilleuse")]
         tiers.append({"key": "unreviewed", "label": "Unreviewed — best moments"})
         tiers.append({"key": "unsaved", "label": "No saved moments yet"})
+        try:                                      # your trained concepts, each a channel
+            concepts = [{"key": c["slug"], "label": c["name"], "kind": c.get("kind", "visual")}
+                        for c in self.concepts() if c.get("trained")]
+        except Exception:  # noqa: BLE001 — concepts are extra
+            concepts = []
         return {"tag": self.cfg.markers.tag_name, "collections": self.list_collections(),
-                "tiers": tiers}
+                "tiers": tiers, "concepts": concepts}
 
     def run_playlist(self, job=None, tags=None, log=None) -> dict:
         """(Re)build the megaboard playlist from Stash markers → the mounted

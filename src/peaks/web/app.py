@@ -655,6 +655,18 @@ def create_app(cfg=None):
     def board_scenes(refresh: bool = False):
         return {"scenes": service.scene_pool(refresh=refresh)}
 
+    @app.get("/api/board/concept")
+    def board_concept(key: str, per_scene: int = 3, min_score: float = 0.0, top_k: int = 1500):
+        """A megaboard channel of one concept's moments, strongest first."""
+        try:
+            c, hits = service.concept_board(key, top_k=max(1, min(top_k, 20000)), per_scene=per_scene,
+                                            min_score=min_score)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        out = _search_payload(service, hits, enrich=0)
+        out.update({"concept": c["name"], "kind": c.get("kind", "visual")})
+        return out
+
     @app.get("/api/board/apexes")
     def board_apexes(tag: str | None = None):
         return service.board_apexes(tag)

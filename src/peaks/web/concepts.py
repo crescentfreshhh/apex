@@ -312,6 +312,23 @@ class ConceptsMixin:
         return [Hit(scene_id=h.scene_id, key=h.key, time=h.time, score=float(_sigmoid(h.score * norm + b)))
                 for h in hits]
 
+    def concept_board(self, slug: str, top_k: int = 1500, per_scene: int = 3, min_score: float = 0.0):
+        """A megaboard's worth of moments for one of your concepts — visual (the
+        strongest frames, up to `per_scene` a scene) or a named sound / motion
+        concept (its best clip a scene). Returns (concept, hits)."""
+        c = next((x for x in self.concepts() if x["slug"] == slug), None)
+        if c is None:
+            raise LookupError(f"no concept “{slug}”")
+        if not c.get("trained"):
+            raise LookupError(f"teach “{c['name']}” first — mark a few yes and no")
+        if c.get("kind", "visual") == "visual":
+            hits = self.concept_search(slug, top_k=top_k, per_scene=per_scene if per_scene > 0 else None)
+        else:
+            hits = self.sense_concept_search(slug, top_k=top_k)
+        if min_score > 0:
+            hits = [h for h in hits if h.score >= min_score]
+        return c, hits
+
     def trained_concepts(self) -> list[tuple[str, str]]:
         """[(slug, name)] of concepts with a probe for the active model."""
         return [(c["slug"], c["name"]) for c in self._visual_concepts() if self._cx_probe(c["slug"]) is not None]
