@@ -1946,6 +1946,17 @@ def create_app(cfg=None):
             raise HTTPException(400, "performer_ids must be a list")
         return service.set_scene_performers(scene_id, ids)
 
+    @app.post("/api/orphans/{scene_id}/create-performer")
+    def orphan_create_performer(scene_id: str, body: dict):
+        try:
+            return service.orphan_create_performer(scene_id, str(body.get("name") or ""))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:  # noqa: BLE001 — Stash unreachable etc.
+            raise HTTPException(503, str(exc))
+
     @app.post("/api/orphans/{scene_id}/not-them")
     def orphan_not_them(scene_id: str, body: dict):
         return service.orphan_not_them(scene_id, str(body.get("performer_id") or ""))

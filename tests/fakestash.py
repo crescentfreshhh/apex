@@ -61,6 +61,13 @@ class FakeStash:
         return [{"id": str(p["id"]), "name": p.get("name", ""), "image": None, "scene_count": 0}
                 for p in self.performers if rx.search(p.get("name", ""))][:limit]
 
+    def create_performer(self, name):
+        self.performers = list(self.performers)               # never the shared class list
+        pid = str(1000 + len(self.performers))
+        self.performers.append({"id": pid, "name": name})
+        self.calls.append(("performer-create", name))
+        return {"id": pid, "name": name}
+
     def performer_image(self, pid):
         p = next((x for x in self.performers if x["id"] == str(pid)), None)
         if not p or not p.get("has_image"):

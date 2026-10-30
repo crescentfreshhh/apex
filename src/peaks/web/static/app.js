@@ -5418,7 +5418,21 @@ async function orphAdd(sid, pid, name) {
     toast(`${name} added in Stash`);
   } catch (e) { toast(e.message, true); }
 }
+// the name typed isn't in Stash: create the performer there, then add (an exact match is reused)
+async function orphCreate(sid, name, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/orphans/${encodeURIComponent(sid)}/create-performer`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    orph.done[sid] = { name: r.performer.name, previous: r.previous, created: r.created };
+    const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
+    orphPaint(sid);
+    toast(r.created ? `Created ${r.performer.name} in Stash and added to this scene` : `${r.performer.name} was already in Stash — added`);
+  } catch (err) { if (btn) btn.disabled = false; toast(err.message, true); }
+}
 document.addEventListener("click", async (e) => {
+  const mk = e.target.closest("[data-orph-create]");
+  if (mk) return orphCreate(mk.dataset.orphCreate, mk.dataset.name, mk);
   const add = e.target.closest("[data-orph-add]");
   if (add) return orphAdd(add.dataset.orphAdd, add.dataset.pid, add.dataset.name);
   const no = e.target.closest("[data-orph-no]");
@@ -5437,7 +5451,7 @@ document.addEventListener("click", async (e) => {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_ids: d.previous }) });
       delete orph.done[sid];
       const it = cat.items.find((x) => x.scene_id === sid); if (it && r.scene) Object.assign(it, r.scene);
-      orphPaint(sid); toast("Undone");
+      orphPaint(sid); toast(d.created ? `Undone — ${d.name} stays in Stash with no scenes` : "Undone");
     } catch (err) { toast(err.message, true); }
     return;
   }
@@ -5454,8 +5468,13 @@ document.addEventListener("input", (e) => {
     if (q.length < 2) { box.innerHTML = ""; return; }
     try {
       const found = await api("/api/performers/search?" + new URLSearchParams({ q }));
-      box.innerHTML = found.length ? found.map((p) => `<button class="btn sm ghost" data-orph-pick="${esc(inp.dataset.orphQ)}" data-pid="${esc(p.id)}" data-name="${esc(p.name)}">+ ${esc(p.name)}</button>`).join("")
-        : '<span class="faint small">no performer by that name in Stash</span>';
+      const norm = (x) => x.trim().replace(/\s+/g, " ").toLowerCase();
+      const exact = found.some((p) => norm(p.name) === norm(q));
+      const name = q.replace(/\s+/g, " ");
+      box.innerHTML = found.map((p) => `<button class="btn sm ghost" data-orph-pick="${esc(inp.dataset.orphQ)}" data-pid="${esc(p.id)}" data-name="${esc(p.name)}">+ ${esc(p.name)}</button>`).join("")
+        + (exact ? "" : `${found.length ? "" : '<span class="faint small">no performer by that name in Stash</span>'}
+          <button class="btn sm pri orph-create" data-orph-create="${esc(inp.dataset.orphQ)}" data-name="${esc(name)}"
+            title="Create a new performer named “${esc(name)}” in Stash and add to this scene">＋ Create “${esc(name)}” and add</button>`);
     } catch (err) { box.textContent = err.message; }
   }, 250);
 });

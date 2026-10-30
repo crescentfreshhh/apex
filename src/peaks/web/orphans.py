@@ -159,6 +159,32 @@ class OrphansMixin:
         self.client().update_scene(sid, performer_ids=new)
         return self._performers_written(sid, prev, new, source)
 
+    def orphan_create_performer(self, scene_id: str, name: str) -> dict:
+        """The name typed isn't in Stash: create the performer, then add them to the
+        scene (merged, logged, undoable like any add). An exact name match —
+        ignoring case and spacing — is reused instead, so nobody is created twice."""
+        import re
+
+        clean = " ".join(str(name or "").split())
+        if not clean:
+            raise ValueError("a name is required")
+        sid = str(scene_id)
+        if not self._meta_client().scene_details([sid]).get(sid):
+            raise LookupError(f"scene {sid} not found in Stash")
+        pat = "(?i)^" + re.sub(r"\s+", r"\\s+", "".join("\\" + c if c in ".^$*+?()[]{}|\\" else c for c in clean)) + "$"
+        same = [p for p in self.client().find_performers(pat, limit=5)
+                if " ".join(p.get("name", "").split()).lower() == clean.lower()]
+        if same:
+            perf, created = {"id": str(same[0]["id"]), "name": same[0].get("name", clean)}, False
+        else:
+            perf, created = self.client().create_performer(clean), True
+            self.__dict__.pop("_perf_dir_cache", None)          # the Performers page lists them
+        out = self.add_performer(sid, perf["id"], source="orphans")
+        if created:
+            self._log_scene("performer-created", out["scene"], performer_id=perf["id"], name=perf["name"],
+                            source="orphans")
+        return {**out, "performer": perf, "created": created}
+
     def set_scene_performers(self, scene_id: str, performer_ids: list[str], source: str = "undo") -> dict:
         """Put a scene's performer list back exactly (the undo of `add_performer`)."""
         sid = str(scene_id)

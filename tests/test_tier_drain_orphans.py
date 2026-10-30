@@ -169,3 +169,33 @@ def test_add_performer_merges_and_undoes(tmp_path, monkeypatch):
     assert [p["id"] for p in stash.s["u2"]["performers_detail"]] == ["9"]
     log = svc.history(10)
     assert any(e["action"] == "performers" and e["after"] == ["9", "1"] for e in log)
+
+
+def test_a_name_not_in_stash_is_created_once_and_added(tmp_path, monkeypatch):
+    svc, stash = _orphan_svc(tmp_path, monkeypatch)
+    r = svc.orphan_create_performer("u1", "  Dana   Rose ")
+    assert r["created"] and r["performer"]["name"] == "Dana Rose" and r["previous"] == []
+    pid = r["performer"]["id"]
+    assert [p["id"] for p in stash.s["u1"]["performers_detail"]] == [pid]
+    assert "u1" not in {x["scene_id"] for x in svc.catalogue(view="orphans", limit=50)["items"]}
+    assert any(e["action"] == "performer-created" and e["name"] == "Dana Rose" for e in svc.history(10))
+    again = svc.orphan_create_performer("a1", "dana  ROSE")                  # case / spacing: the same person
+    assert not again["created"] and again["performer"]["id"] == pid
+    assert [c for c in stash.calls if c[0] == "performer-create"] == [("performer-create", "Dana Rose")]
+    assert not svc.orphan_create_performer("u2", "ava")["created"]          # an existing performer is reused
+    svc.set_scene_performers("u1", r["previous"])                          # undo: off the scene, still in Stash
+    assert stash.s["u1"]["performers_detail"] == [] and any(p["id"] == pid for p in stash.performers)
+
+
+def test_the_create_performer_api(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, stash = _orphan_svc(tmp_path, monkeypatch)
+    c = TestClient(app_mod.create_app(svc.cfg))
+    assert c.post("/api/orphans/u1/create-performer", json={"name": " "}).status_code == 400
+    assert c.post("/api/orphans/nope/create-performer", json={"name": "Eve"}).status_code == 404
+    d = c.post("/api/orphans/u1/create-performer", json={"name": "Eve (II)"}).json()
+    assert d["created"] and d["scene"]["performers"] == ["Eve (II)"]
+    assert not c.post("/api/orphans/a1/create-performer", json={"name": "eve (ii)"}).json()["created"]

@@ -209,6 +209,12 @@ mutation TagCreate($input: TagCreateInput!) {
 }
 """
 
+_PERFORMER_CREATE = """
+mutation PerformerCreate($input: PerformerCreateInput!) {
+  performerCreate(input: $input) { id name }
+}
+"""
+
 _SCENE_MARKER_CREATE = """
 mutation SceneMarkerCreate($input: SceneMarkerCreateInput!) {
   sceneMarkerCreate(input: $input) { id seconds end_seconds title }
@@ -655,6 +661,12 @@ class StashClient:
                 "image": p.get("image_path"), "scene_count": p.get("scene_count", 0),
             })
         return out
+
+    def create_performer(self, name: str) -> dict:
+        """A new performer in Stash with just a name: {id, name}."""
+        data = self.execute(_PERFORMER_CREATE, {"input": {"name": name}})
+        p = data["performerCreate"]
+        return {"id": str(p["id"]), "name": p.get("name", name)}
 
     def iter_performers(self, page_size: int = 500) -> Iterator[dict]:
         """Every performer in Stash as {id, name, aliases, image, has_image,
