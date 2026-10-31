@@ -262,12 +262,40 @@ def test_a_failed_stage_still_leaves_a_finished_record(svc, stash):
 
 # --- memory: Peaks steps aside while Stash scans ---------------------------------------
 
-def test_index_is_released_and_not_reloaded_during_stash_stages(svc, stash, monkeypatch):
+def test_ingest_keeps_the_index_and_page_data_when_memory_is_fine(svc, stash, monkeypatch):
+    """The index lives on the SSD now: an ordinary ingest only lets idle caches
+    go, and pages keep their moments while Stash scans."""
     import peaks.web.service as svc_mod
+    from peaks.web import memwatch
 
+    monkeypatch.setattr(memwatch, "soft_limit_bytes", lambda: 20 * 2**30)
+    monkeypatch.setattr(memwatch, "rss_bytes", lambda: 4 * 2**30)        # real memory: fine
     calls = []
     monkeypatch.setattr(svc_mod.Service, "shed_memory",
-                        lambda self, drop_indexes=True: calls.append(("shed", drop_indexes)) or {})
+                        lambda self, drop_indexes=True, keep_hot=False: calls.append(("shed", drop_indexes, keep_hot)) or {})
+    monkeypatch.setattr(svc_mod.Service, "invalidate_index",
+                        lambda self, model=None: calls.append(("invalidate", model)))
+    real_scan = stash.metadata_scan
+
+    def scan(inp):
+        calls.append(("scan",))
+        assert svc._ingest_stash_lean is False
+        return real_scan(inp)
+    monkeypatch.setattr(stash, "metadata_scan", scan)
+    svc.run_ingest()
+    assert calls[:2] == [("shed", False, True), ("scan",)]                  # light, and no index unload
+    assert ("invalidate", None) not in calls
+
+
+def test_index_is_released_and_not_reloaded_during_stash_stages_when_memory_is_high(svc, stash, monkeypatch):
+    import peaks.web.service as svc_mod
+    from peaks.web import memwatch
+
+    monkeypatch.setattr(memwatch, "soft_limit_bytes", lambda: 20 * 2**30)
+    monkeypatch.setattr(memwatch, "rss_bytes", lambda: 16 * 2**30)       # 80%: step fully aside
+    calls = []
+    monkeypatch.setattr(svc_mod.Service, "shed_memory",
+                        lambda self, drop_indexes=True, keep_hot=False: calls.append(("shed", drop_indexes)) or {})
     monkeypatch.setattr(svc_mod.Service, "invalidate_index",
                         lambda self, model=None: calls.append(("invalidate", model)))
     real_scan = stash.metadata_scan
@@ -293,7 +321,7 @@ def test_index_is_released_and_not_reloaded_during_stash_stages(svc, stash, monk
     monkeypatch.setattr(stash, "metadata_identify", identify)
     svc.run_ingest()
     assert calls[:3] == [("invalidate", None), ("shed", True), ("scan",)]   # freed BEFORE the scan
-    assert svc._ingest_stash_busy is False
+    assert svc._ingest_stash_busy is False and svc._ingest_stash_lean is False
 
 
 def test_index_kept_when_an_embed_pass_is_using_it(svc, monkeypatch):
@@ -301,7 +329,10 @@ def test_index_kept_when_an_embed_pass_is_using_it(svc, monkeypatch):
 
     seen = []
     monkeypatch.setattr(svc_mod.Service, "invalidate_index", lambda self, model=None: seen.append(model))
-    monkeypatch.setattr(svc_mod.Service, "shed_memory", lambda self, drop_indexes=True: {})
+    monkeypatch.setattr(svc_mod.Service, "shed_memory", lambda self, drop_indexes=True, keep_hot=False: {})
+    from peaks.web import memwatch
+    monkeypatch.setattr(memwatch, "soft_limit_bytes", lambda: 20 * 2**30)
+    monkeypatch.setattr(memwatch, "rss_bytes", lambda: 16 * 2**30)       # high: would unload — but an embed uses it
     svc.run_ingest(embed_busy=lambda: True)
     assert seen == []
 

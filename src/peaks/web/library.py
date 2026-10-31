@@ -1251,16 +1251,27 @@ class LibraryMixin:
             log(f"re-applied the tier tag on {fixed} scene(s) graded during the ingest")
         return fixed
 
+    STASH_LEAN_AT = 0.7          # real memory above this share of the limit: step fully aside
+
     def _release_for_stash(self, embed_busy, log) -> None:
-        """Free Peaks' big memory (caches, and the search index unless an embed
-        pass is using it) before Stash starts decoding files."""
+        """Before Stash starts decoding files. The search index lives on the SSD now
+        (page cache the kernel reclaims), so Peaks normally keeps it and the pages'
+        data and only lets idle caches go; only when real memory is actually high
+        does it step fully aside (index unloaded, page data dropped, no reloads
+        until Stash's stages are done)."""
         from . import memwatch
 
+        self._ingest_stash_lean = False
         try:
             before = memwatch.rss_bytes()
-            if not (embed_busy and embed_busy()):
-                self.invalidate_index()
-            self.shed_memory(drop_indexes=True)
+            limit = memwatch.soft_limit_bytes()
+            if limit and before >= self.STASH_LEAN_AT * limit:
+                self._ingest_stash_lean = True
+                if not (embed_busy and embed_busy()):
+                    self.invalidate_index()
+                self.shed_memory(drop_indexes=True)
+            else:
+                self.shed_memory(drop_indexes=False, keep_hot=True)
             freed = max(0, before - memwatch.rss_bytes())
             if freed >= 64 * 1048576:
                 log(f"released {freed / 1073741824:.1f} GB of Peaks memory for Stash's scan")
@@ -1363,7 +1374,7 @@ class LibraryMixin:
 
                 # 4. Peaks embed — only the new scenes, in id order (the order the
                 # Review queue shows them), never the whole backlog
-                self._ingest_stash_busy = False
+                self._ingest_stash_busy = self._ingest_stash_lean = False
                 stage("embed")
                 if job is not None:
                     job.progress = {"stage": "embed"}
@@ -1403,7 +1414,7 @@ class LibraryMixin:
                 for k in ("identify", "auto tag", "embed", "duplicates"):
                     stages[k] = "nothing new"
         finally:
-            self._ingest_stash_busy = False
+            self._ingest_stash_busy = self._ingest_stash_lean = False
             # always leave a finished record, even when a stage failed
             record.update(running=False, stage="done", finished=time.strftime("%Y-%m-%dT%H:%M:%S"),
                           dupe_ids=sorted({r["scene_id"] for g in (dupes or {}).get("groups", [])

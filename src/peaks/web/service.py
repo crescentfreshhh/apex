@@ -5487,8 +5487,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                              min_gap: float = 20.0) -> dict[str, list[dict]]:
         """Up to `n` well-spaced best moments per scene for the catalogue cards:
         top taste frames when a taste model exists, otherwise evenly spread."""
-        if getattr(self, "_ingest_stash_busy", False):
-            return {}          # Stash is scanning: don't pull the index back into memory
+        if getattr(self, "_ingest_stash_lean", False):
+            return {}          # memory was high when Stash's scan started: don't pull the index back in
         try:
             model = self._model_name()
             idx = self.index(model)
@@ -5965,8 +5965,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         st = self._tier_model_state()
         if st["model"] is None:
             return {}
-        if getattr(self, "_ingest_stash_busy", False):
-            # no index reloads while Stash's ingest stages run — last results stand
+        if getattr(self, "_ingest_stash_lean", False):
+            # memory was high: no index reloads while Stash's ingest stages run — last results stand
             cached = getattr(self, "_tier_preds", None)
             return cached[1] if cached else {}
         # valid for this model + this index build (new embeds → new index → re-score)
