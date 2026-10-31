@@ -96,7 +96,15 @@ DINO_BACKBONES = (
     "dinov2_vitg14",
     "dinov3_vitl16",       # DINOv3 (2025): sharper features, same role — try it in the Lab first
     "dinov3_vith16plus",
+    "siglip2_so400m",      # image-text models (open weights): what a frame shows, not only how it looks
+    "pe_core_l",
 )
+
+# image-text backbones through open_clip (Hugging Face hub, no licence or token)
+OPENCLIP_BACKBONES = {
+    "siglip2_so400m": ("hf-hub:timm/ViT-SO400M-16-SigLIP2-384", "SigLIP 2 So400m"),
+    "pe_core_l": ("hf-hub:timm/PE-Core-L-14-336", "Perception Encoder L"),
+}
 
 # DINOv3 weights live on Hugging Face behind Meta's licence: accept it on the
 # model page once, then give the container a read token (env HF_TOKEN).
@@ -113,6 +121,8 @@ def dino_cache_name(model_name: str) -> str:
     their different-dim vectors never collide (e.g. "dinov2-vitb14")."""
     if model_name in ("dinov2_vits14", "dinov2"):
         return "dinov2"
+    if model_name in OPENCLIP_BACKBONES:
+        return model_name.replace("_", "-")
     if model_name.startswith("dinov3_"):
         return "dinov3-" + model_name.replace("dinov3_", "").replace("_", "-")
     return "dinov2-" + model_name.replace("dinov2_", "").replace("_", "-")
@@ -120,6 +130,8 @@ def dino_cache_name(model_name: str) -> str:
 
 def dino_label(model_name: str) -> str:
     """"dinov3_vitl16" → "DINOv3 ViT-L/16" for people."""
+    if model_name in OPENCLIP_BACKBONES:
+        return OPENCLIP_BACKBONES[model_name][1]
     fam, _, arch = model_name.partition("_")
     arch = arch.replace("vit", "").replace("16plus", "+/16").upper()
     for n in ("14", "16"):
@@ -413,8 +425,78 @@ class MotionEmbedder:
         return out.cpu().numpy().astype(np.float32)
 
 
+class OpenClipVisualEmbedder(Embedder):
+    """An image-text model (SigLIP 2, Perception Encoder) as the visual backbone,
+    through open_clip from the Hugging Face hub. Input size and normalisation come
+    from the model's own preprocessing config; bfloat16 on a GPU that has it
+    (float32 otherwise — never float16, whose range big ViTs overflow)."""
+
+    def __init__(self, model_name: str, device: str | None = None):
+        import torch  # lazy
+
+        if model_name not in OPENCLIP_BACKBONES:
+            raise ValueError(f"unknown image-text backbone: {model_name}")
+        hub, label = OPENCLIP_BACKBONES[model_name]
+        try:
+            import open_clip  # lazy
+            model, _, preprocess = open_clip.create_model_and_transforms(hub)
+        except Exception as exc:  # noqa: BLE001 — old open_clip / no network: say which
+            raise RuntimeError(
+                f"couldn't load {label} ({hub}): {exc.__class__.__name__}: {exc} — it needs a recent "
+                "open_clip (pip install -U 'open_clip_torch>=3.1' 'timm>=1.0.15') and network access "
+                "to Hugging Face once") from exc
+        self._torch = torch
+        self.name = dino_cache_name(model_name)
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        bf16 = self.device.startswith("cuda") and bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+        self._dtype = torch.bfloat16 if bf16 else torch.float32
+        self.model = model.eval().to(self.device, dtype=self._dtype)
+        self.preprocess = preprocess
+        cfg = getattr(getattr(model, "visual", None), "preprocess_cfg", None) or {}
+        size = cfg.get("size") or getattr(getattr(model, "visual", None), "image_size", 224)
+        size = int(size[0] if isinstance(size, (tuple, list)) else size)
+        self.raw_resize = self.raw_crop = size
+        mean = tuple(cfg.get("mean") or (0.5, 0.5, 0.5))
+        std = tuple(cfg.get("std") or (0.5, 0.5, 0.5))
+        self._mean_t = torch.tensor(mean, device=self.device).view(1, 3, 1, 1)
+        self._std_t = torch.tensor(std, device=self.device).view(1, 3, 1, 1)
+        with torch.no_grad():
+            probe = self.model.encode_image(torch.zeros(1, 3, size, size, device=self.device, dtype=self._dtype))
+        self.dim = int(probe.shape[1])
+
+    def _encode(self, x):
+        torch = self._torch
+        feats = self.model.encode_image(x.to(self._dtype)).float()
+        bad = ~torch.isfinite(feats).all(dim=1)
+        if bool(bad.any()):                      # never let a broken frame into the cache
+            feats[bad] = 0.0
+        return torch.nn.functional.normalize(feats, dim=1)
+
+    def embed_images(self, images: Sequence["Image"]) -> np.ndarray:
+        torch = self._torch
+        if not images:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        batch = torch.stack([self.preprocess(im.convert("RGB")) for im in images])
+        with torch.no_grad():
+            feats = self._encode(batch.to(self.device))
+        return feats.cpu().numpy().astype(np.float32)
+
+    def embed_array(self, frames: np.ndarray) -> np.ndarray:
+        torch = self._torch
+        if frames.shape[0] == 0:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        t = torch.from_numpy(np.ascontiguousarray(frames))
+        with torch.no_grad():
+            t = t.to(self.device, non_blocking=True).permute(0, 3, 1, 2).float().div_(255.0)
+            feats = self._encode((t - self._mean_t) / self._std_t)
+        return feats.cpu().numpy().astype(np.float32)
+
+
 def make_dino(model_name: str = "dinov2_vits14", device: str | None = None) -> Embedder:
-    """The structure channel for a backbone name — DINOv2 via torch.hub, DINOv3 via transformers."""
+    """The visual channel for a backbone name — DINOv2 via torch.hub, DINOv3 via
+    transformers, the image-text models (SigLIP 2, Perception Encoder) via open_clip."""
+    if model_name in OPENCLIP_BACKBONES:
+        return OpenClipVisualEmbedder(model_name, device=device)
     if model_name.startswith("dinov3_"):
         return DinoV3Embedder(model_name, device=device)
     return DinoV2Embedder(model_name, device=device)

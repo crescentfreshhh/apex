@@ -18,10 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 ml = [
     "torch",          # DINOv2 / CLIP inference
-    "open_clip_torch",  # the CLIP channel
+    "open_clip_torch>=3.1",  # the CLIP channel; SigLIP 2 / Perception Encoder in the Lab
     "torchvision",    # DINOv2 image transforms
     "transformers>=4.56",  # DINOv3 (Hugging Face weights, gated by Meta's licence) + CLAP (hearing)
-    "timm",           # V-JEPA 2.1 (motion) through torch.hub
+    "timm>=1.0.15",   # V-JEPA 2.1 (motion) through torch.hub; SigLIP 2 / PE towers
     "einops",
     "pillow",
     "scikit-learn",   # the Tier-2 taste classifier

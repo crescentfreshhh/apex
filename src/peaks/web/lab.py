@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-CANDIDATES = ("dinov3_vitl16", "dinov3_vith16plus")
+CANDIDATES = ("dinov3_vitl16", "dinov3_vith16plus", "siglip2_so400m", "pe_core_l")
 PER_TIER = 60             # graded scenes per tier in a trial
 SAMPLE_CAP = 400          # scenes per trial, saved-moment scenes included
 GRADE_WIN = 0.02          # grading accuracy margin for a win
@@ -71,6 +71,8 @@ class LabMixin:
         for c in CANDIDATES:
             t = d["trials"].get(c)
             out.append({"id": c, "label": dino_label(c), "kind": "dino", "active": c == active,
+                        "licence": c.startswith("dinov3_"),        # Meta's licence + HF_TOKEN
+                        "data_deleted": bool(t and t.get("data_deleted")),
                         "trial": t, "stale": bool(t and t.get("against") != active),
                         "error": (d.get("errors", {}).get(c) or {}).get("error"),
                         "sample": self.lab_sample_progress(c) if c != active else None})
@@ -146,6 +148,71 @@ class LabMixin:
         mode, iv = self._active_sampling()
         return FrameSampler(interval_seconds=iv, mode=mode, hwaccel=s.hwaccel, pipeline=s.pipeline,
                             scene_timeout=s.scene_timeout)
+
+    # --- trial data on disk -----------------------------------------------------------------
+
+    def _lab_ns_dirs(self) -> dict[str, Path]:
+        """Candidate model → its cache folder (only those on disk)."""
+        from ..embedding import dino_cache_name
+
+        root = Path(self.cfg.embedding.cache_dir)
+        out = {}
+        for c in CANDIDATES:
+            d = root / dino_cache_name(c)
+            if d.is_dir():
+                out[c] = d
+        return out
+
+    @staticmethod
+    def _dir_bytes(d: Path) -> tuple[int, int]:
+        size = n = 0
+        for f in d.rglob("*"):
+            try:
+                if f.is_file():
+                    size += f.stat().st_size
+                    n += f.suffix == ".npz"
+            except OSError:
+                pass
+        return size, n
+
+    def lab_trial_data(self, running: str | None = None, queued: str | None = None) -> dict:
+        """Every candidate's trial embeddings on disk: size, scenes, and whether it's
+        safe to delete (not the active model, no trial running or queued for it)."""
+        from ..embedding import dino_label
+
+        active = self._active_dino_model()
+        rows = []
+        for c, d in self._lab_ns_dirs().items():
+            size, n = self._dir_bytes(d)
+            busy = c in (running, queued)
+            rows.append({"id": c, "label": dino_label(c), "bytes": size, "scenes": n, "active": c == active,
+                         "busy": busy, "deletable": c != active and not busy})
+        return {"items": rows, "bytes": sum(r["bytes"] for r in rows)}
+
+    def lab_delete_data(self, cand: str, running: str | None = None, queued: str | None = None) -> dict:
+        """Delete a candidate's trial embeddings (and any index snapshot of them).
+        Its trial result stays; a re-run embeds from scratch."""
+        import shutil
+
+        from ..embedding import dino_cache_name
+
+        if cand not in CANDIDATES:
+            raise KeyError(cand)
+        if cand == self._active_dino_model():
+            raise ValueError("that's the model Peaks is using — its embeddings stay")
+        if cand in (running, queued):
+            raise ValueError("a trial is running or waiting for it — stop it first")
+        root = Path(self.cfg.embedding.cache_dir)
+        freed = 0
+        for d in (root / dino_cache_name(cand), root / "_index" / dino_cache_name(cand)):
+            if d.is_dir():
+                freed += self._dir_bytes(d)[0]
+                shutil.rmtree(d, ignore_errors=True)
+        st = self._lab_state()
+        if cand in st["trials"]:
+            st["trials"][cand]["data_deleted"] = True
+            self._lab_save(st)
+        return {"deleted": cand, "freed_bytes": freed}
 
     @staticmethod
     def _lab_drop_broken(cache, ns: str, keys: list[str]) -> int:

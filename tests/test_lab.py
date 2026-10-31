@@ -141,7 +141,7 @@ def test_the_lab_api(tmp_path, monkeypatch):
     c = TestClient(app_mod.create_app(svc.cfg))
     d = c.get("/api/lab").json()
     assert d["active"] == "dinov2_vits14" and d["running"] is None
-    assert {x["id"] for x in d["candidates"]} == {"dinov3_vitl16", "dinov3_vith16plus"}
+    assert {x["id"] for x in d["candidates"]} == {"dinov3_vitl16", "dinov3_vith16plus", "siglip2_so400m", "pe_core_l"}
     assert c.post("/api/lab/dinov3_vith16plus/switch").status_code == 409     # never trialled
     assert c.post(f"/api/lab/{CAND}/switch").json()["dino_model"] == CAND
 
@@ -271,3 +271,45 @@ def test_broken_nan_frames_are_redone_and_never_judged(tmp_path, monkeypatch):
     assert LabMixin._lab_drop_broken(cache, NS, keys) == 0
     tr = svc.run_lab(CAND)                                       # judged fine; the scene embedded again
     assert "verdict" in tr and cache.has(keys[0], NS)
+
+
+def test_image_text_candidates_are_registered(monkeypatch):
+    import types
+
+    from peaks import embedding as E
+    from peaks.web.lab import CANDIDATES
+
+    assert {"siglip2_so400m", "pe_core_l"} <= set(CANDIDATES) <= set(E.DINO_BACKBONES)
+    assert E.dino_label("siglip2_so400m") == "SigLIP 2 So400m" and E.dino_label("pe_core_l") == "Perception Encoder L"
+    assert E.dino_cache_name("siglip2_so400m") == "siglip2-so400m" and E.dino_cache_name("pe_core_l") == "pe-core-l"
+    made = []
+    monkeypatch.setattr(E, "OpenClipVisualEmbedder", lambda name, device=None: made.append(name) or "emb")
+    assert E.make_dino("siglip2_so400m") == "emb" and made == ["siglip2_so400m"]
+    monkeypatch.undo()
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "open_clip", None)              # an image without open_clip
+    with pytest.raises(RuntimeError, match="open_clip"):
+        E.OpenClipVisualEmbedder("pe_core_l")
+
+
+def test_trial_data_is_listed_and_deleted_on_request(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, _, _, _, cache = _lab_svc(tmp_path, monkeypatch)
+    svc.run_lab(CAND)
+    c = TestClient(app_mod.create_app(svc.cfg))
+    d = c.get("/api/lab/data").json()
+    row = next(x for x in d["items"] if x["id"] == CAND)
+    assert row["scenes"] == len(cache.keys(NS)) > 0 and row["bytes"] > 0 and row["deletable"]
+    lab = c.get("/api/lab").json()
+    card = next(x for x in lab["candidates"] if x["id"] == CAND)
+    assert card["licence"] and not next(x for x in lab["candidates"] if x["id"] == "siglip2_so400m")["licence"]
+    assert c.delete(f"/api/lab/{svc._active_dino_model()}/data").status_code in (404, 409)   # never the active model
+    r = c.delete(f"/api/lab/{CAND}/data").json()
+    assert r["freed_bytes"] == row["bytes"] and cache.keys(NS) == []
+    card = next(x for x in c.get("/api/lab").json()["candidates"] if x["id"] == CAND)
+    assert card["trial"] and card["data_deleted"]                                        # the result stays
+    assert all(x["id"] != CAND for x in c.get("/api/lab/data").json()["items"])
+    assert c.delete("/api/lab/nope/data").status_code == 404

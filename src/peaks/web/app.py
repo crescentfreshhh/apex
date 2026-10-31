@@ -2082,6 +2082,28 @@ def create_app(cfg=None):
 
     # --- the Lab: a new model has to win on your library first ---------------------
 
+    def _lab_busy():
+        j = jobs.running("lab")
+        running = (getattr(j, "args", None) or {}).get("cand") if j is not None else None
+        queued = ((jobs.paused.get("lab") or {}).get("args") or {}).get("cand")
+        return running, queued
+
+    @app.get("/api/lab/data")
+    def lab_data():
+        """Trial embeddings on disk, per candidate model."""
+        running, queued = _lab_busy()
+        return service.lab_trial_data(running=running, queued=queued)
+
+    @app.delete("/api/lab/{cand}/data")
+    def lab_delete_data(cand: str):
+        running, queued = _lab_busy()
+        try:
+            return service.lab_delete_data(cand, running=running, queued=queued)
+        except KeyError:
+            raise HTTPException(404, f"unknown candidate: {cand}")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+
     @app.get("/api/lab")
     def lab_get():
         d = dict(_snap("lab", service.lab))

@@ -3683,7 +3683,19 @@ async function openLab(poll) {
     else await swr("/api/lab", drawLab);
   } catch (e) { box.innerHTML = `<p class="dim">${esc(e.message)}</p>`; }
 }
+// trial embeddings on disk: what each candidate takes, deletable once its trial is over
+async function loadLabData() {
+  const box = $("#lab-data"); if (!box) return;
+  let d; try { d = await api("/api/lab/data"); } catch { return; }
+  if (!d.items.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<h3 class="lab-h">Trial data on disk <span class="faint small">${fmtBytes(d.bytes)} in all</span></h3>
+    <table class="htab"><tbody>${d.items.map((x) => `<tr><td>${esc(x.label)}${x.active ? ' <span class="q">active</span>' : ""}</td>
+      <td>${x.scenes.toLocaleString()} scenes</td><td>${fmtBytes(x.bytes)}</td>
+      <td>${x.deletable ? `<button class="btn sm ghost" data-lab-del="${x.id}" data-label="${esc(x.label)}" data-size="${x.bytes}">🗑 Delete</button>`
+        : `<span class="faint small">${x.active ? "in use" : "trial running"}</span>`}</td></tr>`).join("")}</tbody></table>`;
+}
 function drawLab(d) {
+  setTimeout(loadLabData, 0);
   const box = $("#lab-body"); if (!box) return;
   clearTimeout(labPoll);
   const run = d.running;
@@ -3692,6 +3704,7 @@ function drawLab(d) {
       scenes: grading (each scene graded by a model that never saw it) and finding your saved moments. A switch is only offered on a
       clear win. Now using <b>${esc(d.active_label)}</b>.</p>
     <div class="lab-grid">${d.candidates.map((c) => labCard(c, run)).join("")}</div>
+    <div id="lab-data" class="lab-data"></div>
     <h3 class="lab-h">Senses</h3>
     <p class="faint small">Extra senses Peaks can learn from. Each runs in the background when nothing else does, and is used only where
       it makes Peaks better on your library — finding your moments, or grading — tested on scenes it didn't learn from.</p>
@@ -3772,9 +3785,24 @@ function labCard(c, run) {
       ? `<p class="small">Sample: <b>${c.sample.done.toLocaleString()} of ${c.sample.total.toLocaleString()}</b> embedded with ${esc(c.label)} — ${t ? "Run again" : "Run trial"} carries on from here.</p>` : ""}
     <div class="row">${c.active ? "" : `<button class="btn sm" data-lab-run="${c.id}" ${run && run.status === "running" ? "disabled" : ""}>${t ? "Run again" : "Run trial"}</button>`}
       ${t && t.win && !c.active && !c.stale ? `<button class="btn sm pri" data-lab-switch="${c.id}">Switch to ${esc(c.label)}</button>` : ""}</div>
-    <p class="faint small">Needs Meta's DINOv3 licence accepted on Hugging Face and the container's <code>HF_TOKEN</code> set.</p></div>`;
+    ${!mine && !c.active && c.sample && c.sample.done ? `<button class="btn sm ghost" data-lab-del="${c.id}" data-label="${esc(c.label)}">🗑 Delete trial data</button>` : ""}
+    ${c.data_deleted && !(c.sample && c.sample.done) ? '<p class="faint small">Trial data deleted — a re-run starts over.</p>' : ""}
+    ${c.licence ? `<p class="faint small">Needs Meta's DINOv3 licence accepted on Hugging Face and the container's <code>HF_TOKEN</code> set.</p>`
+      : '<p class="faint small">Open weights — downloaded from Hugging Face on the first run, no token needed.</p>'}</div>`;
 }
 document.addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-lab-del]");
+  if (del) {
+    const size = del.dataset.size ? ` (${fmtBytes(+del.dataset.size)})` : "";
+    if (!confirm(`Delete ${del.dataset.label}'s trial embeddings${size}? Its result stays; running the trial again embeds from scratch.`)) return;
+    del.disabled = true;
+    try {
+      const r = await api(`/api/lab/${del.dataset.labDel}/data`, { method: "DELETE" });
+      toast(`Deleted — ${fmtBytes(r.freed_bytes)} freed`);
+    } catch (err) { del.disabled = false; toast(err.message, true); }
+    openLab();
+    return;
+  }
   const r = e.target.closest("[data-lab-run]"), s = e.target.closest("[data-lab-switch]");
   if (r) {
     r.disabled = true;
