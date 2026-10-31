@@ -313,3 +313,13 @@ def test_trial_data_is_listed_and_deleted_on_request(tmp_path, monkeypatch):
     assert card["trial"] and card["data_deleted"]                                        # the result stays
     assert all(x["id"] != CAND for x in c.get("/api/lab/data").json()["items"])
     assert c.delete("/api/lab/nope/data").status_code == 404
+
+
+def test_keeper_split_with_two_keeper_tiers():
+    from peaks.web.lab import LabMixin
+
+    y = ["reject", "reject", "exceptionnelle", "legendaire", "legendaire", "exceptionnelle"]
+    p = ["reject", "legendaire", "exceptionnelle", "exceptionnelle", "legendaire", "reject"]
+    d = LabMixin._lab_keeper_split(p, y)
+    assert d["keeper_right"] == round(4 / 6, 4)                    # 2 keep/reject mix-ups
+    assert d["best_tier_right"] == round(2 / 3, 4) and d["best_tier_n"] == 3

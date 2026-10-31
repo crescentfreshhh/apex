@@ -343,8 +343,20 @@ class LabMixin:
         return {"n": len(y),
                 "accuracy": round(float(np.mean([p == t for p, t in zip(pred, y)])), 4),
                 "within_one": round(float(np.mean([abs(live[p] - live[t]) <= 1 for p, t in zip(pred, y)])), 4),
+                **LabMixin._lab_keeper_split(pred, y),
                 "log_loss": round(float(-np.mean(np.log(np.clip(p_true, 1e-6, 1)))), 4),
                 "right": sorted(rs[keep[i]]["scene_id"] for i, (p, t) in enumerate(zip(pred, y)) if p == t)}
+
+    @staticmethod
+    def _lab_keeper_split(pred: list, y: list) -> dict:
+        """With only two keeper tiers, "within one tier" says little. Two plainer
+        questions: is keep-or-reject right, and among keepers called keepers, is the
+        tier right?"""
+        keep = [(p != "reject", t != "reject") for p, t in zip(pred, y)]
+        both = [(p, t) for p, t in zip(pred, y) if p != "reject" and t != "reject"]
+        return {"keeper_right": round(float(np.mean([a == b for a, b in keep])), 4) if keep else None,
+                "best_tier_right": round(float(np.mean([p == t for p, t in both])), 4) if both else None,
+                "best_tier_n": len(both)}
 
     @staticmethod
     def _lab_moments(vecs: dict, saved: dict[str, list[float]], only: set | None = None) -> dict | None:

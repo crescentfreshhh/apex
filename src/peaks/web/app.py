@@ -889,6 +889,12 @@ def create_app(cfg=None):
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
 
+    @app.post("/api/hear/clear-error")
+    def hear_clear():
+        service.sense_clear("hear")
+        _hear_next["at"] = 0.0
+        return {"ok": True}
+
     @app.post("/api/hear/settings")
     def hear_settings(body: dict = Body(...)):
         return service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
@@ -944,6 +950,12 @@ def create_app(cfg=None):
             return jobs.start("motion", service.run_motion).as_dict()
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
+
+    @app.post("/api/motion/clear-error")
+    def motion_clear():
+        service.sense_clear("motion")
+        _motion_next["at"] = 0.0
+        return {"ok": True}
 
     @app.post("/api/motion/settings")
     def motion_settings(body: dict = Body(...)):

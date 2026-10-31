@@ -3724,11 +3724,18 @@ function senseCoverage(sense, st) {
   const of = sense === "sound" ? `${n(st.embedded)} scenes in your library`
     : `${n(st.embedded)} zoomed scenes <span class="faint">(motion watches the moments zoom found)</span>`;
   const r = st.last_run;
-  const last = r ? `<p class="small ${r.failed && !r.done ? "lab-err" : ""}">Last run ${new Date(r.at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })} ·
-      ${n(r.done)} ${sense === "sound" ? "heard" : "watched"}${r.silent ? ` (${n(r.silent)} without sound)` : ""} · ${n(r.failed)} failed${r.stopped ? ` — stopped: ${esc(r.stopped)}` : ""}</p>
+  const live = r && r.running && st.running;              // the run is going now
+  const cut = r && r.running && !st.running;               // a run that never got to finish (a restart, a pause)
+  const word = sense === "sound" ? "heard" : "watched";
+  const bad = r && ((r.failed && !r.done) || r.stopped && r.stopped !== "you stopped it");
+  const when = r ? new Date(r.at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "";
+  const clear = `<a href="#" class="small" data-sense-clear="${sense}">Clear</a>`;
+  const last = r ? `<p class="small ${bad ? "lab-err" : ""}">${live ? "Running now" : cut ? `Last run ${when} (cut short)` : `Last run ${when}`} ·
+      ${n(r.done)} ${word}${live ? " so far" : ""}${r.silent ? ` (${n(r.silent)} without sound)` : ""} · ${n(r.failed)} failed${r.stopped ? ` — stopped: ${esc(r.stopped)}` : ""}
+      ${bad || (r.first_errors || []).length ? clear : ""}</p>
       ${(r.first_errors || []).length && !r.stopped ? `<p class="small lab-err">${r.first_errors.map(esc).join("<br>")}</p>` : ""}` : "";
   return `<p class="small">${c != null ? `${sense === "sound" ? "Heard" : "Seen"} ${n(c)} of ${of}` : "—"}</p>${last}
-    ${st.error && !(r && r.stopped === st.error) ? `<p class="small lab-err">${esc(st.error)}</p>` : ""}`;
+    ${st.error && !(r && r.stopped === st.error) ? `<p class="small lab-err">${esc(st.error)} ${r ? "" : clear}</p>` : ""}`;
 }
 function senseCard(x) {
   const pc = (v) => (v == null ? "—" : Math.round(100 * v) + "%");
@@ -3749,6 +3756,13 @@ function senseCard(x) {
       <button class="btn sm ghost" data-sense-on="${x.id}" data-on="${st.settings && st.settings.on ? 0 : 1}">${st.settings && st.settings.on ? "Turn off" : "Turn on"}</button></div></div>`;
 }
 document.addEventListener("click", async (e) => {
+  const cl = e.target.closest("[data-sense-clear]");
+  if (!cl) return;
+  e.preventDefault();
+  try { await api(SENSE_API[cl.dataset.senseClear] + "/clear-error", { method: "POST" }); } catch (err) { toast(err.message, true); }
+  openLab();
+});
+document.addEventListener("click", async (e) => {
   const r = e.target.closest("[data-sense-run]"), o = e.target.closest("[data-sense-on]");
   if (!r && !o) return;
   const id = (r || o).dataset.senseRun || (r || o).dataset.senseOn, base = SENSE_API[id];
@@ -3766,7 +3780,8 @@ function labCard(c, run) {
   const g = (s) => s.grading, m = (s) => s.moments;
   const table = t ? `<table class="htab cmp-t"><thead><tr><th></th><th>${esc(t.against_label || t.against)}</th><th>${esc(c.label)}</th></tr></thead><tbody>
       ${row("Grades right", (s) => (g(s) ? pc(g(s).accuracy) : "—"))}
-      ${row("Within one tier", (s) => (g(s) ? pc(g(s).within_one) : "—"))}
+      ${row("Keeper or reject right", (s) => (g(s) ? pc(g(s).keeper_right) : "—"))}
+      ${row("Best tier right <span class='faint small'>(among keepers)</span>", (s) => (g(s) ? pc(g(s).best_tier_right) : "—"))}
       ${row("Sureness <span class='faint small'>(log-loss, lower is better)</span>", (s) => (g(s) ? g(s).log_loss.toFixed(2) : "—"))}
       ${row("Finds your moments <span class='faint small'>(top 3, 15 s)</span>", (s) => (m(s) ? pc(m(s).top3) : "—"))}
       ${row("… spot on <span class='faint small'>(4 s)</span>", (s) => (m(s) ? pc(m(s).tight) : "—"))}

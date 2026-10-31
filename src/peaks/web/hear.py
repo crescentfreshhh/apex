@@ -189,6 +189,7 @@ class HearMixin:
         done = silent = 0
         run = SenseRun()
         t0 = time.time()
+        self._sense_record("hear", {"running": True, "done": 0, "silent": silent, **run.summary()})   # a new run replaces the last
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
                 log("stopped — the rest waits for the next run")
@@ -205,6 +206,8 @@ class HearMixin:
                     self._hear_error = run.stopped
                     log(run.stopped)
                     break
+            if (i + 1) % 25 == 0:
+                self._sense_record("hear", {"running": True, "done": done, "silent": silent, **run.summary()})
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
@@ -233,6 +236,21 @@ class HearMixin:
         d[kind] = {"at": time.time(), **rec}
         p.parent.mkdir(parents=True, exist_ok=True)
         atomic.write_json(p, d, indent=1)
+
+    def sense_clear(self, kind: str) -> None:
+        """Forget the last run's record and error: the card starts clean."""
+        import json
+
+        from .. import atomic
+
+        setattr(self, f"_{kind}_error", None)
+        p = self._senses_runs_path()
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return
+        if d.pop(kind, None) is not None:
+            atomic.write_json(p, d, indent=1)
 
     def sense_last_run(self, kind: str) -> dict | None:
         import json

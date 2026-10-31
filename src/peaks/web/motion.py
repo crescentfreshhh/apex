@@ -185,6 +185,7 @@ class MotionMixin:
         done = 0
         run = SenseRun()
         t0 = time.time()
+        self._sense_record("motion", {"running": True, "done": 0, **run.summary()})   # a new run replaces the last
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
                 log("stopped — the rest waits for the next run")
@@ -200,6 +201,8 @@ class MotionMixin:
                     self._motion_error = run.stopped
                     log(run.stopped)
                     break
+            if (i + 1) % 25 == 0:
+                self._sense_record("motion", {"running": True, "done": done, **run.summary()})
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}

@@ -187,6 +187,47 @@ def test_the_last_run_is_on_the_card_with_its_first_errors(tmp_path, monkeypatch
     assert lr["first_errors"] == ["scene 4: OSError: moov atom not found"]
 
 
+def test_a_new_run_replaces_an_old_failure_at_once_and_clear_forgets_it(tmp_path, monkeypatch):
+    svc, stash = _triage_svc(tmp_path, monkeypatch)
+    for sid in stash.s:
+        stash.s[sid]["path"] = f"/data/{sid}.mp4"
+    svc._sense_record("hear", {"done": 0, "failed": 100, "first_errors": ["old CUDA error"], "stopped": None})
+    svc._hear_error = "old CUDA error"
+    seen = {}
+
+    def plan(p):
+        seen.setdefault("rec", svc.sense_last_run("hear"))           # what the card shows mid-run
+        if len(seen) == 1 and p.endswith("/30.mp4"):
+            seen["late"] = svc.sense_last_run("hear")
+            raise KeyboardInterrupt                                   # the container goes away mid-run
+        return _blocks(30)
+    _wire(svc, monkeypatch, plan)
+    with pytest.raises(KeyboardInterrupt):
+        svc.run_hear(limit=500)
+    assert seen["rec"]["running"] and seen["rec"]["failed"] == 0 and seen["rec"]["first_errors"] == []
+    lr = svc.sense_last_run("hear")
+    assert lr["running"] and lr["done"] >= 25 and lr["failed"] == 0      # partial counts, not the old failure
+    svc.sense_clear("hear")
+    assert svc.sense_last_run("hear") is None and svc.hear_status()["error"] is None
+
+
+def test_clear_error_route(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+    from peaks.config import Config
+
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PEAKS_SCHEDULER", "0")
+    monkeypatch.setenv("PEAKS_WARM_ON_START", "0")
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    c = TestClient(app_mod.create_app(cfg))
+    for kind in ("hear", "motion"):
+        assert c.post(f"/api/{kind}/clear-error").json() == {"ok": True}
+        assert c.get(f"/api/{kind}").json()["last_run"] is None
+
+
 def test_clap_uses_the_feature_extractor_not_the_renamed_processor_argument(monkeypatch):
     import types
 
