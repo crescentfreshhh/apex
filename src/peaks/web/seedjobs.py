@@ -14,12 +14,15 @@ from PEAKS_QBT_*. The state folder keeps the scripts' formats (runs.log,
 pull.log, <cat>.done, pull.failing), so history carries over and the
 Seedbox page keeps reading it.
 
+
 Peaks won't run these until you confirm the Unraid scripts are switched off
 (two pullers at once would fight over the same files), and it warns if
 runs.log shows a pull it didn't make.
 """
 
 from __future__ import annotations
+
+from ..atomic import settings_saver as _settings_saver
 
 import json
 import os
@@ -68,17 +71,22 @@ class SeedJobsMixin:
         s["remote"] = os.environ.get("PEAKS_SEEDBOX_REMOTE") or s["remote"]
         return s
 
+    @_settings_saver
     def save_seedjob_settings(self, body: dict) -> dict:
         from .. import atomic
 
         settings = dict(self._settings())
         cur = {**DEFAULTS, **(settings.get("seedjobs") or {})}
+        from .inputs import as_bool, as_int
+
         for k in DEFAULTS:
             if k in body and body[k] is not None and k != "purge_dry_until":
-                cur[k] = body[k]
-        cur["parallel"] = max(1, min(8, int(cur["parallel"])))
-        cur["streams"] = max(1, min(16, int(cur["streams"])))
-        cur["pull_every_min"] = max(5, int(cur["pull_every_min"]))
+                cur[k] = as_bool(body[k], k) if isinstance(DEFAULTS[k], bool) else body[k]
+        cur["parallel"] = max(1, min(8, as_int(cur["parallel"], "parallel")))
+        cur["streams"] = max(1, min(16, as_int(cur["streams"], "streams")))
+        cur["pull_every_min"] = max(5, as_int(cur["pull_every_min"], "pull_every_min"))
+        if not isinstance(cur["categories"], list) or not all(isinstance(c, dict) for c in cur["categories"]):
+            raise ValueError("categories must be a list of {cat, dest}")
         for k in ("purge_at", "report_at"):
             if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(cur[k])):
                 raise ValueError(f"{k} must be HH:MM")
@@ -650,10 +658,11 @@ class SeedJobsMixin:
                        ("Daily report: " if rep["ok"] else "Daily report — needs attention: "
                         + "; ".join(rep["issues"]) + ". ") + text)
         # runs.log keeps the last 7 days, as before
-        keep = [ln for ln in self._read_text(runs_path).splitlines()
-                if ln.split("|", 1)[0].strip().isdigit() and float(ln.split("|", 1)[0]) >= now - 7 * 86400]
-        if runs_path.exists():
-            atomic.write_text(runs_path, "\n".join(keep) + ("\n" if keep else ""))
+        with self.__dict__.setdefault("_sj_file_lock", threading.Lock()):     # no append lost mid-trim
+            keep = [ln for ln in self._read_text(runs_path).splitlines()
+                    if ln.split("|", 1)[0].strip().isdigit() and float(ln.split("|", 1)[0]) >= now - 7 * 86400]
+            if runs_path.exists():
+                atomic.write_text(runs_path, "\n".join(keep) + ("\n" if keep else ""))
         return rep
 
     # --- schedule --------------------------------------------------------------------

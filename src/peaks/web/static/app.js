@@ -626,7 +626,7 @@ $("#cur-goal")?.addEventListener("change", async (e) => {
 });
 $("#cur-follow")?.addEventListener("change", async (e) => {
   try { await api("/api/library/curation?follow_renamer=" + e.target.checked, { method: "POST" }); toast(e.target.checked ? "Following renamer moves" : "Renamer moves: Sync by hand"); }
-  catch (err) { toast(err.message, true); }
+  catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }   // didn't save: show what's really set
 });
 // Activity → Maintenance: files your renamer moved after a grade, followed automatically
 async function loadRenamerMoves() {
@@ -651,7 +651,7 @@ $("#cur-auto-leg")?.addEventListener("change", async (e) => {
   try {
     const r = await api("/api/library/curation?auto_legendaire_on_save=" + e.target.checked, { method: "POST" });
     $("#cur-status").textContent = r.auto_legendaire_on_save ? "On — saving promotes the scene" : "Off";
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { e.target.checked = !e.target.checked; toast(err.message, true); }
 });
 async function loadTierNames() {
   loadCuration();
@@ -3476,9 +3476,23 @@ function zoomCard(z) {
       a build-up, a hold, movement, your concepts. It only switches to shape picks when they beat frame picks on scenes held out.</p>
     ${cmp}${words}
     <div class="row"><button class="btn sm" id="zoom-run" ${run ? "disabled" : ""}>Zoom more now</button>
-      <button class="btn sm ghost" id="zoom-train">Retrain</button></div></div>`;
+      <button class="btn sm ghost" id="zoom-train">Retrain</button>
+      <button class="btn sm ghost" id="zoom-onoff" data-on="${z.settings && z.settings.on === false ? 1 : 0}"
+        title="Whether Peaks zooms on its own when nothing else runs">${z.settings && z.settings.on === false ? "Turn on" : "Turn off"}</button></div></div>`;
 }
 document.addEventListener("click", async (e) => {
+  const oo = e.target.closest("#zoom-onoff");
+  if (oo) {
+    oo.disabled = true;
+    try {
+      const r = await api("/api/zoom/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: oo.dataset.on === "1" }) });
+      toast(r.on ? "Moment zoom on — it runs when nothing else does" : "Moment zoom off");
+    } catch (err) { toast(err.message, true); }
+    oo.disabled = false;
+    openMoments();
+    return;
+  }
   if (e.target.closest("#zoom-run")) {
     try {
       const d = await api("/api/moments/zoom", { method: "POST" });
@@ -3907,7 +3921,11 @@ document.addEventListener("click", async (e) => {
   try {
     await api("/api/prefs/pick-prompts", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ on: pickPromptsOn }) });
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {                                  // didn't save: back to what's really set
+    pickPromptsOn = !pickPromptsOn; pickPaintToggles();
+    for (const v of [$("#viewer-v"), $("#rv-v")]) if (v) pickTick(v);
+    toast(err.message, true);
+  }
 });
 function pickSetup(v, sid, picks, host, track) {
   const st = { sid, chip: null, track, shown: null,

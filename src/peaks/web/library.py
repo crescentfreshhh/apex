@@ -4,6 +4,9 @@ embedding/search code so the management surface stays readable."""
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 from .. import atomic
 
 import re
@@ -145,6 +148,7 @@ class LibraryMixin:
 
         return retired_tags(self._settings().get("tier_tags"))
 
+    @_settings_saver
     def save_tier_tags(self, tags: dict) -> dict[str, str]:
         from ..tiers import TIER_TAGS
 
@@ -393,6 +397,7 @@ class LibraryMixin:
         return {"on": bool(s.get("cleanup_on_sync", True)), "approved": bool(s.get("cleanup_approved", False)),
                 "root": str(self._cleanup_root())}
 
+    @_settings_saver
     def save_cleanup_settings(self, on: bool | None = None, approved: bool | None = None) -> dict:
         s = dict(self._settings())
         if on is not None:
@@ -506,6 +511,7 @@ class LibraryMixin:
         s = self._settings()
         return {"on": bool(s.get("copies_on", True)), "approved": bool(s.get("copies_approved", False))}
 
+    @_settings_saver
     def save_copies_settings(self, on: bool | None = None, approved: bool | None = None) -> dict:
         s = dict(self._settings())
         if on is not None:
@@ -841,6 +847,12 @@ class LibraryMixin:
             return set()
 
     def ignore_duplicate_group(self, scene_ids: list[str]) -> int:
+        from .. import atomic
+
+        with atomic.edit_lock(self._dupe_ignore_path()):            # one read-change-save at a time
+            return self._ignore_duplicate_group_unlocked(scene_ids=scene_ids)
+
+    def _ignore_duplicate_group_unlocked(self, scene_ids: list[str]) -> int:
         """'Not duplicates': this exact group stops showing (a new copy joining
         it makes it a different group, which shows again)."""
         import json
@@ -1198,6 +1210,7 @@ class LibraryMixin:
             opts["scanGenerateImagePreviews"] = False        # a sub-option of previews
         return opts
 
+    @_settings_saver
     def save_ingest_scan(self, opts: dict) -> dict[str, bool]:
         s = dict(self._settings())
         s["ingest_scan"] = {k: bool(v) for k, v in (opts or {}).items()
@@ -1515,6 +1528,7 @@ class LibraryMixin:
     def delete_view(self, name: str) -> list[dict]:
         return self._write_views([v for v in self.saved_views() if v.get("name") != name])
 
+    @_settings_saver
     def _write_views(self, views: list[dict]) -> list[dict]:
         s = dict(self._settings())
         s["saved_views"] = views

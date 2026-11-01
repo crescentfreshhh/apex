@@ -14,6 +14,9 @@ motion group — each kept only where the honest held-out test says it helps.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 import hashlib
 import time
 
@@ -62,13 +65,16 @@ class MotionMixin:
         return {"on": bool(m.get("on", True)), "per_run": int(m.get("per_run") or MOTION_PER_RUN),
                 "explore_windows": int(m.get("explore_windows", EXPLORE_WINDOWS))}
 
+    @_settings_saver
     def save_motion_settings(self, on: bool | None = None, per_run: int | None = None) -> dict:
         s = dict(self._settings())
         m = dict(s.get("motion") or {})
+        from .inputs import as_bool, as_int
+
         if on is not None:
-            m["on"] = bool(on)
+            m["on"] = as_bool(on, "on")
         if per_run is not None:
-            m["per_run"] = max(1, min(2000, int(per_run)))
+            m["per_run"] = max(1, min(2000, as_int(per_run, "per_run")))
         s["motion"] = m
         self._save_settings_dict(s)
         return self.motion_settings()
@@ -392,5 +398,6 @@ class MotionMixin:
         if m is not None:
             mean = m[1].mean(axis=0)
             out = (mean / max(float(np.linalg.norm(mean)), 1e-9)).astype(np.float32)
-        memo[str(sid)] = out
+        if out is not None:                  # a miss is never remembered: the scene may be watched any moment
+            memo[str(sid)] = out
         return out

@@ -220,6 +220,8 @@ class ConceptsMixin:
         new — then train once (when there are enough of each)."""
         from ..labels import LabelStore
 
+        if not isinstance(items, list) or not all(isinstance(x, dict) and "key" in x and "t" in x for x in items):
+            raise ValueError("items must be a list of {key, t, label}")
         c = self.concept_create(name)
         slug = c["slug"]
         with LabelStore.editing(self._cx_labels_path()) as store:
@@ -235,6 +237,8 @@ class ConceptsMixin:
                       scene_id: str | None = None) -> dict:
         from ..labels import LabelStore
 
+        if int(label) not in (0, 1):
+            raise ValueError("label is 1 (yes) or 0 (no)")
         slug = self._cx_slug_of(name_or_slug)
         with LabelStore.editing(self._cx_labels_path()) as store:
             store.add(key, float(t), int(label), slug, scene_id=scene_id)
@@ -272,8 +276,11 @@ class ConceptsMixin:
             clf.fit(X, y)
             p = self._cx_dir()
             p.mkdir(parents=True, exist_ok=True)
-            np.savez(p / f"{slug}.npz", w=clf.coef_[0].astype(np.float32), b=np.float32(clf.intercept_[0]),
-                     model=np.array(model))
+            from .. import atomic
+
+            with atomic.temp_for(p / f"{slug}.npz", ".npz") as tmp, open(tmp, "wb") as fh:   # never half-written
+                np.savez(fh, w=clf.coef_[0].astype(np.float32), b=np.float32(clf.intercept_[0]),
+                         model=np.array(model))
             rep = {"trained": True, "yes": pos, "no": neg, "accuracy": round(acc, 3),
                    "reliability": reliability(acc, pos + neg), "at": time.time(), "model": model}
         with self._cx_lock():
@@ -287,9 +294,11 @@ class ConceptsMixin:
     def _cx_probe(self, slug: str):
         """(w, b) for the active model, or None (untrained, or trained on another model)."""
         p = self._cx_dir() / f"{slug}.npz"
+        import zipfile
+
         try:
             z = np.load(p)
-        except (OSError, ValueError):
+        except (OSError, ValueError, zipfile.BadZipFile):
             return None
         if str(z["model"]) != self._model_name():
             return None
@@ -303,11 +312,11 @@ class ConceptsMixin:
         idx = self.index(self._model_name())
         cache = self.__dict__.setdefault("_cx_cache", {})
         hit = cache.get(slug)
-        if hit and hit[0] == id(idx):
+        if hit and hit[0] == getattr(idx, 'gen', id(idx)):
             return hit[1]
         w, b = probe
         probs = _sigmoid(idx.dot(w) + b).astype(np.float32)
-        cache[slug] = (id(idx), probs, None)
+        cache[slug] = (getattr(idx, 'gen', id(idx)), probs, None)
         return probs
 
     def concept_scene_scores(self, name_or_slug: str) -> dict[str, float]:
@@ -330,7 +339,7 @@ class ConceptsMixin:
                 continue
             seg = np.sort(probs[a:b])[::-1]
             out[str(sid)] = round(float(seg[: max(1, (b - a) // 10)].mean()), 4)
-        cache[slug] = (hit[0], hit[1], out) if hit else (id(idx), probs, out)
+        cache[slug] = (hit[0], hit[1], out) if hit else (getattr(idx, 'gen', id(idx)), probs, out)
         return out
 
     def concept_search(self, name_or_slug: str, top_k: int | None = 60, per_scene: int | None = 3):

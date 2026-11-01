@@ -81,14 +81,14 @@ class OrphansMixin:
         """{scene_id: unit mean frame embedding} for every embedded scene, cached per index build."""
         idx = self.index(self._model_name())
         cached = self.__dict__.get("_scene_means_cache")
-        if cached and cached[0] == id(idx):
+        if cached and cached[0] == getattr(idx, 'gen', id(idx)):
             return cached[1]
         out = {}
         for key, (a, b) in idx._key_rows.items():
             sid = str((idx.key_meta.get(key) or {}).get("scene_id") or "")
             if sid and b > a:
                 out[sid] = self._unit(idx.rows(a, b).mean(axis=0))
-        self._scene_means_cache = (id(idx), out)
+        self._scene_means_cache = (getattr(idx, 'gen', id(idx)), out)
         return out
 
     def orphan_suggestions(self, scene_id: str, k: int = SUGGEST_K) -> dict:

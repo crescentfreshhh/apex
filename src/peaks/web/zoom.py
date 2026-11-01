@@ -18,6 +18,8 @@ a start, a peak and an end.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
 import json
 import time
 from pathlib import Path
@@ -112,6 +114,20 @@ class ZoomMixin:
         z = self._settings().get("zoom") or {}
         return {"per_run": int(z.get("per_run") or ZOOM_PER_RUN), "on": bool(z.get("on", True))}
 
+    @_settings_saver
+    def save_zoom_settings(self, on=None, per_run=None) -> dict:
+        from .inputs import as_bool, as_int
+
+        s = dict(self._settings())
+        z = dict(s.get("zoom") or {})
+        if on is not None:
+            z["on"] = as_bool(on, "on")
+        if per_run is not None:
+            z["per_run"] = max(1, min(5000, as_int(per_run, "per_run")))
+        s["zoom"] = z
+        self._save_settings_dict(s)
+        return self.zoom_settings()
+
     # --- scoring a block of frames like the library is scored ----------------------------
 
     def _taste_block(self, vecs: np.ndarray) -> np.ndarray | None:
@@ -133,14 +149,14 @@ class ZoomMixin:
         """Your library's 75th-percentile taste: 'holding' means staying above it."""
         cached = self.__dict__.get("_zoom_hold")
         idx = self.index(self._model_name())
-        if cached and cached[0] == id(idx):
+        if cached and cached[0] == getattr(idx, 'gen', id(idx)):
             return cached[1]
         try:
             scores, _ = self._taste_scores(self._model_name())
         except Exception:  # noqa: BLE001
             scores = None
         lvl = float(np.quantile(scores, 0.75)) if scores is not None and len(scores) else 0.5
-        self._zoom_hold = (id(idx), lvl)
+        self._zoom_hold = (getattr(idx, 'gen', id(idx)), lvl)
         return lvl
 
     # --- which scenes, which windows -------------------------------------------------------
@@ -238,9 +254,12 @@ class ZoomMixin:
         self._zoom_cache().save(key, self._zoom_ns(), np.asarray(times)[order],
                                 np.asarray(vecs, np.float32)[order] if vecs else np.zeros((0, idx.dim), np.float32),
                                 meta={"scene_id": sid, "candidates": cands})
-        d = self._zoom_state()
-        d["scenes"][sid] = {"key": key, "centers": [c["c"] for c in cands], "at": time.time(), "frames": len(times)}
-        self._zoom_save(d)
+        from .. import atomic
+
+        with atomic.edit_lock(self._zoom_path()):          # one read-change-save at a time
+            d = self._zoom_state()
+            d["scenes"][sid] = {"key": key, "centers": [c["c"] for c in cands], "at": time.time(), "frames": len(times)}
+            self._zoom_save(d)
         self.__dict__.pop("_zoom_rows_cache", None)
         return d["scenes"][sid]
 
@@ -414,7 +433,14 @@ class ZoomMixin:
     # --- the model ------------------------------------------------------------------------------
 
     def train_moment_model(self) -> dict:
-        """Fit the moment model and score it honestly against frame picks."""
+        """Fit the moment model and score it honestly against frame picks — one fit
+        at a time (zoom, Hearing, Motion and the Train button can all ask)."""
+        import threading
+
+        with self.__dict__.setdefault("_moment_train_lock", threading.Lock()):
+            return self._train_moment_model()
+
+    def _train_moment_model(self) -> dict:
         from sklearn.linear_model import LogisticRegression
         from sklearn.preprocessing import StandardScaler
 
@@ -532,14 +558,17 @@ class ZoomMixin:
         return self._zoom_path().with_name(self._zoom_path().stem.replace("zoom", "moment_model", 1) + ".npz")
 
     def _zoom_store_model(self, fitted, rep: dict) -> dict:
+        from .. import atomic
+
         p = self._zoom_model_path()
         if fitted is not None:
             sc, m, names = fitted
-            p.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(p, mean=sc.mean_, scale=sc.scale_, coef=m.coef_[0], icpt=m.intercept_, names=np.array(names))
-        d = self._zoom_state()
-        d["model"] = rep
-        self._zoom_save(d)
+            with atomic.temp_for(p, ".npz") as tmp, open(tmp, "wb") as fh:     # never half-written
+                np.savez(fh, mean=sc.mean_, scale=sc.scale_, coef=m.coef_[0], icpt=m.intercept_, names=np.array(names))
+        with atomic.edit_lock(self._zoom_path()):
+            d = self._zoom_state()
+            d["model"] = rep
+            self._zoom_save(d)
         self.__dict__.pop("_zoom_model_cache", None)
         return rep
 
@@ -547,16 +576,22 @@ class ZoomMixin:
         """(names, mean, scale, coef, intercept) when shape ranking is on, else None."""
         if not (self._zoom_view().get("model") or {}).get("use_shape"):
             return None
+        import zipfile
+
         p = self._zoom_model_path()
+        try:
+            stamp = (p, p.stat().st_mtime_ns)            # a newer file on disk is never hidden by the cache
+        except OSError:
+            return None
         hit = self.__dict__.get("_zoom_model_cache")
-        if hit is not None and hit[0] == p:
+        if hit is not None and hit[0] == stamp:
             return hit[1]
         try:
             z = np.load(p)
             hit = ([str(x) for x in z["names"]], z["mean"], z["scale"], z["coef"], float(z["icpt"][0]))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile):
             return None
-        self._zoom_model_cache = (p, hit)
+        self._zoom_model_cache = (stamp, hit)
         return hit
 
     # --- spans for the players ------------------------------------------------------------------

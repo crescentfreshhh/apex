@@ -200,6 +200,12 @@ class PerfReviewMixin:
     # --- a finished review ---------------------------------------------------------------
 
     def perf_review_done(self, pid: str, summary: dict | None = None, now: float | None = None) -> dict:
+        from .. import atomic
+
+        with atomic.edit_lock(self._pr_path()):            # one read-change-save at a time
+            return self._perf_review_done_unlocked(pid=pid, summary=summary, now=now)
+
+    def _perf_review_done_unlocked(self, pid: str, summary: dict | None = None, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         s = {k: int((summary or {}).get(k) or 0) for k in ("seen", "regraded", "rejected", "kept")}
         s["freed_bytes"] = int((summary or {}).get("freed_bytes") or 0)

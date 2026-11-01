@@ -144,3 +144,16 @@ def repairs() -> list[dict]:
 
 def clear_repairs() -> None:
     _REPAIRS.clear()
+
+
+def settings_saver(fn):
+    """For a method that reads the settings, changes them and saves: the whole
+    read-change-save runs under one lock per service, so two saves at once can't
+    drop each other's change."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(self, *a, **k):
+        with self.__dict__.setdefault("_settings_rlock", threading.RLock()):
+            return fn(self, *a, **k)
+    return wrapped

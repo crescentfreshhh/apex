@@ -18,6 +18,9 @@ State: models/upgrades.json {scenes: {sid: {...}}, last_pass}.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 import os
 import threading
 import time
@@ -46,6 +49,7 @@ class UpgradesMixin:
             s["has_key"] = bool(k)
         return s
 
+    @_settings_saver
     def save_upgrade_settings(self, body: dict) -> dict:
         from .. import atomic
 
@@ -62,7 +66,11 @@ class UpgradesMixin:
         cur["min_seeders"] = max(1, int(cur["min_seeders"]))
         cur["per_day"] = max(1, min(500, int(cur["per_day"])))
         cur["research_days"] = max(1, int(cur["research_days"]))
-        cur["auto"] = bool(cur["auto"])
+        from .inputs import as_bool
+
+        cur["auto"] = as_bool(cur["auto"], "auto")
+        if isinstance(cur["excluded_studios"], str):          # one name, not a list of its letters
+            cur["excluded_studios"] = [x for x in cur["excluded_studios"].split(",")]
         cur["excluded_studios"] = sorted({str(x).strip() for x in cur["excluded_studios"] or [] if str(x).strip()},
                                          key=str.lower)
         cur["categories"] = [int(c) for c in cur["categories"] or []]

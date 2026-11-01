@@ -328,6 +328,12 @@ def create_app(cfg=None):
     app = FastAPI(title="peaks", docs_url="/api/docs")
     from .compress import TextGzip
 
+    from fastapi.responses import JSONResponse as _JSON
+
+    @app.exception_handler(ValueError)
+    async def _bad_value(request, exc):           # a bad value someone sent: say so, don't 500
+        return _JSON({"detail": str(exc)}, status_code=400)
+
     app.add_middleware(TextGzip)                 # JSON/JS/CSS only: video and ranges untouched
     # background jobs share this interpreter; a short switch interval lets a
     # page request take its turn quickly instead of queueing behind them
@@ -669,7 +675,7 @@ def create_app(cfg=None):
         return {"scenes": service.scene_pool(refresh=refresh)}
 
     @app.get("/api/board/concept")
-    def board_concept(key: str, per_scene: int = 3, min_score: float = 0.0, top_k: int = 1500):
+    def board_concept(key: str, per_scene: int = 3, min_score: float = 0.0, top_k: int = Query(1500, ge=1, le=20000)):
         """A megaboard channel of one concept's moments, strongest first."""
         try:
             c, hits = service.concept_board(key, top_k=max(1, min(top_k, 20000)), per_scene=per_scene,
@@ -863,8 +869,8 @@ def create_app(cfg=None):
     @app.get("/api/search/similar")
     def search_similar(
         key: str | None = None, t: float = 0.0, scene_id: str | None = None,
-        top_k: int = 60, taste: bool = False, per_scene: int = 3,
-        min_score: float = 0.0, enrich: int = 300, whole_peak: bool | None = None,
+        top_k: int = Query(60, ge=1, le=5000), taste: bool = False, per_scene: int = 3,
+        min_score: float = 0.0, enrich: int = Query(300, ge=0, le=5000), whole_peak: bool | None = None,
     ):
         # the megaboard knows scene_id, not the cache key — resolve it so
         # "more like this moment" works from a board tile.
@@ -883,8 +889,8 @@ def create_app(cfg=None):
 
     @app.get("/api/search/text")
     def search_text(
-        q: str, top_k: int = 60, taste: bool = False, per_scene: int = 3,
-        min_score: float = 0.0, neg_weight: float = 0.5, enrich: int = 300,
+        q: str, top_k: int = Query(60, ge=1, le=5000), taste: bool = False, per_scene: int = 3,
+        min_score: float = 0.0, neg_weight: float = 0.5, enrich: int = Query(300, ge=0, le=5000),
     ):
         head, _, rest = q.partition(":")
         if head.strip().lower() in ("sound", "motion") and rest.strip():
@@ -921,7 +927,7 @@ def create_app(cfg=None):
         return _search_payload(service, hits, enrich=enrich)
 
     @app.get("/api/search/sound")
-    def search_sound(q: str, top_k: int = 60, enrich: int = 300):
+    def search_sound(q: str, top_k: int = Query(60, ge=1, le=5000), enrich: int = Query(300, ge=0, le=5000)):
         if not q:
             raise HTTPException(400, "say what it should sound like")
         try:
@@ -1053,6 +1059,8 @@ def create_app(cfg=None):
             key = service._key_for_scene(scene_id, service._model_name())
         if key is None:
             raise HTTPException(400, "need a key or a resolvable scene_id")
+        if label not in (0, 1):
+            raise HTTPException(400, "label is 1 (👍) or 0 (👎)")
         res = service.add_label(key, t, label, profile=profile, scene_id=scene_id)
         if pick and scene_id is not None:          # an answer on one of Peaks' picks
             service.record_pick_feedback(scene_id, t, label)
@@ -1172,7 +1180,7 @@ def create_app(cfg=None):
     # --- "For You": taste-centroid recommendations + active-learning trainer -
 
     @app.get("/api/foryou")
-    def foryou(top_k: int = 60, recent: int = 0, rebuild: bool = False,
+    def foryou(top_k: int = Query(60, ge=1, le=5000), recent: int = 0, rebuild: bool = False,
                profile: str | None = None, daily: bool = False):
         # daily: a rank-weighted shuffle seeded by today's date — changes every day
         seed = int(__import__("time").strftime("%Y%m%d")) if daily else None
@@ -1214,7 +1222,7 @@ def create_app(cfg=None):
         return {"items": items}
 
     @app.get("/api/foryou/words")
-    def foryou_words(recent: int = 0, top_k: int = 8):
+    def foryou_words(recent: int = 0, top_k: int = Query(8, ge=1, le=100)):
         return service.taste_words(top_k=top_k, recent=recent)
 
     @app.get("/api/taste/scale")
@@ -2161,6 +2169,17 @@ def create_app(cfg=None):
     def moments_zoom_run():
         return _bg_run("zoom", service.run_zoom)
 
+    @app.post("/api/zoom/settings")
+    def zoom_settings_save(body: dict = Body(...)):
+        out = service.save_zoom_settings(on=body.get("on"), per_run=body.get("per_run"))
+        if out["on"] is False:                       # switched off: the run in progress stops too
+            j = jobs.running("zoom")
+            if j is not None:
+                j.paused_for = None
+                j.request_cancel()
+            jobs.pause_pop("zoom")
+        return out
+
     @app.post("/api/moments/train")
     def moments_train():
         try:
@@ -2278,7 +2297,7 @@ def create_app(cfg=None):
             raise HTTPException(400, f"bad mark: {exc}")
 
     @app.get("/api/concepts/{name}/search")
-    def concepts_search(name: str, top_k: int = 60, per_scene: int = 3, enrich: int = 300):
+    def concepts_search(name: str, top_k: int = Query(60, ge=1, le=5000), per_scene: int = 3, enrich: int = Query(300, ge=0, le=5000)):
         try:
             hits = service.concept_search(name, top_k=top_k, per_scene=per_scene if per_scene > 0 else None)
         except LookupError as exc:
@@ -2291,7 +2310,9 @@ def create_app(cfg=None):
 
     @app.post("/api/prefs/pick-prompts")
     def set_pick_prompts(body: dict):
-        return {"on": service.set_pick_prompts(bool(body.get("on", True)))}
+        from .inputs import as_bool
+
+        return {"on": service.set_pick_prompts(as_bool(body.get("on", True), "on"))}
 
     # --- settling the library: the questions left -----------------------------------
 

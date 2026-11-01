@@ -283,12 +283,13 @@ class PictureMixin:
                     return m
                 except (OSError, ValueError):
                     pass
+            self._pic_dirty = False               # cleared first: a measure landing during training sets it again
             m = pq.PictureModel()
             m.train(self._pic_feats(), self._pic_picks(), self._pic_ratings())
             from .. import atomic
 
             atomic.write_json(self._pic_dir() / "model.json", m.state())
-            self._pic_model_obj, self._pic_dirty = m, False
+            self._pic_model_obj = m
             self.__dict__.pop("_pic_scores_cache", None)
             return m
 

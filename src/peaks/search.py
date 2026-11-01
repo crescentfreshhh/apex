@@ -21,6 +21,10 @@ import numpy as np
 
 from .cache import EmbeddingCache
 
+import itertools as _it
+
+_GEN = _it.count(1)          # every index build gets its own number (id() can be reused after a rebuild)
+
 # In-RAM storage for the stacked matrix.
 #
 # A 2s-sampled library is millions of frames: DINOv2-L at ~4M frames is ~16 GB
@@ -100,6 +104,7 @@ class Hit:
 
 class SearchIndex:
     def __init__(self, cache: EmbeddingCache, model_name: str):
+        self.gen = next(_GEN)
         self.cache = cache
         self.model_name = model_name
         self.matrix: np.ndarray = np.zeros((0, 0), dtype=np.float32)
@@ -168,6 +173,8 @@ class SearchIndex:
         (seconds), patched with just the scenes that changed, or built from the
         cache and then snapshotted (see `index_snapshot`)."""
         from . import index_snapshot as snap
+
+        self.gen = next(_GEN)                     # rebuilt in place: caches keyed on it start over
 
         keys = keys if keys is not None else self.cache.keys(self.model_name)
         if not snap.enabled():

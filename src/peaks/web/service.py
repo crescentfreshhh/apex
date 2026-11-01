@@ -7,6 +7,9 @@ thumbnails. The web layer stays thin glue over this.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 from .. import atomic
 
 import threading
@@ -177,6 +180,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return {"retired": list(retired()), "draining": list(draining()), "keepers": list(keeper_tiers()),
                 "retired_note": self._settings().get("tier_retired_note")}
 
+    @_settings_saver
     def set_tier_state(self, retired: list[str] | None = None, draining: list[str] | None = None) -> dict:
         """Change which tiers are retired / draining (by hand; Peaks also retires a
         drained tier on its own). Rows are rebuilt so O-counts read the new way."""
@@ -202,6 +206,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._cat_cache = None                 # tiers and tag states are read into the rows
         self._tier_preds = None
 
+    @_settings_saver
     def _check_drained(self, rows: list[dict]) -> None:
         """Retire a draining tier once nothing is left in it (needs a real listing:
         an empty or keeper-less one never retires anything)."""
@@ -272,6 +277,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "peak_pool": self._peak_pool_default(),
         }
 
+    @_settings_saver
     def save_models(self, dino_model: str | None = None, clip_model: str | None = None,
                     peak_pool: bool | None = None) -> dict:
         """Persist the active DINOv2 backbone and/or CLIP variant to
@@ -333,6 +339,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "codec_options": ["h264", "hevc"],
         }
 
+    @_settings_saver
     def save_export_settings(self, res=None, fps=None, codec=None) -> dict:
         """Persist reel export quality to settings.json (no re-embed / no index
         rebuild — it only affects export time)."""
@@ -394,6 +401,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "config_interval": self.cfg.sampling.interval_seconds,
         }
 
+    @_settings_saver
     def save_sampling_settings(self, mode=None, interval=None) -> dict:
         """Persist the library's sampling. Changing it makes every cached scene
         at other settings 'pending' — callers must confirm that (see
@@ -454,6 +462,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "max": self.cfg.scoring.max_duration,
         }
 
+    @_settings_saver
     def save_clip_settings(self, similarity=None) -> dict:
         """Persist the moment-length drift threshold to settings.json. Applies to
         the next feed / board / reel build — no re-embed, no restart."""
@@ -518,6 +527,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "prune": bool(s.get("prune", sc.prune)),
         }
 
+    @_settings_saver
     def save_schedule(self, embed_hours=None, sync=None, prune=None) -> dict:
         """Persist recurring-embed settings to /config/settings.json."""
 
@@ -579,6 +589,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         profs = {default} | set(reg) | set(self._label_store().profiles())
         return sorted(profs, key=lambda p: (p != default, p.lower()))
 
+    @_settings_saver
     def _write_profile_registry(self, names: list[str]) -> None:
         s = dict(self._settings())
         s["profiles"] = names
@@ -1499,19 +1510,21 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """Every scene (within library scope) as {scene_id, duration, url} — the
         pool the shuffle board draws random moments from. Cached, since it's a
         full Stash pass; call with refresh=True to rebuild."""
-        if self._pool is None or refresh:
-            client = self.client()
-            pool = []
-            for s in client.iter_scenes(path_prefix=self.cfg.library.path):
-                if not s.path:
-                    continue
-                pool.append({
-                    "scene_id": s.id,
-                    "duration": s.duration or 0,
-                    "url": client.stream_url(s.id, start=0),
-                })
-            self._pool = pool
-        return self._pool
+        pool = self._pool                                        # read once (a purge may clear it)
+        if pool is not None and not refresh:
+            return pool
+        client = self.client()
+        pool = []
+        for s in client.iter_scenes(path_prefix=self.cfg.library.path):
+            if not s.path:
+                continue
+            pool.append({
+                "scene_id": s.id,
+                "duration": s.duration or 0,
+                "url": client.stream_url(s.id, start=0),
+            })
+        self._pool = pool
+        return pool
 
     def board_apexes(self, tag: str | None = None) -> dict:
         """Live apex playlist for a tag (no on-disk write) so the board's source
@@ -2023,8 +2036,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 self._index_rebuilding = None
             idx.source_key_count = len(keys)
             with self._index_lock:
-                self._index[m] = idx
-                self._index_stale.discard(m)
+                if self._index.get(m) is before:      # nothing newer was installed while this built
+                    self._index[m] = idx
+                    self._index_stale.discard(m)
+                else:
+                    idx = self._index.get(m) or idx
             before = None
             from . import memwatch
 
@@ -3088,6 +3104,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return ids
 
     def set_scene_hidden(self, scene_id: str, hidden: bool) -> None:
+        with self.__dict__.setdefault("_hidden_lock", threading.RLock()):   # two quick 1★/unhide never drop one
+            return self._set_scene_hidden_unlocked(scene_id, hidden)
+
+    def _set_scene_hidden_unlocked(self, scene_id: str, hidden: bool) -> None:
         """Add/remove a scene from the hidden set (persisted). Driven by the
         rating: 1★ ('mark for deletion') hides it, a higher/cleared rating unhides."""
         import json
@@ -3176,7 +3196,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         Stash markers are cached separately and survive a rating too."""
         self._taste_src_cache.clear()
         self._taste_modes_cache.clear()
-        by_classifier = any(v[1] == "classifier" for v in self._board_score_cache.values() if v)
+        by_classifier = any(v[1] == "classifier" for v in list(self._board_score_cache.values()) if v)
         if not by_classifier:          # modes/centroid scoring depends on the ratings
             self._board_score_cache.clear()
             self._board_universe_cache.clear()
@@ -3286,13 +3306,25 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._taste_src_cache.clear()
         self._taste_modes_cache.clear()
         meta = self.__dict__.setdefault("_score_meta", {})
-        for k in [k for k in self._board_score_cache if k not in meta]:
+        for k in [k for k in list(self._board_score_cache) if k not in meta]:
             del self._board_score_cache[k]
         self._board_universe_cache.clear()
         self._peak_index_cache = None   # peaks depend on the taste scorer
         self._scene_seg_cache = None    # so do the per-scene segment spans
 
     def _taste_scores(self, model: str, profile: str | None = None, wait: bool = True):
+        """(see _taste_scores_raw) — but never scores from another build of the index:
+        a rebuild in between would misalign every row."""
+        out = self._taste_scores_raw(model, profile, wait)
+        scores = out[0] if isinstance(out, tuple) else None
+        if scores is not None:
+            idx = self._index.get(model)
+            if idx is not None and getattr(scores, "shape", (None,))[0] != idx.size:
+                self._invalidate_taste_caches()
+                return None, "pending"
+        return out
+
+    def _taste_scores_raw(self, model: str, profile: str | None = None, wait: bool = True):
         """One taste score per indexed moment, for the whole library. Uses your
         trained classifier's probability when a model exists (a learned,
         multi-modal boundary that recognises your *diverse* taste), otherwise
@@ -4011,8 +4043,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """Leaderboard of the library's performers by moments generated: for each
         performer appearing on an embedded scene, {id, name, scenes, moments, and
         taste_best/mean when a centroid exists}. Cached (Stash-heavy to build)."""
-        if not rebuild and getattr(self, "_perf_stats_cache", None) is not None:
-            return self._perf_stats_cache
+        hit = getattr(self, "_perf_stats_cache", None)          # read once: a purge may clear it meanwhile
+        if not rebuild and hit is not None:
+            return hit
         model = self._model_name()
         idx = self.index(model)
         # scene_id -> (key, n_frames)
@@ -4884,6 +4917,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         return tier_names(self._settings().get("tier_names"))
 
+    @_settings_saver
     def save_tier_names(self, names: dict) -> dict[str, str]:
         from ..tiers import DEFAULT_NAMES
 
@@ -5027,12 +5061,16 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _catalogue_fetch(self, refresh: bool = False) -> list[dict]:
         import time as _t
 
+        started = self.__dict__.get("_cat_edit_seq", 0)
         ids = [str(s.id) for s in self.scenes()]
         want = ids if refresh else [s for s in ids if s not in self._meta]
         if want:
             fetched = self._meta_client().scene_details(want)   # raises if Stash is down
+            edited = self.__dict__.get("_cat_edited", {})
             with self._meta_lock:
                 for sid in want:
+                    if edited.get(sid, 0) > started:          # graded while this read: yours is newer
+                        continue
                     self._meta[sid] = fetched.get(sid, {})
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._sync_hidden_from_ratings(rows)
@@ -5042,6 +5080,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return rows
 
     def _sync_hidden_from_ratings(self, rows: list[dict]) -> None:
+        with self.__dict__.setdefault("_hidden_lock", threading.RLock()):   # two quick 1★/unhide never drop one
+            return self._sync_hidden_from_ratings_unlocked(rows)
+
+    def _sync_hidden_from_ratings_unlocked(self, rows: list[dict]) -> None:
         """Keep the feed-hiding set in line with Stash: every 1★ (rejected) scene
         is hidden from feeds/boards, including ones rejected in Stash itself;
         in-scope scenes that are no longer 1★ are unhidden."""
@@ -5071,6 +5113,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         sid = str(sid)
         with self._meta_lock:
             self._meta[sid] = fresh
+            self._cat_edit_seq = self.__dict__.get("_cat_edit_seq", 0) + 1
+            self.__dict__.setdefault("_cat_edited", {})[sid] = self._cat_edit_seq
         row = self._cat_row(sid, fresh)
         cached = getattr(self, "_cat_cache", None)
         if cached:
@@ -5455,6 +5499,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return {"auto_legendaire_on_save": bool(self._settings().get("auto_legendaire_on_save", True)),
                 "follow_renamer": self.follow_renamer_on(), "today_goal": self.today_goal()}
 
+    @_settings_saver
     def save_curation_settings(self, auto_legendaire_on_save: bool | None = None,
                                follow_renamer: bool | None = None, today_goal: int | None = None) -> dict:
 
@@ -5772,7 +5817,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             scores, _ = self._taste_scores(model)
         except Exception:  # noqa: BLE001
             scores = None
-        tag = (id(idx), id(scores))
+        tag = (getattr(idx, 'gen', id(idx)), id(scores))
         cache = getattr(self, "_vis_feat_cache", None)
         if cache is None or cache[0] != tag:
             cache = (tag, {})
@@ -5823,6 +5868,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return str(sid) in d or bool(fp and fp in self._no_learn_fps())
 
     def _set_no_learn(self, sid: str, fp: str | None, on: bool) -> None:
+        from .. import atomic
+
+        with atomic.edit_lock(self._no_learn_path()):            # one read-change-save at a time
+            return self._set_no_learn_unlocked(sid=sid, fp=fp, on=on)
+
+    def _set_no_learn_unlocked(self, sid: str, fp: str | None, on: bool) -> None:
         d = dict(self._no_learn())
         sid = str(sid)
         if on == (sid in d) and (not on or d.get(sid) == fp):
@@ -5981,7 +6032,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             return cached[1] if cached else {}
         # valid for this model + this index build (new embeds → new index → re-score)
         pics = self._picture_entries()
-        key = (id(st["model"]), id(self.index(self._model_name())), len(rows), id(pics))
+        key = (id(st["model"]), getattr(self.index(self._model_name()), 'gen', 0), len(rows), id(pics))
         cached = getattr(self, "_tier_preds", None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -6397,7 +6448,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _frame_cache_path(self, key: str, time: float, size: int):
         from pathlib import Path
 
-        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(key))[:120] or "_"
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(key))[:120] or "_"
         return Path(self.cfg.embedding.cache_dir) / "_frames" / safe / f"{float(time):g}-{int(size)}.jpg"
 
     def frame_cached(self, key: str, time: float, size: int) -> bytes | None:
@@ -6493,9 +6544,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             if not model or not cache.has(key, model):
                 continue
             try:
-                times, vecs, m = cache.load(key, model)
-                m["path"] = new
-                cache.save(key, model, times, vecs, meta=m)
+                with atomic.edit_lock(cache._file(key, model)):   # a job's save of this entry can't be undone
+                    times, vecs, m = cache.load(key, model)
+                    m["path"] = new
+                    cache.save(key, model, times, vecs, meta=m)
             except Exception:  # noqa: BLE001 — leave that entry for a Sync
                 continue
         with self._index_lock:

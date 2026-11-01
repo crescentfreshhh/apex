@@ -32,7 +32,9 @@ def failure_log_for(cfg) -> "FailureLog":
 class FailureLog:
     def __init__(self, path: Path | str):
         self.path = Path(path)
-        self._lock = threading.Lock()
+        from .atomic import _lock
+
+        self._lock = _lock(self.path)       # one lock per file, shared by every FailureLog on it
 
     def _load(self) -> dict[str, dict]:
         if not self.path.exists():

@@ -16,6 +16,9 @@ says it helps.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 import time
 
 import numpy as np
@@ -68,13 +71,16 @@ class HearMixin:
         h = self._settings().get("hearing") or {}
         return {"on": bool(h.get("on", True)), "per_run": int(h.get("per_run") or HEAR_PER_RUN)}
 
+    @_settings_saver
     def save_hear_settings(self, on: bool | None = None, per_run: int | None = None) -> dict:
         s = dict(self._settings())
         h = dict(s.get("hearing") or {})
+        from .inputs import as_bool, as_int
+
         if on is not None:
-            h["on"] = bool(on)
+            h["on"] = as_bool(on, "on")
         if per_run is not None:
-            h["per_run"] = max(1, min(5000, int(per_run)))
+            h["per_run"] = max(1, min(5000, as_int(per_run, "per_run")))
         s["hearing"] = h
         self._save_settings_dict(s)
         return self.hear_settings()
@@ -88,8 +94,8 @@ class HearMixin:
         """scene_id → cache key, for scenes in the visual index (the key is the file's)."""
         idx = self.index(self._model_name())
         hit = self.__dict__.get("_hear_keys_cache")
-        if hit is None or hit[0] is not idx:
-            hit = (idx, {str(m.get("scene_id")): k for k, m in idx.key_meta.items()})
+        if hit is None or hit[0] != idx.gen:          # by build number: never pins an old index in memory
+            hit = (idx.gen, {str(m.get("scene_id")): k for k, m in idx.key_meta.items()})
             self._hear_keys_cache = hit
         return hit[1]
 
@@ -233,13 +239,14 @@ class HearMixin:
         from .. import atomic
 
         p = self._senses_runs_path()
-        try:
-            d = json.loads(p.read_text())
-        except (OSError, ValueError):
-            d = {}
-        d[kind] = {"at": time.time(), **rec}
-        p.parent.mkdir(parents=True, exist_ok=True)
-        atomic.write_json(p, d, indent=1)
+        with atomic.edit_lock(p):                     # Hearing and Motion both write here
+            try:
+                d = json.loads(p.read_text())
+            except (OSError, ValueError):
+                d = {}
+            d[kind] = {"at": time.time(), **rec}
+            p.parent.mkdir(parents=True, exist_ok=True)
+            atomic.write_json(p, d, indent=1)
 
     def sense_clear(self, kind: str) -> None:
         """Forget the last run's record and error: the card starts clean."""
@@ -249,12 +256,13 @@ class HearMixin:
 
         setattr(self, f"_{kind}_error", None)
         p = self._senses_runs_path()
-        try:
-            d = json.loads(p.read_text())
-        except (OSError, ValueError):
-            return
-        if d.pop(kind, None) is not None:
-            atomic.write_json(p, d, indent=1)
+        with atomic.edit_lock(p):
+            try:
+                d = json.loads(p.read_text())
+            except (OSError, ValueError):
+                return
+            if d.pop(kind, None) is not None:
+                atomic.write_json(p, d, indent=1)
 
     def sense_last_run(self, kind: str) -> dict | None:
         import json
@@ -352,7 +360,8 @@ class HearMixin:
             et, ef, ct, cv = s
             loud = np.interp(ct, et, ef[:, ENV_FEATURES.index("loudness")]) if len(et) else None
             out = visual_features(cv, loud)
-        memo[str(sid)] = out
+        if out is not None:                  # a miss is never remembered: the scene may be heard any moment
+            memo[str(sid)] = out
         return out
 
     # --- search by sound -----------------------------------------------------------------------

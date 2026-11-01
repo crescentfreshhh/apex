@@ -205,7 +205,7 @@ class ArbiterMixin:
         except Exception:  # noqa: BLE001
             return None
         cached = self.__dict__.get("_arb_words_cache")
-        if cached and cached[0] == id(idx):
+        if cached and cached[0] == getattr(idx, 'gen', id(idx)):
             return cached[1]
         labels, mat = self._vocab_matrix()
         sids, vecs = [], []
@@ -219,7 +219,7 @@ class ArbiterMixin:
         S = np.stack(vecs) @ mat.T
         Z = (S - S.mean(axis=0)) / np.maximum(S.std(axis=0), 1e-6)
         out = (labels, {s: i for i, s in enumerate(sids)}, Z.astype(np.float32))
-        self._arb_words_cache = (id(idx), out)
+        self._arb_words_cache = (getattr(idx, 'gen', id(idx)), out)
         return out
 
     def _arb_concept_table(self, rows):

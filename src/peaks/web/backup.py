@@ -18,6 +18,9 @@ back and reloads Peaks — no restart.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 from .. import atomic
 
 import hashlib
@@ -62,11 +65,20 @@ class BackupMixin:
         s = self._settings()
         return {k: s.get(k, v) for k, v in DEFAULTS.items()}
 
+    @_settings_saver
     def save_backup_settings(self, **kw) -> dict:
         s = dict(self._settings())
+        from .inputs import as_bool, as_int
+
+        bounds = {"backup_day": (0, 6), "backup_hour": (0, 23), "backup_minute": (0, 59), "backup_keep": (1, 52)}
         for k, v in kw.items():
             if k in DEFAULTS and v is not None:
-                s[k] = type(DEFAULTS[k])(v)
+                if isinstance(DEFAULTS[k], bool):
+                    s[k] = as_bool(v, k)
+                elif isinstance(DEFAULTS[k], int):
+                    s[k] = as_int(v, k, *bounds.get(k, (None, None)))
+                else:
+                    s[k] = type(DEFAULTS[k])(v)
         s["backup_keep"] = max(1, int(s.get("backup_keep", 4)))
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)

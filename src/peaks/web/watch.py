@@ -17,6 +17,9 @@ records what's already there as handled — only what arrives afterwards counts.
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 from .. import atomic
 
 import json
@@ -48,6 +51,7 @@ class WatchMixin:
         out["watch_paths"] = [str(p) for p in (out["watch_paths"] or []) if str(p).strip()]
         return out
 
+    @_settings_saver
     def save_watch_settings(self, on: bool | None = None, paths: list[str] | None = None,
                             settle: int | None = None, quiet: int | None = None) -> dict:
         s = dict(self._settings())
@@ -64,10 +68,12 @@ class WatchMixin:
                 if p and p not in clean:
                     clean.append(p)
             s["watch_paths"] = clean
+        from .inputs import as_int
+
         if settle is not None:
-            s["watch_settle"] = max(30, min(3600, int(settle)))
+            s["watch_settle"] = max(30, min(3600, as_int(settle, "settle")))
         if quiet is not None:
-            s["watch_quiet"] = max(0, min(3600, int(quiet)))
+            s["watch_quiet"] = max(0, min(3600, as_int(quiet, "quiet")))
         path = self._settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic.write_json(path, s, indent=2, trailing_newline=True)

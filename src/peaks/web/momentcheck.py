@@ -15,6 +15,9 @@ top picks for that scene (the same well-spaced picking as the moment strips).
 
 from __future__ import annotations
 
+from ..atomic import settings_saver as _settings_saver
+
+
 import json
 import time
 from pathlib import Path
@@ -93,6 +96,7 @@ class MomentCheckMixin:
     def pick_prompts_on(self) -> bool:
         return bool(self._settings().get("pick_prompts", True))
 
+    @_settings_saver
     def set_pick_prompts(self, on: bool) -> bool:
         from .. import atomic
 
@@ -115,7 +119,7 @@ class MomentCheckMixin:
         idx = self.index(model)
         arr, sources = self._taste_sources(model)
         cached = self.__dict__.get("_mc_est_cache")
-        sig = (id(idx), int(arr.shape[0]))
+        sig = (getattr(idx, 'gen', id(idx)), int(arr.shape[0]))
         if cached and cached[0] == sig:
             return cached[1]
         apex = [s for s in sources if s.get("kind") == "apex" and s.get("scene_id")]

@@ -62,6 +62,16 @@ class LabMixin:
         d.setdefault("trials", {})
         return d
 
+    def _lab_edit(self, fn) -> None:
+        """Read lab.json, change it with `fn`, save — one at a time (the trial and
+        a Delete click both write it)."""
+        from .. import atomic
+
+        with atomic.edit_lock(self._lab_path()):
+            d = self._lab_state()
+            if fn(d) is not False:
+                self._lab_save(d)
+
     def _lab_save(self, d: dict) -> None:
         from .. import atomic
 
@@ -216,10 +226,11 @@ class LabMixin:
             if d.is_dir():
                 freed += self._dir_bytes(d)[0]
                 shutil.rmtree(d, ignore_errors=True)
-        st = self._lab_state()
-        if cand in st["trials"]:
+        def mark(st):
+            if cand not in st["trials"]:
+                return False
             st["trials"][cand]["data_deleted"] = True
-            self._lab_save(st)
+        self._lab_edit(mark)
         return {"deleted": cand, "freed_bytes": freed}
 
     @staticmethod
@@ -444,13 +455,9 @@ class LabMixin:
         try:
             out = self._run_lab(cand, job)
         except Exception as exc:  # noqa: BLE001
-            d = self._lab_state()
-            d.setdefault("errors", {})[cand] = {"error": str(exc), "at": time.time()}
-            self._lab_save(d)
+            self._lab_edit(lambda d: d.setdefault("errors", {}).__setitem__(cand, {"error": str(exc), "at": time.time()}))
             raise
-        d = self._lab_state()
-        if d.get("errors", {}).pop(cand, None) is not None:
-            self._lab_save(d)
+        self._lab_edit(lambda d: d.get("errors", {}).pop(cand, None) is not None)
         return out
 
     def _run_lab(self, cand: str, job=None) -> dict:
@@ -493,9 +500,7 @@ class LabMixin:
                  "speed_fps": None if fps is None else round(fps, 1),
                  "switch_hours": None if est is None else round(est, 1),
                  "library_frames": int(idx.size), "sample_frames": int(sample_frames)}
-        d = self._lab_state()
-        d["trials"][cand] = trial
-        self._lab_save(d)
+        self._lab_edit(lambda d: d["trials"].__setitem__(cand, trial))
         log("lab: " + verdict["verdict"])
         return trial
 

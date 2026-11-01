@@ -154,40 +154,47 @@ class TodayMixin:
         return taken
 
     def _today_state(self, ctx: dict, more: bool = False) -> dict:
+        from .. import atomic
+
         d = self._load_today()
-        if d is None or more:
-            queues = {j: self._job_queue(j, ctx) for j in JOBS}
-            base = d or {"date": time.strftime("%Y-%m-%d"), "items": [], "done": [], "skipped": []}
-            have = {it["scene_id"] for it in base["items"]}
-            new = self._mix(queues, self.today_goal(), have)
-            for it in new:
-                it["tier"] = (ctx["by"].get(it["scene_id"]) or {}).get("tier")
-            base["items"] += new
-            d = base
-            self._save_today(d)
-        # graded anywhere else since it was picked → done
-        changed = False
-        for it in d["items"]:
-            row = ctx["by"].get(it["scene_id"])
-            if it["scene_id"] not in d["done"] and (row is None or row["tier"] != it.get("tier")):
-                d["done"].append(it["scene_id"])
-                changed = True
-        if changed:
-            self._save_today(d)
+        queues = {j: self._job_queue(j, ctx) for j in JOBS} if (d is None or more) else None   # slow: unlocked
+        with atomic.edit_lock(self._today_path()):          # a mark made meanwhile is kept
+            d = self._load_today()
+            if queues is not None:
+                base = d or {"date": time.strftime("%Y-%m-%d"), "items": [], "done": [], "skipped": []}
+                have = {it["scene_id"] for it in base["items"]}
+                new = self._mix(queues, self.today_goal(), have)
+                for it in new:
+                    it["tier"] = (ctx["by"].get(it["scene_id"]) or {}).get("tier")
+                base["items"] += new
+                d = base
+                self._save_today(d)
+            # graded anywhere else since it was picked → done
+            changed = False
+            for it in d["items"]:
+                row = ctx["by"].get(it["scene_id"])
+                if it["scene_id"] not in d["done"] and (row is None or row["tier"] != it.get("tier")):
+                    d["done"].append(it["scene_id"])
+                    changed = True
+            if changed:
+                self._save_today(d)
         return d
 
     def today_mark(self, scene_id: str, skip: bool = False, undo: bool = False) -> dict:
         """Done (answered here), skipped (to the back of today's set), or — after
         an undo — back to not done."""
-        d = self._load_today() or {"date": time.strftime("%Y-%m-%d"), "items": [], "done": [], "skipped": []}
-        sid = str(scene_id)
-        if undo:
-            d["done"] = [s for s in d["done"] if s != sid]
-        elif skip:
-            d["skipped"] = [s for s in d["skipped"] if s != sid] + [sid]
-        elif sid not in d["done"]:
-            d["done"].append(sid)
-        self._save_today(d)
+        from .. import atomic
+
+        with atomic.edit_lock(self._today_path()):
+            d = self._load_today() or {"date": time.strftime("%Y-%m-%d"), "items": [], "done": [], "skipped": []}
+            sid = str(scene_id)
+            if undo:
+                d["done"] = [s for s in d["done"] if s != sid]
+            elif skip:
+                d["skipped"] = [s for s in d["skipped"] if s != sid] + [sid]
+            elif sid not in d["done"]:
+                d["done"].append(sid)
+            self._save_today(d)
         return {"done": len(d["done"])}
 
     # --- the page ---------------------------------------------------------------------
