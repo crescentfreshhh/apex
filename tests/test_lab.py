@@ -141,7 +141,10 @@ def test_the_lab_api(tmp_path, monkeypatch):
     c = TestClient(app_mod.create_app(svc.cfg))
     d = c.get("/api/lab").json()
     assert d["active"] == "dinov2_vits14" and d["running"] is None
-    assert {x["id"] for x in d["candidates"]} == {"dinov3_vitl16", "dinov3_vith16plus", "siglip2_so400m", "pe_core_l"}
+    assert {x["id"] for x in d["candidates"]} == {"dinov2_vitg14", "dinov3_vitl16", "dinov3_vith16plus",
+                                                  "siglip2_so400m", "pe_core_l"}
+    g = next(x for x in d["candidates"] if x["id"] == "dinov2_vitg14")
+    assert g["label"] == "DINOv2 ViT-G/14" and not g["licence"]
     assert c.post("/api/lab/dinov3_vith16plus/switch").status_code == 409     # never trialled
     assert c.post(f"/api/lab/{CAND}/switch").json()["dino_model"] == CAND
 
@@ -279,7 +282,7 @@ def test_image_text_candidates_are_registered(monkeypatch):
     from peaks import embedding as E
     from peaks.web.lab import CANDIDATES
 
-    assert {"siglip2_so400m", "pe_core_l"} <= set(CANDIDATES) <= set(E.DINO_BACKBONES)
+    assert {"siglip2_so400m", "pe_core_l", "dinov2_vitg14"} <= set(CANDIDATES) <= set(E.DINO_BACKBONES)
     assert E.dino_label("siglip2_so400m") == "SigLIP 2 So400m" and E.dino_label("pe_core_l") == "Perception Encoder L"
     assert E.dino_cache_name("siglip2_so400m") == "siglip2-so400m" and E.dino_cache_name("pe_core_l") == "pe-core-l"
     made = []

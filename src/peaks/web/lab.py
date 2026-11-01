@@ -35,7 +35,7 @@ def sign_test_p(wins: int, losses: int) -> float:
     n = wins + losses
     return sum(comb(n, i) for i in range(wins, n + 1)) / 2 ** n if n else 1.0
 
-CANDIDATES = ("dinov3_vitl16", "dinov3_vith16plus", "siglip2_so400m", "pe_core_l")
+CANDIDATES = ("dinov2_vitg14", "dinov3_vitl16", "dinov3_vith16plus", "siglip2_so400m", "pe_core_l")
 PER_TIER = 60             # graded scenes per tier in a trial
 SAMPLE_CAP = 400          # scenes per trial, saved-moment scenes included
 GRADE_WIN = 0.02          # grading accuracy margin for a win
