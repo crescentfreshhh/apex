@@ -79,3 +79,24 @@ def span(times, scores) -> tuple[float, float, float]:
         end += lo - start
         start = lo
     return round(max(0.0, start), 2), round(pk, 2), round(end, 2)
+
+
+def unit(x) -> np.ndarray:
+    """A curve rescaled to 0..1 within its window (a flat curve is all 0.5), so
+    two curves on different scales can be mixed."""
+    x = np.asarray(x, np.float64)
+    lo, rng = (float(x.min()), float(np.ptp(x))) if len(x) else (0.0, 0.0)
+    return (x - lo) / rng if rng > 0 else np.full(len(x), 0.5)
+
+
+def blend_scores(vis, mot, alpha: float = 0.5) -> np.ndarray:
+    """How it looks (frame taste) mixed with how it moves (motion taste), each
+    rescaled to 0..1 within the window."""
+    return (1 - alpha) * unit(vis) + alpha * unit(mot)
+
+
+def overlap(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Intersection over union of two [start, end] stretches (0..1)."""
+    inter = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+    union = max(a[1], b[1]) - min(a[0], b[0])
+    return inter / union if union > 0 else 0.0

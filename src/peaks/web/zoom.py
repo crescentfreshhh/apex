@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..moment_shape import FEATURES, WORDS, shape_features, span
+from ..moment_shape import FEATURES, WORDS, blend_scores, shape_features, span
 from .hear import SOUND_WORDS
 from .motion import MOTION_WORDS
 
@@ -321,6 +321,12 @@ class ZoomMixin:
                 concepts.append((slug, 1.0 / (1.0 + np.exp(-(vecs @ w + b)))))
         except Exception:  # noqa: BLE001
             concepts = []
+        curve = None
+        if self.motion_span_on():                     # motion sets the length too (it won the honest check)
+            try:
+                curve = self.motion_taste_curve(sid, times)
+            except Exception:  # noqa: BLE001
+                curve = None
         out = []
         for c in meta.get("candidates") or []:
             m = np.abs(times - c["c"]) <= ZOOM_HALF + 0.01
@@ -329,7 +335,7 @@ class ZoomMixin:
             f = shape_features(times[m], s[m], vecs[m], level)
             for slug, p in concepts:
                 f[f"concept:{slug}"] = float(p[m].max())
-            sp = span(times[m], s[m])
+            sp = span(times[m], s[m] if curve is None else blend_scores(s[m], curve[m]))
             f.update(self._window_senses(sid, c["c"], sp[1]))
             out.append({"c": c["c"], "kind": c["kind"], "taste": c.get("taste"), "span": sp, "feats": f})
         return out

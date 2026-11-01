@@ -957,6 +957,10 @@ def create_app(cfg=None):
         _motion_next["at"] = 0.0
         return {"ok": True}
 
+    @app.post("/api/motion/span-check")
+    def motion_span_check():
+        return service.motion_span_check()
+
     @app.post("/api/motion/settings")
     def motion_settings(body: dict = Body(...)):
         return service.save_motion_settings(on=body.get("on"), per_run=body.get("per_run"))

@@ -3737,6 +3737,21 @@ function senseCoverage(sense, st) {
   return `<p class="small">${c != null ? `${sense === "sound" ? "Heard" : "Seen"} ${n(c)} of ${of}` : "—"}</p>${last}
     ${st.error && !(r && r.stopped === st.error) ? `<p class="small lab-err">${esc(st.error)} ${r ? "" : clear}</p>` : ""}`;
 }
+function lengthRow(L, pc) {
+  const v = !L ? '<span class="faint">not tested yet</span>'
+    : L.on ? '<b class="lab-win">in use</b>'
+    : L.iou_with == null ? `<span class="faint" title="${esc(L.verdict || "")}">needs ${20 - (L.n || 0)} more</span>`
+    : '<span class="faint">not better yet</span>';
+  return `<tr><td>Moment length <span class="faint small" title="How much Peaks' start–end overlaps the start–end you set on saved moments">(overlap with yours)</span></td>
+    <td>${pc(L && L.iou_without)}</td><td>${pc(L && L.iou_with)}</td><td>${v} <a href="#" class="small" data-span-check>Check</a></td></tr>`;
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-span-check]");
+  if (!b) return;
+  e.preventDefault();
+  try { const r = await api("/api/motion/span-check", { method: "POST" }); toast(r.verdict); } catch (err) { toast(err.message, true); }
+  openLab();
+});
 function senseCard(x) {
   const pc = (v) => (v == null ? "—" : Math.round(100 * v) + "%");
   const st = x.status || {}, m = x.moments || {}, g = x.grading || {};
@@ -3750,7 +3765,8 @@ function senseCard(x) {
     ${senseCoverage(x.id, st)}
     <table class="htab cmp-t"><thead><tr><th></th><th>without</th><th>with</th><th></th></tr></thead><tbody>
       <tr><td>Finds your moments <span class="faint small">(top 3)</span></td><td>${pc((m.without || {}).top3)}</td><td>${pc((m.with || {}).top3)}</td><td>${verdict(m.in_use, (m.with || {}).top3, (m.without || {}).top3)}</td></tr>
-      <tr><td>Grades right</td><td>${pc(g.without)}</td><td>${pc(g.with)}</td><td>${verdict(g.in_use, g.with, g.without)}</td></tr></tbody></table>
+      <tr><td>Grades right</td><td>${pc(g.without)}</td><td>${pc(g.with)}</td><td>${verdict(g.in_use, g.with, g.without)}</td></tr>
+      ${x.id === "motion" ? lengthRow(x.length, pc) : ""}</tbody></table>
 
     <div class="row"><button class="btn sm" data-sense-run="${x.id}">Run now</button>
       <button class="btn sm ghost" data-sense-on="${x.id}" data-on="${st.settings && st.settings.on ? 0 : 1}">${st.settings && st.settings.on ? "Turn off" : "Turn on"}</button></div></div>`;

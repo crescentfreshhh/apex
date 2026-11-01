@@ -27,6 +27,8 @@ CLIP_FRAMES = 16          # frames per clip
 CLIP_FPS = 4.0            # → 4-second clips
 CLIP_EVERY = 4.0          # a clip centred every … seconds across a window
 WINDOW_HALF = 20.0        # the zoom window: ±20 s around a candidate
+SPAN_MIN_CASES = 20      # saved moments with an end, before motion may set lengths
+SPAN_WIN = 0.03           # mean overlap gain it needs (plus a sign test)
 MOTION_FEATURES: tuple[str, ...] = ("motion_taste", "motion_change_mean", "motion_change_max", "motion_like")
 MOTION_WORDS = {"motion_taste": "moves like your moments", "motion_change_mean": "the movement keeps changing",
                 "motion_change_max": "a change of pace", "motion_like": "moves like what you picked in the Lab"}
@@ -211,6 +213,10 @@ class MotionMixin:
         del embedder
         if done:
             self._senses_retrain(log)
+            try:
+                log("moment length: " + self.motion_span_check()["verdict"])
+            except Exception as exc:  # noqa: BLE001 — a check, never in the way
+                log(f"moment length: {exc}")
         return {"seen": done, "failed": run.failed}
 
     # --- what the moment model and the tier model get --------------------------------------
@@ -264,6 +270,114 @@ class MotionMixin:
                 taste = float((vw @ bank[0][others].T).max())
         return {"motion_taste": taste, "motion_change_mean": float(change.mean()),
                 "motion_change_max": float(change.max()), **self.sense_window_likes("motion", sid, centre, half)}
+
+    # --- moment length: how it moves, as well as how it looks -----------------------------
+
+    def motion_taste_curve(self, sid: str, times) -> np.ndarray | None:
+        """How much each moment of the scene moves like your saves in *other*
+        scenes, at the given times (from the 4-s clips around them); None when
+        the scene hasn't been watched there."""
+        m, bank = self._motion_load(sid), self._motion_bank()
+        if m is None or bank is None:
+            return None
+        others = bank[1] != str(sid)
+        if not others.any():
+            return None
+        t, v = m
+        times = np.asarray(times, np.float64)
+        if not len(times):
+            return None
+        near = np.abs(t[:, None] - times[None, :]).min(axis=1) <= CLIP_EVERY
+        if near.sum() < 2:
+            return None
+        tt, sim = t[near], (v[near] @ bank[0][others].T).max(axis=1)
+        o = np.argsort(tt)
+        return np.interp(times, tt[o], sim[o])
+
+    def _motion_span_path(self):
+        return self._state_dir() / "motion_span.json"
+
+    def motion_span_state(self) -> dict | None:
+        import json
+
+        hit = self.__dict__.get("_motion_span_memo")
+        if hit is not None:
+            return hit[0]
+        try:
+            st = json.loads(self._motion_span_path().read_text())
+        except (OSError, ValueError):
+            st = None
+        self._motion_span_memo = (st,)
+        return st
+
+    def motion_span_on(self) -> bool:
+        return bool((self.motion_span_state() or {}).get("on"))
+
+    def _zoom_saved_ranges(self) -> dict[str, list[tuple[float, float]]]:
+        """scene_id → your saved moments that have an end: [(start, end)]."""
+        out: dict[str, list[tuple[float, float]]] = {}
+        try:
+            for mk in self._saved_markers(self.cfg.markers.tag_name):
+                s, e = mk.get("seconds"), mk.get("end_seconds")
+                if mk.get("scene_id") and e and float(e) > float(s or 0):
+                    out.setdefault(str(mk["scene_id"]), []).append((float(s or 0), float(e)))
+        except Exception:  # noqa: BLE001 — Stash down: nothing to check against
+            pass
+        return out
+
+    def motion_span_check(self) -> dict:
+        """Does motion set a moment's start and end closer to yours? Each saved
+        moment with an end, in a zoomed and watched scene: Peaks' span from how it
+        looks alone vs looks + motion, scored by overlap with yours. Switched on
+        only for a clear, more-than-luck gain."""
+        import json
+
+        from .. import atomic
+        from ..moment_shape import blend_scores, overlap, span
+        from .lab import sign_test_p
+        from .zoom import ZOOM_HALF
+
+        zv = self._zoom_view()["scenes"]
+        without, with_ = [], []
+        for sid, ranges in self._zoom_saved_ranges().items():
+            e = zv.get(sid)
+            if not e:
+                continue
+            try:
+                times, vecs, _ = self._zoom_cache().load(e["key"], self._zoom_ns())
+            except (OSError, KeyError, ValueError):
+                continue
+            s = self._taste_block(vecs) if len(times) else None
+            if s is None:
+                continue
+            curve = self.motion_taste_curve(sid, times)
+            if curve is None:
+                continue
+            for a, b in ranges:
+                m = np.abs(times - (a + b) / 2) <= ZOOM_HALF + 0.01
+                if m.sum() < 2:
+                    continue
+                v0, v1 = span(times[m], s[m]), span(times[m], blend_scores(s[m], curve[m]))
+                without.append(overlap((v0[0], v0[2]), (a, b)))
+                with_.append(overlap((v1[0], v1[2]), (a, b)))
+        n = len(without)
+        st = {"n": n, "at": time.time(), "on": False, "iou_without": None, "iou_with": None, "p": None}
+        if n < SPAN_MIN_CASES:
+            st["verdict"] = f"not enough saved moments with an end in watched scenes yet ({n} of {SPAN_MIN_CASES})"
+        else:
+            w0, w1 = np.asarray(without), np.asarray(with_)
+            wins, losses = int((w1 > w0 + 1e-6).sum()), int((w0 > w1 + 1e-6).sum())
+            p = sign_test_p(wins, losses)
+            gain = float(w1.mean() - w0.mean())
+            st.update(iou_without=round(float(w0.mean()), 4), iou_with=round(float(w1.mean()), 4),
+                      p=round(p, 4), wins=wins, losses=losses, on=bool(gain >= SPAN_WIN and p <= 0.05))
+            st["verdict"] = (f"motion sets the length closer to yours — {round(100 * gain):+d} pts overlap, in use"
+                             if st["on"] else f"not better yet ({round(100 * gain):+d} pts overlap)")
+        p_ = self._motion_span_path()
+        p_.parent.mkdir(parents=True, exist_ok=True)
+        atomic.write_json(p_, st, indent=1)
+        self._motion_span_memo = (st,)
+        return st
 
     def motion_scene_vector(self, sid: str) -> np.ndarray | None:
         memo = self.__dict__.setdefault("_motion_vec_memo", {})

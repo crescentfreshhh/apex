@@ -28,6 +28,13 @@ from pathlib import Path
 
 import numpy as np
 
+
+def sign_test_p(wins: int, losses: int) -> float:
+    """Exact one-sided sign test: the chance of at least `wins` of the
+    disagreements going one way by a coin flip."""
+    n = wins + losses
+    return sum(comb(n, i) for i in range(wins, n + 1)) / 2 ** n if n else 1.0
+
 CANDIDATES = ("dinov3_vitl16", "dinov3_vith16plus", "siglip2_so400m", "pe_core_l")
 PER_TIER = 60             # graded scenes per tier in a trial
 SAMPLE_CAP = 400          # scenes per trial, saved-moment scenes included
@@ -100,6 +107,7 @@ class LabMixin:
                                          else tier.get("cv")) or {}).get("exact"),
                             "with": (tier.get(f"cv_with_{sid}") or {}).get("exact"),
                             "gain": tier.get(f"{sid}_gain"), "in_use": bool(tier.get(f"use_{sid}"))},
+                **({"length": self.motion_span_state()} if sid == "motion" else {}),
             })
         return out
 
@@ -409,11 +417,7 @@ class LabMixin:
             return None
         ra, rb = set(a.pop("right", [])), set(b.pop("right", []))
         only_b, only_a = len(rb - ra), len(ra - rb)
-        n = only_b + only_a
-
-        def tail(k: int) -> float:                     # P(at least k of n by a coin flip)
-            return sum(comb(n, i) for i in range(k, n + 1)) / 2 ** n if n else 1.0
-        p_better, p_worse = tail(only_b), tail(only_a)
+        p_better, p_worse = sign_test_p(only_b, only_a), sign_test_p(only_a, only_b)
         return {"only_candidate": only_b, "only_current": only_a, "p": round(min(p_better, p_worse), 4),
                 "better": p_better <= 0.05, "worse": p_worse <= 0.05}
 

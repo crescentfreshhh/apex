@@ -173,3 +173,70 @@ def test_a_broken_motion_model_stops_early_and_says_why(tmp_path, monkeypatch):
     assert r["seen"] == 0 and r["failed"] == 5
     st = svc.motion_status()
     assert "failed the same way" in st["last_run"]["stopped"] and "4 dimensions" in st["error"]
+
+
+# --- motion helps set a moment's length ------------------------------------------------------
+
+def test_a_motion_curve_moves_the_span_onto_the_movement():
+    from peaks.moment_shape import blend_scores, overlap, span
+
+    t = np.arange(28.0, 70.0, 2.0)
+    vis = np.full(len(t), 0.3)
+    vis[np.searchsorted(t, 44.0)] = 0.9                            # one frame looks best, at 44 s
+    mot = np.where((t >= 40) & (t <= 56), 0.8, 0.1)                # the movement is 40–56 s
+    a, _, b = span(t, vis)
+    assert b - a == 6 and overlap((a, b), (40, 56)) < 0.4          # looks alone: a 6 s sliver
+    a, _, b = span(t, blend_scores(vis, mot))
+    assert overlap((a, b), (40, 56)) > 0.7
+    assert overlap((0, 10), (5, 15)) == 5 / 15 and overlap((0, 1), (2, 3)) == 0.0
+
+
+def _span_world(tmp_path, monkeypatch, n=25, motion="follows", seed=0):
+    import peaks.web.service as svc_mod
+    from test_catalogue import _triage_svc
+
+    svc, _ = _triage_svc(tmp_path, monkeypatch)
+    rng = np.random.default_rng(seed)
+    t = np.arange(0.0, 120.0, 2.0)
+    vis = {}
+    for i in range(n):
+        v = 0.3 + 0.02 * rng.standard_normal(len(t))
+        v[np.searchsorted(t, 44.0)] = 0.9                           # one pretty frame inside the action
+        vis[f"m{i}"] = v
+    ranges = {sid: [(40.0, 56.0)] for sid in vis}
+    scenes = {sid: {"key": sid} for sid in vis}
+
+    class Cache:
+        def load(self, key, ns):
+            return t, np.stack([vis[key], np.zeros(len(t))], axis=1), {"candidates": [{"c": 48.0, "kind": "saved"}]}
+
+    def curve(self, sid, times):
+        if motion == "follows":
+            return np.where((times >= 40) & (times <= 56), 0.8, 0.1)
+        return np.random.default_rng(hash(sid) % 1000).random(len(times))
+    monkeypatch.setattr(svc_mod.Service, "_zoom_view", lambda self: {"scenes": scenes})
+    monkeypatch.setattr(svc_mod.Service, "_zoom_cache", lambda self: Cache())
+    monkeypatch.setattr(svc_mod.Service, "_taste_block", lambda self, v: np.asarray(v)[:, 0])
+    monkeypatch.setattr(svc_mod.Service, "motion_taste_curve", curve)
+    monkeypatch.setattr(svc_mod.Service, "_zoom_saved_ranges", lambda self: ranges)
+    monkeypatch.setattr(svc_mod.Service, "_window_senses", lambda self, *a: {})
+    return svc
+
+
+def test_motion_sets_lengths_only_when_it_lands_closer_to_yours(tmp_path, monkeypatch):
+    svc = _span_world(tmp_path, monkeypatch)
+    before = svc._zoom_windows("m0")[0]["span"]
+    st = svc.motion_span_check()
+    assert st["on"] and st["n"] == 25 and st["iou_with"] > st["iou_without"] + 0.1 and st["p"] <= 0.05
+    after = svc._zoom_windows("m0")[0]["span"]                     # the players' spans now follow the movement
+    assert after != before and after[0] >= 38 and after[2] <= 58
+    card = next(x for x in svc.lab()["senses"] if x["id"] == "motion")
+    assert card["length"]["on"]
+
+
+def test_motion_noise_or_too_few_saves_leave_lengths_alone(tmp_path, monkeypatch):
+    svc = _span_world(tmp_path, monkeypatch, motion="noise")
+    assert not svc.motion_span_check()["on"] and not svc.motion_span_on()
+    svc2 = _span_world(tmp_path / "b", monkeypatch, n=5)
+    st = svc2.motion_span_check()
+    assert not st["on"] and st["n"] == 5 and "not enough" in st["verdict"]
