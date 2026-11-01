@@ -181,3 +181,19 @@ def test_weekly_schedule(env):
     assert not svc.backup_due(now + 3 * 86400) or time.localtime(now + 3 * 86400).tm_wday == (t.tm_wday + 1) % 7
     svc.save_backup_settings(backup_on=False)
     assert not svc.backup_due(now)
+
+
+def test_restore_with_grades_uses_the_grade_file_from_the_snapshots_time_and_drops_old_copies(env, monkeypatch):
+    svc, conf, data = env
+    old = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600))
+    new = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + 3600))
+    (conf / "backups" / "grades-backup-20260101.json").write_text(json.dumps({"created": old, "count": 5}))
+    snap = svc.run_backup()["name"]
+    (conf / "backups" / "grades-backup-20260102.json").write_text(json.dumps({"created": new, "count": 9}))
+    assert svc.backup_restore_snapshot_preview(snap)["grade_file"]["name"] == "grades-backup-20260101.json"
+    applied = []
+    monkeypatch.setattr(Service, "backup_restore_apply", lambda self, job, name, confirm=False: applied.append(name) or {})
+    svc._vd_mem = {"stale": True}
+    svc.backup_restore(None, snap, confirm=True, grades=True)
+    assert applied == ["grades-backup-20260101.json"]          # never the newer one
+    assert "_vd_mem" not in svc.__dict__                        # the next save can't write the old state back

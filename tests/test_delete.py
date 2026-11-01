@@ -108,7 +108,9 @@ def test_training_keeps_the_reject_class_after_deletion(lib, monkeypatch):
     pytest.importorskip("sklearn")
     svc, stash = lib
     client = _api(svc, monkeypatch)
-    _wait(client, client.post("/api/catalogue/delete", json={"confirm": True}).json())
+    ids = client.get("/api/catalogue/delete-preview").json()["ids"]
+    assert client.post("/api/catalogue/delete", json={"confirm": True}).status_code == 400   # ids required
+    _wait(client, client.post("/api/catalogue/delete", json={"scene_ids": ids, "confirm": True}).json())
     assert not [s for s, v in stash.s.items() if v["rating100"] == 20]      # all gone
     rep = svc.train_tier_model()
     assert rep["trained"] and rep["remembered_rejects"] == 12

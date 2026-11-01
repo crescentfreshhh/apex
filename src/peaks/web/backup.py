@@ -286,7 +286,17 @@ class BackupMixin:
         for p in PARTS:
             parts[p] = {"snapshot": (man.get("parts", {}).get(p) or {}).get("files", 0),
                         "now": len(self._part_files(p))}
-        return {"name": name, "created": man.get("created"), "parts": parts, "bytes": man.get("bytes", 0)}
+        g = self._grade_file_for(man.get("created"))
+        return {"name": name, "created": man.get("created"), "parts": parts, "bytes": man.get("bytes", 0),
+                "grade_file": g}
+
+    def _grade_file_for(self, created) -> dict | None:
+        """The grade backup that goes with a snapshot: the newest one made at or
+        before it — never a later one (that would re-apply grades made since)."""
+        if not created:
+            return None
+        cut = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(float(created)))
+        return next((b for b in self.list_grade_backups() if b.get("created") and b["created"] <= cut), None)
 
     def backup_restore(self, job, name: str, confirm: bool = False, grades: bool = False) -> dict:
         """Put a snapshot back: safety snapshot of the current state first, then
@@ -319,7 +329,8 @@ class BackupMixin:
                 if want and _sha(tmp) != want:
                     tmp.unlink(missing_ok=True)
                     raise RuntimeError(f"checksum mismatch for {part}/{rel} — the snapshot is damaged")
-                os.replace(tmp, dest)
+                with atomic.edit_lock(dest):        # no save in progress can put the old file back after
+                    os.replace(tmp, dest)
                 have.discard(rel)
                 restored += 1
             # small parts come back exactly (files the snapshot didn't have go);
@@ -331,9 +342,12 @@ class BackupMixin:
         self._reload_after_restore()
         out = {"restored": restored, "safety": safety, "name": name}
         if grades:
-            snaps = self.list_grade_backups()
-            if snaps:
-                out["grades"] = self.backup_restore_apply(job, snaps[0]["name"], confirm=True)
+            g = self._grade_file_for(man.get("created"))
+            if g:
+                log(f"re-applying grades from {g['name']} (the grade backup from that snapshot's time)")
+                out["grades"] = self.backup_restore_apply(job, g["name"], confirm=True)
+            else:
+                log("no grade backup from before that snapshot — grades in Stash left as they are")
         return out
 
     def _reload_after_restore(self) -> None:
@@ -349,7 +363,10 @@ class BackupMixin:
         with self._taste_lock:
             self._taste.clear()
         for attr in ("_tier_state", "_tier_preds", "_cat_cache", "_who_cache", "_perf_dir_cache",
-                     "_perf_by_id", "_exposure", "_scale_cache", "_vis_feat_cache"):
+                     "_perf_by_id", "_exposure", "_scale_cache", "_vis_feat_cache",
+                     # in-memory copies of state files: else the next save writes the old state back
+                     "_vd_mem", "_dq_mem", "_orph_mem", "_watch_mem", "_motion_span_memo", "_motion_bank_cache",
+                     "_zoom_model_cache", "_hear_keys_cache", "_sound_vec_memo", "_motion_vec_memo"):
             self.__dict__.pop(attr, None)
         self._perf_stats_cache = None
 

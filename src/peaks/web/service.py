@@ -5489,7 +5489,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         tier = tier_of(cur.get("rating100"), cur.get("o_counter"))
         if tier not in self.PROMOTABLE:
             return None
-        self.grade_scene(sid, "legendaire", source="auto: saved a moment")
+        res = self.grade_scene(sid, "legendaire", source="auto: saved a moment")
+        self._promote_prev = (sid, res.get("previous"))     # so the save can hand back an undo
         return tier
 
     def _scene_moment_strips(self, scene_ids: list[str], n: int = 4,

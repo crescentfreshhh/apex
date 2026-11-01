@@ -117,10 +117,14 @@ class DupeQueueMixin:
             self._dq_save()
         return self._dq_public(it)
 
-    def dupe_queue_add_recommended(self, delete_file: bool = True) -> dict:
+    def dupe_queue_add_recommended(self, delete_file: bool = True, only: set[str] | None = None) -> dict:
+        """Queue the recommended keep for every group — or, with `only`, just the
+        groups you were looking at (keys: their scene ids, sorted, comma-joined)."""
         cached = getattr(self, "_dupe_cache", None) or {}
         added, skipped = 0, 0
         for g in list(cached.get("groups") or []):
+            if only is not None and ",".join(sorted(str(r["scene_id"]) for r in g["scenes"])) not in only:
+                continue
             keep = g["keep"]                                   # None: you rejected it, every copy goes
             others = [r["scene_id"] for r in g["scenes"] if r["scene_id"] != keep]
             try:

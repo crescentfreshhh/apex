@@ -1236,6 +1236,8 @@ class LibraryMixin:
             row = self._cat_put_row(sid, m)
             if not row["tag_state"]["needs_sync"]:
                 continue
+            if row["tier"] not in self.tier_tag_names():   # unreviewed / no tier tag: never touched on its own
+                continue
             try:
                 tags = self._tier_tag_list(m.get("tag_ids") or [], row["tier"])
                 self.client().update_scene(sid, tag_ids=tags, organized=True)

@@ -996,6 +996,7 @@ async function loadCopies(action) {
 wireJob($("#btn-score"), $("#score-status"), $("#score-log"), () => {
   const tag = $("#score-tag").value.trim();
   const write = $("#score-write").checked;
+  if (write && !confirm("Write markers to Stash for every scene the model scores above the threshold?\n\nThis creates markers from the model's output across your library, under your marker tag. Untick 'write' for a dry run first.")) return Promise.reject(new Error("Not started"));
   const qs = new URLSearchParams();
   if (tag) qs.set("tag", tag);
   if (write) qs.set("write", "true");
@@ -1470,8 +1471,9 @@ async function saveMoment(sid, t, end) {
     if (end != null && end > t) p.end = (+end).toFixed(2);   // a span: its own in/out points
     if (ptag()) p.tag = ptag();   // file the moment under the active profile's tag
     const r = await api(`/api/scene/${sid}/apex?` + new URLSearchParams(p), { method: "POST" });
+    if (r && r.promoted_from && r.previous) gradeUndo.push({ sid: String(sid), prev: r.previous, grade: "legendaire" });
     toast("Saved moment + added to taste @ " + fmt(t) + (PROFILE.isDefault() ? "" : ` · ${PROFILE.name}`)
-      + (r && r.promoted_from ? ` · scene promoted to ${gradeName("legendaire")}` : ""));
+      + (r && r.promoted_from ? ` · scene promoted to ${gradeName("legendaire")}${r.previous ? " — Z to undo the promotion" : ""}` : ""));
     if (r && r.promoted_from) refreshSidebar();
   } catch (e) { toast(e.message, true); }
 }
@@ -6319,11 +6321,18 @@ $("#btn-dupe-all")?.addEventListener("click", async () => {
   if (!gs.length) return;
   const df = dupeDeleteFiles();
   const bytes = gs.reduce((a, g) => a + g.reclaim, 0);
-  if (!confirm(`Keep the recommended copy in all ${gs.length} groups and ${df
-    ? `delete the other ${plural(gs.reduce((a, g) => a + g.scenes.length - 1, 0), "copy", "copies")} with their files (${fmtBytes(bytes)})`
-    : "remove the other copies from Stash (files stay on disk)"}?\n\nEach kept copy takes its group's highest tier first. Deletions run in the background — you can Stop or Clear the queue any time.`)) return;
+  const allGo = gs.filter((g) => !g.keep);              // a copy you rejected: every copy in it goes
+  const n = gs.reduce((a, g) => a + g.scenes.length - (g.keep ? 1 : 0), 0);
+  if (!confirm(`Keep the recommended copy in ${gs.length - allGo.length} group${gs.length - allGo.length === 1 ? "" : "s"} and ${df
+    ? `delete ${plural(n, "other copy", "other copies")} with their files (${fmtBytes(bytes)})`
+    : `remove ${plural(n, "other copy", "other copies")} from Stash (files stay on disk)`}?`
+    + (allGo.length ? `\n\n${plural(allGo.length, "group")} keep NOTHING — you rejected them, so every copy goes:\n` + allGo.slice(0, 8).map((g) => "  · " + (g.scenes[0]?.title || g.scenes[0]?.scene_id)).join("\n") + (allGo.length > 8 ? "\n  …" : "") : "")
+    + `\n\nEach kept copy takes its group's highest tier first. Deletions run in the background — you can Stop or Clear the queue any time.`)) return;
   try {
-    const r = await api("/api/duplicates/queue/recommended?delete_file=" + df, { method: "POST" });
+    const r = await api("/api/duplicates/queue/recommended?delete_file=" + df, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys: gs.map((g) => g.scenes.map((s) => s.scene_id).sort().join(",")) }),
+    });
     const d = await api("/api/duplicates"); if (d.groups) { dupe.data = d; renderDupes(); }
     renderDupeQueue(r);
     toast(`Queued ${plural(r.added, "group")}${r.skipped ? ` · ${r.skipped} skipped (already queued)` : ""}`);
@@ -7748,12 +7757,19 @@ async function loadSeedJobs() {
   const warn = (d.warnings || []).map((w) => `<div class="sj-alert alert">⚠ ${esc(w)}</div>`).join("") +
     (d.ingest_pending && d.ingest_pending.paths && d.ingest_pending.paths.length
       ? `<div class="sj-alert ok">Waiting to ingest new files in ${esc(d.ingest_pending.paths.join(", "))}</div>` : "");
+  sjLast = d;
   box.innerHTML = warn + (!d.settings.cutover ? `<div class="sj-alert warning">Not taken over yet — the Unraid scripts are still in charge. Switch them off, then tick the box in <a href="#" data-go="dashboard" data-sec="seedjobs">Settings → Seedbox jobs</a>.</div>` : "") +
     ["pull", "purge", "report"].map(row).join("") +
     `<h4>Latest report</h4>${sjReportHTML(d.report)}` + (alerts ? `<h4>Recent</h4>${alerts}` : "");
 }
+let sjLast = null;
 $("#sb-jobs")?.addEventListener("click", async (e) => {
   const b = e.target.closest(".sj-run"); if (!b) return;
+  if (b.dataset.k === "purge" && sjLast && sjLast.purge && !sjLast.purge.dry) {
+    const lp = sjLast.last_purge || {};
+    const n = lp.delete ?? lp.n;
+    if (!confirm(`Run the purge for real now?\n\nIt deletes finished torrents and their files on the seedbox${n != null ? ` (the last run marked ${n})` : ""}. This can't be undone.`)) return;
+  }
   b.disabled = true; b.textContent = "Running…";
   try {
     const job = await api(`/api/seedjobs/run/${b.dataset.k}`, { method: "POST" });

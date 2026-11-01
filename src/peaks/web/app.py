@@ -1569,13 +1569,9 @@ def create_app(cfg=None):
         caps = service.capabilities()
         if not caps["ops"].get("scenesDestroy"):
             raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
-        try:
-            ids = body.scene_ids
-            if ids is None:
-                ids = [r["scene_id"] for r in service._catalogue_all(refresh=True)
-                       if r["tier"] == "rejected"]
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(503, str(exc))
+        ids = body.scene_ids
+        if ids is None:          # only what you previewed: never "every 1★ there is right now"
+            raise HTTPException(400, "send the scene ids you previewed (delete-preview → ids)")
         if not ids:
             raise HTTPException(400, "no rejected scenes to delete")
         return _library_job(lambda j: service.delete_scenes(j, ids, confirm=True, reason="reject",
@@ -1987,11 +1983,13 @@ def create_app(cfg=None):
         return {"item": item, **service.dupe_queue_status()}
 
     @app.post("/api/duplicates/queue/recommended")
-    def dupe_queue_recommended(delete_file: bool = True):
+    def dupe_queue_recommended(delete_file: bool = True, body: dict | None = Body(None)):
         caps = service.capabilities()
         if not caps["ops"].get("scenesDestroy"):
             raise HTTPException(501, caps["reason"] or "this Stash version can't delete scenes")
-        out = service.dupe_queue_add_recommended(delete_file=delete_file)
+        keys = (body or {}).get("keys")
+        out = service.dupe_queue_add_recommended(delete_file=delete_file,
+                                                 only=set(keys) if isinstance(keys, list) else None)
         _dupe_drain()
         return out
 
@@ -2481,11 +2479,15 @@ def create_app(cfg=None):
             marker = service.create_apex(scene_id, t, end=end, tag=tag)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"Stash marker create failed: {exc}")
+        previous = None
         try:   # saving a moment makes the scene Légendaire (setting; promotable tiers only)
+            service._promote_prev = None
             promoted = service.promote_on_save(scene_id, tag=tag)
+            if promoted and (service._promote_prev or (None,))[0] == str(scene_id):
+                previous = service._promote_prev[1]
         except Exception:  # noqa: BLE001 — the save itself succeeded
             promoted = None
-        return {"marker": marker, "promoted_from": promoted}
+        return {"marker": marker, "promoted_from": promoted, "previous": previous}
 
     @app.get("/api/library/health")
     def library_health():

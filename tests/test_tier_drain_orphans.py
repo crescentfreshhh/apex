@@ -199,3 +199,45 @@ def test_the_create_performer_api(tmp_path, monkeypatch):
     d = c.post("/api/orphans/u1/create-performer", json={"name": "Eve (II)"}).json()
     assert d["created"] and d["scene"]["performers"] == ["Eve (II)"]
     assert not c.post("/api/orphans/a1/create-performer", json={"name": "eve (ii)"}).json()["created"]
+
+
+def test_an_ingest_never_marks_an_unreviewed_scene_organized_on_its_own():
+    """A new unreviewed scene that picked up a retired tier tag (Stash auto-tag)
+    needs a tag sync — but Peaks doesn't grade it, so the ingest leaves it alone."""
+    from peaks.web.library import LibraryMixin
+
+    writes = []
+
+    class Lib(LibraryMixin):
+        def _meta_client(self):
+            return type("C", (), {"scene_details": lambda _s, ids: {i: {"tag_ids": ["9"]} for i in ids}})()
+
+        def client(self):
+            return type("C", (), {"update_scene": lambda _s, sid, **k: writes.append((sid, k))})()
+
+        def _cat_put_row(self, sid, m):
+            tier = {"u1": "unreviewed", "k1": "exceptionnelle"}[sid]
+            return {"tier": tier, "path": "/x", "tag_state": {"needs_sync": True}}
+
+        def tier_tag_names(self):
+            return {"exceptionnelle": "Exc", "legendaire": "Leg"}
+
+        def _tier_tag_list(self, ids, tier):
+            return ["1"] if tier in self.tier_tag_names() else None
+
+        def invalidate_meta(self, sid):
+            pass
+
+        def _cat_update_row(self, sid):
+            return {"tier": "exceptionnelle", "path": "/x"}
+
+        def _watch_path(self, *a):
+            pass
+
+        def _log_scene(self, *a, **k):
+            pass
+
+        _cat_cache = None
+
+    Lib()._repair_new_tier_tags(["u1", "k1"], print)
+    assert [w[0] for w in writes] == ["k1"]                    # the keeper is repaired; the unreviewed one isn't touched
