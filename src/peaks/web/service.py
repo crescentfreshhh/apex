@@ -6370,7 +6370,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         from ..sampling import FrameSampler
 
-        sampler = FrameSampler(hwaccel=self.cfg.sampling.hwaccel)
+        # one frame: the CPU is as quick (no CUDA context to set up) and never fights
+        # a trial or Motion for GPU memory — a full GPU used to mean broken thumbnails
+        sampler = FrameSampler(hwaccel=None)
         img: Image.Image = sampler.grab_frame(path, time, width=size)
         img.thumbnail((size, size))
         buf = BytesIO()

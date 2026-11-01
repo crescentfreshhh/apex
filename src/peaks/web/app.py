@@ -8,6 +8,7 @@ added scenes once the GPU is gone).
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -28,6 +29,8 @@ JOB_FAMILY = {"ingest": "ingest", "embed": "embed", "fix": "embed", "warmup": "e
               "taste-measure": "taste", "playlist": "taste", "reel": "taste", "picture": "picture",
               "picture-dupes": "picture", "perf-photos": "picture", "upgrades": "upgrades", "seedbox": "upgrades"}
 from .service import IndexMemoryError, Service
+
+_log = logging.getLogger("peaks.web")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -2611,6 +2614,7 @@ def create_app(cfg=None):
 
     _FRAME_HEADERS = {"Cache-Control": "private, max-age=604800"}   # same key + time = same picture
     _frame_gate: dict = {}
+    _frame_failed: set = set()                      # say why once per file, not on every request
 
     def _frame_decode(key: str, t: float, size: int) -> bytes:
         path = service.path_for_key(key)
@@ -2619,10 +2623,18 @@ def create_app(cfg=None):
         if not Path(path).exists():          # renamed/moved (e.g. by the renamer after a grade)
             path = service.refresh_path(key) or path
         try:
-            data = service.frame_jpeg(path, t, size=size)
+            try:
+                data = service.frame_jpeg(path, t, size=size)
+            except Exception as exc:  # noqa: BLE001
+                if t < 1.0 or "no frame decoded" not in str(exc):
+                    raise
+                data = service.frame_jpeg(path, t - 1.0, size=size)   # past the last frame: a second earlier
         except Exception as exc:  # noqa: BLE001
             healed = service.refresh_path(key)   # moved between the check and the decode
             if not healed or healed == path:
+                if key not in _frame_failed:
+                    _frame_failed.add(key)
+                    _log.warning("thumbnail failed for %s @ %ss: %s", path, t, exc)
                 raise HTTPException(500, f"could not decode frame: {exc}")
             try:
                 data = service.frame_jpeg(healed, t, size=size)

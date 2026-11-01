@@ -86,3 +86,28 @@ def test_job_decoders_run_at_low_priority():
 
     out = subprocess.run(["sh", "-c", "nice"], capture_output=True, text=True, preexec_fn=background_priority)
     assert int(out.stdout.strip()) >= 10
+
+
+def test_thumbnails_decode_on_the_cpu_and_step_back_from_the_very_end(tmp_path, monkeypatch):
+    import peaks.sampling as sampling
+    import peaks.web.service as svc_mod
+
+    made = []
+
+    class Sampler:
+        def __init__(self, hwaccel=None, **k):
+            made.append(hwaccel)
+
+        def grab_frame(self, path, t, width=None):
+            from PIL import Image
+            if t > 99:
+                raise sampling.SamplerError(f"no frame decoded for {path}@{t}s")
+            return Image.new("RGB", (64, 36), (200, 0, 0))
+    monkeypatch.setattr(sampling, "FrameSampler", Sampler)
+    monkeypatch.setattr(svc_mod.Service, "path_for_key", lambda self, k: str(tmp_path / "v.mp4"))
+    (tmp_path / "v.mp4").write_bytes(b"x")
+    c, app = _client(tmp_path, monkeypatch, lambda: {})
+    assert c.get("/api/frame", params={"key": "k1", "t": 12}).headers["content-type"] == "image/jpeg"
+    assert made and all(h is None for h in made)                  # never -hwaccel for a thumbnail
+    r = c.get("/api/frame", params={"key": "k1", "t": 99.5})       # past the last frame
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"

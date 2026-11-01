@@ -3968,7 +3968,7 @@ function pickTick(v) {
   if (st.shown !== p) {                                    // a different moment: a different question
     st.shown = p;
     st.chip.dataset.t = p.t;
-    st.chip.innerHTML = `${p.thumb ? `<img data-pjump src="${p.thumb}" alt="" title="Watch it again" />` : ""}
+    st.chip.innerHTML = `${p.thumb ? `<img data-pjump src="${p.thumb}" alt="" title="Watch it again" onerror="this.remove()" />` : ""}
       <span>Peaks pick · <a href="#" data-pjump title="Jump back to this moment">${p.start != null ? `${fmt(p.start)}–${fmt(p.end)}` : fmt(p.t)}</a> · your kind of moment?</span>
       <button data-pv="1" title="Yes (+)">👍</button><button data-pv="0" title="No (−)">👎</button>
       ${p.start != null ? `<button data-psave title="Save this stretch as a moment, with its own in and out points">★</button>` : ""}`;
