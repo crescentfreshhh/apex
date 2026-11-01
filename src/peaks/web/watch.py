@@ -267,6 +267,8 @@ class WatchMixin:
         if job is not None:
             job.log(f"embedding {len(ids)} new scene(s) an ingest left for later")
         out = self.embed_new_scenes(job, ids)
+        if job is not None and job.cancelled:      # stopped: the rest stay owed (done ones skip in seconds)
+            return out
         with self._folder_watch_lock():
             self._save_followup(set(self.embed_followup()) - set(ids))
         return out

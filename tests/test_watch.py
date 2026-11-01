@@ -200,7 +200,7 @@ def test_owed_embeds_go_before_the_scheduled_pass(svc):
     svc.add_embed_followup(["7"])
     jobs = _Jobs()
     assert app_mod._scheduled_embeds(svc, jobs, {"last": 0.0}, 0, "run") == "followup"
-    assert jobs.started[0][1] == svc.run_embed_followup
+    assert getattr(jobs.started[0][1], "__wrapped__", None) == svc.run_embed_followup
 
 
 def test_watch_waits_for_a_running_embed(svc, folder, monkeypatch):

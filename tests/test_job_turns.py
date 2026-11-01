@@ -234,3 +234,54 @@ def test_a_stopped_ingest_is_a_stop_and_old_jobs_are_let_go():
     jm.start("last", lambda job: {})
     assert len(jm.list()) <= KEEP_JOBS + 2
     assert "fix" in app_mod.LIBRARY_WORK
+
+
+# --- your Stop sticks ------------------------------------------------------------------------
+
+class DueService(FakeService):
+    def index_loaded(self):
+        return True
+
+    def hear_due(self):
+        return True
+
+    def run_hear(self, job):
+        while not job.cancelled:
+            time.sleep(0.01)
+        return {}
+
+
+def test_a_stopped_sense_is_not_restarted_by_the_scheduler_today(tmp_path, monkeypatch):
+    c, jm = _app(tmp_path, monkeypatch)
+    svc = DueService()
+    app_mod._hear_next["at"] = 0.0
+    j = app_mod._start_hear(svc, jm)
+    assert j is not None
+    assert c.post(f"/api/jobs/{j.id}/cancel").status_code == 200
+    assert _wait(lambda: jm.running("hear") is None) and j.status == "cancelled"
+    app_mod._hear_next["at"] = 0.0
+    assert app_mod._start_hear(svc, jm) is None and jm.stopped_by_you("hear")     # not on its own
+    jm.stopped_until.pop("hear")
+    assert app_mod._start_hear(svc, jm) is not None                               # tomorrow (or you) again
+    jm.running("hear").request_cancel()
+
+
+def test_stopping_a_job_that_was_pausing_cancels_its_resume_and_waiting_work_can_be_cancelled(tmp_path, monkeypatch):
+    c, jm = _app(tmp_path, monkeypatch)
+    gate = threading.Event()
+    lab = jm.start("lab", _bg(gate, []), args={"cand": "dinov3_vitl16"})
+    app_mod._make_way(jm, "Ingest")
+    c.post(f"/api/jobs/{lab.id}/cancel")
+    assert _wait(lambda: lab.status != "running") and lab.status == "cancelled" and "lab" not in jm.paused
+    jm.pause_put("zoom", {"for": "Embedding", "args": {}, "at": 0})
+    assert c.delete("/api/jobs/waiting/zoom").json() == {"ok": True} and "zoom" not in jm.paused
+    assert jm.stopped_by_you("zoom") and c.delete("/api/jobs/waiting/zoom").status_code == 404
+    jm.stopped_until.clear()
+
+
+def test_switching_a_sense_off_stops_its_run(tmp_path, monkeypatch):
+    c, jm = _app(tmp_path, monkeypatch)
+    gate = threading.Event()
+    jm.start("motion", _bg(gate, []))
+    c.post("/api/motion/settings", json={"on": False})
+    assert _wait(lambda: jm.running("motion") is None)

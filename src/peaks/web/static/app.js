@@ -305,7 +305,8 @@ $("#bk-list")?.addEventListener("click", async (e) => {
   let p; try { p = await api(`/api/backup/${encodeURIComponent(name)}/preview`); } catch (err) { return toast(err.message, true); }
   const lines = Object.entries(p.parts).map(([k, v]) => `  ${k}: ${v.snapshot.toLocaleString()} files (you have ${v.now.toLocaleString()} now)`).join("\n");
   if (!confirm(`Restore the snapshot from ${new Date(p.created * 1000).toLocaleString()}?\n\n${lines}\n\nPeaks first takes a safety snapshot of how things are now, then puts this one back (taste, models, settings, playlists, logs, embeddings) and reloads — no restart.`)) return;
-  const grades = confirm("Also re-apply the grades in this snapshot to Stash?\n\nOnly needed for a new or rebuilt Stash. Cancel = leave Stash as it is.");
+  const gf = p.grade_file;
+  const grades = gf ? confirm(`Also re-apply grades to Stash from ${gf.name} (${gf.count} scenes, saved ${gf.created.replace("T", " ")} — the grade backup from that snapshot's time)?\n\nOnly needed for a new or rebuilt Stash. Cancel = leave Stash as it is.`) : false;
   try {
     const job = await api(`/api/backup/${encodeURIComponent(name)}/restore?confirm=true&grades=${grades}`, { method: "POST" });
     const j = await waitJob(job.id, () => { $("#bk-status").textContent = "restoring…"; });
@@ -6459,7 +6460,8 @@ function drawActlog(d) {
     const speed = j.per_item_s != null ? `${j.per_item_s < 10 ? j.per_item_s.toFixed(1) : Math.round(j.per_item_s)} s each · ${j.rate_per_min}/min` : "";
     if (j.stopping) return `<div class="actlog-job waiting fam-${j.family}">
       <div class="row between"><span><span class="actlog-tag">${esc(j.label)}</span></span>
-        <span class="small muted">⏸ ${esc(j.stage)} — stopping now${items ? ` · ${items}` : ""}</span></div></div>`;
+        <span class="small muted">⏸ ${esc(j.stage)} — stopping now${items ? ` · ${items}` : ""}
+          <button class="btn sm ghost" data-actlog-stop="${esc(j.id)}" title="Stop it for good — it won't resume on its own">Stop</button></span></div></div>`;
     return `<div class="actlog-job fam-${j.family}">
       <div class="row between"><span><span class="actlog-tag">${esc(j.label)}</span>${j.stage ? ` <span class="muted small">${esc(j.stage)}</span>` : ""}</span>
         <span class="small">${pct != null ? `<b>${pct}%</b>` : ""}${j.eta_s != null ? ` · <b>~${dur(j.eta_s)} left</b>` : ""}</span></div>
@@ -6468,7 +6470,8 @@ function drawActlog(d) {
         <span>running ${dur(j.elapsed_s)} <button class="btn sm ghost" data-actlog-stop="${esc(j.id)}">Stop</button></span></div></div>`;
   }).join("") + (d.waiting || []).map((w) => `<div class="actlog-job waiting fam-${w.family}">
       <div class="row between"><span><span class="actlog-tag">${esc(w.label)}</span>${w.detail ? ` <span class="muted small">${esc(w.detail)}</span>` : ""}</span>
-        <span class="small muted">⏸ waiting — ${w.queued ? "starts" : "resumes"} after ${esc(w.after || "the running job")}</span></div></div>`).join("")
+        <span class="small muted">⏸ waiting — ${w.queued ? "starts" : "resumes"} after ${esc(w.after || "the running job")}
+          <button class="btn sm ghost" data-actlog-unwait="${esc(w.kind)}" title="Take it off the list — it won't start on its own">Cancel</button></span></div></div>`).join("")
     || '<p class="faint small">Nothing is running. Scheduled work (embeds, ingest, Hearing, Motion…) shows up here the moment it starts.</p>';
   const chips = $("#actlog-chips");
   const present = new Set([...actlog.lines.map((l) => l.fam), ...d.running.map((j) => j.family)]);
@@ -6489,6 +6492,13 @@ document.addEventListener("click", async (e) => {
     try { localStorage.setItem("peaks.actlog.off", JSON.stringify([...actlog.off])); } catch {}
     actlog.since = actlog.since;                         // no refetch needed: redraw from what we have
     pollActlog();
+    return;
+  }
+  const u = e.target.closest("[data-actlog-unwait]");
+  if (u) {
+    u.disabled = true;
+    try { await api(`/api/jobs/waiting/${encodeURIComponent(u.dataset.actlogUnwait)}`, { method: "DELETE" }); toast("Taken off the list"); pollActlog(); }
+    catch (err) { u.disabled = false; toast(err.message, true); }
     return;
   }
   const s = e.target.closest("[data-actlog-stop]");

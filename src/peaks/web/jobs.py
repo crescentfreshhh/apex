@@ -140,6 +140,19 @@ class JobManager:
         self._hlock = threading.Lock()       # the history file — never held with _lock
         self._seq = 0
         self.on_finish: Callable[[Job], None] | None = None   # e.g. hand GPU memory back
+        self.stopped_until: dict[str, float] = {}   # kind → no automatic start before this (you stopped it)
+
+    def stop_by_you(self, kind: str) -> None:
+        """You stopped `kind` (or its waiting turn): nothing starts it on its own
+        again until tomorrow — starting it yourself lifts that."""
+        import datetime as _dt
+
+        tomorrow = _dt.datetime.combine(_dt.date.today() + _dt.timedelta(days=1), _dt.time(4, 0))
+        self.stopped_until[kind] = tomorrow.timestamp()
+        self.pause_pop(kind)
+
+    def stopped_by_you(self, kind: str) -> bool:
+        return time.time() < self.stopped_until.get(kind, 0.0)
 
     # --- the waiting list: read and changed only under its lock ---------------------------
 

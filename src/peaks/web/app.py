@@ -815,6 +815,7 @@ def create_app(cfg=None):
         from .jobs import Busy
 
         args = {"manual": True, **(args or {})}
+        jobs.stopped_until.pop(kind, None)              # you asked for it: your earlier Stop is lifted
         busy = [k for k in _others(kind) if jobs.running(k)]
         if not busy:
             try:
@@ -840,8 +841,22 @@ def create_app(cfg=None):
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "no such job")
+        if getattr(job, "paused_for", None):         # it was pausing for other work: now it's a stop
+            job.paused_for = None
+            job.log("stopped by you — it won't resume on its own")
         job.request_cancel()
+        if job.kind in PAUSABLE:
+            jobs.stop_by_you(job.kind)               # and the scheduler leaves it alone until tomorrow
         return job.as_dict(log_tail=1)
+
+    @app.delete("/api/jobs/waiting/{kind}")
+    def cancel_waiting(kind: str):
+        """Take waiting work off the list — it won't start on its own."""
+        if jobs.pause_pop(kind) is None:
+            raise HTTPException(404, "nothing of that kind is waiting")
+        if kind in PAUSABLE:
+            jobs.stop_by_you(kind)
+        return {"ok": True}
 
     # --- search -------------------------------------------------------------
 
@@ -938,7 +953,15 @@ def create_app(cfg=None):
 
     @app.post("/api/hear/settings")
     def hear_settings(body: dict = Body(...)):
-        return service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
+        out = service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
+        if body.get("on") is False:                  # switched off: the run in progress stops too
+            j = jobs.running("hear")
+            if j is not None:
+                j.paused_for = None
+                j.log("switched off — stopping")
+                j.request_cancel()
+            jobs.pause_pop("hear")
+        return out
 
     # --- the Lab's explorers: more of this / less of this ---------------------------
 
@@ -1001,7 +1024,15 @@ def create_app(cfg=None):
 
     @app.post("/api/motion/settings")
     def motion_settings(body: dict = Body(...)):
-        return service.save_motion_settings(on=body.get("on"), per_run=body.get("per_run"))
+        out = service.save_motion_settings(on=body.get("on"), per_run=body.get("per_run"))
+        if body.get("on") is False:                  # switched off: the run in progress stops too
+            j = jobs.running("motion")
+            if j is not None:
+                j.paused_for = None
+                j.log("switched off — stopping")
+                j.request_cancel()
+            jobs.pause_pop("motion")
+        return out
 
     # --- taste (explicit thumbs → personalized ranking) ---------------------
 
@@ -3003,6 +3034,7 @@ def _way_then(jobs: JobManager, for_what: str, target):
                 job.progress = {"stage": f"waiting for {names} to pause"}
                 _t.sleep(0.25)
         return target(job)
+    run.__wrapped__ = target
     return run
 
 
@@ -3081,7 +3113,8 @@ _PICTURE_WAIT_FOR = ("warmup", "ingest", "embed", "fix", "sync", "backup", "rest
 def _start_picture(service: Service, jobs: JobManager):
     """Measure picture quality — new files from the last ingest, plus the library
     if you switched that on — when nothing heavy is running."""
-    if any(jobs.running(k) for k in _PICTURE_WAIT_FOR) or _bg_turn_taken(jobs, "picture") or not service.picture_due():
+    if (jobs.stopped_by_you("picture") or any(jobs.running(k) for k in _PICTURE_WAIT_FOR)
+            or _bg_turn_taken(jobs, "picture") or not service.picture_due()):
         return None
     try:
         j = jobs.start("picture", service.run_picture, blockers=_others("picture"))
@@ -3100,7 +3133,8 @@ def _start_zoom(service: Service, jobs: JobManager):
     10 minutes, and only with the index already in memory (never loads it just to look)."""
     import time as _t
 
-    if (_t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion"))
+    if (_t.time() < _zoom_next["at"] or jobs.stopped_by_you("zoom")
+            or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion"))
             or _bg_turn_taken(jobs, "zoom")):
         return None
     if not service.index_loaded():                 # (cheap) — and no 10-minute wait for it
@@ -3127,7 +3161,8 @@ def _start_hear(service: Service, jobs: JobManager):
     (no model, no network) so it doesn't retry in a loop."""
     import time as _t
 
-    if _t.time() < _hear_next["at"] or any(jobs.running(k) for k in _HEAR_WAIT_FOR) or _bg_turn_taken(jobs, "hear"):
+    if (_t.time() < _hear_next["at"] or jobs.stopped_by_you("hear") or any(jobs.running(k) for k in _HEAR_WAIT_FOR)
+            or _bg_turn_taken(jobs, "hear")):
         return None
     if not service.index_loaded():
         return None
@@ -3154,7 +3189,8 @@ def _start_motion(service: Service, jobs: JobManager):
     Checked at most every 10 minutes; backs off an hour after a failure."""
     import time as _t
 
-    if _t.time() < _motion_next["at"] or any(jobs.running(k) for k in _MOTION_WAIT_FOR) or _bg_turn_taken(jobs, "motion"):
+    if (_t.time() < _motion_next["at"] or jobs.stopped_by_you("motion")
+            or any(jobs.running(k) for k in _MOTION_WAIT_FOR) or _bg_turn_taken(jobs, "motion")):
         return None
     if not service.index_loaded():
         return None
