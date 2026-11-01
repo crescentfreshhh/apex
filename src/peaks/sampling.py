@@ -142,6 +142,44 @@ def background_priority() -> None:
         except Exception:  # noqa: BLE001
             pass
 
+def lower_priority(pid: int) -> None:
+    """The same as background_priority, done from the parent once the decoder has
+    started: no code runs in the forked child (preexec_fn isn't safe in a
+    threaded server — a child can deadlock before it ever execs)."""
+    import os
+    import platform
+
+    try:
+        os.setpriority(os.PRIO_PROCESS, pid, 10)
+    except (OSError, AttributeError):
+        pass
+    nr = {"x86_64": 251, "aarch64": 30, "arm64": 30}.get(platform.machine())
+    if nr:
+        try:
+            import ctypes
+
+            ctypes.CDLL(None, use_errno=True).syscall(nr, 1, pid, 3 << 13)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run_low(cmd: list, timeout: float | None = None, text: bool = False) -> subprocess.CompletedProcess:
+    """subprocess.run(..., capture_output, check) at background priority, killed
+    after `timeout` seconds so a hung decoder can't hold a job forever."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text)
+    lower_priority(proc.pid)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        raise subprocess.CalledProcessError(-9, cmd, out, (err or ("" if text else b"")) +
+                                            ("decoder timed out" if text else b"decoder timed out"))
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 class SamplerError(RuntimeError):
     pass
 
@@ -455,7 +493,7 @@ class FrameSampler:
             "-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "-",
         ]
         try:
-            out = subprocess.run(cmd, capture_output=True, check=True, preexec_fn=background_priority)
+            out = run_low(cmd, timeout=max(120.0, 6 * duration))
         except FileNotFoundError as exc:
             raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
         except subprocess.CalledProcessError as exc:
@@ -603,9 +641,8 @@ class FrameSampler:
             "-",
         ]
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=background_priority
-            )
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            lower_priority(proc.pid)
         except FileNotFoundError as exc:
             raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
 
@@ -679,9 +716,8 @@ class FrameSampler:
             "-",
         ]
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=background_priority
-            )
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            lower_priority(proc.pid)
         except FileNotFoundError as exc:
             raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
 
@@ -757,8 +793,7 @@ class FrameSampler:
                 str(tmpdir / "f-%06d.jpg"),
             ]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                                      preexec_fn=background_priority)
+                proc = run_low(cmd, timeout=self.scene_timeout or None, text=True)
             except FileNotFoundError as exc:
                 raise SamplerError(f"{self.ffmpeg} not found on PATH") from exc
             except subprocess.CalledProcessError as exc:

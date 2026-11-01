@@ -271,6 +271,11 @@ class ZoomMixin:
         todo = self.zoom_todo()[: limit or per_run]
         saved = self._zoom_saved()
         if not todo:
+            if self.__dict__.pop("_retrain_owed", False):
+                try:
+                    self.train_moment_model()
+                except Exception as exc:  # noqa: BLE001
+                    log(f"moment model: {exc}")
             return {"zoomed": 0}
         embedder, sampler = _Lazy(self._embedder), _Lazy(self._zoom_sampler)
         done = failed = 0
@@ -290,6 +295,10 @@ class ZoomMixin:
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
         log(f"zoomed {done} scene(s){f', {failed} unreadable' if failed else ''}")
         del embedder
+        if getattr(job, "paused_for", None):
+            log("moment model retrain waits until it resumes")
+            return {"zoomed": done, "failed": failed}
+        self.__dict__.pop("_retrain_owed", None)
         try:
             rep = self.train_moment_model()
             log("moment model: " + (rep.get("verdict") or rep.get("reason") or "trained"))

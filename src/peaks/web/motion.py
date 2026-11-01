@@ -175,6 +175,8 @@ class MotionMixin:
         log = job.log if job else print
         todo = self.motion_todo()[: limit or self.motion_settings()["per_run"]]
         if not todo:
+            if self.__dict__.pop("_retrain_owed", False):
+                self._senses_retrain(log)
             return {"seen": 0}
         try:
             self._motion_log = log                        # a first run fetches the weights: say so
@@ -191,7 +193,7 @@ class MotionMixin:
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
                 log("stopped — the rest waits for the next run")
-                run.stopped = "you stopped it"
+                run.stopped = (f"paused for {job.paused_for}" if getattr(job, "paused_for", None) else "you stopped it")
                 break
             try:
                 self.motion_scene(row, embedder, sampler)
@@ -211,7 +213,9 @@ class MotionMixin:
         log(f"watched {done} scene(s){f', {run.failed} unreadable' if run.failed else ''}")
         self._sense_record("motion", {"done": done, **run.summary()})
         del embedder
-        if done:
+        if getattr(job, "paused_for", None):
+            log("retrain waits until it resumes")
+        elif done or self.__dict__.pop("_retrain_owed", False):
             self._senses_retrain(log)
             try:
                 log("moment length: " + self.motion_span_check()["verdict"])

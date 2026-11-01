@@ -11,12 +11,15 @@ index, so sound and picture line up. Pure numpy; the CLAP embedder (the sound's
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from typing import Iterator
 
 import numpy as np
 
 ENV_FEATURES: tuple[str, ...] = ("loudness", "onset", "brightness", "rhythm")
 FRAME = 0.05              # seconds per analysis frame inside the envelope
+STALL_S = 120.0           # an audio decode with no output for this long is killed
 RHYTHM_SPAN = 8.0         # seconds of onsets looked at for a steady beat
 
 
@@ -45,18 +48,28 @@ def decode_audio(path: str, sr: int, ffmpeg: str = "ffmpeg", block: float = 10.0
 def _blocks(path, sr, ffmpeg, block, hop):
     cmd = [ffmpeg, "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
     try:
-        from .sampling import background_priority
+        from .sampling import lower_priority
 
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                preexec_fn=background_priority)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        lower_priority(proc.pid)
     except FileNotFoundError as exc:
         raise AudioError(f"{ffmpeg} not found") from exc
+    stall = {"t": time.monotonic()}
+
+    def _watch():                         # no audio for STALL_S: the decoder hung — kill it
+        while proc.poll() is None:
+            if time.monotonic() - stall["t"] > STALL_S:
+                proc.kill()
+                return
+            time.sleep(2)
+    threading.Thread(target=_watch, daemon=True, name="audio-stall").start()
     nb, nh = int(block * sr), int(hop * sr)
     buf = np.zeros(0, np.float32)
     start = 0
     try:
         while True:
             chunk = proc.stdout.read(nh * 4)
+            stall["t"] = time.monotonic()
             if chunk:
                 buf = np.concatenate([buf, np.frombuffer(chunk[: len(chunk) // 4 * 4], np.float32)])
             while len(buf) >= nb:

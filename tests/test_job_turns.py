@@ -69,7 +69,10 @@ def test_background_senses_make_way_and_their_timers_clear(tmp_path):
     app_mod._make_way(jm, "Embedding")
     assert _wait(lambda: jm.running("hear") is None) and "hear" in jm.paused
     assert app_mod._resume_paused(FakeService(), jm) == ["hear"]
-    assert app_mod._hear_next["at"] == 0.0 and not jm.paused
+    assert app_mod._hear_next["at"] == 0.0 and jm.paused["hear"]["resuming"]       # its turn; still holds the queue
+    app_mod._hear_next["at"] = 99.0
+    app_mod._resume_paused(FakeService(), jm)
+    assert app_mod._hear_next["at"] == 99.0                                        # zeroed once, not every tick
 
 
 def test_nothing_pauses_without_a_running_background_job():
@@ -122,8 +125,8 @@ def test_the_background_lane_runs_one_job_at_a_time_in_order(tmp_path):
     assert app_mod._bg_turn_taken(jm, "hear") and app_mod._bg_turn_taken(jm, "picture")
     gate.set()
     assert _wait(lambda: jm.running("lab") is None)
-    assert app_mod._resume_paused(svc, jm) == ["hear"] and not jm.paused
-    assert not app_mod._bg_turn_taken(jm, "hear")
+    assert app_mod._resume_paused(svc, jm) == ["hear"] and jm.paused["hear"]["resuming"]
+    assert not app_mod._bg_turn_taken(jm, "hear") and app_mod._bg_turn_taken(jm, "picture")   # picture can't jump it
 
 
 def test_a_trial_asked_for_while_hearing_runs_goes_next(tmp_path, monkeypatch):
@@ -147,3 +150,87 @@ def test_a_trial_asked_for_while_hearing_runs_goes_next(tmp_path, monkeypatch):
     w = c.get("/api/activity/feed").json()["waiting"][0]
     assert w["kind"] == "lab" and w["queued"] and w["after"] == "Hearing"
     gate.set()
+
+
+# --- one GPU lane for user-started work too -------------------------------------------------
+
+def _app(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from peaks.config import Config
+
+    monkeypatch.setenv("PEAKS_SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("PEAKS_SCHEDULER", "0")
+    monkeypatch.setenv("PEAKS_WARM_ON_START", "0")
+    made = {}
+    real = app_mod.JobManager
+    monkeypatch.setattr(app_mod, "JobManager", lambda *a, **k: made.setdefault("jm", real(*a, **k)))
+    cfg = Config()
+    cfg.embedding.cache_dir = str(tmp_path / "cache")
+    c = TestClient(app_mod.create_app(cfg))
+    return c, made["jm"]
+
+
+def test_heavy_work_waits_until_the_paused_job_has_really_stopped(tmp_path):
+    jm = JobManager()
+    gate, order = threading.Event(), []
+
+    def slow_to_stop(job):
+        while not job.cancelled:
+            time.sleep(0.01)
+        time.sleep(0.3)                                       # finishing its scene
+        order.append("hear stopped")
+        return {}
+    jm.start("hear", slow_to_stop)
+
+    def embed(job):
+        order.append("embed ran")
+        return {}
+    jm.start("embed", app_mod._way_then(jm, "Embedding", embed))
+    assert _wait(lambda: len(order) == 2, 3) and order == ["hear stopped", "embed ran"]
+    assert "hear" in jm.paused
+
+
+def test_a_sense_asked_for_while_the_lane_is_busy_is_queued_not_doubled(tmp_path, monkeypatch):
+    c, jm = _app(tmp_path, monkeypatch)
+    gate = threading.Event()
+    jm.start("embed", _bg(gate, []))
+    for path, kind, after in (("/api/hear", "hear", "Embedding"), ("/api/motion", "motion", "Embedding"),
+                              ("/api/moments/zoom", "zoom", "Embedding")):
+        assert c.post(path).json() == {"queued": True, "after": after}
+        assert jm.running(kind) is None and jm.paused[kind]["args"]["manual"]
+    gate.set()
+    assert _wait(lambda: jm.running("embed") is None)
+
+
+def test_no_model_switch_mid_trial_and_blockers_are_atomic(tmp_path, monkeypatch):
+    from peaks.web.jobs import Busy
+
+    c, jm = _app(tmp_path, monkeypatch)
+    gate = threading.Event()
+    jm.start("zoom", _bg(gate, []))
+    r = c.post("/api/models", json={"dino_model": "dinov2_vitg14"})
+    assert r.status_code == 409 and "Moment zoom" in r.json()["detail"]
+    with pytest.raises(Busy):
+        jm.start("hear", lambda j: {}, blockers=("zoom",))
+    gate.set()
+
+
+def test_a_stopped_ingest_is_a_stop_and_old_jobs_are_let_go():
+    from peaks.web.jobs import KEEP_JOBS
+
+    jm = JobManager()
+
+    def ingest(job):
+        while not job.cancelled:
+            time.sleep(0.01)
+        raise InterruptedError("stopped")
+    j = jm.start("ingest", ingest)
+    j.request_cancel()
+    assert _wait(lambda: j.status != "running") and j.status == "cancelled"
+    for i in range(KEEP_JOBS + 20):
+        jm.start(f"k{i}", lambda job: {})
+    assert _wait(lambda: all(x.status != "running" for x in jm.list()))
+    jm.start("last", lambda job: {})
+    assert len(jm.list()) <= KEEP_JOBS + 2
+    assert "fix" in app_mod.LIBRARY_WORK

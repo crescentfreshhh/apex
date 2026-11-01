@@ -316,6 +316,15 @@ def create_app(cfg=None):
 
     service = Service(cfg)
     jobs = JobManager(history_path=service._state_dir() / "job_history.jsonl")
+
+    def _job_done(job):
+        if job.kind in GPU_JOBS:                     # hand the GPU memory back for whoever's next
+            from ..embedding import free_gpu
+
+            free_gpu()
+        if getattr(job, "paused_for", None) and job.kind in ("hear", "motion", "zoom"):
+            service._retrain_owed = True             # its retrain was skipped: the resumed run does it
+    jobs.on_finish = _job_done
     app = FastAPI(title="peaks", docs_url="/api/docs")
     from .compress import TextGzip
 
@@ -597,7 +606,8 @@ def create_app(cfg=None):
                 overrides["model"] = models[0]
             target = lambda j: service.run_embed(j, limit=limit, **overrides)  # noqa: E731
         try:
-            job = jobs.start("embed", target)
+            job = jobs.start("embed", _way_then(jobs, "Embedding", target),
+                             blockers=("ingest", "fix", "restore", "warmup"))
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         if save_to is not None:   # confirmed sampling change → the library's new setting
@@ -736,7 +746,8 @@ def create_app(cfg=None):
     @app.post("/api/sync")
     def start_sync(prune: bool = True):
         try:
-            job = jobs.start("sync", lambda j: service.run_sync(j, prune=prune))
+            job = jobs.start("sync", _way_then(jobs, "Sync", lambda j: service.run_sync(j, prune=prune)),
+                             blockers=("ingest", "embed", "fix", "restore"))
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()
@@ -750,7 +761,8 @@ def create_app(cfg=None):
     @app.post("/api/fix")
     def start_fix(limit: int = Query(0)):
         try:
-            job = jobs.start("fix", lambda j: service.run_fix(j, limit=limit))
+            job = jobs.start("fix", _way_then(jobs, "Retrying failed", lambda j: service.run_fix(j, limit=limit)),
+                             blockers=("ingest", "embed", "restore", "warmup", "sync"))
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()
@@ -783,7 +795,7 @@ def create_app(cfg=None):
         waiting = [{"kind": k, "label": JOB_LABELS.get(k, k), "family": JOB_FAMILY.get(k, "other"),
                     "after": e.get("for"), "since": e.get("at"), "queued": bool(e.get("queued")),
                     "detail": dino_label(e["args"]["cand"]) if k == "lab" and (e.get("args") or {}).get("cand") else None}
-                   for k, e in jobs.paused.items()]
+                   for k, e in jobs.paused_snapshot().items()]
         return {"now": _t.time(), "running": running, "finished": finished, "waiting": waiting,
                 "lines": lines[-400:]}
 
@@ -793,6 +805,35 @@ def create_app(cfg=None):
         if not job:
             raise HTTPException(404, "no such job")
         return job.as_dict()
+
+    def _bg_run(kind: str, target, args: dict | None = None):
+        """Start background work you asked for — or, when library work or another
+        background job has the GPU, queue it to start the moment the lane is free
+        (never two models at once)."""
+        import time as _t
+
+        from .jobs import Busy
+
+        args = {"manual": True, **(args or {})}
+        busy = [k for k in _others(kind) if jobs.running(k)]
+        if not busy:
+            try:
+                return jobs.start(kind, target, args=args, blockers=_others(kind)).as_dict()
+            except Busy as exc:
+                busy = [exc.kind]
+            except RuntimeError as exc:
+                raise HTTPException(409, str(exc))
+        after = JOB_LABELS.get(busy[0], busy[0])
+        jobs.pause_put(kind, {"for": after, "args": args, "at": _t.time(), "queued": True})
+        return {"queued": True, "after": after}
+
+    def _no_switch_while_running():
+        """A model switch mid-trial / mid-zoom / mid-senses would mix two models'
+        vectors under one name: finish or stop those first."""
+        busy = [k for k in ("lab", "zoom", "hear", "motion", "embed", "fix") if jobs.running(k)]
+        if busy:
+            raise HTTPException(409, f"{JOB_LABELS.get(busy[0], busy[0])} is running — "
+                                     "let it finish (or stop it) before switching models")
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
@@ -887,10 +928,7 @@ def create_app(cfg=None):
 
     @app.post("/api/hear")
     def hear_run():
-        try:
-            return jobs.start("hear", service.run_hear).as_dict()
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
+        return _bg_run("hear", service.run_hear)
 
     @app.post("/api/hear/clear-error")
     def hear_clear():
@@ -949,10 +987,7 @@ def create_app(cfg=None):
 
     @app.post("/api/motion")
     def motion_run():
-        try:
-            return jobs.start("motion", service.run_motion).as_dict()
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
+        return _bg_run("motion", service.run_motion)
 
     @app.post("/api/motion/clear-error")
     def motion_clear():
@@ -1365,6 +1400,8 @@ def create_app(cfg=None):
 
     @app.post("/api/models")
     def save_models(body: ModelsIn):
+        if body.dino_model and body.dino_model != service.get_models().get("dino_model"):
+            _no_switch_while_running()
         try:
             return service.save_models(
                 dino_model=body.dino_model, clip_model=body.clip_model,
@@ -1653,10 +1690,9 @@ def create_app(cfg=None):
         missing = [op for op in ("metadataScan", "findJob") if not caps["ops"].get(op)]
         if missing:
             raise HTTPException(501, caps["reason"] or f"this Stash version lacks {', '.join(missing)}")
-        _make_way(jobs, "Ingest")
         try:
-            job = jobs.start("ingest", lambda j: service.run_ingest(
-                j, embed_busy=lambda: jobs.running("embed") is not None))
+            job = jobs.start("ingest", _way_then(jobs, "Ingest", lambda j: service.run_ingest(
+                j, embed_busy=lambda: jobs.running("embed") is not None)))
         except RuntimeError as exc:
             raise HTTPException(409, str(exc))
         return job.as_dict()
@@ -2087,10 +2123,7 @@ def create_app(cfg=None):
 
     @app.post("/api/moments/zoom")
     def moments_zoom_run():
-        try:
-            return jobs.start("zoom", service.run_zoom).as_dict()
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
+        return _bg_run("zoom", service.run_zoom)
 
     @app.post("/api/moments/train")
     def moments_train():
@@ -2104,7 +2137,7 @@ def create_app(cfg=None):
     def _lab_busy():
         j = jobs.running("lab")
         running = (getattr(j, "args", None) or {}).get("cand") if j is not None else None
-        queued = ((jobs.paused.get("lab") or {}).get("args") or {}).get("cand")
+        queued = ((jobs.paused_snapshot().get("lab") or {}).get("args") or {}).get("cand")
         return running, queued
 
     @app.get("/api/lab/data")
@@ -2132,33 +2165,25 @@ def create_app(cfg=None):
 
     @app.post("/api/lab/{cand}/run")
     def lab_run(cand: str):
-        import time as _t
+        from .lab import CANDIDATES
 
-        lib = [k for k in LIBRARY_WORK if jobs.running(k)]
-        if lib:                                     # library work first: the trial starts right after
-            jobs.paused["lab"] = {"for": JOB_LABELS.get(lib[0], lib[0]), "args": {"cand": cand}, "at": _t.time(),
-                                  "queued": True}
-            return {"queued": True, "after": JOB_LABELS.get(lib[0], lib[0])}
-        busy = [k for k in (*_PICTURE_WAIT_FOR, "zoom", "hear", "motion") if jobs.running(k)]
-        if busy:                                    # another job has the lane: the trial goes next
-            jobs.paused["lab"] = {"for": JOB_LABELS.get(busy[0], busy[0]), "args": {"cand": cand},
-                                  "at": _t.time(), "queued": True}
-            return {"queued": True, "after": JOB_LABELS.get(busy[0], busy[0])}
-        try:
-            j = jobs.start("lab", lambda job: service.run_lab(cand, job=job))
-            j.args = {"cand": cand}
-            return j.as_dict()
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc))
+        if cand not in CANDIDATES:
+            raise HTTPException(404, f"unknown candidate: {cand}")
+        queued = ((jobs.paused_snapshot().get("lab") or {}).get("args") or {}).get("cand")
+        if queued and queued != cand:
+            raise HTTPException(409, "another trial is already waiting its turn — cancel it first")
+        return _bg_run("lab", lambda job: service.run_lab(cand, job=job), args={"cand": cand})
 
     @app.post("/api/lab/{cand}/switch")
     def lab_switch(cand: str):
+        _no_switch_while_running()
         try:
             out = service.lab_switch(cand)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         try:                                        # fill the new model's cache now (the sample is already in)
-            out["embed"] = jobs.start("embed", lambda job: service.run_embed(job)).as_dict()
+            out["embed"] = jobs.start("embed", _way_then(jobs, "Embedding", lambda job: service.run_embed(job)),
+                                      blockers=("ingest", "fix", "restore", "warmup")).as_dict()
         except RuntimeError:
             out["embed"] = None                     # one's running — the next pass picks it up
         return out
@@ -2477,7 +2502,7 @@ def create_app(cfg=None):
         """Save the schedule, or (run=true) take a snapshot now as a job."""
         if run:
             try:
-                return jobs.start("backup", service.run_backup).as_dict()
+                return jobs.start("backup", service.run_backup, blockers=("restore",)).as_dict()
             except RuntimeError as exc:
                 raise HTTPException(409, str(exc))
         return service.save_backup_settings(backup_on=backup_on, backup_day=backup_day, backup_hour=backup_hour,
@@ -2494,8 +2519,9 @@ def create_app(cfg=None):
     def backup_snapshot_restore(name: str, confirm: bool = False, grades: bool = False):
         try:
             service.backup_restore_snapshot_preview(name)          # exists?
-            return jobs.start("restore", lambda j: service.backup_restore(j, name, confirm=confirm,
-                                                                          grades=grades)).as_dict()
+            return jobs.start("restore", _way_then(jobs, "Restore", lambda j: service.backup_restore(
+                j, name, confirm=confirm, grades=grades)),
+                blockers=("ingest", "embed", "fix", "warmup", "sync", "backup", "library")).as_dict()
         except (ValueError, FileNotFoundError) as exc:
             raise HTTPException(404, str(exc))
         except RuntimeError as exc:
@@ -2916,16 +2942,14 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
     waits — and starts the minute the ingest ends — rather than being skipped."""
     import time as _t
 
-    if any(jobs.running(k) is not None for k in ("embed", "ingest", "warmup")):
+    if any(jobs.running(k) is not None for k in ("embed", "ingest", "warmup", "fix", "sync", "backup", "restore")):
         return None                                # warm-up first: never two big loads at once
     try:
         if service.embed_followup():
-            _make_way(jobs, "Embedding")
-            jobs.start("embed", service.run_embed_followup)
+            jobs.start("embed", _way_then(jobs, "Embedding", service.run_embed_followup))
             return "followup"
         if secs and secs > 0 and (_t.time() - state["last"]) >= secs:
-            _make_way(jobs, "Embedding")
-            jobs.start("embed", run)
+            jobs.start("embed", _way_then(jobs, "Embedding", run))
             state["last"] = _t.time()
             return "scheduled"
     except RuntimeError:
@@ -2939,7 +2963,9 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
 # between scenes and resumes from its cache), and is started again once the library
 # work is done.
 PAUSABLE = ("lab", "hear", "motion", "zoom", "picture")
-LIBRARY_WORK = ("ingest", "embed", "warmup", "sync", "backup", "restore")
+GPU_JOBS = ("embed", "ingest", "fix", "lab", "hear", "motion", "zoom")
+LIBRARY_WORK = ("ingest", "embed", "fix", "warmup", "sync", "backup", "restore")
+WAY_WAIT_S = 180.0          # how long heavy work waits for paused jobs to actually stop
 
 
 def _make_way(jobs: JobManager, for_what: str) -> list[str]:
@@ -2952,10 +2978,41 @@ def _make_way(jobs: JobManager, for_what: str) -> list[str]:
             continue
         j.paused_for = for_what
         j.log(f"paused for {for_what} — resumes automatically when it's done")
-        jobs.paused[k] = {"for": for_what, "args": dict(getattr(j, "args", None) or {}), "at": _t.time()}
+        jobs.pause_put(k, {"for": for_what, "args": dict(getattr(j, "args", None) or {}), "at": _t.time()})
         j.request_cancel()
         paused.append(k)
     return paused
+
+
+def _way_then(jobs: JobManager, for_what: str, target):
+    """`target`, run as heavy work: first it asks background jobs to pause, then
+    waits (up to WAY_WAIT_S) until they've really stopped — so two models never
+    share the GPU while one winds down. Done inside the job, so a start that
+    fails never pauses anything."""
+    import time as _t
+
+    def run(job):
+        stopping = [j for k in PAUSABLE if (j := jobs.running(k)) is not None and not j.cancelled]
+        _make_way(jobs, for_what)
+        if stopping:
+            names = ", ".join(JOB_LABELS.get(j.kind, j.kind) for j in stopping)
+            job.log(f"waiting for {names} to pause")
+            t0 = _t.time()
+            while (any(j.status == "running" for j in stopping) and _t.time() - t0 < WAY_WAIT_S
+                   and not job.cancelled):
+                job.progress = {"stage": f"waiting for {names} to pause"}
+                _t.sleep(0.25)
+        return target(job)
+    return run
+
+
+def _others(kind: str) -> tuple[str, ...]:
+    """Everything `kind` must not run beside: library work and the other background jobs."""
+    return tuple(k for k in (*LIBRARY_WORK, *PAUSABLE) if k != kind)
+
+
+_BG_TARGETS = {"hear": lambda s: s.run_hear, "motion": lambda s: s.run_motion,
+               "zoom": lambda s: s.run_zoom, "picture": lambda s: s.run_picture}
 
 
 # background work shares one lane — never two at once; what waits goes in this order
@@ -2968,31 +3025,42 @@ def _bg_turn_taken(jobs: JobManager, kind: str) -> bool:
     if any(jobs.running(k) for k in PAUSABLE if k != kind):
         return True
     rank = RESUME_ORDER.index(kind) if kind in RESUME_ORDER else len(RESUME_ORDER)
-    return any(k in jobs.paused for k in RESUME_ORDER[:rank])
+    waiting = jobs.paused_snapshot()
+    return any(k in waiting for k in RESUME_ORDER[:rank])
 
 
 def _resume_paused(service: Service, jobs: JobManager) -> list[str]:
     """Start again — one at a time — what made way or was queued, once no library
-    work and no other background job is running."""
-    if not jobs.paused or any(jobs.running(k) for k in (*LIBRARY_WORK, *PAUSABLE)):
+    work and no other background job is running. A waiting entry leaves the list
+    only once its job has actually started (or turned out not to be due), so
+    nothing behind it can jump the queue meanwhile."""
+    waiting = jobs.paused_snapshot()
+    if not waiting or any(jobs.running(k) for k in (*LIBRARY_WORK, *PAUSABLE)):
         return []
     timers = {"hear": _hear_next, "motion": _motion_next, "zoom": _zoom_next}
-    out = []
-    for k in [k for k in RESUME_ORDER if k in jobs.paused][:1]:
-        e = jobs.paused[k]
-        if k == "lab":
-            cand = (e.get("args") or {}).get("cand")
-            if cand:
-                try:
-                    j = jobs.start("lab", lambda job, c=cand: service.run_lab(c, job=job))
-                    j.args = {"cand": cand}
-                except RuntimeError:
-                    continue
-        elif k in timers:
-            timers[k]["at"] = 0.0                     # its own scheduler starts it this tick
-        jobs.paused.pop(k, None)
-        out.append(k)
-    return out
+    for k in [k for k in RESUME_ORDER if k in waiting][:1]:
+        e = waiting[k]
+        args = e.get("args") or {}
+        if k == "lab" or args.get("manual"):            # a trial, or something you asked for: start it now
+            if k == "lab" and not args.get("cand"):
+                jobs.pause_pop(k)
+                return []
+            target = ((lambda job, c=args["cand"]: service.run_lab(c, job=job)) if k == "lab"
+                      else _BG_TARGETS[k](service))
+            try:
+                jobs.start(k, target, args=args, blockers=_others(k))
+            except RuntimeError:
+                return []
+            jobs.pause_pop(k)
+            return [k]
+        if k in timers:                                 # its own starter starts it (it checks it's still on)
+            if not e.get("resuming"):
+                timers[k]["at"] = 0.0
+                jobs.pause_put(k, {**e, "resuming": True})
+            return [k]
+        jobs.pause_pop(k)                               # picture: its starter runs right after, this tick
+        return [k]
+    return []
 
 
 def _env_int(name: str, default: int) -> int:
@@ -3006,8 +3074,8 @@ def _env_int(name: str, default: int) -> int:
 
 # thumbnails decoded at once (each is an ffmpeg seek into a video file)
 _FRAME_DECODES = _env_int("PEAKS_FRAME_DECODES", 3)
-_WARM_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library")
-_PICTURE_WAIT_FOR = ("warmup", "ingest", "embed", "sync", "backup", "restore", "library", "picture")
+_WARM_WAIT_FOR = ("warmup", "ingest", "embed", "fix", "sync", "backup", "restore", "library")
+_PICTURE_WAIT_FOR = ("warmup", "ingest", "embed", "fix", "sync", "backup", "restore", "library", "picture")
 
 
 def _start_picture(service: Service, jobs: JobManager):
@@ -3016,9 +3084,11 @@ def _start_picture(service: Service, jobs: JobManager):
     if any(jobs.running(k) for k in _PICTURE_WAIT_FOR) or _bg_turn_taken(jobs, "picture") or not service.picture_due():
         return None
     try:
-        return jobs.start("picture", service.run_picture)
+        j = jobs.start("picture", service.run_picture, blockers=_others("picture"))
     except RuntimeError:
         return None
+    jobs.pause_pop("picture")
+    return j
 
 
 _ZOOM_WAIT_FOR = (*_PICTURE_WAIT_FOR, "zoom")
@@ -3033,13 +3103,18 @@ def _start_zoom(service: Service, jobs: JobManager):
     if (_t.time() < _zoom_next["at"] or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion"))
             or _bg_turn_taken(jobs, "zoom")):
         return None
+    if not service.index_loaded():                 # (cheap) — and no 10-minute wait for it
+        return None
     _zoom_next["at"] = _t.time() + 600
-    if not service.index_loaded() or not service.zoom_due():
+    if not service.zoom_due():
+        jobs.pause_pop("zoom")                     # nothing to do (or switched off): don't hold the queue
         return None
     try:
-        return jobs.start("zoom", service.run_zoom)
+        j = jobs.start("zoom", service.run_zoom, blockers=_others("zoom"))
     except RuntimeError:
         return None
+    jobs.pause_pop("zoom")
+    return j
 
 
 _HEAR_WAIT_FOR = (*_ZOOM_WAIT_FOR, "hear", "lab", "motion")
@@ -3054,15 +3129,20 @@ def _start_hear(service: Service, jobs: JobManager):
 
     if _t.time() < _hear_next["at"] or any(jobs.running(k) for k in _HEAR_WAIT_FOR) or _bg_turn_taken(jobs, "hear"):
         return None
+    if not service.index_loaded():
+        return None
     _hear_next["at"] = _t.time() + 600
-    if not service.index_loaded() or not service.hear_due():
+    if not service.hear_due():
+        jobs.pause_pop("hear")
         return None
     if getattr(service, "_hear_error", None):
         _hear_next["at"] = _t.time() + 3600
     try:
-        return jobs.start("hear", service.run_hear)
+        j = jobs.start("hear", service.run_hear, blockers=_others("hear"))
     except RuntimeError:
         return None
+    jobs.pause_pop("hear")
+    return j
 
 
 _MOTION_WAIT_FOR = (*_HEAR_WAIT_FOR, "motion")
@@ -3076,15 +3156,20 @@ def _start_motion(service: Service, jobs: JobManager):
 
     if _t.time() < _motion_next["at"] or any(jobs.running(k) for k in _MOTION_WAIT_FOR) or _bg_turn_taken(jobs, "motion"):
         return None
+    if not service.index_loaded():
+        return None
     _motion_next["at"] = _t.time() + 600
-    if not service.index_loaded() or not service.motion_due():
+    if not service.motion_due():
+        jobs.pause_pop("motion")
         return None
     if getattr(service, "_motion_error", None):
         _motion_next["at"] = _t.time() + 3600
     try:
-        return jobs.start("motion", service.run_motion)
+        j = jobs.start("motion", service.run_motion, blockers=_others("motion"))
     except RuntimeError:
         return None
+    jobs.pause_pop("motion")
+    return j
 
 
 def _rewarm(service: Service, jobs: JobManager):
@@ -3111,7 +3196,7 @@ def _rewarm(service: Service, jobs: JobManager):
         return None
 
 
-_WATCH_WAIT_FOR = ("ingest", "embed", "sync", "backup", "restore")
+_WATCH_WAIT_FOR = ("ingest", "embed", "fix", "warmup", "sync", "backup", "restore")
 
 
 def _watch_go(service: Service, jobs: JobManager, force: bool = False):
@@ -3136,8 +3221,10 @@ def _watch_go(service: Service, jobs: JobManager, force: bool = False):
         service.watch_succeeded()
         return out
 
-    _make_way(jobs, "Ingest")
-    job = jobs.start("ingest", _ingest)
+    try:
+        job = jobs.start("ingest", _way_then(jobs, "Ingest", _ingest))
+    except RuntimeError:
+        return None                                # one started meanwhile: the next look goes
     service.watch_started(files)
     return job
 
@@ -3164,9 +3251,8 @@ def _seed_ingest_go(service: Service, jobs: JobManager):
             service.requeue_seed_ingest(pending)
             raise
 
-    _make_way(jobs, "Ingest")
     try:
-        return jobs.start("ingest", _ingest)
+        return jobs.start("ingest", _way_then(jobs, "Ingest", _ingest))
     except RuntimeError:
         service.requeue_seed_ingest(pending)
         return None

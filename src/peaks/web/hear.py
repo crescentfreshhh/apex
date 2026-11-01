@@ -179,6 +179,8 @@ class HearMixin:
         log = job.log if job else print
         todo = self.hear_todo()[: limit or self.hear_settings()["per_run"]]
         if not todo:
+            if self.__dict__.pop("_retrain_owed", False):
+                self._senses_retrain(log)
             return {"heard": 0}
         try:
             embedder = self._hear_embedder()
@@ -193,7 +195,7 @@ class HearMixin:
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
                 log("stopped — the rest waits for the next run")
-                run.stopped = "you stopped it"
+                run.stopped = (f"paused for {job.paused_for}" if getattr(job, "paused_for", None) else "you stopped it")
                 break
             try:
                 r = self.hear_scene(row, embedder)
@@ -214,7 +216,9 @@ class HearMixin:
         log(f"heard {done} scene(s){f', {silent} without sound' if silent else ''}{f', {run.failed} unreadable' if run.failed else ''}")
         self._sense_record("hear", {"done": done, "silent": silent, **run.summary()})
         del embedder
-        if done > silent:
+        if getattr(job, "paused_for", None):
+            log("retrain waits until it resumes")       # never rebuild the index during an ingest
+        elif done > silent or self.__dict__.pop("_retrain_owed", False):
             self._senses_retrain(log)
         return {"heard": done, "silent": silent, "failed": run.failed}
 
@@ -358,10 +362,13 @@ class HearMixin:
         CLAP text vs every heard block, best block per scene."""
         from ..search import Hit
 
-        emb = self.__dict__.get("_clap_text")
-        if emb is None:
-            emb = self._hear_embedder()
-            self._clap_text = emb
+        import threading
+
+        with self.__dict__.setdefault("_clap_lock", threading.Lock()):   # one CLAP, however many searches
+            emb = self.__dict__.get("_clap_text")
+            if emb is None:
+                emb = self._hear_embedder()
+                self._clap_text = emb
         w = emb.embed_text([q])[0]
         w = w / max(float(np.linalg.norm(w)), 1e-9)
         cache = self._hear_cache()

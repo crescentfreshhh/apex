@@ -3475,7 +3475,10 @@ function zoomCard(z) {
 }
 document.addEventListener("click", async (e) => {
   if (e.target.closest("#zoom-run")) {
-    try { await api("/api/moments/zoom", { method: "POST" }); toast("Zooming in the background — this page updates when you come back"); }
+    try {
+      const d = await api("/api/moments/zoom", { method: "POST" });
+      toast(d && d.queued ? `Queued — zooms after ${d.after}` : "Zooming in the background — this page updates when you come back");
+    }
     catch (err) { toast(err.message, true); }
     openMoments();
   } else if (e.target.closest("#zoom-train")) {
@@ -3727,7 +3730,7 @@ function senseCoverage(sense, st) {
   const live = r && r.running && st.running;              // the run is going now
   const cut = r && r.running && !st.running;               // a run that never got to finish (a restart, a pause)
   const word = sense === "sound" ? "heard" : "watched";
-  const bad = r && ((r.failed && !r.done) || r.stopped && r.stopped !== "you stopped it");
+  const bad = r && ((r.failed && !r.done) || r.stopped && !/^(you stopped it|paused for )/.test(r.stopped));
   const when = r ? new Date(r.at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "";
   const clear = `<a href="#" class="small" data-sense-clear="${sense}">Clear</a>`;
   const last = r ? `<p class="small ${bad ? "lab-err" : ""}">${live ? "Running now" : cut ? `Last run ${when} (cut short)` : `Last run ${when}`} ·
@@ -3783,7 +3786,11 @@ document.addEventListener("click", async (e) => {
   if (!r && !o) return;
   const id = (r || o).dataset.senseRun || (r || o).dataset.senseOn, base = SENSE_API[id];
   try {
-    if (r) { r.disabled = true; await api(base, { method: "POST" }); toast("Running in the background — see Activity"); }
+    if (r) {
+      r.disabled = true;
+      const d = await api(base, { method: "POST" });
+      toast(d && d.queued ? `Queued — starts after ${d.after}` : "Running in the background — see Activity");
+    }
     else await api(base + "/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: o.dataset.on === "1" }) });
   } catch (err) { toast(err.message, true); }
   openLab();

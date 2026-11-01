@@ -118,6 +118,17 @@ class Job:
                 "error": self.error, "result": " · ".join(bits), "paused_for": getattr(self, "paused_for", None)}
 
 
+KEEP_JOBS = 200
+
+
+class Busy(RuntimeError):
+    """Another job that must not run alongside is running."""
+
+    def __init__(self, kind: str):
+        super().__init__(f"a '{kind}' job is running")
+        self.kind = kind
+
+
 class JobManager:
     def __init__(self, history_path: str | Path | None = None):
         self._history_path = Path(history_path) if history_path else None
@@ -125,7 +136,24 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._by_kind: dict[str, str] = {}  # kind -> current running job id
         self._lock = threading.Lock()
+        self._plock = threading.Lock()       # the waiting list (request threads + the scheduler)
+        self._hlock = threading.Lock()       # the history file — never held with _lock
         self._seq = 0
+        self.on_finish: Callable[[Job], None] | None = None   # e.g. hand GPU memory back
+
+    # --- the waiting list: read and changed only under its lock ---------------------------
+
+    def pause_put(self, kind: str, entry: dict) -> None:
+        with self._plock:
+            self.paused[kind] = entry
+
+    def pause_pop(self, kind: str) -> dict | None:
+        with self._plock:
+            return self.paused.pop(kind, None)
+
+    def paused_snapshot(self) -> dict[str, dict]:
+        with self._plock:
+            return {k: dict(v) for k, v in self.paused.items()}
 
     def _running_locked(self, kind: str) -> Job | None:
         """Caller must hold self._lock (the lock is not reentrant)."""
@@ -137,15 +165,22 @@ class JobManager:
         with self._lock:
             return self._running_locked(kind)
 
-    def start(self, kind: str, target: Callable[[Job], dict | None]) -> Job:
-        """Start `target(job)` in a thread. Raises if a job of `kind` is live."""
+    def start(self, kind: str, target: Callable[[Job], dict | None], args: dict | None = None,
+              blockers: tuple[str, ...] = ()) -> Job:
+        """Start `target(job)` in a thread. Raises if a job of `kind` is live — or,
+        atomically with that check, if any of `blockers` is (Busy, naming it)."""
         with self._lock:
             if self._running_locked(kind) is not None:
                 raise RuntimeError(f"a '{kind}' job is already running")
+            for b in blockers:
+                if self._running_locked(b) is not None:
+                    raise Busy(b)
             self._seq += 1
             job = Job(id=f"{kind}-{self._seq}", kind=kind)
+            job.args = dict(args or {})
             self._jobs[job.id] = job
             self._by_kind[kind] = job.id
+            self._prune_locked()
 
         def _run():
             status = "error"
@@ -153,6 +188,10 @@ class JobManager:
                 result = target(job)
                 job.result = result if isinstance(result, dict) else None
                 status = ("paused" if getattr(job, "paused_for", None) else "cancelled") if job.cancelled else "done"
+            except InterruptedError:                 # stopped mid-stage: a stop, not an error
+                status = ("paused" if getattr(job, "paused_for", None) else "cancelled") if job.cancelled else "error"
+                if status == "error":
+                    job.error = "interrupted"
             except Exception as exc:  # noqa: BLE001 - surface to the UI
                 job.error = f"{type(exc).__name__}: {exc}"
                 job.log("ERROR: " + job.error)
@@ -163,6 +202,11 @@ class JobManager:
                 job.finished = time.time()
                 self._remember(job, status)
                 job.status = status
+                if self.on_finish is not None:
+                    try:
+                        self.on_finish(job)
+                    except Exception:  # noqa: BLE001 — a hook never fails a job
+                        pass
 
         threading.Thread(target=_run, daemon=True, name=f"job-{job.id}").start()
         return job
@@ -172,7 +216,7 @@ class JobManager:
         if not self._history_path:
             return
         try:
-            with self._lock:
+            with self._hlock:
                 p = self._history_path
                 p.parent.mkdir(parents=True, exist_ok=True)
                 lines = p.read_text().splitlines() if p.exists() else []
@@ -182,6 +226,14 @@ class JobManager:
                 tmp.replace(p)
         except Exception:  # noqa: BLE001 — history is a convenience
             pass
+
+    def _prune_locked(self) -> None:
+        """Keep the last KEEP_JOBS finished jobs in memory (the history file has the rest)."""
+        done = [j for j in self._jobs.values() if j.status != "running"]
+        if len(done) <= KEEP_JOBS:
+            return
+        for j in sorted(done, key=lambda j: j.started)[: len(done) - KEEP_JOBS]:
+            self._jobs.pop(j.id, None)
 
     def history(self) -> list[dict]:
         """Finished jobs, newest first: this run's plus the remembered ones."""
@@ -204,4 +256,6 @@ class JobManager:
         return self._jobs.get(job_id)
 
     def list(self) -> list[Job]:
-        return sorted(self._jobs.values(), key=lambda j: j.started, reverse=True)
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return sorted(jobs, key=lambda j: j.started, reverse=True)

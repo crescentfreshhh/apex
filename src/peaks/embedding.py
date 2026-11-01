@@ -492,6 +492,21 @@ class OpenClipVisualEmbedder(Embedder):
         return feats.cpu().numpy().astype(np.float32)
 
 
+def free_gpu() -> None:
+    """Hand GPU memory a finished job held back to the device, so the next job —
+    and ffmpeg's own CUDA decoders — find it free. A no-op without torch/CUDA."""
+    import gc
+    import sys
+
+    gc.collect()
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def make_dino(model_name: str = "dinov2_vits14", device: str | None = None) -> Embedder:
     """The visual channel for a backbone name — DINOv2 via torch.hub, DINOv3 via
     transformers, the image-text models (SigLIP 2, Perception Encoder) via open_clip."""

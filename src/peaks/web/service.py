@@ -1846,7 +1846,6 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 if ok:
                     flog.resolve(key)
                     result["fixed"] += 1
-                    self.invalidate_index(embedder.name)
                 else:
                     flog.record(
                         key, e.get("scene_id"), scene.path,
@@ -1856,6 +1855,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     result["failed"] += 1
             if job:
                 job.progress["done"] = result["fixed"] + result["failed"] + result["pruned"]
+        if result["fixed"]:
+            self.invalidate_index(embedder.name)       # once, at the end — not a rebuild per scene
         log(f"done — fixed {result['fixed']}, pruned {result['pruned']} deleted, "
             f"{result['failed']} still failing of {result['total']}")
         return result
@@ -2180,7 +2181,15 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 for m in [m for m in self._index if m != keep]:
                     self._index.pop(m, None)
                     dropped.append(m)
+        if drop_indexes and not keep_hot:                # a hard purge: the text-search models go too
+            with self._clip_lock:
+                self._clip = None
+            with self.__dict__.setdefault("_clap_lock", threading.Lock()):
+                self.__dict__.pop("_clap_text", None)
         gc.collect()
+        from ..embedding import free_gpu
+
+        free_gpu()
         memwatch.malloc_trim()
         after = memwatch.rss_bytes()
         return {
