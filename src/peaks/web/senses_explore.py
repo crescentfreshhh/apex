@@ -386,15 +386,17 @@ class SenseExploreMixin:
         return next(c for c in self.sense_concepts() if c["slug"] == key)
 
     def _se_concept_train(self, key: str) -> None:
-        reg = self._se_reg()
-        v = reg.get(key)
+        v = self._se_reg().get(key)
         if not v:
             return
-        probe = self._se_fit(v["sense"], self._se_marks(v["sense"], key))
-        v["w"] = None if probe is None else [round(float(x), 6) for x in probe[0]]
-        v["b"] = None if probe is None else probe[1]
-        reg[key] = v
-        self._se_save_reg(reg)
+        probe = self._se_fit(v["sense"], self._se_marks(v["sense"], key))     # the slow part: outside the lock
+        with self._se_lock():                     # merge into the registry as it is now
+            reg = self._se_reg()
+            if key not in reg:                    # deleted meanwhile: it stays deleted
+                return
+            reg[key]["w"] = None if probe is None else [round(float(x), 6) for x in probe[0]]
+            reg[key]["b"] = None if probe is None else probe[1]
+            self._se_save_reg(reg)
         self.__dict__.pop("_se_cscore_cache", None)
         self._se_drop_feature_caches()
 
@@ -407,8 +409,12 @@ class SenseExploreMixin:
     def sense_concept_delete(self, key: str) -> dict:
         with self._se_lock():
             reg = self._se_reg()
-            reg.pop(key, None)
+            v = reg.pop(key, None)
             self._se_save_reg(reg)
+            if v:                                  # its marks go too: saving the name again starts fresh
+                with self._se_labels_path().open("a") as fh:
+                    for m in self._se_marks(v["sense"], key):
+                        fh.write(json.dumps({**m, "label": 0, "at": time.time()}) + "\n")
         self.__dict__.pop("_se_cscore_cache", None)
         self._se_drop_feature_caches()
         return {"deleted": key}

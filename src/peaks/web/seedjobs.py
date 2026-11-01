@@ -328,7 +328,7 @@ class SeedJobsMixin:
                 def fetch(i_rel, cat=cat, dest=dest):
                     i, rel = i_rel
                     if job is not None and job.cancelled:
-                        return (rel, False, 0)
+                        return (rel, None, 0)          # skipped (you stopped it): not a failure
                     target = dest / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     lane = {"id": i, "cat": cat, "pct": 0.0, "bytes": 0, "total": 0}
@@ -376,10 +376,11 @@ class SeedJobsMixin:
                     landed_paths.add(str(dest))
                     landed_files.extend(landed_here)
                 ok_n = sum(1 for _, ok, _ in results if ok)
-                fail_n = len(results) - ok_n
+                fail_n = sum(1 for _, ok, _ in results if ok is False)
+                skip_n = len(results) - ok_n - fail_n
                 total += ok_n
                 total_bytes += sum(sz for _, ok, sz in results if ok)
-                log(f"[{cat}] done: {ok_n} pulled, {fail_n} failed")
+                log(f"[{cat}] done: {ok_n} pulled, {fail_n} failed" + (f", {skip_n} left for next run (stopped)" if skip_n else ""))
                 if fail_n:
                     errors.append(f"[{cat}] {fail_n} of {len(new)} file(s) failed; will retry next run")
             failing = self._sj_dir() / "pull.failing"

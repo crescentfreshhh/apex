@@ -191,3 +191,26 @@ def test_answering_by_grading_is_a_ruling_and_undo_takes_it_back(tmp_path, monke
     r = c.post("/api/catalogue/grade", json={"scene_id": wrong, "grade": "reject", "no_learn": True,
                                               "settle": True}).json()       # "reject, don't learn": never a question
     assert r["settled"] is False
+
+
+def test_keep_mine_and_keep_as_is_answer_both_places_and_undo_keeps_an_earlier_ruling(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, stash, (wrong,), _ = _library(tmp_path, monkeypatch, drain=False)
+    svc.settle_rule(wrong)                                       # Keep mine…
+    assert svc._vd()[wrong]["tier"] == svc.rulings()[wrong]["grade"]       # …also answers the suggestion lists
+    svc.settle_unrule(wrong)
+    svc.undo_verdict(wrong)
+    svc.keep_as_is(wrong)                                        # Keep as is…
+    assert wrong in svc.rulings()                                # …also settles it
+    svc.undo_keep(wrong)
+    assert wrong not in svc.rulings()
+    c = TestClient(app_mod.create_app(svc.cfg))
+    svc.settle_rule(wrong)
+    first = dict(svc.rulings()[wrong])
+    r = c.post("/api/catalogue/grade", json={"scene_id": wrong, "grade": "merveilleuse", "settle": True}).json()
+    assert r["settled"] and r["ruling_prev"]["grade"] == first["grade"]
+    c.request("DELETE", f"/api/settle/rule/{wrong}", json={"restore": r["ruling_prev"]})   # what Z does
+    assert svc.rulings()[wrong]["grade"] == first["grade"]       # the earlier "Keep mine" is back

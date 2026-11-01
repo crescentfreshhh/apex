@@ -86,17 +86,26 @@ class SettleMixin:
         self._rulings_path().parent.mkdir(parents=True, exist_ok=True)
         atomic.write_json(self._rulings_path(), d, indent=1)
 
-    def settle_rule(self, sid: str) -> dict:
+    def settle_rule(self, sid: str, _verdict_only: bool = False) -> dict:
         """"Keep mine": your grade stands against Peaks' disagreement, for good —
         until you grade the scene again (a ruling is for the grade it was made on)."""
         row = next((r for r in self._catalogue_all() if r["scene_id"] == str(sid)), None)
         if row is None:
             raise KeyError(sid)
-        d = self.rulings()
-        d[str(sid)] = {"grade": row["tier"], "at": time.time()}
-        self._rulings_save(d)
+        from .. import atomic
+
+        with atomic.edit_lock(self._rulings_path()):
+            d = self.rulings()
+            prev = d.get(str(sid))
+            d[str(sid)] = {"grade": row["tier"], "at": time.time()}
+            self._rulings_save(d)
         self._settle_log(answer=True)
-        return {"ruled": True, "scene_id": str(sid), "grade": row["tier"]}
+        if not _verdict_only:                 # "Keep mine" also answers the suggestion lists
+            try:
+                self.record_verdict(str(sid), row["tier"], source="keep")
+            except Exception:  # noqa: BLE001
+                pass
+        return {"ruled": True, "scene_id": str(sid), "grade": row["tier"], "previous": prev}
 
     def settle_ruling_for(self, sid: str) -> bool:
         """You answered a Settle question by grading it: whatever you chose is
@@ -108,14 +117,21 @@ class SettleMixin:
         row = next((r for r in self._catalogue_all() if r["scene_id"] == str(sid)), None)
         if row is None or not train_class(row["tier"]) or row.get("no_learn"):
             return False
-        self.settle_rule(sid)
-        return True
+        return self.settle_rule(sid, _verdict_only=True)
 
-    def settle_unrule(self, sid: str) -> dict:
-        d = self.rulings()
-        d.pop(str(sid), None)
-        self._rulings_save(d)
-        return {"ruled": False, "scene_id": str(sid)}
+    def settle_unrule(self, sid: str, restore: dict | None = None) -> dict:
+        """Take a ruling back — or put back the one it replaced (`restore`), so
+        undoing a grade never loses an earlier "Keep mine"."""
+        from .. import atomic
+
+        with atomic.edit_lock(self._rulings_path()):
+            d = self.rulings()
+            if restore and restore.get("grade"):
+                d[str(sid)] = {"grade": restore["grade"], "at": restore.get("at") or time.time()}
+            else:
+                d.pop(str(sid), None)
+            self._rulings_save(d)
+        return {"ruled": bool(restore), "scene_id": str(sid)}
 
     def _settle_history_path(self) -> Path:
         return self._state_dir() / "settle_history.jsonl"

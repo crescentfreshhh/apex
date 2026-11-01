@@ -84,6 +84,13 @@ class VerdictMixin:
             raise LookupError(f"scene {sid} not found in Stash")
         row = self._cat_put_row(sid, fresh)
         self.record_verdict(sid, row["tier"], source="keep")
+        try:                                          # …and Settle stops asking about it too
+            from ..tier_model import train_class
+
+            if train_class(row["tier"]) and not row.get("no_learn"):
+                self.settle_rule(sid, _verdict_only=True)
+        except Exception:  # noqa: BLE001
+            pass
         # your answer is newer than the megaboard's evidence (kept for an undo)
         self.__dict__.setdefault("_expo_undo", {})[sid] = self.exposure().reset(sid)
         self._log_scene("keep", row, detail=f"kept as {row['tier']} — suggestion answered")
@@ -92,6 +99,10 @@ class VerdictMixin:
     def undo_keep(self, scene_id: str) -> dict:
         sid = str(scene_id)
         self.undo_verdict(sid)
+        try:
+            self.settle_unrule(sid)
+        except Exception:  # noqa: BLE001
+            pass
         old = self.__dict__.get("_expo_undo", {}).pop(sid, None)
         if old is not None:
             self.exposure().restore(sid, old)

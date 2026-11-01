@@ -39,3 +39,12 @@ def test_a_save_that_promotes_to_legendaire_hands_back_an_undo(tmp_path, monkeyp
     monkeypatch.setattr(svc_mod.Service, "grade_scene", lambda self, sid, g, source="": {"previous": prev})
     r = c.post("/api/scene/7/apex", params={"t": 12.0}).json()
     assert r["promoted_from"] and r["previous"] == prev
+
+
+def test_a_pick_you_answered_isnt_asked_again_after_it_moves(tmp_path, monkeypatch):
+    c, svc = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(svc_mod.Service, "answered_picks", lambda self, sid: [312.0])
+    monkeypatch.setattr(svc_mod.Service, "scene_picks", lambda self, sid: [
+        {"t": 313.4}, {"t": 330.0, "start": 300.0, "end": 340.0}, {"t": 500.0}])
+    got = [p["answered"] for p in c.get("/api/scene/7/picks").json()]
+    assert got == [True, True, False]

@@ -344,7 +344,15 @@ class ConceptsMixin:
             raise LookupError("teach this concept first — mark a few yes and no")
         w, b = probe
         norm = float(np.linalg.norm(w)) or 1.0
-        hits = self.index(self._model_name()).search(w, top_k=top_k, per_scene=per_scene)
+        # frames you marked "no" never come back as matches (nor anything within 2 s of one)
+        nos: dict[str, list[float]] = {}
+        for lab in self._cx_store().for_profile(slug):
+            if int(lab.label) == 0:
+                nos.setdefault(lab.key, []).append(float(lab.time))
+        want = None if top_k is None else top_k + 4 * sum(len(v) for v in nos.values())
+        hits = self.index(self._model_name()).search(w, top_k=want, per_scene=per_scene)
+        hits = [h for h in hits if not any(abs(h.time - t) <= 2.0 for t in nos.get(h.key, ()))]
+        hits = hits if top_k is None else hits[:top_k]
         return [Hit(scene_id=h.scene_id, key=h.key, time=h.time, score=float(_sigmoid(h.score * norm + b)))
                 for h in hits]
 

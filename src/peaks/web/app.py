@@ -1494,7 +1494,8 @@ def create_app(cfg=None):
         try:
             out = service.grade_scene(body.scene_id, body.grade, no_learn=body.no_learn)
             if body.settle:
-                out = {**out, "settled": service.settle_ruling_for(body.scene_id)}
+                r = service.settle_ruling_for(body.scene_id)
+                out = {**out, "settled": bool(r), "ruling_prev": (r or {}).get("previous") if isinstance(r, dict) else None}
             return out
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -2140,8 +2141,14 @@ def create_app(cfg=None):
         done = service.answered_picks(scene_id)
         return [{"t": p["t"], "score": p.get("score"), "thumb": p.get("thumb"),
                  **({"start": p["start"], "end": p["end"], "shape": p.get("shape")} if "start" in p else {}),
-                 "answered": any(abs(p["t"] - t) <= 1.0 for t in done)}
+                 "answered": _pick_answered(p, done)}
                 for p in service.scene_picks(scene_id)]
+
+    def _pick_answered(p: dict, done: list[float]) -> bool:
+        """Answered if your earlier 👍/👎 falls inside this pick's span — or within
+        6 s of it — so a retrain or a zoom that nudges the pick doesn't ask again."""
+        a, b = (p.get("start"), p.get("end")) if p.get("start") is not None else (None, None)
+        return any((a is not None and a - 1.0 <= t <= b + 1.0) or abs(p["t"] - t) <= 6.0 for t in done)
 
     @app.get("/api/moments/zoom")
     def moments_zoom():
@@ -2300,8 +2307,9 @@ def create_app(cfg=None):
             raise HTTPException(404, "no such scene")
 
     @app.delete("/api/settle/rule/{scene_id}")
-    def settle_unrule(scene_id: str):
-        return service.settle_unrule(scene_id)
+    def settle_unrule(scene_id: str, body: dict | None = Body(None)):
+        restore = (body or {}).get("restore")
+        return service.settle_unrule(scene_id, restore=restore if isinstance(restore, dict) else None)
 
     @app.get("/api/insights/arbiter")
     def insights_arbiter():

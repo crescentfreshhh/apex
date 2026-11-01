@@ -1136,7 +1136,7 @@ async function applyGrade(sid, grade, undoKey = "Z", { settle = false } = {}) {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ scene_id: String(sid), grade: nl ? "reject" : grade, no_learn: nl, settle }),
   });
-  const entry = { sid: String(sid), prev: r.previous, grade, settled: !!r.settled };
+  const entry = { sid: String(sid), prev: r.previous, grade, settled: !!r.settled, rulingPrev: r.ruling_prev || null };
   gradeUndo.push(entry);
   toast(`${gradeName(grade)} — ${undoKey} to undo`);
   if (r.in_ingest) {                       // still in the running ingest: once the reject sticks, it's dropped
@@ -1167,7 +1167,9 @@ async function undoGrade() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scene_id: u.sid, ...u.prev }),
     });
-    if (u.settled) await api(`/api/settle/rule/${encodeURIComponent(u.sid)}`, { method: "DELETE" }).catch(() => {});
+    if (u.settled) await api(`/api/settle/rule/${encodeURIComponent(u.sid)}`, {     // an earlier "Keep mine" comes back
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ restore: u.rulingPrev }),
+    }).catch(() => {});
     toast(`Undone (${gradeName(u.grade)})${u.settled ? " — Settle will ask again" : ""}`);
     return r.scene;
   } catch (e) { gradeUndo.push(u); toast(e.message, true); return null; }
@@ -3649,6 +3651,7 @@ document.addEventListener("click", async (e) => {
   else if (b.dataset.sxTeach) { st.mode = "teach"; st.concept = b.dataset.sxTeach; st.started = true; await sxLoad(sense, true); sxRender(sense); }
   else if (b.dataset.sxCat) { await loadConcepts(); cat.view = ""; cat.tier = ""; go("catalogue"); $("#cat-sort").value = "concept:" + b.dataset.sxCat; openCatalogue(); }
   else if (b.dataset.sxDel) {
+    if (!confirm(`Forget the concept “${b.dataset.sxDel.split(":").pop()}” and its marks?`)) return;
     try { await api(`/api/concepts/${encodeURIComponent(b.dataset.sxDel)}`, { method: "DELETE" }); } catch (err) { toast(err.message, true); }
     sxSide(sense); loadConcepts();
   } else if (b.dataset.sxSave) {
@@ -5677,7 +5680,8 @@ function catBumpCounts(from, to) {
 async function gradeCat(i, grade) {
   const r = cat.items[i]; if (!r) return;
   try {
-    const fresh = await applyGrade(r.scene_id, grade);
+    // in Settle (or an Arbiter cell) a grade is your ruling: it won't be asked again
+    const fresh = await applyGrade(r.scene_id, grade, "Z", { settle: cat.view === "settle" || cat.view === "arbiter" });
     catBumpCounts(r.tier, fresh.tier);
     // stays in place (dimmed) so the list doesn't jump and Z still has context
     cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred, _graded: true };

@@ -6232,7 +6232,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     "why": f"{n} saved moment{'s' if n != 1 else ''} — scenes you save from are Légendaire"}
         if tier == "anomaly":
             return self._suggest_for_anomaly(row, pred, names)
-        if tier in draining() and pred and pred.get("tier") in GRADE_OF_CLASS:
+        if (tier in draining() and pred and pred.get("tier") in GRADE_OF_CLASS
+                and not self._answered("drain", row, pred, sig)):
             # a tier being drained: the model (which no longer learns from it) picks a live tier
             g = GRADE_OF_CLASS[pred["tier"]]
             nm = (names or {}).get("rejected" if g == "reject" else g, g)
