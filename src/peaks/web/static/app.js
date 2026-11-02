@@ -7654,6 +7654,7 @@ function renderUpgrades() {
   const d = upg.data; if (!d) return;
   for (const t of ["found", "wanted", "grabbed", "arrived"]) { const n = $("#upg-n-" + t); if (n) n.textContent = (d[t] || []).length || ""; }
   document.querySelectorAll("#upg-tabs [data-t]").forEach((b) => b.classList.toggle("on", b.dataset.t === upg.tab));
+  if (upg.tab === "discover") return renderDiscover();
   $("#upg-status").textContent = d.configured
     ? (d.settings.auto ? `searching ${d.settings.per_day} a day` : "automatic search off") +
       (d.last_pass ? ` · last search ${new Date(d.last_pass * 1000).toLocaleString()}` : "")
@@ -7668,8 +7669,73 @@ function renderUpgrades() {
 }
 $("#upg-tabs")?.addEventListener("click", (e) => {
   const b = e.target.closest("[data-t]"); if (!b) return;
-  upg.tab = b.dataset.t; renderUpgrades();
+  upg.tab = b.dataset.t;
+  if (upg.tab === "discover") { openDiscover(); document.querySelectorAll("#upg-tabs [data-t]").forEach((x) => x.classList.toggle("on", x === b)); }
+  else renderUpgrades();
 });
+// --- Discover: StashDB scenes from your favourites that you don't have --------------------
+const disc = { data: null, open: new Set() };
+async function openDiscover() {
+  $("#upg-list").innerHTML = '<p class="dim">Loading…</p>';
+  try { disc.data = await api("/api/discover"); } catch (e) { $("#upg-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`; return; }
+  renderDiscover();
+}
+function discCardHTML(x) {
+  const rel = (x.releases || []);
+  const side = x.state === "grabbed" ? `<div class="upg-rel"><b>✓ Grabbed</b><div class="small dim">Comes in through the seedbox pull.</div></div>`
+    : rel.length ? upgRelHTML(rel[0], {}, true).replace("upg-grab", "disc-grab") + (rel.length > 1 ? (disc.open.has(x.id)
+      ? rel.slice(1).map((c) => upgRelHTML(c, {}, false).replace("upg-grab", "disc-grab")).join("")
+      : `<button class="ghost sm disc-more">+${rel.length - 1} more</button>`) : "")
+    : `<div class="upg-rel"><div class="small dim">${x.searched_at ? "Prowlarr has nothing healthy for it yet." : "Not looked for yet."}</div>
+        <button class="ghost sm disc-find">⌕ Find on Prowlarr</button></div>`;
+  return `<div class="upg-card" data-did="${esc(x.id)}">
+    <div class="upg-yours">${x.image ? `<img class="cat-cover" loading="lazy" referrerpolicy="no-referrer" src="${esc(x.image)}" onerror="this.style.visibility='hidden'" />` : ""}
+      <div><div><b>${esc(x.title || "Untitled")}</b></div>
+        <div class="dim small">${esc(x.studio || "")}${x.date ? " · " + esc(x.date) : ""}${x.duration ? " · " + fmt(x.duration) : ""}</div>
+        <div class="small">${esc((x.performers || []).join(", "))}</div>
+        <div class="upg-why">${(x.because || []).map((b) => `<span class="upg-reason">♥ ${esc(b)}</span>`).join("")}
+          ${x.url ? `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">studio page</a>` : ""}</div></div></div>
+    <div class="upg-side">${side}</div>
+    <div class="upg-acts"><button class="ghost sm disc-dismiss" title="Not interested — it won't be shown again">Not interested</button></div></div>`;
+}
+function renderDiscover() {
+  const d = disc.data; if (!d) return;
+  const n = $("#upg-n-discover"); if (n) n.textContent = d.total || "";
+  const head = `<div class="row between disc-head"><span class="small dim">${d.at ? `Updated ${new Date(d.at * 1000).toLocaleString()} · ${plural(d.total, "scene")} you don't have` : "Not built yet."}
+      ${d.favourites ? ` · from ${plural(d.favourites.performers.length, "favourite performer")} and ${plural(d.favourites.studios.length, "studio")}` : ""}</span>
+    <button class="btn sm" id="disc-refresh" ${d.running ? "disabled" : ""}>${d.running ? "Refreshing…" : "↻ Refresh from StashDB"}</button></div>
+    ${(d.unlinked || []).length ? `<p class="faint small">Not linked to StashDB in your Stash (so skipped): ${esc(d.unlinked.slice(0, 12).join(", "))}${d.unlinked.length > 12 ? "…" : ""} — identify them in Stash to include them.</p>` : ""}
+    ${(d.errors || []).length ? `<p class="small warn">${esc(d.errors[0])}${d.errors.length > 1 ? ` (+${d.errors.length - 1} more)` : ""}</p>` : ""}`;
+  $("#upg-list").innerHTML = head + ((d.items || []).length ? d.items.map(discCardHTML).join("")
+    : `<div class="empty">${d.at ? "Nothing new from your favourites." : "Press <b>Refresh from StashDB</b>: Peaks lists your favourites' scenes you don't have, best fit first."}</div>`);
+}
+$("#upg-list")?.addEventListener("click", async (e) => {
+  if (e.target.closest("#disc-refresh")) {
+    try { const j = await api("/api/discover/refresh", { method: "POST" }); toast("Looking on StashDB…");
+      await waitJob(j.id, () => {}); } catch (err) { toast(err.message, true); }
+    return openDiscover();
+  }
+  const card = e.target.closest("[data-did]"); if (!card) return;
+  const id = card.dataset.did, x = (disc.data.items || []).find((i) => i.id === id); if (!x) return;
+  const b = e.target.closest("button"); if (!b) return;
+  try {
+    if (b.classList.contains("disc-more")) { disc.open.add(id); return renderDiscover(); }
+    if (b.classList.contains("disc-find")) {
+      b.disabled = true; b.textContent = "Searching…";
+      const r = await api(`/api/discover/${encodeURIComponent(id)}/search`, { method: "POST" });
+      toast(r.releases.length ? `Found ${plural(r.releases.length, "healthy release")}` : "Nothing healthy on Prowlarr yet");
+    } else if (b.classList.contains("disc-grab")) {
+      const c = x.releases.find((r) => r.guid === b.dataset.guid);
+      if (!confirm(`Grab this release?\n\n${c.title}\n${c.height || "?"}p · ${upgSize(c.size)} · ${c.seeders} seeders · ${c.indexer}\n\nPeaks adds it to your seedbox qBittorrent; the next pull brings it home.`)) return;
+      b.disabled = true; b.textContent = "Grabbing…";
+      const g = await api(`/api/discover/${encodeURIComponent(id)}/grab`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ guid: c.guid }) });
+      toast(`Added to qBittorrent${g.category ? ` (category ${g.category})` : ""}`);
+    } else if (b.classList.contains("disc-dismiss")) {
+      await api(`/api/discover/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
+    }
+  } catch (err) { toast(err.message, true); }
+  openDiscover();
+}, true);
 $("#upg-list")?.addEventListener("click", async (e) => {
   const card = e.target.closest(".upg-card"); if (!card) return;
   const sid = card.dataset.sid, all = ["found", "wanted", "grabbed", "arrived"].flatMap((t) => upg.data[t]);

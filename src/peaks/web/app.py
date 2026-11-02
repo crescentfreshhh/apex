@@ -21,10 +21,10 @@ JOB_LABELS = {"embed": "Embedding", "ingest": "Ingest", "score": "Writing marker
               "library": "Updating Stash", "dupes": "Finding duplicates", "train": "Training taste",
               "taste-measure": "Measuring taste", "warmup": "Starting up", "backup": "Backing up",
               "restore": "Restoring", "perf-photos": "Performer photos", "hear": "Hearing", "motion": "Motion",
-              "zoom": "Moment zoom", "lab": "Model trial", "faces": "Faces", "picture": "Picture quality",
+              "zoom": "Moment zoom", "lab": "Model trial", "faces": "Faces", "discover": "Discover", "picture": "Picture quality",
               "picture-dupes": "Picture: duplicates", "upgrades": "Upgrades search", "seedbox": "Seedbox"}
 JOB_FAMILY = {"ingest": "ingest", "embed": "embed", "fix": "embed", "warmup": "embed", "hear": "hear",
-              "motion": "motion", "zoom": "zoom", "faces": "picture", "lab": "zoom", "library": "stash", "dupes": "stash",
+              "motion": "motion", "zoom": "zoom", "faces": "picture", "discover": "upgrades", "lab": "zoom", "library": "stash", "dupes": "stash",
               "score": "stash", "sync": "sync", "backup": "sync", "restore": "sync", "train": "taste",
               "taste-measure": "taste", "playlist": "taste", "reel": "taste", "picture": "picture",
               "picture-dupes": "picture", "perf-photos": "picture", "upgrades": "upgrades", "seedbox": "upgrades"}
@@ -2168,6 +2168,50 @@ def create_app(cfg=None):
     @app.post("/api/moments/zoom")
     def moments_zoom_run():
         return _bg_run("zoom", service.run_zoom)
+
+    # --- discover: StashDB scenes you'd like but don't have -------------------------------
+
+    @app.get("/api/discover")
+    def discover_get():
+        d = service.discover()
+        j = jobs.running("discover")
+        d["running"] = j.as_dict() if j is not None else None
+        return d
+
+    @app.post("/api/discover/refresh")
+    def discover_refresh():
+        try:
+            return jobs.start("discover", service.run_discover).as_dict()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.post("/api/discover/settings")
+    def discover_settings_save(body: dict = Body(...)):
+        return service.save_discover_settings(body)
+
+    @app.post("/api/discover/{box_id}/search")
+    def discover_search(box_id: str):
+        try:
+            return service.discover_search(box_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:  # noqa: BLE001 — Prowlarr unreachable etc.
+            raise HTTPException(502, str(exc))
+
+    @app.post("/api/discover/{box_id}/grab")
+    def discover_grab(box_id: str, body: dict = Body(...)):
+        try:
+            return service.discover_grab(box_id, str(body.get("guid") or ""))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, str(exc))
+
+    @app.post("/api/discover/{box_id}/dismiss")
+    def discover_dismiss(box_id: str, undo: bool = False):
+        return service.discover_dismiss(box_id, undo=undo)
 
     # --- faces: who is in a scene ------------------------------------------------------
 

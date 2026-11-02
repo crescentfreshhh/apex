@@ -48,6 +48,7 @@ from .settle import FAST_RETRAIN, SettleMixin
 from .hear import HearMixin
 from .motion import MotionMixin
 from .faces import FacesMixin
+from .discover import DiscoverMixin
 from .senses_explore import SenseExploreMixin
 
 
@@ -64,7 +65,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
-              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin):
+              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
