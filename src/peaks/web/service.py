@@ -49,6 +49,7 @@ from .hear import HearMixin
 from .motion import MotionMixin
 from .faces import FacesMixin
 from .discover import DiscoverMixin
+from .timeline import TimelineMixin
 from .senses_explore import SenseExploreMixin
 
 
@@ -65,7 +66,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
-              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin):
+              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin, TimelineMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5658,8 +5659,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         # (kept for an undo)
         self.__dict__.setdefault("_expo_undo", {})[sid] = self.exposure().reset(sid)
         row = self._cat_update_row(sid)
+        said = ((getattr(self, "_tier_preds", None) or (None, {}))[1] or {}).get(sid)   # what Peaks thought, for the timeline
         self._log_scene("grade", row, grade=grade + (" (don't learn)" if grade == "reject" and no_learn else ""),
                         source=source,
+                        peaks={"tier": said["tier"], "conf": round(float(said.get("conf") or 0), 3)} if said else None,
                         before={"rating100": prev["rating100"], "o_counter": prev["o_counter"],
                                 "tier": tier_of(prev["rating100"], prev["o_counter"])},
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],

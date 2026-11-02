@@ -1457,7 +1457,8 @@ async function loadViewerMeta(sid) {
       <option value="">Grade…</option>
       ${GRADES.map((g) => `<option value="${g}">${esc(gradeName(g))}</option>`).join("")}
     </select>
-    <button class="orgbtn ${m.organized ? "on" : ""}">✓ organized</button>`;
+    <button class="orgbtn ${m.organized ? "on" : ""}">✓ organized</button>
+    <button class="btn sm ghost" data-timeline="${esc(sid)}" title="Everything about this scene: what Peaks suggested, what you decided, what changed in Stash — and why">🕘 History</button>`;
   wireSceneEdits(sid, edit);
   const gs = edit.querySelector(".grade-sel");
   if (gs) gs.addEventListener("change", async () => {
@@ -5565,7 +5566,8 @@ function catCardHTML(r, i) {
   const suggest = (r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "")
     + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "")
     + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "")
-    + (p && p.from !== "who" ? `<button class="btn sm ghost" data-why="${esc(r.scene_id)}" title="Why Peaks rates it this way — and, if you graded it, where it disagrees">Why?</button><div class="argue" hidden></div>` : "");
+    + (p && p.from !== "who" ? `<button class="btn sm ghost" data-why="${esc(r.scene_id)}" title="Why Peaks rates it this way — and, if you graded it, where it disagrees">Why?</button><div class="argue" hidden></div>` : "")
+    + `<button class="btn sm ghost" data-timeline="${esc(r.scene_id)}" title="Everything about this scene: what Peaks suggested, what you decided, what changed in Stash — and why">🕘</button>`;
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
@@ -7942,4 +7944,40 @@ $("#sj-save")?.addEventListener("click", async () => {
         purge_mode: $("#sj-mode").value, report_on: $("#sj-report-on").checked, report_at: $("#sj-report-at").value || "06:00" }) });
     $("#sj-save-status").textContent = "Saved"; loadSjSettings();
   } catch (e) { $("#sj-save-status").textContent = e.message; }
+});
+
+// --- one scene's story: suggestions, your decisions, Stash changes — and why -----------------
+const TL_WHO = { you: "You", peaks: "Peaks", stash: "Stash" };
+async function openTimeline(sid) {
+  let dlg = $("#tl-dlg");
+  if (!dlg) {
+    dlg = document.createElement("dialog");
+    dlg.id = "tl-dlg"; dlg.className = "tl-dlg";
+    document.body.appendChild(dlg);
+    dlg.addEventListener("click", (e) => { if (e.target === dlg || e.target.closest("[data-tl-close]")) dlg.close(); });
+  }
+  dlg.innerHTML = '<p class="dim">Loading…</p>';
+  if (!dlg.open) dlg.showModal();
+  let d; try { d = await api(`/api/scene/${encodeURIComponent(sid)}/story`); }
+  catch (e) { dlg.innerHTML = `<p class="dim">${esc(e.message)}</p><button class="btn sm" data-tl-close>Close</button>`; return; }
+  const n = d.now || {};
+  const now = [
+    `Graded <b>${esc(n.tier || "—")}</b>`,
+    n.peaks ? `Peaks: <b>${esc(n.peaks.tier)}</b> (${Math.round(100 * n.peaks.conf)}% sure) <span class="faint">— from ${esc(n.peaks.from)}</span>` : "",
+    n.settle ? `Settle: ${esc(n.settle)}` : "",
+    n.suggests ? `Suggests <b>${esc(n.suggests.grade)}</b> — ${esc(n.suggests.why || "")}${n.suggests.detail ? ` <span class="faint">(${esc(n.suggests.detail)})</span>` : ""}` : "",
+    (n.faces || []).length ? `Faces: ${n.faces.map((f) => `${esc(f.name)}${f.credited ? "" : " <i>(not credited)</i>"}`).join(", ")}` : "",
+  ].filter(Boolean).map((x) => `<li>${x}</li>`).join("");
+  const ev = (d.events || []).map((e) => `<li class="tl-ev tl-${esc(e.who)}">
+      <span class="tl-at">${e.at ? new Date(e.at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—"}</span>
+      <span class="tl-who">${esc(TL_WHO[e.who] || e.who)}</span>
+      <span class="tl-txt">${esc(e.text)}${e.why ? `<br><span class="faint small">${esc(e.why)}</span>` : ""}</span></li>`).join("");
+  dlg.innerHTML = `<div class="row between"><h3>${esc(d.title)}</h3><button class="btn sm ghost" data-tl-close>✕</button></div>
+    <h4>Now</h4><ul class="tl-now">${now}</ul>
+    <h4>History</h4>${ev ? `<ul class="tl">${ev}</ul>` : '<p class="faint small">Nothing recorded for this scene yet.</p>'}`;
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-timeline]"); if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  openTimeline(b.dataset.timeline);
 });

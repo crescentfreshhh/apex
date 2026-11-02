@@ -2435,6 +2435,13 @@ def create_app(cfg=None):
     def stash_capabilities(refresh: bool = False):
         return service.capabilities(refresh=refresh)
 
+    @app.get("/api/scene/{scene_id}/story")
+    def scene_story(scene_id: str):
+        try:
+            return service.scene_story(scene_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
     @app.get("/api/history")
     def history(limit: int = Query(200, ge=1, le=5000)):
         return {"items": service.history(limit)}
