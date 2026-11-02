@@ -95,6 +95,23 @@ class OrphansMixin:
         """Who this scene might be: [{id, name, score, strength, via}] best first.
         `via` is her nearest credited scene, to compare with your own eyes."""
         sid = str(scene_id)
+        try:                                     # by face first: who is actually in the frames
+            fm = [m for m in self.face_matches(sid)["matches"] if not m["credited"]]
+        except Exception:  # noqa: BLE001 — faces are extra
+            fm = []
+        face = [{"id": m["id"], "name": m["name"], "score": m["score"], "strength": m["strength"], "studio": False,
+                 "face": {"faces": m["faces"], "thumb": m["thumb"]},
+                 "via": {"scene_id": sid, "title": f"{m['faces']} matching faces in this scene", "cover": m["thumb"]}}
+                for m in fm[:k]]
+        out = self._orphan_lookalikes(sid, k)
+        if face:
+            seen = {x["id"] for x in face}
+            out["suggestions"] = face + [x for x in out["suggestions"] if x["id"] not in seen][: max(0, k - len(face))]
+            out.pop("reason", None)
+        return out
+
+    def _orphan_lookalikes(self, scene_id: str, k: int = SUGGEST_K) -> dict:
+        sid = str(scene_id)
         stats = self.performer_stats()
         cents = getattr(self, "_perf_centroids", {})
         by_id = getattr(self, "_perf_rows_by_id", {})

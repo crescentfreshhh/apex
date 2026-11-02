@@ -23,6 +23,7 @@ ml = [
     "transformers>=4.56",  # DINOv3 (Hugging Face weights, gated by Meta's licence) + CLAP (hearing)
     "timm>=1.0.15",   # V-JEPA 2.1 (motion) through torch.hub; SigLIP 2 / PE towers
     "einops",
+    "onnxruntime-gpu",  # faces: InsightFace's SCRFD + ArcFace models (runs on the CPU without a GPU)
     "pillow",
     "scikit-learn",   # the Tier-2 taste classifier
     "av>=12",         # sparse (seek-based) sampling; bundles ffmpeg libs

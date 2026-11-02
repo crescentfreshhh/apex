@@ -1949,6 +1949,7 @@ function renderPerfDetail(d, prof = {}) {
     </div>
     ${studios ? `<h3 style="margin:18px 0 0">Studios</h3><div class="pf-studios">${studios}</div>` : ""}
     <div id="pd-costars"></div>
+    <div id="pd-uncredited"></div>
     ${sim ? `<h3 style="margin:18px 0 6px">If you like her, try…</h3><div class="pd-similar">${sim}</div>` : ""}
     ${items.length ? `<h3 style="margin:18px 0 6px">Her best moments</h3><div id="pd-strip" class="grid"></div>` : ""}
     ${scenes ? `<h3 style="margin:18px 0 6px">Her scenes <span class="dim small">${(prof.scenes || []).length} · best first</span></h3>${scenes}` : ""}`;
@@ -1968,6 +1969,7 @@ function renderPerfDetail(d, prof = {}) {
   box.querySelectorAll(".pf-studio").forEach((b) => b.onclick = () => openCatWith({ performer_ids: [String(d.id)], pnames: [name], studios: [b.dataset.studio] }));
   wireSceneCards(box, prof.scenes || []);
   loadCostars(d.id, name);
+  loadUncredited(d.id, name);
 }
 // scene covers (performer and studio pages): a page at a time, click to play
 function wireSceneCards(box, scenes, per = 48) {
@@ -1991,6 +1993,29 @@ function wireSceneCards(box, scenes, per = 48) {
   };
   more();
 }
+// scenes her face is in that don't credit her (Faces) — one click adds her in Stash
+async function loadUncredited(id, name) {
+  const box = $("#pd-uncredited"); if (!box) return;
+  let d; try { d = await api(`/api/performer/${encodeURIComponent(id)}/uncredited`); } catch { return; }
+  if (!(d.scenes || []).length) return;
+  box.innerHTML = `<h3 style="margin:18px 0 6px">May also be in <span class="faint small">— by face, not credited in Stash</span></h3>
+    <div class="unc-grid">${d.scenes.map((s) => `<div class="unc" data-sid="${esc(s.scene_id)}">
+      <img src="${s.thumb}" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+      <span class="small"><b>${esc(s.title)}</b> ${tierChip(s.tier)} · ${s.faces} faces</span>
+      <span class="row"><button class="btn sm pri" data-unc-add="${esc(s.scene_id)}" data-pid="${esc(id)}">Add ${esc(name)}</button>
+        <button class="btn sm ghost" data-unc-no="${esc(s.scene_id)}" data-pid="${esc(id)}" title="Not her — don't suggest again">✕</button></span></div>`).join("")}</div>`;
+}
+document.addEventListener("click", async (e) => {
+  const a = e.target.closest("[data-unc-add],[data-unc-no]"); if (!a) return;
+  const sid = a.dataset.uncAdd || a.dataset.uncNo, pid = a.dataset.pid;
+  a.disabled = true;
+  try {
+    const body = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ performer_id: pid }) };
+    if (a.dataset.uncAdd) { await api(`/api/scene/${encodeURIComponent(sid)}/performers/add`, body); toast("Added in Stash"); }
+    else await api(`/api/orphans/${encodeURIComponent(sid)}/not-them`, body);
+    a.closest(".unc")?.remove();
+  } catch (err) { a.disabled = false; toast(err.message, true); }
+});
 // who she shares scenes with: click for the scenes with both of them
 async function loadCostars(id, name) {
   const box = $("#pd-costars"); if (!box) return;
@@ -3731,10 +3756,26 @@ function drawLab(d) {
     <h3 class="lab-h">Senses</h3>
     <p class="faint small">Extra senses Peaks can learn from. Each runs in the background when nothing else does, and is used only where
       it makes Peaks better on your library — finding your moments, or grading — tested on scenes it didn't learn from.</p>
-    <div class="lab-grid">${(d.senses || []).map(senseCard).join("")}</div>`;
+    <div class="lab-grid">${(d.senses || []).map(senseCard).join("")}<div id="lab-faces"></div></div>`;
+  loadFacesCard();
   if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden) openLab(true); }, 4000);
 }
-const SENSE_API = { sound: "/api/hear", motion: "/api/motion" };
+const SENSE_API = { sound: "/api/hear", motion: "/api/motion", faces: "/api/faces" };
+// Faces: who is in each scene (InsightFace) — names for Orphans, "may also be in" on a performer's page
+async function loadFacesCard() {
+  const box = $("#lab-faces"); if (!box) return;
+  let st; try { st = await api("/api/faces"); } catch { return; }
+  const n = (v) => (v ?? 0).toLocaleString();
+  const on = !st.settings || st.settings.on !== false;
+  box.outerHTML = `<div class="card pad lab-card" id="lab-faces"><h3>Faces ${on ? "" : '<span class="q">off</span>'}</h3>
+    <p class="faint small">Finds the faces in a dozen frames of each scene and recognises them (InsightFace ArcFace — open weights,
+      non-commercial licence). Each performer is known by her Stash photo and the scenes she's credited in. Peaks then suggests names
+      for Orphans and, on a performer's page, scenes she seems to be in but isn't credited for. Nothing is written without a click.</p>
+    ${senseCoverage("faces", { ...st, seen: st.seen })}
+    ${st.performers != null ? `<p class="small">${n(st.performers)} performers recognisable so far</p>` : ""}
+    <div class="row"><button class="btn sm" data-sense-run="faces">Run now</button>
+      <button class="btn sm ghost" data-sense-on="faces" data-on="${on ? 0 : 1}">${on ? "Turn off" : "Turn on"}</button></div></div>`;
+}
 const SENSE_DESC = {
   sound: "Listens to each scene: loudness, how much is happening, rhythm, and what it sounds like (CLAP — open weights, no token). Also lets you search by sound: type <code>sound: …</code> in search.",
   motion: "Watches how your candidate moments move, 4-second clips at a time (V-JEPA 2.1 — open weights, no token).",
@@ -3744,12 +3785,12 @@ function senseCoverage(sense, st) {
   if (!st) return '<p class="small">—</p>';
   const n = (v) => (v ?? 0).toLocaleString();
   const c = st.heard ?? st.seen;
-  const of = sense === "sound" ? `${n(st.embedded)} scenes in your library`
+  const of = sense === "sound" || sense === "faces" ? `${n(st.embedded)} scenes in your library`
     : `${n(st.embedded)} zoomed scenes <span class="faint">(motion watches the moments zoom found)</span>`;
   const r = st.last_run;
   const live = r && r.running && st.running;              // the run is going now
   const cut = r && r.running && !st.running;               // a run that never got to finish (a restart, a pause)
-  const word = sense === "sound" ? "heard" : "watched";
+  const word = sense === "sound" ? "heard" : sense === "faces" ? "looked at" : "watched";
   const bad = r && ((r.failed && !r.done) || r.stopped && !/^(you stopped it|paused for )/.test(r.stopped));
   const when = r ? new Date(r.at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "";
   const clear = `<a href="#" class="small" data-sense-clear="${sense}">Clear</a>`;
@@ -5577,9 +5618,9 @@ function orphHTML(sid) {
   const sugg = d.suggestions.filter((x) => !have.has(String(x.id)));
   const head = added.length ? "" : `<span class="orph-h">Who is this?</span> `;
   if (!sugg.length) return `${chips} ${added.length ? "" : `<span class="faint small">Who is this? ${esc(d.reason || "no look-alikes yet")}</span>`} ${search}`;
-  return `${chips} ${head}${sugg.map((x) => `<span class="orph-s s-${x.strength}" title="looks most like ${esc(x.via.title)}${x.studio ? " · has scenes at this studio" : ""}">
+  return `${chips} ${head}${sugg.map((x) => `<span class="orph-s s-${x.strength}" title="${x.face ? `her face: ${x.face.faces} matching faces in this scene` : `looks most like ${esc(x.via.title)}`}${x.studio ? " · has scenes at this studio" : ""}">
       <img src="${x.via.cover}" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
-      <span><b>${esc(x.name)}</b><i>${x.strength}${x.studio ? " · same studio" : ""}</i></span>
+      <span><b>${esc(x.name)}</b><i>${x.face ? "👤 face · " : ""}${x.strength}${x.studio ? " · same studio" : ""}</i></span>
       <button class="btn sm pri" data-orph-add="${esc(sid)}" data-pid="${esc(x.id)}" data-name="${esc(x.name)}" title="Add ${esc(x.name)} to this scene in Stash">Add</button>
       <button class="btn sm ghost" data-orph-no="${esc(sid)}" data-pid="${esc(x.id)}" title="Not them — don't suggest again for this scene">✕</button></span>`).join("")} ${search}`;
 }

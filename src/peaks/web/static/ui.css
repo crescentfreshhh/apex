@@ -1273,3 +1273,8 @@ body.picks-off .pick-span { display: none !important; }
 .cx-cell.cxr { cursor: pointer; }
 .cxr-bar { margin-top: 10px; gap: 10px; flex-wrap: wrap; align-items: center; }
 .actlog-job.waiting { opacity: .8; border-style: dashed; border-left-style: solid; }
+
+/* performer page: scenes her face is in that don't credit her */
+.unc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.unc { display: flex; flex-direction: column; gap: 4px; }
+.unc img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--bg-2, #222); }

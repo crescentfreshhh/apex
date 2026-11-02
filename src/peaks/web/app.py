@@ -21,10 +21,10 @@ JOB_LABELS = {"embed": "Embedding", "ingest": "Ingest", "score": "Writing marker
               "library": "Updating Stash", "dupes": "Finding duplicates", "train": "Training taste",
               "taste-measure": "Measuring taste", "warmup": "Starting up", "backup": "Backing up",
               "restore": "Restoring", "perf-photos": "Performer photos", "hear": "Hearing", "motion": "Motion",
-              "zoom": "Moment zoom", "lab": "Model trial", "picture": "Picture quality",
+              "zoom": "Moment zoom", "lab": "Model trial", "faces": "Faces", "picture": "Picture quality",
               "picture-dupes": "Picture: duplicates", "upgrades": "Upgrades search", "seedbox": "Seedbox"}
 JOB_FAMILY = {"ingest": "ingest", "embed": "embed", "fix": "embed", "warmup": "embed", "hear": "hear",
-              "motion": "motion", "zoom": "zoom", "lab": "zoom", "library": "stash", "dupes": "stash",
+              "motion": "motion", "zoom": "zoom", "faces": "picture", "lab": "zoom", "library": "stash", "dupes": "stash",
               "score": "stash", "sync": "sync", "backup": "sync", "restore": "sync", "train": "taste",
               "taste-measure": "taste", "playlist": "taste", "reel": "taste", "picture": "picture",
               "picture-dupes": "picture", "perf-photos": "picture", "upgrades": "upgrades", "seedbox": "upgrades"}
@@ -2169,6 +2169,44 @@ def create_app(cfg=None):
     def moments_zoom_run():
         return _bg_run("zoom", service.run_zoom)
 
+    # --- faces: who is in a scene ------------------------------------------------------
+
+    @app.get("/api/faces")
+    def faces_get():
+        d = service.faces_status()
+        j = jobs.running("faces")
+        d["running"] = j.as_dict() if j is not None else None
+        return d
+
+    @app.post("/api/faces")
+    def faces_run():
+        return _bg_run("faces", service.run_faces)
+
+    @app.post("/api/faces/settings")
+    def faces_settings_save(body: dict = Body(...)):
+        out = service.save_faces_settings(on=body.get("on"), per_run=body.get("per_run"))
+        if out["on"] is False:
+            j = jobs.running("faces")
+            if j is not None:
+                j.paused_for = None
+                j.request_cancel()
+            jobs.pause_pop("faces")
+        return out
+
+    @app.post("/api/faces/clear-error")
+    def faces_clear():
+        service.sense_clear("faces")
+        _faces_next["at"] = 0.0
+        return {"ok": True}
+
+    @app.get("/api/scene/{scene_id}/faces")
+    def scene_faces(scene_id: str):
+        return service.face_matches(scene_id)
+
+    @app.get("/api/performer/{pid}/uncredited")
+    def performer_uncredited(pid: str):
+        return service.face_uncredited(pid)
+
     @app.post("/api/zoom/settings")
     def zoom_settings_save(body: dict = Body(...)):
         out = service.save_zoom_settings(on=body.get("on"), per_run=body.get("per_run"))
@@ -3024,8 +3062,8 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
 # later — a Lab trial, Hearing, Motion, the zoom, picture — is asked to stop (each stops
 # between scenes and resumes from its cache), and is started again once the library
 # work is done.
-PAUSABLE = ("lab", "hear", "motion", "zoom", "picture")
-GPU_JOBS = ("embed", "ingest", "fix", "lab", "hear", "motion", "zoom")
+PAUSABLE = ("lab", "hear", "motion", "zoom", "picture", "faces")
+GPU_JOBS = ("embed", "ingest", "fix", "lab", "hear", "motion", "zoom", "faces")
 LIBRARY_WORK = ("ingest", "embed", "fix", "warmup", "sync", "backup", "restore")
 WAY_WAIT_S = 180.0          # how long heavy work waits for paused jobs to actually stop
 
@@ -3075,11 +3113,11 @@ def _others(kind: str) -> tuple[str, ...]:
 
 
 _BG_TARGETS = {"hear": lambda s: s.run_hear, "motion": lambda s: s.run_motion,
-               "zoom": lambda s: s.run_zoom, "picture": lambda s: s.run_picture}
+               "zoom": lambda s: s.run_zoom, "picture": lambda s: s.run_picture, "faces": lambda s: s.run_faces}
 
 
 # background work shares one lane — never two at once; what waits goes in this order
-RESUME_ORDER = ("lab", "zoom", "hear", "motion", "picture")
+RESUME_ORDER = ("lab", "zoom", "hear", "motion", "faces", "picture")
 
 
 def _bg_turn_taken(jobs: JobManager, kind: str) -> bool:
@@ -3100,7 +3138,7 @@ def _resume_paused(service: Service, jobs: JobManager) -> list[str]:
     waiting = jobs.paused_snapshot()
     if not waiting or any(jobs.running(k) for k in (*LIBRARY_WORK, *PAUSABLE)):
         return []
-    timers = {"hear": _hear_next, "motion": _motion_next, "zoom": _zoom_next}
+    timers = {"hear": _hear_next, "motion": _motion_next, "zoom": _zoom_next, "faces": _faces_next}
     for k in [k for k in RESUME_ORDER if k in waiting][:1]:
         e = waiting[k]
         args = e.get("args") or {}
@@ -3236,6 +3274,34 @@ def _start_motion(service: Service, jobs: JobManager):
     except RuntimeError:
         return None
     jobs.pause_pop("motion")
+    return j
+
+
+_FACES_WAIT_FOR = (*_MOTION_WAIT_FOR, "faces")
+_faces_next = {"at": 0.0}
+
+
+def _start_faces(service: Service, jobs: JobManager):
+    """Look for faces in scenes when nothing else runs. Checked at most every 10
+    minutes; backs off an hour after a failure."""
+    import time as _t
+
+    if (_t.time() < _faces_next["at"] or jobs.stopped_by_you("faces")
+            or any(jobs.running(k) for k in _FACES_WAIT_FOR) or _bg_turn_taken(jobs, "faces")):
+        return None
+    if not service.index_loaded():
+        return None
+    _faces_next["at"] = _t.time() + 600
+    if not service.faces_due():
+        jobs.pause_pop("faces")
+        return None
+    if getattr(service, "_faces_error", None):
+        _faces_next["at"] = _t.time() + 3600
+    try:
+        j = jobs.start("faces", service.run_faces, blockers=_others("faces"))
+    except RuntimeError:
+        return None
+    jobs.pause_pop("faces")
     return j
 
 
@@ -3382,6 +3448,10 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
                 pass
             try:   # motion: Peaks watches candidate moments move, the heaviest — last
                 _start_motion(service, jobs)
+            except Exception:  # noqa: BLE001
+                pass
+            try:   # faces: who is in each scene, when nothing else runs
+                _start_faces(service, jobs)
             except Exception:  # noqa: BLE001
                 pass
             try:   # files the pull just brought in: scan exactly where they landed
