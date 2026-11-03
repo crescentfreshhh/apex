@@ -3774,9 +3774,29 @@ async function loadFacesCard() {
       for Orphans and, on a performer's page, scenes she seems to be in but isn't credited for. Nothing is written without a click.</p>
     ${senseCoverage("faces", { ...st, seen: st.seen })}
     ${st.performers != null ? `<p class="small">${n(st.performers)} performers recognisable so far</p>` : ""}
-    <div class="row"><button class="btn sm" data-sense-run="faces">Run now</button>
-      <button class="btn sm ghost" data-sense-on="faces" data-on="${on ? 0 : 1}">${on ? "Turn off" : "Turn on"}</button></div></div>`;
+    <div class="row"><button class="btn sm" data-sense-run="faces" title="One batch of ${n(st.settings && st.settings.per_run)} scenes">Run now</button>
+      ${st.left ? `<button class="btn sm" id="faces-all" title="Every scene not looked at yet, in one run — it still steps aside for an ingest or embed, and Stop keeps what's done">Run all (${n(st.left)} left)</button>` : ""}
+      <button class="btn sm ghost" data-sense-on="faces" data-on="${on ? 0 : 1}">${on ? "Turn off" : "Turn on"}</button></div>
+    <label class="small faint">Scenes per automatic run
+      <input type="number" id="faces-per-run" min="50" max="5000" step="50" value="${(st.settings && st.settings.per_run) || 150}" style="width:6em" /></label></div>`;
 }
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("#faces-all"); if (!b) return;
+  b.disabled = true;
+  try {
+    const d = await api("/api/faces?all=true", { method: "POST" });
+    toast(d && d.queued ? `Queued — starts after ${d.after}` : "Looking at every scene — see Activity for progress and time left");
+  } catch (err) { toast(err.message, true); }
+  openLab();
+});
+document.addEventListener("change", async (e) => {
+  const i = e.target.closest("#faces-per-run"); if (!i) return;
+  const v = Math.max(50, Math.min(5000, Math.round(+i.value || 150)));
+  try {
+    const r = await api("/api/faces/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ per_run: v }) });
+    i.value = r.per_run; toast(`Faces: ${r.per_run} scenes per automatic run`);
+  } catch (err) { toast(err.message, true); }
+});
 const SENSE_DESC = {
   sound: "Listens to each scene: loudness, how much is happening, rhythm, and what it sounds like (CLAP — open weights, no token). Also lets you search by sound: type <code>sound: …</code> in search.",
   motion: "Watches how your candidate moments move, 4-second clips at a time (V-JEPA 2.1 — open weights, no token).",

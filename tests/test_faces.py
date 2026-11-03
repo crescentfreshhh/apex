@@ -113,3 +113,40 @@ def test_faces_take_a_turn_in_the_gpu_lane(tmp_path):
     import peaks.web.app as app_mod
 
     assert "faces" in app_mod.PAUSABLE and "faces" in app_mod.GPU_JOBS and "faces" in app_mod.RESUME_ORDER
+
+
+def test_run_all_does_every_scene_and_per_run_is_a_setting(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, stash = _orphan_svc(tmp_path, monkeypatch)
+    for sid in stash.s:
+        stash.s[sid]["path"] = f"/data/{sid}.mp4"
+        stash.s[sid]["duration"] = 300
+    _wire(svc, monkeypatch, {})
+    made = {}
+    real = app_mod.JobManager
+    monkeypatch.setattr(app_mod, "JobManager", lambda *a, **k: made.setdefault("jm", real(*a, **k)))
+    monkeypatch.setattr(app_mod, "Service", lambda cfg: svc)
+    monkeypatch.setenv("PEAKS_SCHEDULER", "0")
+    c = TestClient(app_mod.create_app(svc.cfg))
+    assert c.post("/api/faces/settings", json={"per_run": 5}).json()["per_run"] == 5
+    left = c.get("/api/faces").json()["left"]
+    assert left > 5
+    j = c.post("/api/faces").json()                        # one batch
+    jm = made["jm"]
+    for _ in range(300):
+        if jm.running("faces") is None:
+            break
+        time.sleep(0.02)
+    assert c.get("/api/faces").json()["left"] == left - 5
+    c.post("/api/faces", params={"all": True})              # everything left
+    for _ in range(500):
+        if jm.running("faces") is None and c.get("/api/faces").json()["left"] == 0:
+            break
+        time.sleep(0.02)
+    assert c.get("/api/faces").json()["left"] == 0 and j

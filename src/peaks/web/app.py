@@ -2223,7 +2223,9 @@ def create_app(cfg=None):
         return d
 
     @app.post("/api/faces")
-    def faces_run():
+    def faces_run(all: bool = False):
+        if all:                                      # every scene not looked at yet, in one run
+            return _bg_run("faces", lambda job: service.run_faces(job, limit=ALL_SCENES), args={"limit": ALL_SCENES})
         return _bg_run("faces", service.run_faces)
 
     @app.post("/api/faces/settings")
@@ -3116,7 +3118,8 @@ def _scheduled_embeds(service: Service, jobs: JobManager, state: dict, secs: flo
 PAUSABLE = ("lab", "hear", "motion", "zoom", "picture", "faces")
 GPU_JOBS = ("embed", "ingest", "fix", "lab", "hear", "motion", "zoom", "faces")
 LIBRARY_WORK = ("ingest", "embed", "fix", "warmup", "sync", "backup", "restore")
-WAY_WAIT_S = 180.0          # how long heavy work waits for paused jobs to actually stop
+WAY_WAIT_S = 180.0
+ALL_SCENES = 1_000_000      # "Run all": more than any library has          # how long heavy work waits for paused jobs to actually stop
 
 
 def _make_way(jobs: JobManager, for_what: str) -> list[str]:
@@ -3199,6 +3202,8 @@ def _resume_paused(service: Service, jobs: JobManager) -> list[str]:
                 return []
             target = ((lambda job, c=args["cand"]: service.run_lab(c, job=job)) if k == "lab"
                       else _BG_TARGETS[k](service))
+            if args.get("limit") and k != "lab":          # e.g. Faces "Run all": the same size when it resumes
+                target = (lambda job, t=target, n=int(args["limit"]): t(job, limit=n))
             try:
                 jobs.start(k, target, args=args, blockers=_others(k))
             except RuntimeError:

@@ -89,7 +89,8 @@ class FacesMixin:
         except Exception:  # noqa: BLE001
             seen = total = None
         g = self.__dict__.get("_face_gal")
-        return {"seen": seen, "embedded": total, "settings": self.faces_settings(),
+        return {"seen": seen, "embedded": total, "left": (total - seen) if total is not None else None,
+                "settings": self.faces_settings(),
                 "performers": len(g[1]["owners_set"]) if g else None,
                 "error": getattr(self, "_faces_error", None), "last_run": self.sense_last_run("faces")}
 
