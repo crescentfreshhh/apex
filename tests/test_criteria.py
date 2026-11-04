@@ -117,3 +117,20 @@ def test_every_settle_question_carries_the_chips_even_if_one_fails(tmp_path, mon
     q = svc.settle_queue(rows, svc._tier_predictions(rows))
     assert "criteria" not in svc.settle_info(bad)
     assert all("criteria" in svc.settle_info(r["scene_id"]) for r in q if r["scene_id"] != bad)
+
+
+def test_a_performer_action_rating_spreads_to_her_scenes(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import peaks.web.app as app_mod
+
+    svc, stash, who = _faces_world(tmp_path, monkeypatch)
+    c = TestClient(app_mod.create_app(svc.cfg))
+    assert c.post("/api/performer/2/criteria", json={"aspect": "action", "value": 2}).json()["ratings"] == {"action": 2}
+    assert c.get("/api/performer/2/criteria").json()["ratings"] == {"action": 2}
+    assert c.get("/api/performers/criteria").json()["2"] == {"action": 2}
+    rows = {r["scene_id"]: r for r in svc._catalogue_all()}
+    labels = svc._crit_labels(rows)["action"]
+    hers = [s for s, p in who.items() if p == "2"]
+    assert sorted(x[0] for x in labels) == sorted(hers) and all(x[1] == 1.0 and x[3] == "p2" for x in labels)
+    assert next(x for x in svc.criteria_summary()["criteria"] if x["aspect"] == "action")["labels"] == len(hers)

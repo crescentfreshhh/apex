@@ -29,7 +29,7 @@ from .. import atomic
 
 ASPECTS = ("body", "face", "outfit", "action", "quality")
 WORDS = {"body": "Body", "face": "Face", "outfit": "Outfit", "action": "Action", "quality": "Quality"}
-PERFORMER_ASPECTS = ("face", "body")
+PERFORMER_ASPECTS = ("face", "body", "action")        # action: her enthusiasm, energy, passion
 RATING_W = {-1: (0.0, 1.0), 1: (1.0, 1.0), 2: (1.0, 2.0)}     # her rating → (label, weight); 0 = ok: no label
 MIN_LABELS = 15           # per criterion, before it gets a model
 MIN_EACH = 3              # of each side
@@ -87,7 +87,7 @@ class CriteriaMixin:
     def set_performer_criterion(self, pid: str, aspect: str, value: int | None) -> dict:
         """Her face / body: −1 (no), 0 (ok), 1 (+), 2 (++); None clears."""
         if aspect not in PERFORMER_ASPECTS or (value is not None and int(value) not in (-1, 0, 1, 2)):
-            raise ValueError("aspect is face or body, value −1, 0, 1 or 2")
+            raise ValueError("aspect is face, body or action, value −1, 0, 1 or 2")
         pid = str(pid)
         p = self._pcrit_path()
         with atomic.edit_lock(p):

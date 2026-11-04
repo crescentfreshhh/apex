@@ -2458,12 +2458,12 @@ def create_app(cfg=None):
     @app.get("/api/performers/criteria")
     def performers_criteria_all():
         """Every performer's face / body rating (for the Rate performers grid)."""
-        return {pid: {k: e[k] for k in ("face", "body") if k in e} for pid, e in service.performer_criteria().items()}
+        return {pid: {k: e[k] for k in ("face", "body", "action") if k in e} for pid, e in service.performer_criteria().items()}
 
     @app.get("/api/performer/{pid}/criteria")
     def performer_criteria_get(pid: str):
         e = service.performer_criteria().get(str(pid)) or {}
-        return {"id": str(pid), "ratings": {k: e[k] for k in ("face", "body") if k in e}}
+        return {"id": str(pid), "ratings": {k: e[k] for k in ("face", "body", "action") if k in e}}
 
     @app.post("/api/performer/{pid}/criteria")
     def performer_criteria_set(pid: str, body: dict = Body(...)):

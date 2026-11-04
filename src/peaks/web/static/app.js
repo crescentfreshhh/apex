@@ -2001,9 +2001,9 @@ function wireSceneCards(box, scenes, per = 48) {
 // her face and body, rated once: applies to every scene she's in (Faces finds the uncredited ones)
 const PCRIT_V = [[-1, "−"], [0, "ok"], [1, "+"], [2, "++"]];
 function pcritHTML(r, head = true) {
-  return (head ? `<div class="pcrit-h"><b>Your rating</b> <span class="faint small">— applies to every scene she's in (two of your five criteria)</span></div>` : "")
-    + `<div class="pcrit">` + ["face", "body"].map((a) =>
-    `<span class="small"><b>${a === "face" ? "Face" : "Body"}</b> <span class="seg">${PCRIT_V.map(([v, t]) =>
+  return (head ? `<div class="pcrit-h"><b>Your rating</b> <span class="faint small">— applies to every scene she's in (three of your five criteria)</span></div>` : "")
+    + `<div class="pcrit">` + ["face", "body", "action"].map((a) =>
+    `<span class="small" ${a === "action" ? 'title="Her enthusiasm, energy, passion — what she brings to a scene"' : ""}><b>${{ face: "Face", body: "Body", action: "Action" }[a]}</b> <span class="seg">${PCRIT_V.map(([v, t]) =>
       `<button class="${r[a] === v ? "on" : ""}" data-pcrit="${a}" data-v="${v}">${t}</button>`).join("")}</span></span>`).join("") + `</div>`;
 }
 async function loadPerfCrit(id) {
@@ -2026,7 +2026,7 @@ document.addEventListener("click", async (e) => {
 const rateP = { ratings: {}, list: [], all: false };
 function rateTileHTML(p) {
   const r = rateP.ratings[p.id] || {}, url = perfPhotoURL(p);
-  const done = r.face != null && r.body != null;
+  const done = r.face != null && r.body != null && r.action != null;
   return `<div class="rate-tile ${done ? "done" : ""}" data-pid="${esc(p.id)}">
     <div class="rate-pic">${url ? `<img loading="lazy" src="${url}" alt="" onerror="this.style.visibility='hidden'" />` : `<span>${perfInitials(p.name)}</span>`}</div>
     <div class="rate-name"><b>${esc(p.name)}</b> <span class="faint small">${p.lib || 0} scene${p.lib === 1 ? "" : "s"}${done ? " · ✓" : ""}</span></div>
@@ -2055,13 +2055,13 @@ async function openRatePerformers() {
 }
 function renderRatePerformers() {
   const dlg = $("#rate-dlg"); if (!dlg) return;
-  const rated = (p) => { const r = rateP.ratings[p.id] || {}; return r.face != null && r.body != null; };
+  const rated = (p) => { const r = rateP.ratings[p.id] || {}; return r.face != null && r.body != null && r.action != null; };
   const n = rateP.list.filter(rated).length;
   const show = (rateP.all ? rateP.list : rateP.list.filter((p) => !rated(p))).slice(0, 120);
   dlg.innerHTML = `<div class="row between"><h3>Rate performers <span class="faint small">— ${n} of ${rateP.list.length} rated</span></h3>
       <span><span class="seg"><button class="${rateP.all ? "" : "on"}" data-rate-all="0">Unrated</button><button class="${rateP.all ? "on" : ""}" data-rate-all="1">All</button></span>
       <button class="btn sm ghost" data-rate-close>Done</button></span></div>
-    <p class="faint small">Face and body, once per performer — it applies to every scene she's in. Most-graded first. One tap saves; tap again to clear.</p>
+    <p class="faint small">Face, body and action (her enthusiasm), once per performer — it applies to every scene she's in. Most-graded first. One tap saves; tap again to clear.</p>
     <div class="rate-grid">${show.map(rateTileHTML).join("") || '<p class="faint">Everyone here is rated. 🎉</p>'}</div>`;
 }
 document.addEventListener("click", (e) => { if (e.target.closest("[data-rate-performers]")) { e.preventDefault(); openRatePerformers(); } });
@@ -3474,7 +3474,7 @@ async function loadCritCard() {
     <p class="small">${d.in_grading ? `<b class="lab-win">In use for grading</b> — it made Peaks' verdicts better on scenes it didn't learn from (${d.gain > 0 ? "+" : ""}${Math.round(100 * (d.gain || 0))} pts).`
       : '<span class="faint">Not used for grading yet — it switches on by itself once it makes Peaks\' verdicts better on scenes it didn\'t learn from.</span>'}
       ${d.performers_rated ? ` · ${d.performers_rated} performer${d.performers_rated === 1 ? "" : "s"} rated` : ""}</p>
-    <button class="btn sm" data-rate-performers>⭐ Rate performers' face &amp; body</button></div>`;
+    <button class="btn sm" data-rate-performers>⭐ Rate performers (face, body, action)</button></div>`;
 }
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-settle-start]")) { cat.view = "settle"; cat.tier = ""; go("catalogue"); openCatalogue(); }
