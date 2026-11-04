@@ -3418,7 +3418,7 @@ async function loadCritCard() {
     const bar = c.moves != null ? `<span class="crit-bar" title="How strongly it goes with your grades (rank correlation)"><i style="width:${Math.max(2, Math.round(100 * Math.max(0, c.moves)))}%"></i></span> ${c.moves.toFixed(2)}` : "—";
     return `<tr><td><b>${esc(c.word)}</b></td><td class="small">${c.labels} (${c.yes}▲ ${c.no}▼)</td><td class="small">${status}</td><td class="small">${bar}</td></tr>`;
   }).join("");
-  const top = d.criteria.filter((c) => c.moves != null).sort((a, b) => b.moves - a.moves);
+  const top = d.criteria.filter((c) => c.moves != null && c.moves >= 0.15).sort((a, b) => b.moves - a.moves);   // a real link only
   box.innerHTML = `<div class="panel stat-card"><h3>What matters to you</h3>
     <p class="faint small">Your five criteria. Tell Peaks why with the ▲/▼ chips when you settle (or in Why? and the player), and rate performers' face and body on their page.
       ${top.length ? `So far <b>${esc(top[0].word)}</b> goes with your grades most${top.length > 1 ? `, then ${esc(top[1].word)}` : ""}.` : ""}</p>
