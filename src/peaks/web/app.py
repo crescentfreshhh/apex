@@ -2437,6 +2437,37 @@ def create_app(cfg=None):
     def stash_capabilities(refresh: bool = False):
         return service.capabilities(refresh=refresh)
 
+    # --- your criteria: why a grade is what it is --------------------------------------
+
+    @app.get("/api/criteria")
+    def criteria_summary():
+        return service.criteria_summary()
+
+    @app.get("/api/scene/{scene_id}/criteria")
+    def scene_criteria(scene_id: str):
+        return service.criteria_for_scene(scene_id)
+
+    @app.post("/api/scene/{scene_id}/criteria")
+    def scene_criteria_set(scene_id: str, body: dict = Body(...)):
+        from .inputs import as_int
+
+        out = service.set_scene_criterion(scene_id, str(body.get("aspect") or ""), as_int(body.get("value", 0), "value", -1, 1))
+        service.note_reason()                      # counts toward the next retrain, like a grade
+        return {**out, **{k: v for k, v in service.criteria_for_scene(scene_id).items() if k == "read"}}
+
+    @app.get("/api/performer/{pid}/criteria")
+    def performer_criteria_get(pid: str):
+        e = service.performer_criteria().get(str(pid)) or {}
+        return {"id": str(pid), "ratings": {k: e[k] for k in ("face", "body") if k in e}}
+
+    @app.post("/api/performer/{pid}/criteria")
+    def performer_criteria_set(pid: str, body: dict = Body(...)):
+        v = body.get("value")
+        from .inputs import as_int
+
+        return service.set_performer_criterion(pid, str(body.get("aspect") or ""),
+                                               None if v is None else as_int(v, "value", -1, 2))
+
     @app.get("/api/scene/{scene_id}/story")
     def scene_story(scene_id: str):
         try:

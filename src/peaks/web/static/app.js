@@ -1458,8 +1458,10 @@ async function loadViewerMeta(sid) {
       ${GRADES.map((g) => `<option value="${g}">${esc(gradeName(g))}</option>`).join("")}
     </select>
     <button class="orgbtn ${m.organized ? "on" : ""}">✓ organized</button>
-    <button class="btn sm ghost" data-timeline="${esc(sid)}" title="Everything about this scene: what Peaks suggested, what you decided, what changed in Stash — and why">🕘 History</button>`;
+    <button class="btn sm ghost" data-timeline="${esc(sid)}" title="Everything about this scene: what Peaks suggested, what you decided, what changed in Stash — and why">🕘 History</button>
+    <div class="crit" data-crit-sid="${esc(sid)}"></div>`;
   wireSceneEdits(sid, edit);
+  critLoad(sid);
   const gs = edit.querySelector(".grade-sel");
   if (gs) gs.addEventListener("change", async () => {
     if (!gs.value) return;
@@ -1949,6 +1951,7 @@ function renderPerfDetail(d, prof = {}) {
       </div>
     </div>
     ${studios ? `<h3 style="margin:18px 0 0">Studios</h3><div class="pf-studios">${studios}</div>` : ""}
+    <div class="pcrit" id="pd-crit" data-pid="${esc(String(d.id))}"></div>
     <div id="pd-costars"></div>
     <div id="pd-uncredited"></div>
     ${sim ? `<h3 style="margin:18px 0 6px">If you like her, try…</h3><div class="pd-similar">${sim}</div>` : ""}
@@ -1970,6 +1973,7 @@ function renderPerfDetail(d, prof = {}) {
   box.querySelectorAll(".pf-studio").forEach((b) => b.onclick = () => openCatWith({ performer_ids: [String(d.id)], pnames: [name], studios: [b.dataset.studio] }));
   wireSceneCards(box, prof.scenes || []);
   loadCostars(d.id, name);
+  loadPerfCrit(d.id);
   loadUncredited(d.id, name);
 }
 // scene covers (performer and studio pages): a page at a time, click to play
@@ -1994,6 +1998,25 @@ function wireSceneCards(box, scenes, per = 48) {
   };
   more();
 }
+// her face and body, rated once: applies to every scene she's in (Faces finds the uncredited ones)
+const PCRIT_V = [[-1, "−"], [0, "ok"], [1, "+"], [2, "++"]];
+async function loadPerfCrit(id) {
+  const box = $("#pd-crit"); if (!box) return;
+  let d; try { d = await api(`/api/performer/${encodeURIComponent(id)}/criteria`); } catch { return; }
+  box.innerHTML = `<span class="small faint" title="Applies to every scene she's in — one of your five criteria">Your rating:</span>` + ["face", "body"].map((a) =>
+    `<span class="small"><b>${a === "face" ? "Face" : "Body"}</b> <span class="seg">${PCRIT_V.map(([v, t]) =>
+      `<button class="${d.ratings[a] === v ? "on" : ""}" data-pcrit="${a}" data-v="${v}">${t}</button>`).join("")}</span></span>`).join("");
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-pcrit]"); if (!b) return;
+  const box = b.closest("#pd-crit"), id = box && box.dataset.pid; if (!id) return;
+  const on = b.classList.contains("on");
+  try {
+    await api(`/api/performer/${encodeURIComponent(id)}/criteria`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ aspect: b.dataset.pcrit, value: on ? null : +b.dataset.v }) });
+    loadPerfCrit(id);
+  } catch (err) { toast(err.message, true); }
+});
 // scenes her face is in that don't credit her (Faces) — one click adds her in Stash
 async function loadUncredited(id, name) {
   const box = $("#pd-uncredited"); if (!box) return;
@@ -3230,7 +3253,8 @@ async function argueLoad(sid, el, i) {
   if (!argCache[sid]) el.innerHTML = '<span class="faint small">Weighing it up…</span>';
   try { argCache[sid] = argCache[sid] || await api(`/api/tiers/explain/${encodeURIComponent(sid)}`); }
   catch (e) { el.innerHTML = `<span class="faint small">${esc(e.message)}</span>`; return; }
-  el.innerHTML = argueHTML(argCache[sid], i);
+  el.innerHTML = argueHTML(argCache[sid], i) + `<div class="crit" data-crit-sid="${esc(sid)}"></div>`;
+  critLoad(sid);
 }
 function argueHTML(e, i) {
   if (!e.ok) return `<span class="faint small">${esc(e.reason || "no argument to make")}</span>`;
@@ -3379,7 +3403,29 @@ async function loadSettleCard() {
       <button class="btn pri" data-settle-start ${d.unsettled ? "" : "disabled"}>Start settling</button></div>
     ${d.projection ? `<p class="small">At the rate your answers have been settling others (about ${d.projection.per_answer} each), that's roughly <b>${n(d.projection.answers)} more answers</b>.</p>` : ""}
     ${pts.length > 1 ? lineChart(pts, { y: "unsettled", fmtY: (v) => Math.round(v).toLocaleString(), h: 110 }) : ""}
-    <p class="faint small">${esc(cal)} Only graded scenes — unreviewed ones are left to <a href="#" data-settle-likely>Likely keepers</a> and Quality check. Peaks never grades anything itself.</p></div>`;
+    <p class="faint small">${esc(cal)} Only graded scenes — unreviewed ones are left to <a href="#" data-settle-likely>Likely keepers</a> and Quality check. Peaks never grades anything itself.</p></div>
+    <div id="crit-card"></div>`;
+  loadCritCard();
+}
+// Insights: what matters to you — your five criteria, how much each moves your grades
+async function loadCritCard() {
+  const box = $("#crit-card"); if (!box) return;
+  let d; try { d = await api("/api/criteria"); } catch { return; }
+  const rows = d.criteria.map((c) => {
+    const status = c.used ? `<b class="lab-win">learned</b> · right ${Math.round(100 * c.acc)}% on answers it didn't learn from`
+      : c.needs ? `<span class="faint">needs ${c.needs} more answer${c.needs === 1 ? "" : "s"}</span>`
+      : `<span class="faint">not reliable yet${c.acc != null ? ` (${Math.round(100 * c.acc)}%)` : ""}</span>`;
+    const bar = c.moves != null ? `<span class="crit-bar" title="How strongly it goes with your grades (rank correlation)"><i style="width:${Math.max(2, Math.round(100 * Math.max(0, c.moves)))}%"></i></span> ${c.moves.toFixed(2)}` : "—";
+    return `<tr><td><b>${esc(c.word)}</b></td><td class="small">${c.labels} (${c.yes}▲ ${c.no}▼)</td><td class="small">${status}</td><td class="small">${bar}</td></tr>`;
+  }).join("");
+  const top = d.criteria.filter((c) => c.moves != null).sort((a, b) => b.moves - a.moves);
+  box.innerHTML = `<div class="panel stat-card"><h3>What matters to you</h3>
+    <p class="faint small">Your five criteria. Tell Peaks why with the ▲/▼ chips when you settle (or in Why? and the player), and rate performers' face and body on their page.
+      ${top.length ? `So far <b>${esc(top[0].word)}</b> goes with your grades most${top.length > 1 ? `, then ${esc(top[1].word)}` : ""}.` : ""}</p>
+    <table class="htab"><thead><tr><th></th><th>answers</th><th>Peaks' score</th><th>moves your grade</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="small">${d.in_grading ? `<b class="lab-win">In use for grading</b> — it made Peaks' verdicts better on scenes it didn't learn from (${d.gain > 0 ? "+" : ""}${Math.round(100 * (d.gain || 0))} pts).`
+      : '<span class="faint">Not used for grading yet — it switches on by itself once it makes Peaks\' verdicts better on scenes it didn\'t learn from.</span>'}
+      ${d.performers_rated ? ` · ${d.performers_rated} performer${d.performers_rated === 1 ? "" : "s"} rated` : ""}</p></div>`;
 }
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-settle-start]")) { cat.view = "settle"; cat.tier = ""; go("catalogue"); openCatalogue(); }
@@ -3391,10 +3437,41 @@ function rvSettleBanner(r) {
   box.hidden = !s;
   if (!s) return;
   box.className = "rv-settle " + s.kind;
-  box.innerHTML = s.kind === "disagree"
+  box.innerHTML = (s.kind === "disagree"
     ? `<span>⚖ ${esc(s.why)} — keep yours (Keep mine, or press your grade) or grade again; either way it won't be asked again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
-    : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`;
+    : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`)
+    + `<div class="crit" data-crit-sid="${esc(r.scene_id)}">${s.criteria ? critHTML(r.scene_id, s.criteria) : ""}</div>`;
 }
+// --- your criteria: tell Peaks why (▲ better than it gave credit for, ▼ worse) -----------------
+const CRIT = [["body", "Body"], ["face", "Face"], ["outfit", "Outfit"], ["action", "Action"], ["quality", "Quality"]];
+const critState = {};
+function critHTML(sid, c) {
+  critState[sid] = c;
+  const mine = c.reasons || {}, read = c.read || {};
+  return `<span class="crit-h small" title="Tap ▲ where this scene is better than Peaks gave it credit for, ▼ where it's worse — Peaks learns your five criteria from it">Why your grade?</span>`
+    + CRIT.map(([a, w]) => {
+      const v = mine[a] || 0, rd = read[a];
+      return `<span class="crit-c ${c.teach === a && !v ? "teach" : ""}" title="${rd ? `Peaks reads ${w}: ${rd.band}` : `${w}: Peaks has no read yet`}${c.teach === a && !v ? " — the one Peaks would most like to know" : ""}">
+        <b>${w}</b>${rd ? `<i class="crit-rd ${rd.band}">${rd.band}</i>` : ""}
+        <button class="crit-b ${v > 0 ? "on" : ""}" data-crit="${esc(sid)}" data-a="${a}" data-v="${v > 0 ? 0 : 1}" aria-label="${w} better">▲</button><button class="crit-b ${v < 0 ? "on" : ""}" data-crit="${esc(sid)}" data-a="${a}" data-v="${v < 0 ? 0 : -1}" aria-label="${w} worse">▼</button>${a === "outfit" ? ` <a class="small faint" href="#" data-crit-word title="Teach Peaks a word for it — heels, lingerie, fishnets…">+word</a>` : ""}</span>`;
+    }).join("");
+}
+async function critLoad(sid) {
+  const el = document.querySelector(`.crit[data-crit-sid="${CSS.escape(String(sid))}"]`); if (!el) return;
+  try { const c = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`); el.innerHTML = critHTML(sid, c); } catch {}
+}
+document.addEventListener("click", async (e) => {
+  if (e.target.closest("[data-crit-word]")) { e.preventDefault(); go("lab"); setTimeout(() => document.querySelector('#labx-tabs [data-tab="concepts"]')?.click(), 300); return; }
+  const b = e.target.closest("[data-crit]"); if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  const sid = b.dataset.crit;
+  try {
+    const r = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ aspect: b.dataset.a, value: +b.dataset.v }) });
+    const c = { ...(critState[sid] || {}), reasons: r.reasons, read: r.read || (critState[sid] || {}).read, teach: null };
+    document.querySelectorAll(`.crit[data-crit-sid="${CSS.escape(sid)}"]`).forEach((el) => { el.innerHTML = critHTML(sid, c); });
+  } catch (err) { toast(err.message, true); }
+});
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-settle-keep]"); if (!b) return;
   b.disabled = true;

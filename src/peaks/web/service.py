@@ -50,6 +50,7 @@ from .motion import MotionMixin
 from .faces import FacesMixin
 from .discover import DiscoverMixin
 from .timeline import TimelineMixin
+from .criteria import CriteriaMixin
 from .senses_explore import SenseExploreMixin
 
 
@@ -66,7 +67,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
-              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin, TimelineMixin):
+              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin, TimelineMixin, CriteriaMixin):
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -5750,6 +5751,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         # its picture or bitrate — views are re-derived from rows every request)
         if self.settling():
             self._settle_log(answer=True)          # a question answered
+        self._maybe_retrain()
+
+    def note_reason(self) -> None:
+        """A reason you gave (a criterion ▲/▼): counts toward the next retrain, like a grade."""
+        self._grades_since_train = getattr(self, "_grades_since_train", 0) + 1
+        self._maybe_retrain()
+
+    def _maybe_retrain(self) -> None:
         every = FAST_RETRAIN if self.settling() else 25   # learn faster while you settle
         if self._grades_since_train >= every and self._tier_model_state()["model"] is not None:
             with self._train_gate:
@@ -5900,7 +5909,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tier_model import sense_row
 
         out = {}
-        for name, fn in (("sound", self.sound_scene_vector), ("motion", self.motion_scene_vector)):
+        for name, fn in (("sound", self.sound_scene_vector), ("motion", self.motion_scene_vector),
+                         ("criteria", self.criteria_scene_vector)):      # your five criteria, once they've learned
             vecs = []
             for sid in sids:
                 try:

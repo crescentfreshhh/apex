@@ -23,7 +23,7 @@ WORD_GATE = 0.3          # |effect size| a term needs between two tiers to be sh
 WORD_MIN_N = 5           # graded scenes per tier before words are tried at all
 CLUSTER_MIN_N = 5        # scenes sharing a trait before its disagreement rate counts
 GROUP_NAMES = {"look": "Look", "file": "File", "who": "Performers / studio", "picture": "Picture",
-               "sound": "Sound", "motion": "Motion"}
+               "sound": "Sound", "motion": "Motion", "criteria": "Your criteria"}
 
 
 def _tier(c: str) -> str:
@@ -74,6 +74,12 @@ class ArbiterMixin:
                        own=None if honest else mine, pic=picture_features(pics.get(sid)),
                        senses={k: v[0] for k, v in sen.items()})
         facts = self._arb_facts(row, a, b, rows, pics, names)
+        try:                                   # your criteria: Peaks' read, in your words
+            from .criteria import WORDS
+
+            facts["criteria"] = [f"{WORDS[k]} {v['band']}" for k, v in self.criteria_read(sid).items()]
+        except Exception:  # noqa: BLE001
+            pass
         for g in ex["groups"]:
             g["label"] = GROUP_NAMES.get(g["group"], g["group"])
             g["facts"] = facts.get(g["group"], [])

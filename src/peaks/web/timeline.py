@@ -82,6 +82,7 @@ class TimelineMixin:
             "discover-grab": ("you", "Grabbed from Discover"),
             "restore": ("you", "Grade restored (undo / backup)"),
             "file-copy": ("peaks", "Same-file copy removed"),
+            "criteria": ("you", "Told Peaks why"),
         }
         who, text = texts.get(a, ("peaks", a or "change"))
         return {"at": at, "who": who, "kind": a, "text": text, "why": e.get("detail") or ""}

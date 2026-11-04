@@ -1292,3 +1292,18 @@ body.picks-off .pick-span { display: none !important; }
 .tl-peaks .tl-who { color: #c9a0ff; }
 .tl-stash .tl-who { color: #9c9; }
 @media (max-width: 520px) { .tl-ev { grid-template-columns: 1fr; gap: 2px; } }
+
+/* your criteria chips */
+.crit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.crit:empty { display: none; }
+.crit-h { color: var(--muted, #999); margin-right: 2px; }
+.crit-c { display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; border: 1px solid var(--line, #333); border-radius: 999px; font-size: 12px; }
+.crit-c.teach { border-color: #c9a0ff; box-shadow: 0 0 0 1px #c9a0ff55; }
+.crit-b { background: none; border: 0; color: var(--muted, #888); cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1; }
+.crit-b.on { color: var(--accent, #6cf); font-weight: 700; }
+.crit-rd { font-style: normal; font-size: 10px; padding: 0 4px; border-radius: 6px; background: #ffffff14; }
+.crit-rd.strong { color: #9c9; } .crit-rd.weak { color: #e99; }
+.pcrit { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.pcrit .seg button.on { background: var(--accent, #6cf); color: #000; }
+.crit-bar { display: inline-block; width: 70px; height: 6px; background: #ffffff14; border-radius: 3px; vertical-align: middle; }
+.crit-bar i { display: block; height: 100%; background: var(--accent, #6cf); border-radius: 3px; }
