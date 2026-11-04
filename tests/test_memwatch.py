@@ -110,7 +110,13 @@ def test_one_watchdog_check_purges_softly_and_logs_it(tmp_path, monkeypatch):
     svc = svc_mod.Service(cfg)
     monkeypatch.setattr(svc, "_model_name", lambda: "dinov2")
     svc._meta = {"1": {}}
+    import threading
+
     rss = iter([95, 95, 80])
-    monkeypatch.setattr(memwatch, "rss_bytes", lambda: next(rss) * memwatch.MB)
+    me = threading.get_ident()
+    # only this test's own reads walk the sequence: a health logger left running by an
+    # earlier test (another thread) reading memory must not use up its numbers
+    monkeypatch.setattr(memwatch, "rss_bytes",
+                        lambda: (next(rss) if threading.get_ident() == me else 50) * memwatch.MB)
     e = watch_once(svc, memwatch.PurgePolicy(100 * memwatch.MB))
     assert e["level"] == "soft" and e["freed_mb"] == 15 and svc._meta
