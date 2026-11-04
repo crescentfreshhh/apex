@@ -3488,9 +3488,19 @@ function rvSettleBanner(r) {
   box.className = "rv-settle " + s.kind;
   box.innerHTML = (s.kind === "disagree"
     ? `<span>⚖ ${esc(s.why)} — keep yours (Keep mine, or press your grade) or grade again; either way it won't be asked again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
-    : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`)
-    + `<div class="crit" data-crit-sid="${esc(r.scene_id)}">${s.criteria ? critHTML(r.scene_id, s.criteria) : ""}</div>`;
-  if (!s.criteria) critLoad(r.scene_id);       // arrived without them: fetch for this scene
+    : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`);
+}
+// the chips under the grade buttons — every scene in the player, new or settling
+function rvCritRow(r) {
+  const el = $("#rv-crit"); if (!el) return;
+  const sid = String(r.scene_id), have = (r.settle && r.settle.criteria) || critState[sid];
+  el.dataset.critSid = sid;
+  el.innerHTML = have ? critHTML(sid, have) : "";
+  if (!have || !(r.settle && r.settle.criteria)) critLoad(sid);     // fresh read (and yours) for this scene
+}
+async function critPrefetch(sid) {
+  sid = String(sid); if (critState[sid]) return;
+  try { critState[sid] = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`); } catch {}
 }
 // --- your criteria: tell Peaks why (▲ better than it gave credit for, ▼ worse) -----------------
 const CRIT = [["body", "Body"], ["face", "Face"], ["outfit", "Outfit"], ["action", "Action"], ["quality", "Quality"]];
@@ -3498,7 +3508,7 @@ const critState = {};
 function critHTML(sid, c) {
   critState[sid] = c;
   const mine = c.reasons || {}, read = c.read || {};
-  return `<span class="crit-h small" title="Tap ▲ where this scene is better than Peaks gave it credit for, ▼ where it's worse — Peaks learns your five criteria from it">Why your grade?</span>`
+  return `<span class="crit-h small" title="Tap ▲ for a strength of this scene, ▼ for a weakness (or where it's better / worse than Peaks gave it credit for) — Peaks learns your five criteria from it">What made it?</span>`
     + CRIT.map(([a, w]) => {
       const v = mine[a] || 0, rd = read[a];
       return `<span class="crit-c ${c.teach === a && !v ? "teach" : ""}" title="${rd ? `Peaks reads ${w}: ${rd.band}` : `${w}: Peaks has no read yet`}${c.teach === a && !v ? " — the one Peaks would most like to know" : ""}">
@@ -7032,8 +7042,9 @@ function renderReview() {
     rv.start = best;                                     // not loaded yet: it simply starts there
     if (v.readyState >= 1 && Math.abs(v.currentTime - best) > 2) { v.currentTime = best; v.play().catch(() => {}); }
   }).catch(() => {});
-  const nx = rv.items[rv.i + 1]; if (nx) rvPicksGet(nx.scene_id).catch(() => {});      // the next one, ready
+  const nx = rv.items[rv.i + 1]; if (nx) { rvPicksGet(nx.scene_id).catch(() => {}); critPrefetch(nx.scene_id); }   // the next one, ready
   rvSettleBanner(r);
+  rvCritRow(r);
   // grades: current one outlined, the model's pick highlighted
   const cur = r.tier === "rejected" ? "reject" : r.tier;
   const probs = (r.pred || {}).probs || {};

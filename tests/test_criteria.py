@@ -161,3 +161,12 @@ def test_a_tap_answers_at_once_and_the_models_catch_up_in_the_background(tmp_pat
     gate.set()
     assert built.wait(10)                                                          # rebuilt behind the scenes
     assert svc.criteria_models(wait=False) is svc.criteria_models()                # and current again
+
+
+def test_a_new_ungraded_scene_can_be_told_why_too(tmp_path, monkeypatch):
+    svc, stash, who = _faces_world(tmp_path, monkeypatch)
+    rows = {r["scene_id"]: r for r in svc._catalogue_all()}
+    new = next(s for s, r in rows.items() if r["tier"] in ("", None, "unreviewed", "ungraded"))
+    svc.set_scene_criterion(new, "face", 1)
+    assert svc.criteria_for_scene(new)["reasons"] == {"face": 1}
+    assert (new, 1.0, 1.0, "s" + new) in svc._crit_labels(rows)["face"]

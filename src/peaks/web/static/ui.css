@@ -1296,6 +1296,8 @@ body.picks-off .pick-span { display: none !important; }
 /* your criteria chips */
 .crit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
 .crit:empty { display: none; }
+.rv-crit { margin: 8px 0 2px; justify-content: center; }
+.rv-settle[hidden] { display: none; }
 .crit-h { color: var(--muted, #999); margin-right: 2px; }
 .crit-c { display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; border: 1px solid var(--line, #333); border-radius: 999px; font-size: 12px; }
 .crit-c.teach { border-color: #c9a0ff; box-shadow: 0 0 0 1px #c9a0ff55; }
