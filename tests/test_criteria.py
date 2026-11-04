@@ -96,3 +96,24 @@ def test_noise_reasons_teach_nothing(tmp_path, monkeypatch):
     m = svc.criteria_models()["outfit"]
     assert m["labels"] == 30 and not m["used"]
     assert svc.criteria_teach("5") in ("body", "face", "outfit", "action", "quality")
+
+
+def test_every_settle_question_carries_the_chips_even_if_one_fails(tmp_path, monkeypatch):
+    import peaks.web.service as svc_mod
+    from test_settle import _library
+
+    svc, stash, (wrong,), _ = _library(tmp_path / "s", monkeypatch)
+    rows = svc._catalogue_all()
+    q = svc.settle_queue(rows, svc._tier_predictions(rows))
+    assert q and all("criteria" in svc.settle_info(r["scene_id"]) for r in q)       # not just the first ones
+    bad = q[0]["scene_id"]
+    real = svc_mod.Service.criteria_read
+
+    def flaky(self, sid):
+        if str(sid) == bad:
+            raise RuntimeError("boom")
+        return real(self, sid)
+    monkeypatch.setattr(svc_mod.Service, "criteria_read", flaky)
+    q = svc.settle_queue(rows, svc._tier_predictions(rows))
+    assert "criteria" not in svc.settle_info(bad)
+    assert all("criteria" in svc.settle_info(r["scene_id"]) for r in q if r["scene_id"] != bad)

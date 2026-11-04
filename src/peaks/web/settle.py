@@ -284,14 +284,21 @@ class SettleMixin:
                                        "yours": r["tier"],
                                        "why": f"You said {nm(r['tier'])} · Peaks says {nm(p['tier'])} "
                                               f"({round(100 * p['conf'])}%, {'sure' if sure else 'leaning'})"}
-        try:                                        # your criteria: Peaks' read, your reasons, one to teach
-            for r in out[:60]:
-                sid = r["scene_id"]
-                cr = self.criteria_for_scene(sid)
-                info[sid]["criteria"] = {"reasons": cr["reasons"], "read": cr["read"],
-                                         "teach": self.criteria_teach(sid)}
+        try:                                        # your criteria on every question: Peaks' read, your reasons, one to teach
+            reasons = self.criteria_reasons()
+            self.criteria_models()                  # built once (cached) for the whole list
         except Exception:  # noqa: BLE001 — criteria are extra
-            pass
+            reasons = None
+        if reasons is not None:
+            from .criteria import ASPECTS
+
+            for r in out:
+                sid = r["scene_id"]
+                try:                                # one scene failing never blanks the rest
+                    info[sid]["criteria"] = {"reasons": {k: v for k, v in (reasons.get(sid) or {}).items() if k in ASPECTS},
+                                             "read": self.criteria_read(sid), "teach": self.criteria_teach(sid)}
+                except Exception:  # noqa: BLE001
+                    continue
         self._settle_info = info
         return out
 

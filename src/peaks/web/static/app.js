@@ -3490,6 +3490,7 @@ function rvSettleBanner(r) {
     ? `<span>⚖ ${esc(s.why)} — keep yours (Keep mine, or press your grade) or grade again; either way it won't be asked again</span><button class="btn sm" data-settle-keep="${esc(r.scene_id)}">Keep mine</button>`
     : `<span>↪ ${esc(s.why)} — grade it into a live tier</span>`)
     + `<div class="crit" data-crit-sid="${esc(r.scene_id)}">${s.criteria ? critHTML(r.scene_id, s.criteria) : ""}</div>`;
+  if (!s.criteria) critLoad(r.scene_id);       // arrived without them: fetch for this scene
 }
 // --- your criteria: tell Peaks why (▲ better than it gave credit for, ▼ worse) -----------------
 const CRIT = [["body", "Body"], ["face", "Face"], ["outfit", "Outfit"], ["action", "Action"], ["quality", "Quality"]];
