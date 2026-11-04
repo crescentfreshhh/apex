@@ -1307,3 +1307,15 @@ body.picks-off .pick-span { display: none !important; }
 .pcrit .seg button.on { background: var(--accent, #6cf); color: #000; }
 .crit-bar { display: inline-block; width: 70px; height: 6px; background: #ffffff14; border-radius: 3px; vertical-align: middle; }
 .crit-bar i { display: block; height: 100%; background: var(--accent, #6cf); border-radius: 3px; }
+
+/* performer face/body rating: on her page, and the Rate performers grid */
+.pcrit-box { margin: 6px 0 10px; padding: 8px 10px; border: 1px solid var(--line, #333); border-radius: 10px; background: #ffffff08; }
+.pcrit-h { margin-bottom: 4px; }
+.rate-dlg { max-width: 1100px; }
+.rate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 8px; }
+.rate-tile { display: grid; grid-template-columns: 56px 1fr; gap: 4px 10px; align-items: center; padding: 8px; border: 1px solid var(--line, #333); border-radius: 10px; }
+.rate-tile.done { opacity: .7; }
+.rate-pic { grid-row: span 2; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; background: #ffffff10; display: flex; align-items: center; justify-content: center; }
+.rate-pic img { width: 100%; height: 100%; object-fit: cover; }
+.rate-tile .pcrit { margin: 0; gap: 8px; }
+.rate-tile .seg button { padding: 2px 6px; font-size: 12px; }

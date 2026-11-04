@@ -1930,6 +1930,7 @@ function renderPerfDetail(d, prof = {}) {
       </div>
       <div class="pd-info">
         <h2>${esc(name)}${me.fav ? ' <span class="pf-favtxt" title="Favourite in Stash">♥</span>' : ""}</h2>
+        <div class="pcrit-box" id="pd-crit" data-pid="${esc(String(d.id))}">${pcritHTML({})}</div>
         ${(prof.aliases || []).length ? `<div class="dim small">also known as ${esc(prof.aliases.slice(0, 6).join(", "))}</div>` : ""}
         ${record}
         ${bars ? `<div class="pf-tierbars">${bars}</div><div class="small">${tally}</div>` : ""}
@@ -1951,7 +1952,6 @@ function renderPerfDetail(d, prof = {}) {
       </div>
     </div>
     ${studios ? `<h3 style="margin:18px 0 0">Studios</h3><div class="pf-studios">${studios}</div>` : ""}
-    <div class="pcrit" id="pd-crit" data-pid="${esc(String(d.id))}"></div>
     <div id="pd-costars"></div>
     <div id="pd-uncredited"></div>
     ${sim ? `<h3 style="margin:18px 0 6px">If you like her, try…</h3><div class="pd-similar">${sim}</div>` : ""}
@@ -2000,23 +2000,71 @@ function wireSceneCards(box, scenes, per = 48) {
 }
 // her face and body, rated once: applies to every scene she's in (Faces finds the uncredited ones)
 const PCRIT_V = [[-1, "−"], [0, "ok"], [1, "+"], [2, "++"]];
+function pcritHTML(r, head = true) {
+  return (head ? `<div class="pcrit-h"><b>Your rating</b> <span class="faint small">— applies to every scene she's in (two of your five criteria)</span></div>` : "")
+    + `<div class="pcrit">` + ["face", "body"].map((a) =>
+    `<span class="small"><b>${a === "face" ? "Face" : "Body"}</b> <span class="seg">${PCRIT_V.map(([v, t]) =>
+      `<button class="${r[a] === v ? "on" : ""}" data-pcrit="${a}" data-v="${v}">${t}</button>`).join("")}</span></span>`).join("") + `</div>`;
+}
 async function loadPerfCrit(id) {
   const box = $("#pd-crit"); if (!box) return;
   let d; try { d = await api(`/api/performer/${encodeURIComponent(id)}/criteria`); } catch { return; }
-  box.innerHTML = `<span class="small faint" title="Applies to every scene she's in — one of your five criteria">Your rating:</span>` + ["face", "body"].map((a) =>
-    `<span class="small"><b>${a === "face" ? "Face" : "Body"}</b> <span class="seg">${PCRIT_V.map(([v, t]) =>
-      `<button class="${d.ratings[a] === v ? "on" : ""}" data-pcrit="${a}" data-v="${v}">${t}</button>`).join("")}</span></span>`).join("");
+  box.innerHTML = pcritHTML(d.ratings || {});
 }
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-pcrit]"); if (!b) return;
-  const box = b.closest("#pd-crit"), id = box && box.dataset.pid; if (!id) return;
+  const box = b.closest("[data-pid]"), id = box && box.dataset.pid; if (!id) return;
   const on = b.classList.contains("on");
   try {
-    await api(`/api/performer/${encodeURIComponent(id)}/criteria`, { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await api(`/api/performer/${encodeURIComponent(id)}/criteria`, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ aspect: b.dataset.pcrit, value: on ? null : +b.dataset.v }) });
-    loadPerfCrit(id);
+    if (box.id === "pd-crit") box.innerHTML = pcritHTML(r.ratings || {});
+    else { rateP.ratings[id] = r.ratings || {}; box.outerHTML = rateTileHTML(rateP.list.find((p) => p.id === id)); }
   } catch (err) { toast(err.message, true); }
 });
+// --- Rate performers: face and body for many performers, fast ---------------------------------
+const rateP = { ratings: {}, list: [], all: false };
+function rateTileHTML(p) {
+  const r = rateP.ratings[p.id] || {}, url = perfPhotoURL(p);
+  const done = r.face != null && r.body != null;
+  return `<div class="rate-tile ${done ? "done" : ""}" data-pid="${esc(p.id)}">
+    <div class="rate-pic">${url ? `<img loading="lazy" src="${url}" alt="" onerror="this.style.visibility='hidden'" />` : `<span>${perfInitials(p.name)}</span>`}</div>
+    <div class="rate-name"><b>${esc(p.name)}</b> <span class="faint small">${p.lib || 0} scene${p.lib === 1 ? "" : "s"}${done ? " · ✓" : ""}</span></div>
+    ${pcritHTML(r, false)}</div>`;
+}
+async function openRatePerformers() {
+  let dlg = $("#rate-dlg");
+  if (!dlg) {
+    dlg = document.createElement("dialog"); dlg.id = "rate-dlg"; dlg.className = "tl-dlg rate-dlg";
+    document.body.appendChild(dlg);
+    dlg.addEventListener("click", (e) => {
+      if (e.target === dlg || e.target.closest("[data-rate-close]")) { dlg.close(); loadCritCard(); return; }
+      const f = e.target.closest("[data-rate-all]"); if (f) { rateP.all = f.dataset.rateAll === "1"; renderRatePerformers(); }
+    });
+  }
+  dlg.innerHTML = '<p class="dim">Loading your performers…</p>';
+  if (!dlg.open) dlg.showModal();
+  try {
+    if (!perfDir.length) perfSet(await api("/api/performers/directory"));
+    rateP.ratings = await api("/api/performers/criteria");
+  } catch (e) { dlg.innerHTML = `<p class="dim">${esc(e.message)}</p><button class="btn sm" data-rate-close>Close</button>`; return; }
+  // most-graded first: the performers whose scenes you've judged most
+  const graded = (p) => Object.entries(p.tiers || {}).reduce((a, [t, n]) => a + (t === "unreviewed" ? 0 : n), 0);
+  rateP.list = perfDir.filter((p) => p.lib > 0).sort((a, b) => graded(b) - graded(a) || (b.lib || 0) - (a.lib || 0));
+  renderRatePerformers();
+}
+function renderRatePerformers() {
+  const dlg = $("#rate-dlg"); if (!dlg) return;
+  const rated = (p) => { const r = rateP.ratings[p.id] || {}; return r.face != null && r.body != null; };
+  const n = rateP.list.filter(rated).length;
+  const show = (rateP.all ? rateP.list : rateP.list.filter((p) => !rated(p))).slice(0, 120);
+  dlg.innerHTML = `<div class="row between"><h3>Rate performers <span class="faint small">— ${n} of ${rateP.list.length} rated</span></h3>
+      <span><span class="seg"><button class="${rateP.all ? "" : "on"}" data-rate-all="0">Unrated</button><button class="${rateP.all ? "on" : ""}" data-rate-all="1">All</button></span>
+      <button class="btn sm ghost" data-rate-close>Done</button></span></div>
+    <p class="faint small">Face and body, once per performer — it applies to every scene she's in. Most-graded first. One tap saves; tap again to clear.</p>
+    <div class="rate-grid">${show.map(rateTileHTML).join("") || '<p class="faint">Everyone here is rated. 🎉</p>'}</div>`;
+}
+document.addEventListener("click", (e) => { if (e.target.closest("[data-rate-performers]")) { e.preventDefault(); openRatePerformers(); } });
 // scenes her face is in that don't credit her (Faces) — one click adds her in Stash
 async function loadUncredited(id, name) {
   const box = $("#pd-uncredited"); if (!box) return;
@@ -3425,7 +3473,8 @@ async function loadCritCard() {
     <table class="htab"><thead><tr><th></th><th>answers</th><th>Peaks' score</th><th>moves your grade</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="small">${d.in_grading ? `<b class="lab-win">In use for grading</b> — it made Peaks' verdicts better on scenes it didn't learn from (${d.gain > 0 ? "+" : ""}${Math.round(100 * (d.gain || 0))} pts).`
       : '<span class="faint">Not used for grading yet — it switches on by itself once it makes Peaks\' verdicts better on scenes it didn\'t learn from.</span>'}
-      ${d.performers_rated ? ` · ${d.performers_rated} performer${d.performers_rated === 1 ? "" : "s"} rated` : ""}</p></div>`;
+      ${d.performers_rated ? ` · ${d.performers_rated} performer${d.performers_rated === 1 ? "" : "s"} rated` : ""}</p>
+    <button class="btn sm" data-rate-performers>⭐ Rate performers' face &amp; body</button></div>`;
 }
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-settle-start]")) { cat.view = "settle"; cat.tier = ""; go("catalogue"); openCatalogue(); }

@@ -2455,6 +2455,11 @@ def create_app(cfg=None):
         service.note_reason()                      # counts toward the next retrain, like a grade
         return {**out, **{k: v for k, v in service.criteria_for_scene(scene_id).items() if k == "read"}}
 
+    @app.get("/api/performers/criteria")
+    def performers_criteria_all():
+        """Every performer's face / body rating (for the Rate performers grid)."""
+        return {pid: {k: e[k] for k in ("face", "body") if k in e} for pid, e in service.performer_criteria().items()}
+
     @app.get("/api/performer/{pid}/criteria")
     def performer_criteria_get(pid: str):
         e = service.performer_criteria().get(str(pid)) or {}
