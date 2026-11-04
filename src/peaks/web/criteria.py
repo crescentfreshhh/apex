@@ -20,6 +20,7 @@ when the honest held-out test says grading improves, like Hearing and Motion.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -105,7 +106,7 @@ class CriteriaMixin:
         return {"id": pid, "ratings": {k: e[k] for k in PERFORMER_ASPECTS if k in e}}
 
     def _crit_dirty(self) -> None:
-        self.__dict__.pop("_crit_cache", None)
+        self.__dict__.pop("_crit_cache", None)          # _crit_last stays: the screen keeps it until the rebuild
 
     # --- what each criterion looks at ---------------------------------------------------------
 
@@ -213,9 +214,44 @@ class CriteriaMixin:
         return make_pipeline(StandardScaler(), LogisticRegression(C=0.05, class_weight="balanced", max_iter=2000)
                              ).fit(X, y, logisticregression__sample_weight=w)
 
-    def criteria_models(self) -> dict:
+    def criteria_models(self, wait: bool = True) -> dict:
         """Per criterion: {labels, yes, no, acc, used, scores: {scene_id: 0–1}} —
-        every scene with that input scored; a labelled scene out of fold."""
+        every scene with that input scored; a labelled scene out of fold.
+
+        wait=False (what the screen asks for): never block on a rebuild — hand back
+        the last models (or none yet) and rebuild in the background, so a ▲/▼ tap
+        answers at once even while an ingest keeps the machine busy."""
+        if not wait:
+            hit = self.__dict__.get("_crit_cache") or self.__dict__.get("_crit_last")
+            if hit is not None and hit[0] == self._crit_stamp():
+                return hit[1]
+            self._crit_rebuild_soon()
+            return hit[1] if hit is not None else {a: {"labels": 0, "yes": 0, "no": 0, "acc": None, "used": False,
+                                                        "scores": {}} for a in ASPECTS}
+        return self._crit_build()
+
+    def _crit_stamp(self) -> tuple:
+        return (self._crit_path().stat().st_mtime_ns if self._crit_path().exists() else 0,
+                self._pcrit_path().stat().st_mtime_ns if self._pcrit_path().exists() else 0,
+                getattr(self.index(self._model_name()), "gen", 0), len(self._catalogue_all()),
+                len(self.__dict__.get("_face_all") or ()))
+
+    def _crit_rebuild_soon(self) -> None:
+        """One background rebuild at a time; another tap while it runs is picked up by the next."""
+        lk = self.__dict__.setdefault("_crit_bg", threading.Lock())
+        if not lk.acquire(blocking=False):
+            return
+
+        def run():
+            try:
+                self._crit_build()
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                lk.release()
+        threading.Thread(target=run, name="criteria-rebuild", daemon=True).start()
+
+    def _crit_build(self) -> dict:
         rows = {r["scene_id"]: r for r in self._catalogue_all()}
         stamp = (self._crit_path().stat().st_mtime_ns if self._crit_path().exists() else 0,
                  self._pcrit_path().stat().st_mtime_ns if self._pcrit_path().exists() else 0,
@@ -277,7 +313,7 @@ class CriteriaMixin:
             for sid, ps in by_scene.items():
                 scores[sid] = float(np.mean(ps))
             info["scores"] = scores
-        self._crit_cache = (stamp, out)
+        self._crit_cache = self._crit_last = (stamp, out)
         return out
 
     def criteria_scene_vector(self, sid: str) -> np.ndarray | None:
@@ -294,7 +330,7 @@ class CriteriaMixin:
 
     def criteria_read(self, sid: str) -> dict:
         """Peaks' read of a scene on each criterion: {aspect: {score, band}} (used ones only)."""
-        m = self.criteria_models()
+        m = self.criteria_models(wait=False)
         out = {}
         for a in ASPECTS:
             s = m[a]["scores"].get(str(sid)) if m[a]["used"] else None
@@ -314,7 +350,7 @@ class CriteriaMixin:
     def criteria_teach(self, sid: str) -> str | None:
         """The one criterion worth asking about on this scene: the one Peaks is least
         sure of (score nearest the middle), preferring those with the fewest labels."""
-        m = self.criteria_models()
+        m = self.criteria_models(wait=False)
         mine = self.criteria_reasons().get(str(sid)) or {}
         best, key = None, None
         for a in ASPECTS:

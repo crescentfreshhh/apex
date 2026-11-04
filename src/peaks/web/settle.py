@@ -286,7 +286,7 @@ class SettleMixin:
                                               f"({round(100 * p['conf'])}%, {'sure' if sure else 'leaning'})"}
         try:                                        # your criteria on every question: Peaks' read, your reasons, one to teach
             reasons = self.criteria_reasons()
-            self.criteria_models()                  # built once (cached) for the whole list
+            self.criteria_models(wait=False)        # built once (cached) for the whole list
         except Exception:  # noqa: BLE001 — criteria are extra
             reasons = None
         if reasons is not None:

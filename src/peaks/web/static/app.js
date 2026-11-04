@@ -3514,13 +3514,21 @@ document.addEventListener("click", async (e) => {
   if (e.target.closest("[data-crit-word]")) { e.preventDefault(); go("lab"); setTimeout(() => document.querySelector('#labx-tabs [data-tab="concepts"]')?.click(), 300); return; }
   const b = e.target.closest("[data-crit]"); if (!b) return;
   e.preventDefault(); e.stopPropagation();
-  const sid = b.dataset.crit;
+  const sid = b.dataset.crit, a = b.dataset.a, v = +b.dataset.v;
+  const paint = (c) => document.querySelectorAll(`.crit[data-crit-sid="${CSS.escape(sid)}"]`).forEach((el) => { el.innerHTML = critHTML(sid, c); });
+  const before = critState[sid] || {};
+  const reasons = { ...(before.reasons || {}) }; if (v) reasons[a] = v; else delete reasons[a];
+  paint({ ...before, reasons, teach: null });            // show the tap at once; the save follows
   try {
     const r = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ aspect: b.dataset.a, value: +b.dataset.v }) });
-    const c = { ...(critState[sid] || {}), reasons: r.reasons, read: r.read || (critState[sid] || {}).read, teach: null };
-    document.querySelectorAll(`.crit[data-crit-sid="${CSS.escape(sid)}"]`).forEach((el) => { el.innerHTML = critHTML(sid, c); });
-  } catch (err) { toast(err.message, true); }
+      body: JSON.stringify({ aspect: a, value: v }) });
+    const now = critState[sid] || {};
+    paint({ ...now, reasons: { ...(now.reasons || {}), [a]: r.reasons[a] || 0 }, read: r.read || now.read, teach: null });
+  } catch (err) {
+    const now = critState[sid] || {}, back = { ...(now.reasons || {}) };
+    if ((before.reasons || {})[a]) back[a] = before.reasons[a]; else delete back[a];
+    paint({ ...now, reasons: back }); toast(err.message, true);
+  }
 });
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-settle-keep]"); if (!b) return;

@@ -134,3 +134,30 @@ def test_a_performer_action_rating_spreads_to_her_scenes(tmp_path, monkeypatch):
     hers = [s for s, p in who.items() if p == "2"]
     assert sorted(x[0] for x in labels) == sorted(hers) and all(x[1] == 1.0 and x[3] == "p2" for x in labels)
     assert next(x for x in svc.criteria_summary()["criteria"] if x["aspect"] == "action")["labels"] == len(hers)
+
+
+def test_a_tap_answers_at_once_and_the_models_catch_up_in_the_background(tmp_path, monkeypatch):
+    import threading
+
+    svc, stash, who = _faces_world(tmp_path, monkeypatch)
+    for p in ("0", "1", "2", "3"):
+        svc.set_performer_criterion(p, "face", 2)
+    for p in ("6", "7", "8", "9"):
+        svc.set_performer_criterion(p, "face", -1)
+    svc.criteria_models()                                                          # learned once
+    good = next(s for s, p in who.items() if p == "4")
+    before = svc.criteria_for_scene(good)["read"]["face"]
+    gate, built = threading.Event(), threading.Event()
+    real = type(svc)._crit_build
+
+    def slow(self):
+        gate.wait(10)                                                              # a busy machine
+        out = real(self)
+        built.set()
+        return out
+    monkeypatch.setattr(type(svc), "_crit_build", slow)
+    svc.set_scene_criterion(good, "outfit", 1)                                     # a tap: models now stale
+    assert svc.criteria_for_scene(good)["read"]["face"] == before                  # answered from the last models
+    gate.set()
+    assert built.wait(10)                                                          # rebuilt behind the scenes
+    assert svc.criteria_models(wait=False) is svc.criteria_models()                # and current again
