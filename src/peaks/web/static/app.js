@@ -3493,14 +3493,24 @@ function rvSettleBanner(r) {
 // the chips under the grade buttons — every scene in the player, new or settling
 function rvCritRow(r) {
   const el = $("#rv-crit"); if (!el) return;
-  const sid = String(r.scene_id), have = (r.settle && r.settle.criteria) || critState[sid];
+  const sid = String(r.scene_id);
+  const have = critState[sid] || (r.settle && r.settle.criteria);   // latest known (your taps update it) before a list's copy
   el.dataset.critSid = sid;
   el.innerHTML = have ? critHTML(sid, have) : "";
-  if (!have || !(r.settle && r.settle.criteria)) critLoad(sid);     // fresh read (and yours) for this scene
+  critLoad(sid);                                                   // always: end up exactly what's saved
+}
+// a reply that left before your last tap on that scene is older than what you see: never used
+const critTapAt = {};
+async function critFetch(sid) {
+  const asked = Date.now();
+  const c = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`);
+  if ((critTapAt[sid] || 0) >= asked) return null;
+  critState[sid] = { ...(critState[sid] || {}), ...c };
+  return critState[sid];
 }
 async function critPrefetch(sid) {
   sid = String(sid); if (critState[sid]) return;
-  try { critState[sid] = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`); } catch {}
+  try { await critFetch(sid); } catch {}
 }
 // --- your criteria: tell Peaks why (▲ better than it gave credit for, ▼ worse) -----------------
 const CRIT = [["body", "Body"], ["face", "Face"], ["outfit", "Outfit"], ["action", "Action"], ["quality", "Quality"]];
@@ -3517,8 +3527,11 @@ function critHTML(sid, c) {
     }).join("");
 }
 async function critLoad(sid) {
-  const el = document.querySelector(`.crit[data-crit-sid="${CSS.escape(String(sid))}"]`); if (!el) return;
-  try { const c = await api(`/api/scene/${encodeURIComponent(sid)}/criteria`); el.innerHTML = critHTML(sid, c); } catch {}
+  sid = String(sid);
+  let c; try { c = await critFetch(sid); } catch { return; }
+  if (!c) return;
+  // the rows are looked up now, not before asking: one you've moved to another scene is left alone
+  document.querySelectorAll(`.crit[data-crit-sid="${CSS.escape(sid)}"]`).forEach((el) => { el.innerHTML = critHTML(sid, c); });
 }
 document.addEventListener("click", async (e) => {
   if (e.target.closest("[data-crit-word]")) { e.preventDefault(); go("lab"); setTimeout(() => document.querySelector('#labx-tabs [data-tab="concepts"]')?.click(), 300); return; }
@@ -3526,6 +3539,7 @@ document.addEventListener("click", async (e) => {
   e.preventDefault(); e.stopPropagation();
   const sid = b.dataset.crit, a = b.dataset.a, v = +b.dataset.v;
   const paint = (c) => document.querySelectorAll(`.crit[data-crit-sid="${CSS.escape(sid)}"]`).forEach((el) => { el.innerHTML = critHTML(sid, c); });
+  critTapAt[sid] = Date.now();
   const before = critState[sid] || {};
   const reasons = { ...(before.reasons || {}) }; if (v) reasons[a] = v; else delete reasons[a];
   paint({ ...before, reasons, teach: null });            // show the tap at once; the save follows
