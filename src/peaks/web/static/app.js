@@ -5180,9 +5180,34 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
   const offset = append ? cat.items.length : 0;
   $("#cat-status").textContent = refresh ? "re-reading grades from Stash…" : "loading…";
   if (!append) $("#cat-list").innerHTML = '<p class="dim">Reading your library…</p>';
+  const path = "/api/catalogue?" + catParams(offset, refresh);
+  // busy machine: say so instead of hanging silently
+  const slow = setTimeout(() => {
+    if (seq === cat.seq && cat.busy) $("#cat-status").textContent = "Peaks is busy with running jobs — still loading…";
+  }, 15000);
+  // the last answer for this same list draws at once; the fresh one replaces it
+  let drewCached = false;
+  if (!append && !refresh) {
+    try {
+      const hit = await swrPeek(path);
+      if (hit && seq === cat.seq) { catDraw(hit.data, append, refresh); drewCached = true; $("#cat-status").textContent += " · updating…"; }
+    } catch {}
+  }
   try {
-    const d = await api("/api/catalogue?" + catParams(offset, refresh), { signal: ctl.signal });
+    const d = await api(path, { signal: ctl.signal });
     if (seq !== cat.seq) return;                // another section was picked meanwhile
+    catDraw(d, append, refresh, drewCached);         // after a cached draw: your place and selection stay
+  } catch (e) {
+    if (seq !== cat.seq || e.name === "AbortError") return;
+    $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
+    $("#cat-status").textContent = "";
+  } finally {
+    clearTimeout(slow);
+    if (seq === cat.seq) cat.busy = false;
+  }
+}
+function catDraw(d, append, refresh, keepPlace = false) {
+  {
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     applyTierState(d.tier_state);
     cat.items = append ? cat.items.concat(d.items) : d.items;
@@ -5195,17 +5220,16 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
       nb.title = ing.finished ? `Unreviewed scenes from the last ingest (${ing.finished.replace("T", " ").slice(0, 16)})` : "Unreviewed scenes from the last ingest";
     }
     cat.loaded = true;
-    if (!append) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
+    if (!append && !keepPlace) { cat.focus = 0; cat.sel.clear(); cat.anchor = null; }
+    if (keepPlace) {
+      const have = new Set(cat.items.map((x) => x.scene_id));
+      [...cat.sel].forEach((id) => { if (!have.has(id)) cat.sel.delete(id); });
+      cat.focus = Math.min(cat.focus, Math.max(0, cat.items.length - 1));
+    }
     renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk(); renderCatStorage(d.storage);
     renderCatFChips();
     if (!append && !refresh) catSyncUrl();
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
-  } catch (e) {
-    if (seq !== cat.seq || e.name === "AbortError") return;
-    $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
-    $("#cat-status").textContent = "";
-  } finally {
-    if (seq === cat.seq) cat.busy = false;
   }
 }
 // open the Catalogue on a given list (from a performer, a studio, a statistic…)

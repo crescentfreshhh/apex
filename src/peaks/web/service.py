@@ -765,7 +765,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if stats.get("skipped_rejected"):
             self._note_rejects_skipped("embed", stats["skipped_rejected"])
         if stats.get("embedded"):              # nothing new → keep the loaded index warm
-            self.invalidate_index(embedder.name)
+            self.refresh_index_soon(embedder.name)
         # deleted-from-Stash scenes can't ever embed — drop them from the failure
         # log so the count reaches 0 on its own (they're gone from `scanned` too,
         # so they're never re-attempted).
@@ -1623,7 +1623,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             # keep the (minute-long to load) index warm unless it really changed:
             # pruned entries or a scene id change → rebuild; path-only moves → patch
             if s.get("pruned") or any(idc for _, _, idc in moved.values()):
-                self.invalidate_index(model)
+                self.refresh_index_soon(model)
             elif moved:
                 self._patch_index_paths(model, moved)
             changed = changed or bool(s.get("pruned") or moved)
@@ -1873,7 +1873,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             if job:
                 job.progress["done"] = result["fixed"] + result["failed"] + result["pruned"]
         if result["fixed"]:
-            self.invalidate_index(embedder.name)       # once, at the end — not a rebuild per scene
+            self.refresh_index_soon(embedder.name)     # once, at the end — not a rebuild per scene
         log(f"done — fixed {result['fixed']}, pruned {result['pruned']} deleted, "
             f"{result['failed']} still failing of {result['total']}")
         return result
@@ -2016,6 +2016,35 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                                     f"it needs {need / 1073741824:.1f} GB) — it loads as soon as "
                                     f"the running work finishes.")
         return ok
+
+    def refresh_index_soon(self, model: str) -> None:
+        """New embeds for `model`: never drop a loaded index under the pages using it.
+        It's marked stale and rebuilt in the background — beside the old one when
+        memory allows, then swapped in — so the Catalogue and every page keep
+        answering from the old one meanwhile (it only lacks the newest scenes).
+        Nothing loaded (or another model): dropped as before, loaded on first use."""
+        with self._index_lock:
+            loaded = self._index.get(model)
+        if loaded is None or not getattr(loaded, "size", 0) or model != self._model_name():
+            self.invalidate_index(model)
+            return
+        self._index_stale.add(model)
+        self.__dict__["_index_again"] = True
+        lk = self.__dict__.setdefault("_index_bg", threading.Lock())
+        if not lk.acquire(blocking=False):
+            return                                   # one is running: it goes round again
+
+        def run():
+            try:
+                while self.__dict__.pop("_index_again", False):
+                    self._index_stale.add(model)
+                    try:
+                        self.rebuild_stale_index()
+                    except Exception:  # noqa: BLE001 — stale stays set: the idle rebuild retries
+                        break
+            finally:
+                lk.release()
+        threading.Thread(target=run, name="peaks-index-refresh", daemon=True).start()
 
     def rebuild_stale_index(self, job=None) -> dict:
         """The scheduler's once-when-idle rebuild after deletes. With room for
@@ -5984,6 +6013,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     fb_p.append(picture_features(None))
                     fb_y.append("reject")
             ids = [r["scene_id"] for r in train] + [None] * remembered
+            try:
+                self.criteria_models()             # training: your criteria up to date (pages never wait on it)
+            except Exception:  # noqa: BLE001 — criteria are extra
+                pass
             senses = self._sense_rows(ids)
             # one heavy fit at a time, process-wide (taste training shares it)
             with self._train_lock, forensics.busy("tier-train"):
@@ -6051,6 +6084,41 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         cached = getattr(self, "_tier_preds", None)
         if cached is not None and cached[0] == key:
             return cached[1]
+        if cached is not None and cached[0][0] == key[0]:
+            # same model, newer index / more scenes: answer now, re-score behind (one at a time)
+            self._tier_preds_bg(rows)
+            return cached[1]
+        with self.__dict__.setdefault("_preds_lock", threading.Lock()):   # two at once: one computes
+            cached = getattr(self, "_tier_preds", None)
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            return self._tier_predictions_compute(rows, st, pics, key)
+
+    def _tier_preds_bg(self, rows: list[dict]) -> None:
+        lk = self.__dict__.setdefault("_preds_bg", threading.Lock())
+        if not lk.acquire(blocking=False):
+            return
+
+        def run():
+            try:
+                st = self._tier_model_state()
+                if st["model"] is None:
+                    return
+                with self.__dict__.setdefault("_preds_lock", threading.Lock()):
+                    pics = self._picture_entries()
+                    key = (id(st["model"]), getattr(self.index(self._model_name()), 'gen', 0), len(rows), id(pics))
+                    cached = getattr(self, "_tier_preds", None)
+                    if cached is None or cached[0] != key:
+                        self._tier_predictions_compute(rows, st, pics, key)
+            except Exception:  # noqa: BLE001 — the last predictions keep serving
+                pass
+            finally:
+                lk.release()
+        threading.Thread(target=run, name="peaks-predictions", daemon=True).start()
+
+    def _tier_predictions_compute(self, rows: list[dict], st: dict, pics, key) -> dict[str, dict]:
+        from ..tier_model import picture_features, quality_features, train_class, who_of
+
         feats = self._scene_features(rows)
         by_id = {r["scene_id"]: r for r in rows}
         m = st["model"]

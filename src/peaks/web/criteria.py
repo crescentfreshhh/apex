@@ -319,7 +319,7 @@ class CriteriaMixin:
     def criteria_scene_vector(self, sid: str) -> np.ndarray | None:
         """The five scores for the tier model (0.5 where a criterion has nothing to
         say). None when no criterion has a model yet, or the scene has no score at all."""
-        m = self.criteria_models()
+        m = self.criteria_models(wait=False)        # never retrain inside a page request
         used = [a for a in ASPECTS if m[a]["used"]]
         if not used:
             return None
