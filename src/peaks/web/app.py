@@ -1394,6 +1394,14 @@ def create_app(cfg=None):
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "private, max-age=604800"})
 
+    @app.get("/api/performer/{pid}/face-crop")
+    def performer_face_crop(pid: str, scene_id: str, t: float):
+        """One "her face, alone" option: the frame cropped around her face."""
+        data = service.face_crop(pid, scene_id, t)
+        if not data:
+            raise HTTPException(404, "no single face of her there")
+        return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
     @app.get("/api/performer/{pid}/photo/options")
     def performer_photo_options(pid: str):
         return service.performer_photo_options(pid)

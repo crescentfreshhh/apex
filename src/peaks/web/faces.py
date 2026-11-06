@@ -198,6 +198,13 @@ class FacesMixin:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
         log(f"faces: looked at {done} scene(s), {found} face(s)")
+        if done:
+            try:                                       # her face, alone, where pictures were covers / frames
+                n = self.upgrade_performer_photos(job=job)
+                if n:
+                    log(f"faces: {n} performer picture(s) now show just her face")
+            except Exception:  # noqa: BLE001 — pictures are extra
+                pass
         self._sense_record("faces", {"done": done, "faces": found, **run.summary()})
         return {"seen": done, "faces": found, "failed": run.failed}
 

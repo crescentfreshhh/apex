@@ -5,9 +5,13 @@ Pictures (first that exists):
   1. the one you chose on her page (models/performer_photos.json)
   2. her Stash profile image (usually a portrait / full-body shot — skipped
      when Stash would serve its default silhouette)
-  3. the cover of her best-graded solo scene (only her in it)
-  4. her best frame (the taste model's pick)
-  5. the cover of any scene she's in (even a rejected one — it still shows her)
+  3. her face, alone: a frame from the Faces scan holding exactly one face — hers —
+     cropped to a portrait around it (no new scanning: the scan kept every face's
+     time, box and identity)
+  4. the cover of her best-graded solo scene (only her in it)
+  5. her best frame (the taste model's pick)
+  6. the cover of any scene she's in (even a rejected one — it still shows her)
+Automatic pictures from 4–6 are upgraded to 3 once the Faces scan has found her.
 Each is resized once and kept in models/perf_photos/{id}.jpg; the browser
 caches it too (the URL carries a version that changes with the picture).
 
@@ -26,6 +30,28 @@ import threading
 import time
 from io import BytesIO
 from pathlib import Path
+
+FACE_MIN_SCORE = 0.7      # detection confidence of a portrait's face
+FACE_MIN_PX = 80          # its size, in the scan's 960-px-wide frame
+FACE_SCENES = 80          # her scenes looked at for portraits (best-graded first)
+UPGRADABLE = ("cover", "frame", None)     # automatic pictures a face portrait replaces
+
+
+def portrait_box(W: int, H: int, box) -> tuple[int, int, int, int]:
+    """A 2:3 crop around a face: the face ~40% of its height, a little above the
+    middle (room for shoulders), kept inside the frame."""
+    x1, y1, x2, y2 = (float(v) for v in box)
+    fh = max(y2 - y1, 1.0)
+    ch = min(fh / 0.4, float(H))
+    cw = ch * 2 / 3
+    if cw > W:
+        cw = float(W)
+        ch = min(cw * 1.5, float(H))
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    left = min(max(cx - cw / 2, 0.0), W - cw)
+    top = min(max(cy - 0.38 * ch, 0.0), H - ch)
+    return int(round(left)), int(round(top)), int(round(left + cw)), int(round(top + ch))
+
 
 TIER_RANK = {"legendaire": 6, "exceptionnelle": 5, "merveilleuse": 4, "anomaly": 3, "unreviewed": 2, "rejected": 0}
 
@@ -290,10 +316,139 @@ class PerformersMixin:
         s = next((x for x in stats if x.get("id") == str(pid)), None)
         return [t for t in (s or {}).get("top", [])[:n] if t.get("key")]
 
+    # --- her face, alone ------------------------------------------------------------------
+
+    def _face_portraits(self, pid: str, n: int = 6) -> list[dict]:
+        """Frames where the Faces scan found exactly one face and it's hers, best
+        first, one per scene: [{scene_id, t, box, sim, title}]."""
+        import numpy as np
+
+        from .faces import MATCH
+
+        pid = str(pid)
+        try:
+            gal = self._face_gallery()
+        except Exception:  # noqa: BLE001 — no faces yet
+            return []
+        M, owners = gal["M"], gal["owners"]
+        mine = M[owners == pid] if len(M) else M
+        if not len(mine):
+            return []
+        out = []
+        for r in [x for x in self._her_scenes(pid) if x["tier"] != "rejected"][:FACE_SCENES]:
+            sf = self._scene_faces(r["scene_id"])
+            if sf is None or not len(sf[1]):
+                continue
+            t, v, meta = sf
+            boxes, scores = meta.get("boxes") or [], meta.get("scores") or []
+            t = np.round(np.asarray(t, np.float32), 2)
+            solo = [str(p) for p in r.get("performer_ids") or []] == [pid]
+            best = None
+            for tt in np.unique(t):
+                at = np.where(t == tt)[0]
+                if len(at) != 1:                       # two people (or more) in the frame: never
+                    continue
+                i = int(at[0])
+                if i >= len(boxes):
+                    continue
+                b = boxes[i]
+                size = min(b[2] - b[0], b[3] - b[1])
+                sc = float(scores[i]) if i < len(scores) else 0.0
+                if sc < FACE_MIN_SCORE or size < FACE_MIN_PX:
+                    continue
+                sim = float((mine @ v[i]).max())
+                if sim < MATCH:                        # one face, but not hers
+                    continue
+                rank = sim * min(size, 320) / 320 * sc * (1.15 if solo else 1.0) * (1 + TIER_RANK.get(r["tier"], 1) / 30)
+                if best is None or rank > best["rank"]:
+                    best = {"scene_id": r["scene_id"], "t": float(tt), "box": list(b), "sim": round(sim, 3),
+                            "title": r.get("title") or f"scene {r['scene_id']}", "rank": rank}
+            if best:
+                out.append(best)
+        out.sort(key=lambda x: -x["rank"])
+        return out[:n]
+
+    def _face_crop_jpeg(self, scene_id: str, t: float, box=None) -> bytes | None:
+        """Her portrait from one frame: grabbed exactly as the scan did (so the box
+        lines up) and cropped 2:3 around the face."""
+        sid = str(scene_id)
+        if box is None:                                 # a saved choice: find the face again
+            sf = self._scene_faces(sid)
+            if sf is None:
+                return None
+            ts, _, meta = sf
+            boxes = meta.get("boxes") or []
+            near = [i for i, x in enumerate(ts) if abs(float(x) - float(t)) < 0.02 and i < len(boxes)]
+            if len(near) != 1:
+                return None
+            box = boxes[near[0]]
+        row = next((r for r in self._catalogue_all() if r["scene_id"] == sid), None)
+        if row is None or not row.get("path"):
+            return None
+        img = self._face_frame(row["path"], float(t)).convert("RGB")
+        img = img.crop(portrait_box(img.width, img.height, box))
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=88)
+        return buf.getvalue()
+
+    def face_crop(self, pid: str, scene_id: str, t: float) -> bytes | None:
+        """The preview of one "her face" option (only a frame that qualifies for her)."""
+        hit = next((p for p in self._face_portraits(pid, 50)
+                    if p["scene_id"] == str(scene_id) and abs(p["t"] - float(t)) < 0.02), None)
+        return self._face_crop_jpeg(scene_id, t, hit["box"]) if hit else None
+
+    # --- where each automatic picture came from ---------------------------------------------
+
+    def _photo_src_path(self) -> Path:
+        return self._photo_dir() / "sources.json"
+
+    def _photo_srcs(self) -> dict:
+        try:
+            return json.loads(self._photo_src_path().read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _note_photo_src(self, pid: str, kind: str | None) -> None:
+        p = self._photo_src_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with atomic.edit_lock(p):
+                d = self._photo_srcs()
+                if kind is None:
+                    d.pop(str(pid), None)
+                else:
+                    d[str(pid)] = kind
+                atomic.write_text(p, json.dumps(d))
+        except OSError:
+            pass
+
+    def upgrade_performer_photos(self, pids=None, job=None) -> int:
+        """Automatic pictures from a cover or a frame → her face, alone, once the
+        Faces scan has found her. Your chosen pictures and Stash photos stay."""
+        chosen, srcs = self._photo_choices(), self._photo_srcs()
+        if pids is None:
+            pids = [f.stem for f in self._photo_dir().glob("*.jpg")]
+        done = 0
+        for pid in pids:
+            pid = str(pid)
+            if job is not None and getattr(job, "cancelled", False):
+                break
+            if pid in chosen or not self.performer_photo_version(pid):
+                continue
+            if srcs.get(pid) not in UPGRADABLE or (self._perf_info(pid) or {}).get("has_image"):
+                continue
+            if not self._face_portraits(pid, 1):
+                continue
+            if self._build_performer_photo(pid, only_face=True):    # a failed crop leaves what she had
+                done += 1
+        return done
+
     def _photo_bytes(self, choice: dict) -> bytes | None:
         """Raw image bytes for one picture source."""
         kind = choice.get("kind")
         try:
+            if kind == "face":
+                return self._face_crop_jpeg(choice["scene_id"], float(choice["t"]), choice.get("box"))
             if kind == "stash":
                 got = self._meta_client().performer_image(choice["pid"])
                 return got[0] if got else None
@@ -315,6 +470,8 @@ class PerformersMixin:
         info = self._perf_info(pid) or {}
         if info.get("has_image"):
             yield {"kind": "stash", "pid": pid}
+        for f in self._face_portraits(pid, 3):        # her face, alone (a few, in case a seek fails)
+            yield {"kind": "face", "scene_id": f["scene_id"], "t": f["t"], "box": f["box"]}
         scenes = self._her_scenes(pid)
         solo = [r for r in scenes if (r.get("performer_ids") or []) == [pid] and r["tier"] != "rejected"]
         if solo:
@@ -326,10 +483,13 @@ class PerformersMixin:
         if others:
             yield {"kind": "cover", "scene_id": others[0]["scene_id"]}
 
-    def _build_performer_photo(self, pid: str) -> bool:
+    def _build_performer_photo(self, pid: str, only_face: bool = False) -> bool:
         from PIL import Image
 
+        chosen = self._photo_choices().get(str(pid))
         for src in self._photo_sources(pid):
+            if only_face and src.get("kind") != "face":
+                continue
             data = self._photo_bytes(src)
             if not data:
                 continue
@@ -342,6 +502,8 @@ class PerformersMixin:
 
                 with atomic.temp_for(out) as tmp:
                     img.save(tmp, format="JPEG", quality=85)
+                self._note_photo_src(pid, "chosen" if chosen and src.get("kind") == chosen.get("kind")
+                                     and src.get("scene_id") == chosen.get("scene_id") else src.get("kind"))
                 return True
             except Exception:  # noqa: BLE001 — unreadable image: try the next source
                 continue
@@ -359,6 +521,9 @@ class PerformersMixin:
         if info.get("has_image"):
             opts.append({"kind": "stash", "label": "Stash profile picture",
                          "thumb": f"/api/performer/{quote(pid)}/image"})
+        for f in self._face_portraits(pid, 6):
+            opts.append({"kind": "face", "scene_id": f["scene_id"], "t": f["t"], "label": f["title"],
+                         "thumb": f"/api/performer/{quote(pid)}/face-crop?scene_id={quote(f['scene_id'])}&t={f['t']:g}"})
         for r in self._her_scenes(pid)[:12]:
             if r["tier"] == "rejected":
                 continue
@@ -369,7 +534,8 @@ class PerformersMixin:
             opts.append({"kind": "frame", "key": f["key"], "t": f["t"], "label": "a moment",
                          "thumb": f.get("thumb") or f"/api/frame?key={quote(f['key'])}&t={f['t']}"})
         for o in opts:
-            o["chosen"] = bool(chosen) and all(chosen.get(k) == o.get(k) for k in ("kind", "scene_id", "key"))
+            o["chosen"] = bool(chosen) and all(chosen.get(k) == o.get(k) for k in ("kind", "scene_id", "key")) and (
+                o["kind"] != "face" or abs(float(chosen.get("t") or 0) - float(o["t"])) < 0.02)
         return {"options": opts, "chosen": chosen}
 
     def choose_performer_photo(self, pid: str, choice: dict | None) -> dict:
@@ -379,11 +545,13 @@ class PerformersMixin:
         choices = self._photo_choices()
         if choice:
             kind = choice.get("kind")
-            if kind not in ("stash", "cover", "frame"):
+            if kind not in ("stash", "cover", "frame", "face"):
                 raise ValueError("unknown picture kind")
             keep = {"kind": kind}
-            if kind == "cover":
+            if kind in ("cover", "face"):
                 keep["scene_id"] = str(choice["scene_id"])
+            if kind == "face":
+                keep["t"] = float(choice["t"])
             if kind == "frame":
                 keep.update(key=str(choice["key"]), t=float(choice["t"]))
             choices[pid] = keep
@@ -407,6 +575,10 @@ class PerformersMixin:
             ids = {pid for r in self._catalogue_all() for pid in who_of(r)["performers"]}
         except Exception:  # noqa: BLE001
             ids = set()
+        try:
+            self.upgrade_performer_photos(sorted(ids), job=job)      # her face, alone, where the scan found her
+        except Exception:  # noqa: BLE001 — pictures are extra
+            pass
         todo = sorted(pid for pid in ids if not self.performer_photo_version(pid))
         done = made = 0
         if job is not None:

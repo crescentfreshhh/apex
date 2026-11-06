@@ -2190,9 +2190,9 @@ async function openPhotoPicker(id, name) {
   const opts = d.options || [];
   pk.querySelector(".box").innerHTML = `<div class="row between"><h3 style="margin:0">Picture for ${esc(name)}</h3>
       <span><button class="ghost" id="pk-auto" title="Let Peaks choose (Stash photo first)">Automatic</button> <button class="ghost" id="pk-x">✕</button></span></div>
-    <p class="dim small">Her Stash photo, covers of her scenes (solo ones marked), and her best moments. Click one to use it everywhere.</p>
-    <div class="pf-opts">${opts.map((o, i) => `<div class="pf-opt ${o.chosen ? "on" : ""} ${o.kind !== "stash" ? "wide" : ""}" data-i="${i}">
-      <img loading="lazy" src="${o.thumb}" onerror="this.parentNode.remove()" /><span>${o.kind === "stash" ? "📷 Stash photo" : o.kind === "cover" ? (o.solo ? "🎬 solo · " : "🎬 ") + esc(o.label) : "✨ a moment"}</span></div>`).join("") || '<p class="dim">Nothing to choose from yet.</p>'}</div>`;
+    <p class="dim small">Her Stash photo, frames where she's the only face (🙂), covers of her scenes (solo ones marked), and her best moments. Click one to use it everywhere.</p>
+    <div class="pf-opts">${opts.map((o, i) => `<div class="pf-opt ${o.chosen ? "on" : ""} ${o.kind !== "stash" && o.kind !== "face" ? "wide" : ""}" data-i="${i}">
+      <img loading="lazy" src="${o.thumb}" onerror="this.parentNode.remove()" /><span>${o.kind === "stash" ? "📷 Stash photo" : o.kind === "face" ? "🙂 her face · " + esc(o.label) : o.kind === "cover" ? (o.solo ? "🎬 solo · " : "🎬 ") + esc(o.label) : "✨ a moment"}</span></div>`).join("") || '<p class="dim">Nothing to choose from yet.</p>'}</div>`;
   $("#pk-x").onclick = () => { pk.hidden = true; };
   const done = async (body) => {
     try {
