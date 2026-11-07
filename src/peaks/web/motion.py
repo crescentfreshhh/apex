@@ -84,15 +84,20 @@ class MotionMixin:
 
         return EmbeddingCache(self.cfg.embedding.cache_dir)
 
-    def motion_todo(self) -> list[dict]:
-        """Zoomed scenes whose candidate windows aren't all watched yet — saves first."""
+    def motion_todo(self, first: bool = False) -> list[dict]:
+        """Zoomed scenes whose candidate windows aren't all watched yet — saves first;
+        a file that failed lately is left out, one being retried goes last. `first`:
+        only whether there's any work (stops at the first)."""
         cache = self._motion_cache()
         zoomed = self._zoom_view()["scenes"]
         saved = self._zoom_saved()
         rows = {r["scene_id"]: r for r in self._catalogue_all() if r["tier"] != "rejected" and r.get("path")}
+        fails, now = self.sense_failures("motion"), time.time()
         out = []
-        for sid, e in zoomed.items():
-            if sid not in rows:
+        order = sorted(zoomed, key=lambda sid: sid not in saved) if first else list(zoomed)
+        for sid in order:
+            e = zoomed[sid]
+            if sid not in rows or self._sense_skip(fails, rows[sid], now):
                 continue
             done = None
             if cache.has(e["key"], MOTION_NS):
@@ -103,7 +108,9 @@ class MotionMixin:
             want = self._motion_centers(sid, e, rows[sid])
             if done is None or sorted(round(c, 1) for c in done) != sorted(round(c, 1) for c in want):
                 out.append(rows[sid])
-        return sorted(out, key=lambda r: r["scene_id"] not in saved)
+                if first:
+                    return out
+        return sorted(out, key=lambda r: (r["scene_id"] in fails, r["scene_id"] not in saved))
 
     def _motion_centers(self, sid: str, entry: dict, row: dict) -> list[float]:
         """The zoom's candidate windows plus a few explore windows elsewhere in the
@@ -133,10 +140,11 @@ class MotionMixin:
         except Exception:  # noqa: BLE001
             seen = total = None
         return {"seen": seen, "embedded": total, "settings": self.motion_settings(),
+                "unreadable": self._sense_failure_count("motion"),
                 "error": getattr(self, "_motion_error", None), "last_run": self.sense_last_run("motion")}
 
     def motion_due(self) -> bool:
-        return self.motion_settings()["on"] and bool(self.motion_todo())
+        return self.motion_settings()["on"] and bool(self.motion_todo(first=True))
 
     # --- the job --------------------------------------------------------------------------
 
@@ -157,11 +165,18 @@ class MotionMixin:
         e = self._zoom_view()["scenes"].get(sid)
         if not e:
             raise LookupError(f"scene {sid} isn't zoomed yet")
-        times, vecs = [], []
+        from ..sampling import SamplerError
+
+        times, vecs, bad, last = [], [], [], None
         centers = self._motion_centers(sid, e, row)
         for c in centers:
             start = max(0.0, float(c) - WINDOW_HALF)
-            frames = sampler.window_frames(row["path"], start, 2 * WINDOW_HALF, 1.0 / CLIP_FPS, size=embedder.size)
+            try:
+                frames = sampler.window_frames(row["path"], start, 2 * WINDOW_HALF, 1.0 / CLIP_FPS, size=embedder.size)
+            except SamplerError as exc:               # a damaged stretch: skip that window, keep the rest
+                bad.append(float(c))
+                last = exc
+                continue
             clips = cut_clips([im for _, im in frames], start)
             clips = [(t, cl) for t, cl in clips if all(abs(t - x) > 1.0 for x in times)]
             if not clips:
@@ -169,13 +184,15 @@ class MotionMixin:
             v = embedder.embed_clips([cl for _, cl in clips])
             times += [t for t, _ in clips]
             vecs.append(v)
+        if centers and len(bad) == len(centers):
+            raise last                                # nothing readable at all: the file fails
         order = np.argsort(times)
         V = np.concatenate(vecs)[order] if vecs else np.zeros((0, embedder.dim), np.float32)
         self._motion_cache().save(e["key"], MOTION_NS, np.asarray(times, np.float32)[order], V,
-                                  meta={"scene_id": sid, "centers": centers})
+                                  meta={"scene_id": sid, "centers": centers, "bad": bad})
         self.__dict__.pop("_motion_bank_cache", None)
         self.__dict__.get("_motion_vec_memo", {}).pop(str(sid), None)
-        return {"clips": len(times)}
+        return {"clips": len(times), "bad": len(bad)}
 
     def run_motion(self, job=None, limit: int | None = None) -> dict:
         log = job.log if job else print
@@ -193,6 +210,7 @@ class MotionMixin:
         self._motion_error = None
         sampler = self._motion_sampler()
         done = 0
+        ok_ids, failed_ids = [], []
         run = SenseRun()
         t0 = time.time()
         self._sense_record("motion", {"running": True, "done": 0, **run.summary()})   # a new run replaces the last
@@ -202,20 +220,27 @@ class MotionMixin:
                 run.stopped = (f"paused for {job.paused_for}" if getattr(job, "paused_for", None) else "you stopped it")
                 break
             try:
-                self.motion_scene(row, embedder, sampler)
+                r = self.motion_scene(row, embedder, sampler)
                 done += 1
                 run.ok()
+                ok_ids.append(row["scene_id"])
+                if r.get("bad"):
+                    log(f"scene {row['scene_id']}: {r['bad']} unreadable window(s) skipped, the rest watched")
             except Exception as exc:  # noqa: BLE001 — one unreadable file mustn't stop the run
-                log(f"scene {row['scene_id']}: {exc}")
+                log(f"scene {row['scene_id']}: {str(exc)[:300]} — skipped for a week")
+                self._sense_failed("motion", row, exc)
+                failed_ids.append(row["scene_id"])
                 if run.fail(row["scene_id"], exc):           # the same failure every time: stop, say so
                     self._motion_error = run.stopped
                     log(run.stopped)
+                    self._sense_unfail("motion", failed_ids)   # the model is broken, not these files
                     break
             if (i + 1) % 25 == 0:
                 self._sense_record("motion", {"running": True, "done": done, **run.summary()})
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
+        self._sense_unfail("motion", ok_ids)
         log(f"watched {done} scene(s){f', {run.failed} unreadable' if run.failed else ''}")
         self._sense_record("motion", {"done": done, **run.summary()})
         del embedder

@@ -3978,7 +3978,8 @@ function senseCoverage(sense, st) {
       ${n(r.done)} ${word}${live ? " so far" : ""}${r.silent ? ` (${n(r.silent)} without sound)` : ""} · ${n(r.failed)} failed${r.stopped ? ` — stopped: ${esc(r.stopped)}` : ""}
       ${bad || (r.first_errors || []).length ? clear : ""}</p>
       ${(r.first_errors || []).length && !r.stopped ? `<p class="small lab-err">${r.first_errors.map(esc).join("<br>")}</p>` : ""}` : "";
-  return `<p class="small">${c != null ? `${sense === "sound" ? "Heard" : "Seen"} ${n(c)} of ${of}` : "—"}</p>${last}
+  const skip = st.unreadable ? `<p class="small faint" title="Files that couldn't be read are left out for a week — after 3 failures, until the file changes — so runs don't start on them every time">${n(st.unreadable)} unreadable file${st.unreadable === 1 ? "" : "s"} skipped · <a href="#" data-sense-retry="${sense}">Retry them</a></p>` : "";
+  return `<p class="small">${c != null ? `${sense === "sound" ? "Heard" : "Seen"} ${n(c)} of ${of}` : "—"}</p>${last}${skip}
     ${st.error && !(r && r.stopped === st.error) ? `<p class="small lab-err">${esc(st.error)} ${r ? "" : clear}</p>` : ""}`;
 }
 function lengthRow(L, pc) {
@@ -4015,6 +4016,13 @@ function senseCard(x) {
     <div class="row"><button class="btn sm" data-sense-run="${x.id}">Run now</button>
       <button class="btn sm ghost" data-sense-on="${x.id}" data-on="${st.settings && st.settings.on ? 0 : 1}">${st.settings && st.settings.on ? "Turn off" : "Turn on"}</button></div></div>`;
 }
+document.addEventListener("click", async (e) => {
+  const rt = e.target.closest("[data-sense-retry]");
+  if (!rt) return;
+  e.preventDefault();
+  try { const r = await api(SENSE_API[rt.dataset.senseRetry] + "/retry-failed", { method: "POST" }); toast(`${r.cleared} file(s) will be tried again next run`); } catch (err) { toast(err.message, true); }
+  openLab();
+});
 document.addEventListener("click", async (e) => {
   const cl = e.target.closest("[data-sense-clear]");
   if (!cl) return;

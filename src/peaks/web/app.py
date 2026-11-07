@@ -957,6 +957,12 @@ def create_app(cfg=None):
         _hear_next["at"] = 0.0
         return {"ok": True}
 
+    @app.post("/api/hear/retry-failed")
+    def hear_retry_failed():
+        """Try the files Hearing couldn't read again on the next run."""
+        _hear_next["at"] = 0.0
+        return service.sense_retry_failed("hear")
+
     @app.post("/api/hear/settings")
     def hear_settings(body: dict = Body(...)):
         out = service.save_hear_settings(on=body.get("on"), per_run=body.get("per_run"))
@@ -1023,6 +1029,12 @@ def create_app(cfg=None):
         service.sense_clear("motion")
         _motion_next["at"] = 0.0
         return {"ok": True}
+
+    @app.post("/api/motion/retry-failed")
+    def motion_retry_failed():
+        """Try the files Motion couldn't read again on the next run."""
+        _motion_next["at"] = 0.0
+        return service.sense_retry_failed("motion")
 
     @app.post("/api/motion/span-check")
     def motion_span_check():
