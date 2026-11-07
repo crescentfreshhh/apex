@@ -388,6 +388,9 @@ def create_app(cfg=None):
         if not p.startswith("/api/"):
             return await call_next(request)
         forensics.note_request(p if not p.startswith("/api/scene/") else "/api/scene/…")
+        from .. import stashtiming
+
+        waited = stashtiming.request_start()          # how much of this request is waiting on Stash
         t0 = _time.monotonic()
         write = request.method not in ("GET", "HEAD", "OPTIONS")
         if write:
@@ -396,10 +399,11 @@ def create_app(cfg=None):
         if write:
             _bump_version()                       # …and anything computed during the write
         secs = _time.monotonic() - t0
-        resp.headers["Server-Timing"] = f"app;dur={secs * 1000:.0f}"
+        st, sn = stashtiming.request_take(waited)
+        resp.headers["Server-Timing"] = f"app;dur={secs * 1000:.0f}" + (f", stash;dur={st * 1000:.0f}" if sn else "")
         if not p.startswith(("/api/jobs", "/api/perf")):
             route = getattr(request.scope.get("route"), "path", None)
-            forensics.note_duration(request.method, p, secs, route=route)
+            forensics.note_duration(request.method, p, secs, route=route, stash=st, stash_calls=sn)
         return resp
 
     @app.on_event("shutdown")
@@ -2960,7 +2964,17 @@ def create_app(cfg=None):
         from . import memwatch
 
         since = _t.time() - minutes * 60 if minutes > 0 else None
+        import os as _os
+
+        from .. import stashtiming
+
+        try:
+            load = _os.getloadavg()[0]
+        except (OSError, AttributeError):
+            load = None
         return {"routes": forensics.perf_summary(since),
+                "stash": stashtiming.summary(),
+                "load": {"one_min": round(load, 2) if load is not None else None, "cores": _os.cpu_count()},
                 "purges": [p for p in memwatch.PURGES if since is None or p["t"] >= since][::-1],
                 "memory": service.memory_status(),
                 "running": [j.kind for j in jobs.list() if j.status == "running"]}

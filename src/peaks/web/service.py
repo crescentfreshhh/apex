@@ -753,11 +753,21 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     job.progress.get("done", 0) + (1 if msg.lstrip().startswith("+") else 0)
                 )
 
+        decoding: dict = {}
+
+        def on_scene(what, sc):            # which scenes are decoding now: progress only counts finished ones
+            if what == "start":
+                decoding[str(sc.id)] = time.time()
+            else:
+                decoding.pop(str(sc.id), None)
+            if job:
+                job.progress["decoding"] = dict(decoding)
+
         stats = embed_library(
             pending, sampler, embedder, cache,
             batch_size=n_batch,
             workers=n_workers,
-            total=total, log=_log,
+            total=total, log=_log, on_scene=on_scene,
             failure_log=failure_log_for(self.cfg),
             should_stop=(lambda: job.cancelled) if job else None,
             should_skip=should_skip,
@@ -5636,12 +5646,34 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             client.scene_reset_o(sid)
             count = 0
         elif n > count:
-            for _ in range(n - count):
-                count = client.scene_add_o(sid)
+            count = self._o_many(lambda: client.scene_add_o(sid, n - count), n - count,
+                                 lambda: client.scene_add_o(sid))
         else:
-            for _ in range(count - n):
-                count = client.scene_delete_o(sid)
+            def drop():
+                dates = sorted(client.scene_o_dates(sid), reverse=True)[: count - n]
+                if len(dates) != count - n:
+                    raise ValueError("O dates don't match the count")
+                return client.scene_delete_o(sid, times=dates)
+            count = self._o_many(drop, count - n, lambda: client.scene_delete_o(sid))
         self.invalidate_meta(sid)
+        return count
+
+    def _o_many(self, batch, k: int, one) -> int:
+        """Several O's in ONE Stash call (each its own write would make a grade 0 → 18
+        eighteen round trips — seconds each while Stash is busy). A Stash that
+        refuses the list form falls back to one at a time, remembered."""
+        if k > 1 and self.__dict__.get("_o_batch_ok", True):
+            try:
+                return batch()
+            except ValueError:                        # dates out of step: the plain way, this once
+                pass
+            except Exception as exc:  # noqa: BLE001
+                if "GraphQL error" not in str(exc):   # Stash unreachable: not a reason to retry the long way
+                    raise
+                self._o_batch_ok = False              # an older Stash: no `times` list
+        count = 0
+        for _ in range(k):
+            count = one()
         return count
 
     def grade_scene(self, scene_id: str, grade: str, source: str = "catalogue", no_learn: bool = False) -> dict:

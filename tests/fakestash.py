@@ -117,14 +117,31 @@ class FakeStash:
             v["performers"] = [p["name"] for p in v["performers_detail"]]
         return {}
 
-    def scene_add_o(self, sid):
-        self.calls.append(("add_o", sid))
-        self.s[sid]["o_counter"] += 1
+    no_o_batch = False            # an older Stash: sceneAddO / sceneDeleteO without `times`
+
+    def scene_add_o(self, sid, n=1):
+        if n > 1:
+            if self.no_o_batch:
+                raise RuntimeError("GraphQL error: Unknown argument \"times\"")
+            self.calls.append(("add_o", sid, n))
+        else:
+            self.calls.append(("add_o", sid))
+        self.s[sid]["o_counter"] += n
         return self.s[sid]["o_counter"]
 
-    def scene_delete_o(self, sid):
-        self.calls.append(("del_o", sid))
-        self.s[sid]["o_counter"] -= 1
+    def scene_o_dates(self, sid):
+        self.calls.append(("o_dates", sid))
+        return [f"2024-01-01T00:00:{i:02d}Z" for i in range(self.s[sid]["o_counter"])]
+
+    def scene_delete_o(self, sid, times=None):
+        if times:
+            if self.no_o_batch:
+                raise RuntimeError("GraphQL error: Unknown argument \"times\"")
+            self.calls.append(("del_o", sid, tuple(times)))
+            self.s[sid]["o_counter"] -= len(times)
+        else:
+            self.calls.append(("del_o", sid))
+            self.s[sid]["o_counter"] -= 1
         return self.s[sid]["o_counter"]
 
     def scene_reset_o(self, sid):

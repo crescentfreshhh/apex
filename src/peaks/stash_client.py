@@ -231,6 +231,10 @@ mutation SceneUpdate($input: SceneUpdateInput!) {
 
 _SCENE_ADD_O = "mutation AddO($id: ID!) { sceneAddO(id: $id) { count } }"
 _SCENE_DELETE_O = "mutation DelO($id: ID!) { sceneDeleteO(id: $id) { count } }"
+# several at once: one write instead of one per O (Stash 0.25+: O history with dates)
+_SCENE_ADD_OS = "mutation AddOs($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }"
+_SCENE_DELETE_OS = "mutation DelOs($id: ID!, $times: [Timestamp!]) { sceneDeleteO(id: $id, times: $times) { count } }"
+_SCENE_O_DATES = "query ODates($id: ID!) { findScene(id: $id) { o_history } }"
 _SCENE_RESET_O = "mutation ResetO($id: ID!) { sceneResetO(id: $id) }"
 
 _SCENE_MARKERS_DESTROY = """
@@ -298,6 +302,12 @@ class StashClient:
     # --- core ----------------------------------------------------------------
 
     def execute(self, query: str, variables: dict | None = None) -> dict[str, Any]:
+        from . import stashtiming
+
+        with stashtiming.timed():
+            return self._execute(query, variables)
+
+    def _execute(self, query: str, variables: dict | None = None) -> dict[str, Any]:
         for attempt, sleep in enumerate((*self.RETRY_SLEEPS, None)):
             try:
                 resp = self.session.post(
@@ -401,13 +411,26 @@ class StashClient:
         data = self.execute(_SCENE_UPDATE, {"input": inp})
         return data["sceneUpdate"]
 
-    def scene_add_o(self, scene_id: str) -> int:
-        """Record one O; returns the new count."""
-        return self.execute(_SCENE_ADD_O, {"id": str(scene_id)})["sceneAddO"]["count"]
+    def scene_add_o(self, scene_id: str, n: int = 1) -> int:
+        """Record `n` O's (one call: each its own time, a second apart); returns the new count."""
+        if n <= 1:
+            return self.execute(_SCENE_ADD_O, {"id": str(scene_id)})["sceneAddO"]["count"]
+        import datetime as _dt
 
-    def scene_delete_o(self, scene_id: str) -> int:
-        """Remove the most recent O; returns the new count."""
-        return self.execute(_SCENE_DELETE_O, {"id": str(scene_id)})["sceneDeleteO"]["count"]
+        now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
+        times = [(now - _dt.timedelta(seconds=n - 1 - i)).strftime("%Y-%m-%dT%H:%M:%SZ") for i in range(n)]
+        return self.execute(_SCENE_ADD_OS, {"id": str(scene_id), "times": times})["sceneAddO"]["count"]
+
+    def scene_delete_o(self, scene_id: str, times: list[str] | None = None) -> int:
+        """Remove the most recent O — or, with `times`, exactly those (one call); returns the new count."""
+        if not times:
+            return self.execute(_SCENE_DELETE_O, {"id": str(scene_id)})["sceneDeleteO"]["count"]
+        return self.execute(_SCENE_DELETE_OS, {"id": str(scene_id), "times": list(times)})["sceneDeleteO"]["count"]
+
+    def scene_o_dates(self, scene_id: str) -> list[str]:
+        """The scene's O dates, as Stash keeps them."""
+        return list(((self.execute(_SCENE_O_DATES, {"id": str(scene_id)}) or {}).get("findScene") or {})
+                    .get("o_history") or [])
 
     def scene_reset_o(self, scene_id: str) -> int:
         return int(self.execute(_SCENE_RESET_O, {"id": str(scene_id)})["sceneResetO"])

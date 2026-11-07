@@ -115,18 +115,21 @@ def note_request(path: str) -> None:
 SLOW_SEC = 3.0
 
 
-def note_duration(method: str, path: str, secs: float, route: str | None = None) -> None:
+def note_duration(method: str, path: str, secs: float, route: str | None = None,
+                  stash: float = 0.0, stash_calls: int = 0) -> None:
     """Log any request slower than SLOW_SEC — so 'the board hangs for 20 s'
-    shows up in docker logs / crash.log as the exact route and time — and keep
-    the last few hundred timings per route for the Speed panel."""
+    shows up in docker logs / crash.log as the exact route and time, and how much
+    of it was waiting on Stash — and keep the last few hundred timings per route
+    for the Speed panel."""
     if secs >= SLOW_SEC:
-        _write(f"{_stamp()} [slow] {secs:.1f}s {method} {path}")
+        part = f" (Stash {stash:.1f}s over {stash_calls} call{'s' if stash_calls != 1 else ''})" if stash_calls else ""
+        _write(f"{_stamp()} [slow] {secs:.1f}s {method} {path}{part}")
     key = f"{method} {route or path}"
     with _state["lock"]:
         q = _timings.get(key)
         if q is None:
             q = _timings[key] = deque(maxlen=TIMING_KEEP)
-        q.append((time.time(), secs))
+        q.append((time.time(), secs, stash))
 
 
 TIMING_KEEP = 200
@@ -137,15 +140,19 @@ def perf_summary(since: float | None = None) -> list[dict]:
     """Per route: count, median, 95th percentile, max and the last time (ms),
     slowest first — over the kept timings (newer than `since`, if given)."""
     with _state["lock"]:
-        items = [(k, [d for t, d in q if since is None or t >= since]) for k, q in _timings.items()]
+        items = [(k, [x for x in q if since is None or x[0] >= since]) for k, q in _timings.items()]
     out = []
-    for k, ds in items:
-        if not ds:
+    for k, xs in items:
+        if not xs:
             continue
+        ds = [x[1] for x in xs]
         s = sorted(ds)
         pct = lambda f: s[min(len(s) - 1, int(f * len(s)))]   # noqa: E731
+        total = sum(ds)
+        waited = sum(x[2] if len(x) > 2 else 0.0 for x in xs)
         out.append({"route": k, "n": len(s), "p50_ms": round(pct(0.5) * 1000), "p95_ms": round(pct(0.95) * 1000),
-                    "max_ms": round(s[-1] * 1000), "last_ms": round(ds[-1] * 1000)})
+                    "max_ms": round(s[-1] * 1000), "last_ms": round(ds[-1] * 1000),
+                    "stash_share": round(waited / total, 2) if total > 0 and waited > 0 else 0.0})
     return sorted(out, key=lambda r: -r["p95_ms"])
 
 

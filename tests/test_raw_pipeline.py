@@ -287,3 +287,16 @@ def test_a_stop_mid_scene_stops_now_and_caches_nothing_half_done(tmp_path):
         again = embed_library(scenes, sampler, emb, cache, batch_size=4, workers=workers,
                               log=lambda *_: None)
         assert again["embedded"] == 6                       # done next time
+
+
+def test_embed_says_which_scenes_are_decoding_and_caps_decoder_threads(tmp_path):
+    emb = FakeEmbedder(dim=6)
+    emb.raw_resize, emb.raw_crop = 16, 16
+    sampler = _RawStubSampler(n_frames=3)
+    sampler.decode_threads = 0
+    seen = []
+    stats = embed_library([_scene(str(i), f"k{i}") for i in range(4)], sampler, emb, EmbeddingCache(tmp_path),
+                          batch_size=3, workers=2, log=lambda *_: None, on_scene=lambda w, sc: seen.append((w, sc.id)))
+    assert stats["embedded"] == 4
+    assert sorted(seen) == sorted([("start", str(i)) for i in range(4)] + [("end", str(i)) for i in range(4)])
+    assert sampler.decode_threads >= 1                           # a share of the cores, set by the job

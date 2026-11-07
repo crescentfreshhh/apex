@@ -72,9 +72,38 @@ def test_tag_state_rules():
 def test_grade_is_o_first_then_one_update_with_full_tag_list(svc, stash):
     svc.grade_scene("2", "legendaire")          # 16 → 18, had merveilleuse + blonde
     assert stash.calls == [
-        ("add_o", "2"), ("add_o", "2"),
+        ("add_o", "2", 2),                                        # both O's in one call
         ("update", "2", {"rating100": 100, "tag_ids": ["7", "11"], "organized": True}),
     ]
+
+
+def test_a_new_scene_to_legendaire_is_one_o_call_and_old_stash_still_works(svc, stash):
+    stash.s["2"]["o_counter"] = 0
+    svc.grade_scene("2", "legendaire")                          # 0 → 18
+    assert [c for c in stash.calls if c[0] == "add_o"] == [("add_o", "2", 18)]
+    assert stash.s["2"]["o_counter"] == 18
+    stash.calls.clear()
+    svc.set_o_count("2", 15)                                    # lowering: the newest three, one call
+    assert [c[0] for c in stash.calls] == ["o_dates", "del_o"] and len(stash.calls[1][2]) == 3
+    assert stash.calls[1][2][0] == "2024-01-01T00:00:17Z" and stash.s["2"]["o_counter"] == 15
+    stash.calls.clear()
+    stash.no_o_batch = True                                     # an older Stash: one at a time, remembered
+    assert svc.set_o_count("2", 18) == 18
+    assert stash.calls == [("add_o", "2")] * 3
+    stash.calls.clear()
+    svc.set_o_count("2", 16)
+    assert stash.calls == [("del_o", "2")] * 2                  # not even asked again
+
+
+def test_an_unreachable_stash_is_not_retried_the_long_way(svc, stash, monkeypatch):
+    def down(sid, n=1):
+        raise RuntimeError("Could not reach Stash at http://stash/graphql")
+    monkeypatch.setattr(stash, "scene_add_o", down)
+    import pytest as _pt
+
+    with _pt.raises(RuntimeError, match="Could not reach"):
+        svc.set_o_count("2", 18)
+    assert svc.__dict__.get("_o_batch_ok", True)
 
 
 def test_grade_creates_a_missing_tier_tag_once(svc, stash):

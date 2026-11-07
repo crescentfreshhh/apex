@@ -286,3 +286,27 @@ def test_worker_exits_quietly_with_its_reason(tmp_path):
         _sparse_extract_worker(str(tmp_path / "missing.mp4"), 2.0, 16, 16, out)
     assert e.value.code == 1
     assert (tmp_path / "o.npz.err").read_text()
+
+
+def test_the_sparse_worker_runs_at_background_priority_with_a_share_of_the_cores(video, monkeypatch):
+    import peaks.sampling as sampling
+
+    lowered = []
+    monkeypatch.setattr(sampling, "lower_priority", lambda pid: lowered.append(pid))
+    s = FrameSampler(interval_seconds=6, mode="sparse")
+    s.decode_threads = 2
+    got = list(s.iter_frames_raw(video, resize_short=32, crop=32))
+    assert got and len(lowered) == 1 and lowered[0] > 0          # the worker process, by pid
+
+
+def test_decode_threads_leave_half_the_cores(monkeypatch):
+    import os
+
+    from peaks.sampling import decode_threads_for
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    assert decode_threads_for(3) == 2 and decode_threads_for(1) == 8 and decode_threads_for(20) == 1
+    s = FrameSampler(interval_seconds=2, mode="interval")
+    assert "-threads" not in s._input_args()                     # thumbnails etc.: unchanged
+    s.decode_threads = 2
+    assert s._input_args()[-2:] == ["-threads", "2"]

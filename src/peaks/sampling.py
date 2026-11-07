@@ -184,8 +184,17 @@ class SamplerError(RuntimeError):
     pass
 
 
+def decode_threads_for(workers: int) -> int:
+    """Decoder threads per scene so that all of a job's parallel decodes together
+    use about half the CPU cores — the rest stay free for Stash and the web
+    server (you grading while it runs)."""
+    import os
+
+    return max(1, (os.cpu_count() or 2) // (2 * max(1, int(workers or 1))))
+
+
 def _sparse_extract_worker(
-    path: str, interval: float, resize_short: int, crop: int, out_path: str
+    path: str, interval: float, resize_short: int, crop: int, out_path: str, threads: int = 0
 ) -> None:
     """Runs in a CHILD process: sparse-decode `path` and save (times, frames)
     to `out_path` as an .npz. Kept at module level so it's importable by the
@@ -203,7 +212,7 @@ def _sparse_extract_worker(
         pass
 
     try:
-        _sparse_extract(path, interval, resize_short, crop, out_path, np, av)
+        _sparse_extract(path, interval, resize_short, crop, out_path, np, av, threads)
     except BaseException as exc:
         # The parent only sees our exit code; leave the actual reason next to the
         # output so it can be surfaced in the job log instead of "worker exit 1".
@@ -227,7 +236,7 @@ def _sparse_error_budget(duration: float, interval: float) -> int:
     return max(60, int(0.2 * expected))
 
 
-def _sparse_extract(path, interval, resize_short, crop, out_path, np, av) -> None:
+def _sparse_extract(path, interval, resize_short, crop, out_path, np, av, threads: int = 0) -> None:
     max_scene_hours = 12.0
 
     times: list[float] = []
@@ -237,6 +246,11 @@ def _sparse_extract(path, interval, resize_short, crop, out_path, np, av) -> Non
             raise RuntimeError(f"no video stream in {path}")
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
+        if threads:                    # a share of the cores, not all of them (see decode_threads_for)
+            try:
+                stream.codec_context.thread_count = int(threads)
+            except (AttributeError, ValueError):
+                pass
         try:  # decode keyframes only — big speedup, and seeks land on them
             stream.codec_context.skip_frame = "NONKEY"
         except (AttributeError, ValueError):
@@ -357,6 +371,9 @@ class FrameSampler:
         # spot. on_fallback(path, reason) lets the caller log it.
         self.linear_fallback = True
         self.on_fallback = None
+        # decoder threads per scene for background jobs (0: the decoder's own
+        # choice — every core); set from the job's worker count by embed_library
+        self.decode_threads = 0
 
     @property
     def interval_signature(self) -> float:
@@ -414,6 +431,8 @@ class FrameSampler:
         args = []
         if self.hwaccel:
             args += ["-hwaccel", self.hwaccel]
+        if getattr(self, "decode_threads", 0):
+            args += ["-threads", str(int(self.decode_threads))]
         return args
 
     def _vf(self) -> str:
@@ -539,12 +558,14 @@ class FrameSampler:
     def _linear_fallback_sampler(self) -> "FrameSampler":
         """Same grid, full linear CPU decode (the most forgiving decoder — what
         the Fix job's last rung uses), recorded at this sampler's signature."""
-        return FrameSampler(
+        fb = FrameSampler(
             interval_seconds=self.interval, ffmpeg=self.ffmpeg, ffprobe=self.ffprobe,
             frame_size=self.frame_size, mode="interval", hwaccel="",
             queue_frames=self.queue_frames, pipeline="raw",
             scene_timeout=self.scene_timeout, signature=self.interval_signature,
         )
+        fb.decode_threads = self.decode_threads
+        return fb
 
     def _iter_frames_sparse(self, path: str, *, resize_short: int, crop: int):
         """Seek-based sampling, run in a CHILD PROCESS with a hard kill-timeout.
@@ -575,10 +596,11 @@ class FrameSampler:
         ctx = mp.get_context("spawn")  # fresh interpreter: no CUDA-fork hazards
         proc = ctx.Process(
             target=_sparse_extract_worker,
-            args=(path, self.interval, resize_short, crop, out_path),
+            args=(path, self.interval, resize_short, crop, out_path, int(getattr(self, "decode_threads", 0) or 0)),
         )
         try:
             proc.start()
+            lower_priority(proc.pid)        # like every decoder a job starts: you come first
             proc.join(self.scene_timeout if self.scene_timeout else None)
             if proc.is_alive():
                 proc.terminate()

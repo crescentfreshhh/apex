@@ -180,6 +180,31 @@ def test_o_counter_mutations_return_counts():
     assert client.scene_reset_o("5") == 0
 
 
+def test_several_os_are_one_call_with_distinct_times():
+    client = FakeClient([{"sceneAddO": {"count": 18}}, {"sceneDeleteO": {"count": 16}},
+                         {"findScene": {"o_history": ["2024-01-01T00:00:00Z"]}}])
+    assert client.scene_add_o("5", 18) == 18
+    q, v = client.calls[0]
+    assert "times" in q and len(v["times"]) == 18 and len(set(v["times"])) == 18
+    assert client.scene_delete_o("5", times=["a", "b"]) == 16 and client.calls[1][1]["times"] == ["a", "b"]
+    assert client.scene_o_dates("5") == ["2024-01-01T00:00:00Z"]
+
+
+def test_every_stash_call_is_timed():
+    from peaks import stashtiming
+
+    class Timed(StashClient):
+        def _execute(self, query, variables=None):            # the network part, faked
+            return {"sceneAddO": {"count": 1}}
+
+    stashtiming.reset()
+    client = Timed(url="http://stash.test:6969")
+    started = stashtiming.request_start()
+    client.scene_add_o("5")
+    secs, n = stashtiming.request_take(started)
+    assert n == 1 and secs >= 0 and stashtiming.summary()["calls"] == 1
+
+
 def test_scene_details_parses_editable_fields():
     payload = {
         "findScenes": {"scenes": [{

@@ -368,10 +368,14 @@ async function loadSpeed() {
   const ms = (x) => (x >= 1000 ? (x / 1000).toFixed(1) + " s" : x + " ms");
   const tone = (x) => (x >= 3000 ? "bad" : x >= 1000 ? "warn" : "");
   const body = $("#speed-body"); if (!body) return;
-  body.innerHTML = `<table class="speed-t"><thead><tr><th>Route</th><th>calls</th><th>typical</th><th>slow (p95)</th><th>worst</th></tr></thead><tbody>
+  const st = d.stash || {}, ld = d.load || {};
+  const busy = ld.one_min != null && ld.cores ? ld.one_min / ld.cores : null;
+  const why = `<p class="dim">Stash ${st.calls ? `answers in <b class="${tone(st.median_ms)}">${ms(st.median_ms)}</b> typically, <span class="${tone(st.p90_ms)}">${ms(st.p90_ms)}</span> when slow (${st.calls} calls, last 5 min)` : "hasn't been asked anything in the last 5 min"}
+    ${busy != null ? ` · server load <b class="${busy >= 1 ? "bad" : busy >= 0.7 ? "warn" : ""}">${ld.one_min}</b> on ${ld.cores} cores${busy >= 1 ? " — every core is busy, so everything waits" : ""}` : ""}</p>`;
+  body.innerHTML = why + `<table class="speed-t"><thead><tr><th>Route</th><th>calls</th><th>typical</th><th>slow (p95)</th><th>worst</th><th title="How much of its time was spent waiting on Stash">waiting on Stash</th></tr></thead><tbody>
     ${d.routes.slice(0, 25).map((r) => `<tr><td><code>${esc(r.route.replace(/^GET /, "").replace("/api/", "/"))}</code></td><td>${r.n}</td><td>${ms(r.p50_ms)}</td>
-      <td class="${tone(r.p95_ms)}">${ms(r.p95_ms)}</td><td class="${tone(r.max_ms)}">${ms(r.max_ms)}</td></tr>`).join("")
-      || '<tr><td colspan="5" class="dim">No requests yet.</td></tr>'}</tbody></table>
+      <td class="${tone(r.p95_ms)}">${ms(r.p95_ms)}</td><td class="${tone(r.max_ms)}">${ms(r.max_ms)}</td><td>${r.stash_share ? Math.round(100 * r.stash_share) + "%" : "—"}</td></tr>`).join("")
+      || '<tr><td colspan="6" class="dim">No requests yet.</td></tr>'}</tbody></table>
     <h4>Memory purges</h4>${d.purges.length ? `<ul class="speed-p">${d.purges.map((p) => `<li>${new Date(p.t * 1000).toLocaleTimeString()} ·
       <b>${p.level}</b> · freed ${p.freed_mb} MB (${(p.rss_before_mb / 1024).toFixed(1)} → ${(p.rss_after_mb / 1024).toFixed(1)} GB)
       ${p.dropped.length ? "· " + esc(p.dropped.join("; ")) : ""}</li>`).join("")}</ul>`
@@ -1130,6 +1134,85 @@ function tierTally(tiers, { compact = false } = {}) {
 
 // grade undo stack, shared by the Catalogue and the viewer's grade menu
 const gradeUndo = [];
+// --- the image lane: covers, moment thumbnails and performer photos load at most 3
+// at a time, those on screen first. A browser opens only 6 connections to a server;
+// on a busy machine a page of thumbnails would take them all, and the Catalogue's list
+// and your grades would wait in the browser behind them. Images say data-lsrc="…".
+const imgLane = { q: [], active: 0, max: 3, io: null };
+function lanePump() {
+  while (imgLane.active < imgLane.max && imgLane.q.length) {
+    const job = imgLane.q.shift();
+    if (job.img && (!job.img.isConnected || !job.img.dataset.lsrc)) continue;     // gone, or already loaded
+    imgLane.active++;
+    const done = () => { imgLane.active--; lanePump(); };
+    if (job.img) {
+      const im = job.img, url = im.dataset.lsrc;
+      delete im.dataset.lsrc;
+      im.addEventListener("load", done, { once: true });
+      im.addEventListener("error", done, { once: true });
+      im.src = url;
+    } else {
+      const im = new Image();
+      im.onload = im.onerror = done;
+      im.src = job.url;
+    }
+  }
+}
+function laneWant(img) {
+  if (!img.dataset.lsrc || imgLane.q.some((j) => j.img === img)) return;
+  imgLane.q.unshift({ img });                // just came into view: before the ones further away
+  lanePump();
+}
+function lanePrefetch(url) { imgLane.q.push({ url }); lanePump(); }     // warming the cache: last in line
+function laneWatch(root) {
+  const imgs = root.matches?.("img[data-lsrc]") ? [root] : [...(root.querySelectorAll?.("img[data-lsrc]") || [])];
+  for (const im of imgs) {
+    if (!imgLane.io) { im.src = im.dataset.lsrc; delete im.dataset.lsrc; continue; }    // no observer: plain loading
+    imgLane.io.observe(im);
+  }
+}
+if ("IntersectionObserver" in window) {
+  imgLane.io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) { imgLane.io.unobserve(e.target); laneWant(e.target); }
+    }
+  }, { rootMargin: "400px 0px" });
+}
+new MutationObserver((muts) => {
+  for (const m of muts) {
+    for (const n of m.addedNodes) if (n.nodeType === 1) laneWatch(n);
+    if (m.type === "attributes" && m.target.dataset?.lsrc) laneWatch(m.target);
+  }
+}).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-lsrc"] });
+document.addEventListener("DOMContentLoaded", () => laneWatch(document));
+
+// --- grades never make you wait: the screen moves on at once, and grades go to
+// Stash behind it, one at a time, in the order you gave them ------------------------
+const GRADE_RO = { legendaire: [100, 18], exceptionnelle: [100, 17], merveilleuse: [100, 16] };
+function gradeGuess(grade) {                 // what the row will say once Stash has it
+  if (grade === "reject" || grade === NO_LEARN) return { rating100: 20, tier: "rejected", no_learn: grade === NO_LEARN };
+  const [rating100, o_counter] = GRADE_RO[grade] || [100, 0];
+  return { rating100, o_counter, tier: grade, organized: true, no_learn: false };
+}
+const gradeQ = { chain: Promise.resolve(), n: 0 };
+function queueGrade(sid, grade, undoKey, opts) {
+  gradeQ.n++; gradeQNote();
+  const p = gradeQ.chain.then(() => applyGrade(sid, grade, undoKey, opts));
+  gradeQ.chain = p.catch(() => {}).finally(() => { gradeQ.n--; gradeQNote(); });
+  return p;
+}
+async function gradesSaved() {               // undo needs Stash's answer for the grade it undoes
+  if (!gradeQ.n) return;
+  toast("Saving your last grade first…");
+  await gradeQ.chain;
+}
+function gradeQNote() {
+  let el = document.getElementById("grade-q");
+  if (!el && document.body) { el = document.createElement("div"); el.id = "grade-q"; document.body.appendChild(el); }
+  if (!el) return;
+  el.hidden = !gradeQ.n;
+  el.textContent = gradeQ.n ? `saving ${gradeQ.n} grade${gradeQ.n > 1 ? "s" : ""} to Stash…` : "";
+}
 async function applyGrade(sid, grade, undoKey = "Z", { settle = false } = {}) {
   const nl = grade === NO_LEARN;
   const r = await api("/api/catalogue/grade", {
@@ -1153,6 +1236,7 @@ async function keepAsIs(sid, undoKey = "Z") {
   return r.scene;
 }
 async function undoGrade() {
+  await gradesSaved();                       // a grade still on its way: undo that one, once Stash has it
   const u = gradeUndo.pop();
   if (!u) { toast("nothing to undo"); return null; }
   if (u.bulk) return undoBulkGrade(u);
@@ -1207,7 +1291,7 @@ function renderHits(hits, container, previewMax) {
     const sid = h.scene_id ?? "";
     return `<div class="tile" data-sid="${sid}">
       <div class="thumbwrap">
-        <img loading="lazy" src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
+        <img data-lsrc="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
         ${g.id === "foryou-results" ? tasteChip(h.score)
           : `<span class="score" data-score="${h.score}" title="How closely this frame matches">${(h.score * 100).toFixed(0)}%</span>`}
         <span class="t">${fmt(h.time)}</span>
@@ -1622,7 +1706,7 @@ async function refreshCollections() {
       ? "<div class='dim' style='margin:8px 0 4px'>Playlists</div><div class='pl-grid'>" + collections.map((c) =>
           `<div class="coll-row pl-card" data-safe="${esc(c.safe)}" data-name="${esc(c.name)}">
             <a class="pl-cover" href="/megaboard/?collection=${encodeURIComponent(c.safe)}" target="_blank" title="Play on megaboard">
-              ${c.thumb ? `<img loading="lazy" src="${c.thumb}" onerror="this.style.display='none'" />` : ""}
+              ${c.thumb ? `<img data-lsrc="${c.thumb}" onerror="this.style.display='none'" />` : ""}
               <span class="pl-play">▶</span>
             </a>
             <div class="pl-meta">
@@ -1691,7 +1775,7 @@ function perfInitials(name) {
 }
 function perfPicHTML(p, { clip = true } = {}) {
   const url = perfPhotoURL(p);
-  const img = url ? `<img loading="lazy" src="${url}" alt="" onerror="this.remove()" />` : "";
+  const img = url ? `<img data-lsrc="${url}" alt="" onerror="this.remove()" />` : "";
   const hover = clip && p.clip ? `<video class="perf-hover" muted loop playsinline preload="none" data-stream="${esc(p.clip)}"></video>` : "";
   return `<div class="pf-pic"><span class="pf-initials">${perfInitials(p.name)}</span>${img}${hover}${p.fav ? '<span class="pf-fav" title="Favourite in Stash">♥</span>' : ""}</div>`;
 }
@@ -1981,7 +2065,7 @@ function wireSceneCards(box, scenes, per = 48) {
   const host = box.querySelector("[data-cards]"); if (!host) return;
   let shown = 0;
   const card = (x) => `<button class="scene-card" data-sid="${esc(x.scene_id)}" title="${esc(x.title)}">
-      <span class="sc-img"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.scene_id)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
+      <span class="sc-img"><img data-lsrc="/api/scene/${encodeURIComponent(x.scene_id)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
       <span class="sc-meta">${tierChip(x.tier)}<span class="sc-t">${esc(x.title)}</span></span>
       <span class="faint small">${esc([(x.date || "").slice(0, 4), x.studio || (x.performers || []).join(", ")].filter(Boolean).join(" · "))}</span></button>`;
   const more = () => {
@@ -2028,7 +2112,7 @@ function rateTileHTML(p) {
   const r = rateP.ratings[p.id] || {}, url = perfPhotoURL(p);
   const done = r.face != null && r.body != null && r.action != null;
   return `<div class="rate-tile ${done ? "done" : ""}" data-pid="${esc(p.id)}">
-    <div class="rate-pic">${url ? `<img loading="lazy" src="${url}" alt="" onerror="this.style.visibility='hidden'" />` : `<span>${perfInitials(p.name)}</span>`}</div>
+    <div class="rate-pic">${url ? `<img data-lsrc="${url}" alt="" onerror="this.style.visibility='hidden'" />` : `<span>${perfInitials(p.name)}</span>`}</div>
     <div class="rate-name"><b>${esc(p.name)}</b> <span class="faint small">${p.lib || 0} scene${p.lib === 1 ? "" : "s"}${done ? " · ✓" : ""}</span></div>
     ${pcritHTML(r, false)}</div>`;
 }
@@ -2072,7 +2156,7 @@ async function loadUncredited(id, name) {
   if (!(d.scenes || []).length) return;
   box.innerHTML = `<h3 style="margin:18px 0 6px">May also be in <span class="faint small">— by face, not credited in Stash</span></h3>
     <div class="unc-grid">${d.scenes.map((s) => `<div class="unc" data-sid="${esc(s.scene_id)}">
-      <img src="${s.thumb}" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+      <img data-lsrc="${s.thumb}" alt="" onerror="this.style.visibility='hidden'" />
       <span class="small"><b>${esc(s.title)}</b> ${tierChip(s.tier)} · ${s.faces} faces</span>
       <span class="row"><button class="btn sm pri" data-unc-add="${esc(s.scene_id)}" data-pid="${esc(id)}">Add ${esc(name)}</button>
         <button class="btn sm ghost" data-unc-no="${esc(s.scene_id)}" data-pid="${esc(id)}" title="Not her — don't suggest again">✕</button></span></div>`).join("")}</div>`;
@@ -2127,7 +2211,7 @@ async function openStudios() {
 function drawStudios(d, q) {
   $("#st-sub").textContent = q ? `${d.total} matching` : `${d.total} in your library`;
   $("#st-grid").innerHTML = d.studios.map((x) => `<button class="st-card" data-name="${esc(x.name)}">
-      <span class="sc-img"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.cover)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
+      <span class="sc-img"><img data-lsrc="/api/scene/${encodeURIComponent(x.cover)}/cover" alt="" onerror="this.style.visibility='hidden'" /></span>
       <span class="st-name">${esc(x.name)}</span>
       <span class="pf-tierbars">${tierBarsHTML(x.tiers)}</span>
       <span class="faint small">${plural(x.scenes, "scene")}${x.top ? ` · ${x.top} top-tier` : ""}${x.record ? ` · <span class="wr-${x.record.tone}">${esc(x.record.verdict)}</span>` : ""}</span>
@@ -2192,13 +2276,16 @@ async function openPhotoPicker(id, name) {
       <span><button class="ghost" id="pk-auto" title="Let Peaks choose (Stash photo first)">Automatic</button> <button class="ghost" id="pk-x">✕</button></span></div>
     <p class="dim small">Her Stash photo, frames where she's the only face (🙂), covers of her scenes (solo ones marked), and her best moments. Click one to use it everywhere.</p>
     <div class="pf-opts">${opts.map((o, i) => `<div class="pf-opt ${o.chosen ? "on" : ""} ${o.kind !== "stash" && o.kind !== "face" ? "wide" : ""}" data-i="${i}">
-      <img loading="lazy" src="${o.thumb}" onerror="this.parentNode.remove()" /><span>${o.kind === "stash" ? "📷 Stash photo" : o.kind === "face" ? "🙂 her face · " + esc(o.label) : o.kind === "cover" ? (o.solo ? "🎬 solo · " : "🎬 ") + esc(o.label) : "✨ a moment"}</span></div>`).join("") || '<p class="dim">Nothing to choose from yet.</p>'}</div>`;
+      <img data-lsrc="${o.thumb}" onerror="this.parentNode.remove()" /><span>${o.kind === "stash" ? "📷 Stash photo" : o.kind === "face" ? "🙂 her face · " + esc(o.label) : o.kind === "cover" ? (o.solo ? "🎬 solo · " : "🎬 ") + esc(o.label) : "✨ a moment"}</span></div>`).join("") || '<p class="dim">Nothing to choose from yet.</p>'}</div>`;
   $("#pk-x").onclick = () => { pk.hidden = true; };
   const done = async (body) => {
     try {
       const r = await api(`/api/performer/${encodeURIComponent(id)}/photo`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const p = perfDir.find((x) => x.id === String(id)); if (p) p.photo = r.photo;
-      document.querySelectorAll(`img[src*="/api/performer/${encodeURIComponent(id)}/photo"]`).forEach((im) => { im.src = `/api/performer/${encodeURIComponent(id)}/photo?v=${r.photo}`; });
+      document.querySelectorAll(`img[src*="/api/performer/${encodeURIComponent(id)}/photo"], img[data-lsrc*="/api/performer/${encodeURIComponent(id)}/photo"]`).forEach((im) => {
+        const url = `/api/performer/${encodeURIComponent(id)}/photo?v=${r.photo}`;
+        if (im.dataset.lsrc) im.dataset.lsrc = url; else im.src = url;
+      });
       pk.hidden = true; toast("Picture updated");
     } catch (e) { toast(e.message, true); }
   };
@@ -2340,7 +2427,7 @@ async function loadTasteVisual() {
         (${d.sources} loved moments). Hit ✕ on any that are <em>wrong</em> to correct it.</div>` +
       d.modes.map((m) => `<div class="taste-strip">` + m.frames.map((f) =>
         `<span class="taste-frame">
-           <img loading="lazy" src="${f.thumb}" title="${(f.score * 100).toFixed(0)}% like your taste"
+           <img data-lsrc="${f.thumb}" title="${(f.score * 100).toFixed(0)}% like your taste"
              onerror="this.closest('.taste-frame').style.display='none'" />
            <button class="tf-x" title="Not my taste — down-vote this frame"
              data-key="${esc(f.key)}" data-t="${f.time}" data-sid="${esc(f.scene_id || "")}">✕</button>
@@ -2370,7 +2457,7 @@ async function loadTasteLabels(reset = true) {
     if (!d.total) { if (reset) el.innerHTML = '<span class="dim">No labels yet — save moments (★) or thumb some up.</span>'; return; }
     el.insertAdjacentHTML("beforeend", d.labels.map((l) =>
       `<span class="taste-label ${l.label ? "pos" : "neg"}" data-key="${esc(l.key)}" data-t="${l.time}" data-sid="${esc(l.scene_id || "")}" data-label="${l.label}">
-         <img loading="lazy" src="${l.thumb}" onerror="this.closest('.taste-label').style.opacity=.25" />
+         <img data-lsrc="${l.thumb}" onerror="this.closest('.taste-label').style.opacity=.25" />
          <button class="tl-flip" title="Flip 👍/👎">${l.label ? "👍" : "👎"}</button>
          <button class="tl-x" title="Remove this label">✕</button>
        </span>`).join(""));
@@ -3323,9 +3410,9 @@ function argueHTML(e, i) {
       <span class="arg-v">${g.push >= 0 ? "+" : "−"}${Math.abs(g.push).toFixed(2)}</span>${facts}</div>`;
   }).join("");
   const look = (c) => ((e.lookalikes || {})[c] || []).map((x) =>
-    `<span class="arg-look" title="${esc(x.title)} · ${Math.round(x.sim * 100)}% alike"><img loading="lazy" src="${x.cover}" alt="" onerror="this.style.visibility='hidden'" /></span>`).join("");
+    `<span class="arg-look" title="${esc(x.title)} · ${Math.round(x.sim * 100)}% alike"><img data-lsrc="${x.cover}" alt="" onerror="this.style.visibility='hidden'" /></span>`).join("");
   const moms = (c) => ((e.moments || {})[c] || []).map((m) =>
-    `<img class="arg-m" loading="lazy" src="${m.thumb}" data-sid="${esc(e.scene_id)}" data-t="${m.t}" title="${fmt(m.t)} — pulls toward ${esc(e.names[c] || c)}" />`).join("");
+    `<img class="arg-m" data-lsrc="${m.thumb}" data-sid="${esc(e.scene_id)}" data-t="${m.t}" title="${fmt(m.t)} — pulls toward ${esc(e.names[c] || c)}" />`).join("");
   const words = e.words && Object.keys(e.words).length
     ? `<div class="arg-words"><span class="faint small" title="CLIP description terms, shown only when they genuinely separate these two tiers in your library">hint ·</span> ${[a, b].map((c) =>
       (e.words[c] || []).length ? `leans ${(e.words[c] || []).map((w) => w.kind === "concept"
@@ -3617,8 +3704,8 @@ function drawMoments(m, z) {
   const box = $("#moments-body"); if (!box) return;
   const pc = (x) => (x == null ? "—" : Math.round(100 * x) + "%");
   const pair = (x) => `<div class="mc-pair ${x.rank ? "hit" : "miss"}">
-      <figure><img loading="lazy" src="${x.saved_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>you saved ${fmt(x.saved)}</figcaption></figure>
-      <figure><img loading="lazy" src="${x.pick_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>${x.rank ? `Peaks' #${x.rank} pick` : "Peaks' nearest pick"}${x.pick != null ? " " + fmt(x.pick) : ""}</figcaption></figure></div>`;
+      <figure><img data-lsrc="${x.saved_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>you saved ${fmt(x.saved)}</figcaption></figure>
+      <figure><img data-lsrc="${x.pick_thumb || ""}" alt="" onerror="this.style.visibility='hidden'" /><figcaption>${x.rank ? `Peaks' #${x.rank} pick` : "Peaks' nearest pick"}${x.pick != null ? " " + fmt(x.pick) : ""}</figcaption></figure></div>`;
   box.innerHTML = `
     <div class="hgrid">
       <div class="card pad hcard"><span class="tq-l">Found before you saved it</span><span class="tq-v">${pc(m.live.top3)}</span>
@@ -3780,7 +3867,7 @@ function sxRender(sense) {
   box.querySelectorAll("[data-sx]").forEach((b) => { b.disabled = !it && b.dataset.sx !== "undo"; });
   box.querySelector(".sx-strip").innerHTML = st.deck.slice(st.i + 1, st.i + 9).map((x, k) =>
     `<button class="sx-thumb" data-sx-jump="${st.i + 1 + k}" data-sense="${sense}" title="${esc(x.title)} · ${fmt(x.start)}">
-      ${x.thumb ? `<img loading="lazy" src="${x.thumb}" alt="" onerror="this.style.visibility='hidden'" />` : ""}<span>${fmt(x.start)}</span></button>`).join("");
+      ${x.thumb ? `<img data-lsrc="${x.thumb}" alt="" onerror="this.style.visibility='hidden'" />` : ""}<span>${fmt(x.start)}</span></button>`).join("");
   if (st.note && it) box.querySelector(".sx-why").textContent += ` · ${st.note}`;
   if (it && st.started) sxPlay(sense, it, v);
 }
@@ -4621,7 +4708,7 @@ function renderPicks() {
     const id = pickId(it);
     const tile = document.createElement("div");
     tile.className = "pick-tile" + (selectedPicks.has(id) ? " selected" : "");
-    tile.innerHTML = `<img loading="lazy" src="${it.thumb}" alt="" onerror="this.style.opacity=.15" />
+    tile.innerHTML = `<img data-lsrc="${it.thumb}" alt="" onerror="this.style.opacity=.15" />
       <span class="pick-t">${fmt(it.time)}</span>
       <button class="pick-play" title="Preview">▶</button>`;
     tile.addEventListener("click", (e) => {
@@ -4884,7 +4971,7 @@ function renderExperimental() {
 
   const w = expData.wall || [];
   const tiles = w.map((it) => `<div class="exp-tile" data-stream="${esc(it.stream || "")}" data-key="${esc(it.key)}" data-t="${it.t}" data-sid="${esc(String(it.scene_id))}">
-      <img loading="lazy" src="${it.thumb}" onerror="this.style.display='none'" />
+      <img data-lsrc="${it.thumb}" onerror="this.style.display='none'" />
       <span class="exp-score">${W.tasteHTML(it.score, SCALE && SCALE.scene)}</span></div>`).join("");
   const wall = w.length ? `<div class="panel"><h3 class="exp-h">Least on-taste scenes <span class="dim">(their own best moment)</span></h3>
     <p class="dim">The ${w.length} scenes your taste scores lowest. Do they genuinely look "not you"? If good scenes are here, your taste needs more examples — not a bug. Click a still to play it.</p>
@@ -4991,7 +5078,7 @@ async function cxTeach(slug) {
   box.innerHTML = `<div class="cx-teach-h"><b>Is this “${esc(c.name)}”?</b>
       <span class="faint small">${c.trained ? "Mostly the frames it's least sure about." : "A first round: some guesses from the words, some at random."}</span>
       <span class="grow"></span><button class="btn sm" data-cx-more>More</button><button class="btn sm ghost" data-cx-close>Done</button></div>
-    <div class="cx-grid">${cxT.items.map((x, i) => `<div class="cx-cell" data-i="${i}"><img loading="lazy" src="${x.thumb}" alt="" />
+    <div class="cx-grid">${cxT.items.map((x, i) => `<div class="cx-cell" data-i="${i}"><img data-lsrc="${x.thumb}" alt="" />
       <div class="cx-ans"><button data-cx-y>Yes</button><button data-cx-n>No</button></div></div>`).join("")
       || '<p class="faint small">Nothing left to ask about right now.</p>'}</div>`;
 }
@@ -5048,7 +5135,7 @@ function cxRender() {
   box.innerHTML = `<div class="cx-teach-h"><b>Pick the frames that show something, then name it</b>
       <span class="faint small">Click to pick · ${cxR.sel.size} picked</span><span class="grow"></span>
       <button class="btn sm" data-cxr-more>🎲 New frames</button><button class="btn sm ghost" data-cxr-close>Close</button></div>
-    <div class="cx-grid">${cxR.items.map((x, i) => `<div class="cx-cell cxr ${cxR.sel.has(i) ? "yes" : ""}" data-cxr="${i}"><img loading="lazy" src="${x.thumb}" alt="" /></div>`).join("")}</div>
+    <div class="cx-grid">${cxR.items.map((x, i) => `<div class="cx-cell cxr ${cxR.sel.has(i) ? "yes" : ""}" data-cxr="${i}"><img data-lsrc="${x.thumb}" alt="" /></div>`).join("")}</div>
     <div class="row cxr-bar"><input id="cxr-name" list="cxr-names" value="${esc(cxR.name)}" placeholder="Name it — a new concept, or one you have" maxlength="60" style="min-width:260px" />
       <datalist id="cxr-names">${names.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>
       <label class="small"><input type="checkbox" id="cxr-rest" ${cxR.rest ? "checked" : ""} /> the rest are <b>not</b> it</label>
@@ -5564,7 +5651,7 @@ function cfEdit(k, anchor) {
   }
 }
 function perfMiniPic(p) {
-  return p.photo ? `<img class="mini-pic" src="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" loading="lazy" />`
+  return p.photo ? `<img class="mini-pic" data-lsrc="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" />`
     : `<span class="mini-pic none">${esc((p.name || "?")[0])}</span>`;
 }
 // --- the search box: suggestions while you type -----------------------------------------
@@ -5758,7 +5845,7 @@ document.addEventListener("click", (e) => {
 function catCardHTML(r, i) {
   const who = [r.performers.slice(0, 3).join(", "), r.studio, (r.date || "").slice(0, 4)].filter(Boolean).join(" · ");
   const moments = (r.moments || []).slice(0, 3).map((m, j) =>
-    `<img class="cat-m" loading="lazy" src="${m.thumb}" data-j="${j}" title="${fmt(m.t)}${m.score != null ? " · taste " + Math.round(m.score * 100) + "%" : ""}" />`).join("");
+    `<img class="cat-m" data-lsrc="${m.thumb}" data-j="${j}" title="${fmt(m.t)}${m.score != null ? " · taste " + Math.round(m.score * 100) + "%" : ""}" />`).join("");
   const cur = r.tier === "rejected" ? "reject" : r.tier;   // highlight the grade it already has
   const p = r.pred;
   const sug = r.suggest ? r.suggest.grade : (p && r.tier === "unreviewed" ? p.tier : null);
@@ -5782,7 +5869,7 @@ function catCardHTML(r, i) {
   const sel = cat.sel.has(r.scene_id);
   return `<div class="cat-card ${i === cat.focus ? "focus" : ""} ${r._graded ? "graded" : ""} ${sel ? "sel" : ""}" data-i="${i}">
     <label class="cat-selbox" title="Select (X) · shift-click selects a range"><input type="checkbox" class="cat-sel" ${sel ? "checked" : ""} /></label>
-    <div class="cat-coverwrap"><img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
+    <div class="cat-coverwrap"><img class="cat-cover" data-lsrc="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
       ${r.duration ? `<span class="dur">${fmt(r.duration)}</span>` : ""}</div>
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
@@ -5832,7 +5919,7 @@ function orphHTML(sid) {
   const head = added.length ? "" : `<span class="orph-h">Who is this?</span> `;
   if (!sugg.length) return `${chips} ${added.length ? "" : `<span class="faint small">Who is this? ${esc(d.reason || "no look-alikes yet")}</span>`} ${search}`;
   return `${chips} ${head}${sugg.map((x) => `<span class="orph-s s-${x.strength}" title="${x.face ? `her face: ${x.face.faces} matching faces in this scene` : `looks most like ${esc(x.via.title)}`}${x.studio ? " · has scenes at this studio" : ""}">
-      <img src="${x.via.cover}" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+      <img data-lsrc="${x.via.cover}" alt="" onerror="this.style.visibility='hidden'" />
       <span><b>${esc(x.name)}</b><i>${x.face ? "👤 face · " : ""}${x.strength}${x.studio ? " · same studio" : ""}</i></span>
       <button class="btn sm pri" data-orph-add="${esc(sid)}" data-pid="${esc(x.id)}" data-name="${esc(x.name)}" title="Add ${esc(x.name)} to this scene in Stash">Add</button>
       <button class="btn sm ghost" data-orph-no="${esc(sid)}" data-pid="${esc(x.id)}" title="Not them — don't suggest again for this scene">✕</button></span>`).join("")} ${search}`;
@@ -5951,15 +6038,28 @@ function catBumpCounts(from, to) {
 }
 async function gradeCat(i, grade) {
   const r = cat.items[i]; if (!r) return;
+  // shown at once — stays in place (dimmed) so the list doesn't jump and Z still has context;
+  // Stash gets it behind the screen, and the card takes Stash's answer when it comes
+  const guess = gradeGuess(grade);
+  catBumpCounts(r.tier, guess.tier);
+  cat.items[i] = { ...r, ...guess, _graded: true };
+  renderCatCard(i);
+  focusCat(i + 1);
+  const at = () => cat.items.findIndex((x) => x.scene_id === r.scene_id);     // the list may have changed meanwhile
   try {
     // in Settle (or an Arbiter cell) a grade is your ruling: it won't be asked again
-    const fresh = await applyGrade(r.scene_id, grade, "Z", { settle: cat.view === "settle" || cat.view === "arbiter" });
-    catBumpCounts(r.tier, fresh.tier);
-    // stays in place (dimmed) so the list doesn't jump and Z still has context
-    cat.items[i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred, _graded: true };
-    renderCatCard(i);
-    focusCat(i + 1);
-  } catch (e) { toast(e.message, true); }
+    const fresh = await queueGrade(r.scene_id, grade, "Z", { settle: cat.view === "settle" || cat.view === "arbiter" });
+    const j = at(); if (j < 0) return;
+    catBumpCounts(cat.items[j].tier, fresh.tier);
+    cat.items[j] = { ...cat.items[j], ...fresh, moments: r.moments, stream: r.stream, pred: r.pred, _graded: true };
+    renderCatCard(j);
+  } catch (e) {
+    toast(`Not saved — ${r.title || "scene " + r.scene_id}: ${e.message}`, true);
+    const j = at(); if (j < 0) return;
+    catBumpCounts(cat.items[j].tier, r.tier);
+    cat.items[j] = r;
+    renderCatCard(j);
+  }
 }
 async function keepCat(i) {
   const r = cat.items[i]; if (!r) return;
@@ -5971,6 +6071,7 @@ async function keepCat(i) {
   } catch (e) { toast(e.message, true); }
 }
 async function undoCatGrade() {
+  await gradesSaved();
   const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
   const fresh = await undoGrade();
   if (!fresh) return;
@@ -6236,7 +6337,7 @@ function dupeCopyHTML(r, g) {
   const added = (r.created_at || "").slice(0, 10);
   const measuring = (g.unmeasured || []).includes(r.scene_id);
   return `<div class="dupe-copy ${rec ? "rec" : ""}" data-sid="${esc(r.scene_id)}">
-    <div class="dupe-media"><img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
+    <div class="dupe-media"><img class="cat-cover" data-lsrc="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
       <button class="dupe-play" title="Play this copy">▶</button></div>
     <div class="dupe-facts">
       <div>${rec ? `<span class="dupe-rec" title="${esc(dupeRecTitle(g))}">★ Recommended${g.keep_by === "picture" ? " — best picture" : g.keep_by === "tie" ? " — pictures tie" : ""}</span> ` : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
@@ -6694,7 +6795,9 @@ async function pollJobTray() {
     const p = j.progress || {}, tm = j.timing || {};
     const pct = tm.pct != null ? Math.round(100 * tm.pct)
       : p.total ? Math.round(100 * (p.done || 0) / p.total) : (typeof p.pct === "number" ? Math.round(100 * p.pct) : null);
-    const detail = p.total ? `${(p.done || 0).toLocaleString()} / ${p.total.toLocaleString()}` : (p.stage || dur(j.elapsed));
+    const dec = Object.values(p.decoding || {});
+    const decoding = dec.length ? ` · decoding ${dec.length} scene${dec.length > 1 ? "s" : ""}, ${dur(Math.max(0, Date.now() / 1000 - Math.min(...dec)))} in` : "";
+    const detail = (p.total ? `${(p.done || 0).toLocaleString()} / ${p.total.toLocaleString()}` : (p.stage || dur(j.elapsed))) + decoding;
     return `<div class="tray-job fam-${jobFam(j.kind)}"><div class="row between"><b>${esc(JOB_LABEL[j.kind] || j.kind)}</b><span class="muted">${pct != null ? pct + "%" : ""}</span></div>
       <div class="muted small">${tm.stopping ? `⏸ ${esc(tm.stage)}…` : esc(detail) + (tm.eta_s != null ? ` · ~${dur(tm.eta_s)} left` : "")}</div><div class="bar"><i style="width:${pct ?? 100}%" class="${pct == null ? "indet" : ""}"></i></div></div>`;
   }).join("");
@@ -7128,7 +7231,7 @@ function renderReview() {
     ${r.tags && r.tags.length ? `<span>Tags</span><span>${esc(r.tags.slice(0, 8).join(", "))}</span>` : ""}
     <span>Path</span><span class="faint path" title="${esc(r.path)}">${esc(r.path)}</span>`;
   $("#rv-queue").innerHTML = rv.items.slice(rv.i + 1, rv.i + 7).map((x, k) => `<div class="qi" data-j="${rv.i + 1 + k}">
-      <div class="pic"><img loading="lazy" src="/api/scene/${encodeURIComponent(x.scene_id)}/cover" onerror="this.style.opacity=.1" /></div>
+      <div class="pic"><img data-lsrc="/api/scene/${encodeURIComponent(x.scene_id)}/cover" onerror="this.style.opacity=.1" /></div>
       <div><b>${esc(x.title)}</b><span class="muted">${esc(x.performers.slice(0, 2).join(", "))}${x.pred ? " · " + esc(W.confidence(x.pred.conf).toLowerCase()) + " " + esc(className(x.pred.tier)) : ""}</span></div></div>`).join("")
     || '<span class="faint">Last one in this list.</span>';
 }
@@ -7151,19 +7254,30 @@ async function rvKeep() {
 }
 async function rvGrade(grade) {
   const r = rv.items[rv.i]; if (!r) return;
-  try {
-    // answering a Settle question by grading: your grade is the ruling, not asked again
-    const fresh = await applyGrade(r.scene_id, grade, "Z", { settle: !!(r.settle && r.settle.kind === "disagree") });
-    prNote(r, fresh, grade);
-    rv.graded.add(r.scene_id);
-    rv.items[rv.i] = { ...r, ...fresh, moments: r.moments, stream: r.stream, pred: r.pred };
+  // on to the next scene at once; Stash gets the grade behind the screen
+  const guess = gradeGuess(grade);
+  const put = (row, from) => {                // into the player's list and the Catalogue's
+    const k = rv.items.findIndex((x) => x.scene_id === r.scene_id);
+    if (k >= 0) rv.items[k] = { ...rv.items[k], ...row, moments: r.moments, stream: r.stream, pred: r.pred };
     const ci = rv.source === "catalogue" ? cat.items.findIndex((x) => x.scene_id === r.scene_id) : -1;
     if (ci >= 0) {                      // same list: mark it graded there, keep your place
-      catBumpCounts(cat.items[ci].tier, fresh.tier);
-      cat.items[ci] = { ...cat.items[ci], ...fresh, _graded: true };
+      catBumpCounts(from ?? cat.items[ci].tier, row.tier);
+      cat.items[ci] = { ...cat.items[ci], ...row, _graded: row !== r };
     } else cat.loaded = false;          // the Catalogue re-reads when you go back
-    rvMove(1);
-  } catch (e) { toast(e.message, true); }
+  };
+  rv.graded.add(r.scene_id);
+  put(guess);
+  rvMove(1);
+  try {
+    // answering a Settle question by grading: your grade is the ruling, not asked again
+    const fresh = await queueGrade(r.scene_id, grade, "Z", { settle: !!(r.settle && r.settle.kind === "disagree") });
+    prNote(r, fresh, grade);
+    put(fresh);
+  } catch (e) {
+    toast(`Not saved — ${r.title || "scene " + r.scene_id}: ${e.message}`, true);
+    rv.graded.delete(r.scene_id);
+    put(r);
+  }
 }
 function rvMove(d) {
   const n = rv.i + d;
@@ -7207,7 +7321,7 @@ function rvPicksGet(sid) {
     e = { list: null };
     e.p = api(`/api/scene/${encodeURIComponent(sid)}/picks`).then((ps) => {
       e.list = ps;
-      for (const p of ps) if (p.thumb) { const im = new Image(); im.src = p.thumb; }
+      for (const p of ps) if (p.thumb) lanePrefetch(p.thumb);
       return ps;
     }).catch((err) => { rvPickCache.delete(sid); throw err; });
     rvPickCache.set(sid, e);
@@ -7364,11 +7478,13 @@ document.addEventListener("keydown", (e) => {
   else if (k === "m") { e.preventDefault(); rvToggleMute(); toast(v.muted ? "🔇 muted" : "🔊 sound on"); }
   else if (k === "z") {
     e.preventDefault();
-    const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
-    undoGrade().then((fresh) => {
-      if (!fresh || fresh.bulk) return;
-      const i = rv.items.findIndex((x) => x.scene_id === sid);
-      if (i >= 0) { rv.items[i] = { ...rv.items[i], ...fresh }; rv.i = i; renderReview(); }
+    gradesSaved().then(() => {
+      const sid = gradeUndo.length ? gradeUndo[gradeUndo.length - 1].sid : null;
+      return undoGrade().then((fresh) => {
+        if (!fresh || fresh.bulk) return;
+        const i = rv.items.findIndex((x) => x.scene_id === sid);
+        if (i >= 0) { rv.items[i] = { ...rv.items[i], ...fresh }; rv.i = i; renderReview(); }
+      });
     });
   } else if (k === "t") { e.preventDefault(); setTheater(!$("#rv").classList.contains("theater")); }
   else if (k === "f") { e.preventDefault(); rvFullscreen(); }
@@ -7431,7 +7547,7 @@ const pr = { active: null, brief: null };      // active: {pid, name, total, cha
 const PR_TIERS = ["legendaire", "exceptionnelle", "merveilleuse", "anomaly", "unreviewed"];
 const PR_COLOR = { legendaire: "var(--leg)", exceptionnelle: "var(--exc)", merveilleuse: "var(--mer)",
   anomaly: "var(--ano)", unreviewed: "var(--unr)", rejected: "var(--rej)" };
-const prPhoto = (p) => p.photo ? `<img src="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" loading="lazy" />`
+const prPhoto = (p) => p.photo ? `<img data-lsrc="/api/performer/${encodeURIComponent(p.id)}/photo?v=${p.photo}" alt="" />`
   : `<div class="pr-photo-ph"></div>`;
 function prTierBar(tiers) {
   const n = PR_TIERS.reduce((a, t) => a + (tiers[t] || 0), 0) || 1;
@@ -7836,7 +7952,7 @@ function upgRelHTML(c, r, best) {
 function upgCardHTML(r) {
   const q = r.quality || {};
   const yours = `<div class="upg-yours">
-      <img class="cat-cover" loading="lazy" src="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
+      <img class="cat-cover" data-lsrc="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
       <div><div><b>${esc(r.title || "Scene " + r.scene_id)}</b> ${tierBadge(r.rating100, r.o_counter)}</div>
         <div class="dim small">${esc(r.studio || "")}${r.date ? " · " + esc(r.date) : ""}</div>
         <div class="small">Yours: <b>${esc(q.res || "?")}</b> · ${q.mbps != null ? q.mbps + " Mbps · " : ""}${upgSize(r.size)}</div>

@@ -78,6 +78,28 @@ def test_the_speed_panel_lists_routes_slowest_first_and_purges(tmp_path, monkeyp
     assert d["routes"][0]["route"] == "GET /api/slow" and d["routes"][0]["p95_ms"] == 2500
     assert any(r["route"] == "GET /api/catalogue/summary" and r["n"] == 3 for r in d["routes"])
     assert d["purges"][0]["level"] == "soft" and "memory" in d and d["running"] == []
+    assert "stash" in d and d["load"]["cores"]
+
+
+def test_a_request_knows_how_long_it_waited_on_stash(tmp_path, monkeypatch):
+    import time as _t
+
+    from peaks import stashtiming
+    from peaks.web import forensics
+
+    forensics._timings.clear()
+    stashtiming.reset()
+
+    def slow_summary():
+        with stashtiming.timed():                 # what StashClient.execute does around each call
+            _t.sleep(0.05)
+        return {"n": 1}
+    c, app = _client(tmp_path, monkeypatch, slow_summary)
+    r = c.get("/api/catalogue/summary")
+    assert "stash;dur=" in r.headers["server-timing"]
+    row = next(x for x in c.get("/api/perf").json()["routes"] if x["route"] == "GET /api/catalogue/summary")
+    assert row["stash_share"] > 0.3
+    assert c.get("/api/perf").json()["stash"]["calls"] == 1
 
 
 @pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="Linux only")

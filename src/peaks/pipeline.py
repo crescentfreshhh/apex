@@ -119,8 +119,11 @@ def embed_library(
     failure_log=None,
     should_stop: Callable[[], bool] | None = None,
     should_skip: Callable[[Scene], str | None] | None = None,
+    on_scene: Callable[[str, Scene], None] | None = None,
 ) -> dict:
     """Embed every scene not already cached. Resumable + idempotent.
+    `on_scene("start" | "end", scene)` tells the caller which scenes are being
+    decoded right now (progress only counts finished ones).
 
     Frames are embedded in rolling batches as they stream off ffmpeg, so at
     most `batch_size` decoded frames are held in memory — not the whole scene.
@@ -160,6 +163,12 @@ def embed_library(
                 model=embedder.name,
             )
 
+    if hasattr(sampler, "decode_threads") and not sampler.decode_threads:
+        from .sampling import decode_threads_for
+
+        # all parallel decodes together take about half the cores: Stash and the
+        # web server keep the rest, so grading stays quick while this runs
+        sampler.decode_threads = decode_threads_for(workers)
     skips: dict = {}
     scenes = _skipping(scenes, should_skip, log, skips)
     if workers > 1 and use_raw:
@@ -167,7 +176,7 @@ def embed_library(
             scenes, sampler, embedder, cache,
             signature=signature, batch_size=batch_size, total=total,
             workers=workers, log=log, failure_log=failure_log,
-            should_stop=should_stop, should_skip=should_skip, skips=skips,
+            should_stop=should_stop, should_skip=should_skip, skips=skips, on_scene=on_scene,
         )
         out["skipped_rejected"] = skips.get("skipped_rejected", 0)
         return out
@@ -190,6 +199,7 @@ def embed_library(
             stats["failed"] += 1
             continue
         started = _time.monotonic()
+        _note(on_scene, "start", scene)
         try:
             times: list[float] = []
             batch: list = []
@@ -262,10 +272,22 @@ def embed_library(
             log(f"  ! scene {scene.id} failed: {exc}")
             stats["failed"] += 1
             _record_failure(scene, key, exc)
+        finally:
+            _note(on_scene, "end", scene)
     if stats["embedded"]:
         stats["seconds_per_scene"] = round(embed_seconds / stats["embedded"], 2)
     stats["skipped_rejected"] = skips.get("skipped_rejected", 0)
     return stats
+
+
+def _note(on_scene, what: str, scene) -> None:
+    """Tell the caller a scene's decode started / ended — never in the way."""
+    if on_scene is None:
+        return
+    try:
+        on_scene(what, scene)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _embed_library_parallel(
@@ -283,6 +305,7 @@ def _embed_library_parallel(
     should_stop: Callable[[], bool] | None = None,
     should_skip: Callable[[Scene], str | None] | None = None,
     skips: dict | None = None,
+    on_scene: Callable[[str, Scene], None] | None = None,
 ) -> dict:
     """Raw-path embed with `workers` scenes decoding concurrently.
 
@@ -303,6 +326,13 @@ def _embed_library_parallel(
         return bool(should_stop and should_stop())
 
     def _decode(scene: Scene):
+        _note(on_scene, "start", scene)
+        try:
+            return _decode_frames(scene)
+        finally:
+            _note(on_scene, "end", scene)
+
+    def _decode_frames(scene: Scene):
         times: list[float] = []
         frames: list[np.ndarray] = []
         it = sampler.iter_frames_raw(
