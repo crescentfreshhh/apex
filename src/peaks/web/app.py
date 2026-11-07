@@ -1739,6 +1739,31 @@ def create_app(cfg=None):
 
     # --- ingest: scan → identify → auto tag (Stash) → embed → duplicates --------
 
+    @app.get("/api/hold")
+    def hold_get():
+        """The top bar's pause: is it on, and how long is left."""
+        import time as _t
+
+        left = max(0.0, jobs.hold_until - _t.time())
+        return {"held": jobs.held(), "until": jobs.hold_until if left else None, "left_s": round(left)}
+
+    @app.post("/api/hold")
+    def hold_on(minutes: float = Query(60, ge=1, le=24 * 60)):
+        """Pause all background work for `minutes` (1 hour by default)."""
+        paused = _hold_jobs(service, jobs, minutes)
+        return {**hold_get(), "paused": [JOB_LABELS.get(k, k) for k in paused]}
+
+    @app.delete("/api/hold")
+    def hold_off():
+        """Carry on now: what the pause stopped starts again, the senses resume in order."""
+        jobs.unhold()
+        started = _restart_held(service, jobs)
+        try:
+            _resume_paused(service, jobs)
+        except Exception:  # noqa: BLE001
+            pass
+        return {**hold_get(), "started": [JOB_LABELS.get(k, k) for k in started]}
+
     @app.post("/api/ingest")
     def ingest(confirm: bool = False):
         if jobs.running("embed") is not None and not confirm:
@@ -3260,8 +3285,8 @@ def _resume_paused(service: Service, jobs: JobManager) -> list[str]:
     only once its job has actually started (or turned out not to be due), so
     nothing behind it can jump the queue meanwhile."""
     waiting = jobs.paused_snapshot()
-    if not waiting or any(jobs.running(k) for k in (*LIBRARY_WORK, *PAUSABLE)):
-        return []
+    if not waiting or jobs.held() or any(jobs.running(k) for k in (*LIBRARY_WORK, *PAUSABLE)):
+        return []                                   # (paused by you: waits for the end of the pause)
     timers = {"hear": _hear_next, "motion": _motion_next, "zoom": _zoom_next, "faces": _faces_next}
     for k in [k for k in RESUME_ORDER if k in waiting][:1]:
         e = waiting[k]
@@ -3532,73 +3557,145 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
             return
         while not stop.wait(60):  # poll every minute; interval read live
             try:
-                secs = service.schedule_settings().get("embed_seconds", 0.0)
-            except Exception:  # noqa: BLE001
-                secs = 0.0
-            try:   # overnight full taste measure, when idle and enough is new
-                busy = any(jobs.running(k) for k in ("embed", "ingest", "taste-measure", "train"))
-                if not busy and service.measure_due():
-                    jobs.start("taste-measure", lambda j: service.train_taste(mode="full", job=j))
+                _scheduler_once(service, jobs, state, _embed_then_sync)
             except Exception:  # noqa: BLE001 — never let the scheduler die
-                pass
-            try:   # the weekly backup — waits for an embed / ingest to finish
-                busy = any(jobs.running(k) for k in ("embed", "ingest", "backup", "restore"))
-                if not busy and service.backup_due():
-                    jobs.start("backup", service.run_backup)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # duplicate deletions waiting (after a restart / another library job)
-                _start_dupe_drain(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # the folder watch: new downloads → one Ingest, after they settle
-                _watch_go(service, jobs)
-            except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
-                service.watch_check_failed(exc)
-            _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
-            try:   # paused / queued background work goes before anything new starts
-                _resume_paused(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # picture quality: new files, and the library once you've started it
-                _start_picture(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # moment zoom: dense looks at candidate moments, when nothing else runs
-                _start_zoom(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # hearing: Peaks listens to scenes, when nothing else runs
-                _start_hear(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # motion: Peaks watches candidate moments move, the heaviest — last
-                _start_motion(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # faces: who is in each scene, when nothing else runs
-                _start_faces(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # files the pull just brought in: scan exactly where they landed
-                _seed_ingest_go(service, jobs)
-            except Exception:  # noqa: BLE001
-                pass
-            for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over
-                try:
-                    if not jobs.running(f"seed-{kind}") and service.seedjob_due(kind):
-                        jobs.start(f"seed-{kind}", getattr(service, f"run_seed_{kind}"))
-                except Exception:  # noqa: BLE001 — a job's error is in its own log
-                    pass
-            try:   # upgrades: the daily Prowlarr search, when you've switched it on
-                if not any(jobs.running(k) for k in ("ingest", "upgrades", "restore")) and service.upgrade_due():
-                    jobs.start("upgrades", service.run_upgrade_pass)
-            except Exception:  # noqa: BLE001
-                pass
-            try:   # anything that dropped the index: reload it before anyone opens a page
-                _rewarm(service, jobs)
-            except Exception:  # noqa: BLE001
                 pass
 
     threading.Thread(target=_loop, daemon=True, name="peaks-scheduler").start()
     app.state._scheduler_stop = stop
+
+
+# --- "Pause jobs for an hour" (the top bar's ⏸) ----------------------------------------------
+HOLD_FOR = "your 1-hour pause"
+HOLD_STOPS = ("ingest", "embed", "fix", "taste-measure", "upgrades", "discover")   # stopped; the first three start again after
+HOLD_RESTART = ("ingest", "embed", "fix")
+
+
+def _hold_jobs(service: Service, jobs: JobManager, minutes: float = 60) -> list[str]:
+    """Pause all background work for `minutes`: the senses wait on the usual waiting
+    list (and resume in order afterwards); Ingest / Embed / Fix and the other heavy
+    passes stop and the library ones start again when the pause ends. What you
+    started that changes Stash or files mid-way (bulk grades, deletes, restore,
+    sync, seedbox transfers) finishes. Returns what it paused."""
+    jobs.hold(minutes * 60)
+    paused = _make_way(jobs, HOLD_FOR)
+    for k in HOLD_STOPS:
+        j = jobs.running(k)
+        if j is None or j.cancelled:
+            continue
+        j.paused_for = HOLD_FOR
+        j.log(f"paused for {HOLD_FOR} — {'starts again' if k in HOLD_RESTART else 'runs again on schedule'} when it ends")
+        j.request_cancel()
+        if k in HOLD_RESTART and k not in jobs.held_restart:
+            jobs.held_restart.append(k)
+        paused.append(k)
+    return paused
+
+
+def _restart_held(service: Service, jobs: JobManager) -> list[str]:
+    """After the pause: what it stopped starts again — an Ingest (it embeds its new
+    files), else an Embed, else a Fix. The waiting senses then resume in order."""
+    todo, jobs.held_restart = list(jobs.held_restart), []
+    started = []
+    if "ingest" in todo:
+        try:
+            jobs.start("ingest", _way_then(jobs, "Ingest", lambda j: service.run_ingest(
+                j, embed_busy=lambda: jobs.running("embed") is not None)))
+            started.append("ingest")
+        except RuntimeError:
+            jobs.held_restart.append("ingest")        # something's still winding down: next tick
+        return started
+    for k, target in (("embed", service.run_embed), ("fix", service.run_fix)):
+        if k in todo:
+            try:
+                jobs.start(k, _way_then(jobs, JOB_LABELS.get(k, k), target))
+                started.append(k)
+            except RuntimeError:
+                jobs.held_restart.append(k)
+            break
+    return started
+
+
+def _hold_tick(service: Service, jobs: JobManager) -> bool:
+    """True while paused (the tick starts nothing). Once it's over, what the pause
+    stopped is started again — then the tick carries on as usual."""
+    if jobs.held():
+        return True
+    if jobs.held_restart and not any(jobs.running(k) for k in HOLD_RESTART):
+        _restart_held(service, jobs)
+    return False
+
+
+def _scheduler_once(service: Service, jobs: JobManager, state: dict, _embed_then_sync) -> None:
+    """One scheduler tick. While you've paused jobs (the top bar's ⏸), nothing
+    starts on its own; when the pause ends, what it stopped starts again first."""
+    if _hold_tick(service, jobs):
+        return
+    try:
+        secs = service.schedule_settings().get("embed_seconds", 0.0)
+    except Exception:  # noqa: BLE001
+        secs = 0.0
+    try:   # overnight full taste measure, when idle and enough is new
+        busy = any(jobs.running(k) for k in ("embed", "ingest", "taste-measure", "train"))
+        if not busy and service.measure_due():
+            jobs.start("taste-measure", lambda j: service.train_taste(mode="full", job=j))
+    except Exception:  # noqa: BLE001 — never let the scheduler die
+        pass
+    try:   # the weekly backup — waits for an embed / ingest to finish
+        busy = any(jobs.running(k) for k in ("embed", "ingest", "backup", "restore"))
+        if not busy and service.backup_due():
+            jobs.start("backup", service.run_backup)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # duplicate deletions waiting (after a restart / another library job)
+        _start_dupe_drain(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # the folder watch: new downloads → one Ingest, after they settle
+        _watch_go(service, jobs)
+    except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
+        service.watch_check_failed(exc)
+    _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
+    try:   # paused / queued background work goes before anything new starts
+        _resume_paused(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # picture quality: new files, and the library once you've started it
+        _start_picture(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # moment zoom: dense looks at candidate moments, when nothing else runs
+        _start_zoom(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # hearing: Peaks listens to scenes, when nothing else runs
+        _start_hear(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # motion: Peaks watches candidate moments move, the heaviest — last
+        _start_motion(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # faces: who is in each scene, when nothing else runs
+        _start_faces(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # files the pull just brought in: scan exactly where they landed
+        _seed_ingest_go(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass
+    for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over
+        try:
+            if not jobs.running(f"seed-{kind}") and service.seedjob_due(kind):
+                jobs.start(f"seed-{kind}", getattr(service, f"run_seed_{kind}"))
+        except Exception:  # noqa: BLE001 — a job's error is in its own log
+            pass
+    try:   # upgrades: the daily Prowlarr search, when you've switched it on
+        if not any(jobs.running(k) for k in ("ingest", "upgrades", "restore")) and service.upgrade_due():
+            jobs.start("upgrades", service.run_upgrade_pass)
+    except Exception:  # noqa: BLE001
+        pass
+    try:   # anything that dropped the index: reload it before anyone opens a page
+        _rewarm(service, jobs)
+    except Exception:  # noqa: BLE001
+        pass

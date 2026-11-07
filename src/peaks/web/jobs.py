@@ -141,6 +141,19 @@ class JobManager:
         self._seq = 0
         self.on_finish: Callable[[Job], None] | None = None   # e.g. hand GPU memory back
         self.stopped_until: dict[str, float] = {}   # kind → no automatic start before this (you stopped it)
+        # "Pause jobs for an hour": nothing starts on its own before this; the library
+        # jobs the pause stopped (ingest / embed / fix) are started again after it
+        self.hold_until = 0.0
+        self.held_restart: list[str] = []
+
+    def hold(self, seconds: float) -> None:
+        self.hold_until = time.time() + max(0.0, float(seconds))
+
+    def unhold(self) -> None:
+        self.hold_until = 0.0
+
+    def held(self) -> bool:
+        return time.time() < self.hold_until
 
     def stop_by_you(self, kind: str) -> None:
         """You stopped `kind` (or its waiting turn): nothing starts it on its own

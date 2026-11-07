@@ -1327,3 +1327,6 @@ body.picks-off .pick-span { display: none !important; }
   border-radius: 999px; background: var(--panel, #1b1b1f); border: 1px solid var(--line, #333); color: var(--muted, #aaa);
   font-size: 12px; pointer-events: none; }
 #grade-q[hidden] { display: none; }
+
+/* the top bar's ⏸ while background work is paused: a countdown, highlighted */
+#btn-hold.held { border-color: var(--gold, #d4b45a); color: var(--gold, #d4b45a); font-variant-numeric: tabular-nums; }

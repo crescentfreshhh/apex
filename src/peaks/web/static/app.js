@@ -8309,3 +8309,44 @@ document.addEventListener("click", (e) => {
   e.preventDefault(); e.stopPropagation();
   openTimeline(b.dataset.timeline);
 });
+
+// --- the top bar's ⏸: pause all background work for an hour (click again to carry on) ---
+const hold = { until: null, tick: 0 };
+function holdDraw() {
+  const b = $("#btn-hold"); if (!b) return;
+  const left = hold.until ? Math.max(0, Math.round(hold.until - Date.now() / 1000)) : 0;
+  if (hold.until && left <= 0) { hold.until = null; setTimeout(holdLoad, 1500); }   // over: what it stopped starts again
+  const on = !!hold.until;
+  b.classList.toggle("held", on);
+  b.textContent = on ? `▶ Resume · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "⏸ Pause jobs";
+  b.title = on ? "Background work is paused so grading stays snappy — click to carry on now"
+    : "Pause all background work for an hour, so grading stays snappy — click again to carry on";
+  clearTimeout(hold.tick);
+  if (on) hold.tick = setTimeout(holdDraw, 1000 - (Date.now() % 1000) + 5);
+}
+async function holdLoad() {
+  try {
+    const d = await api("/api/hold");
+    hold.until = d.held ? Date.now() / 1000 + d.left_s : null;     // the server's count, on this device's clock
+  } catch { return; }
+  holdDraw();
+}
+$("#btn-hold")?.addEventListener("click", async (e) => {
+  const b = e.currentTarget; b.disabled = true;
+  try {
+    if (hold.until) {
+      const r = await api("/api/hold", { method: "DELETE" });
+      hold.until = null;
+      toast("Carrying on" + (r.started && r.started.length ? ` — ${r.started.join(", ")} started again` : "") + "; paused work resumes in turn");
+    } else {
+      const r = await api("/api/hold?minutes=60", { method: "POST" });
+      hold.until = Date.now() / 1000 + r.left_s;
+      toast((r.paused && r.paused.length ? `Paused ${r.paused.join(", ")}` : "Nothing was running") + " — no background work for an hour");
+    }
+  } catch (err) { toast(err.message, true); }
+  b.disabled = false;
+  holdDraw();
+  if (typeof pollJobTray === "function") pollJobTray();
+});
+holdLoad();
+setInterval(() => { if (!document.hidden) holdLoad(); }, 30000);
