@@ -261,6 +261,32 @@ class JobManager:
         for j in sorted(done, key=lambda j: j.started)[: len(done) - KEEP_JOBS]:
             self._jobs.pop(j.id, None)
 
+    def _history_file(self) -> list[dict]:
+        """The remembered jobs on disk, newest first — parsed once per change of the
+        file (the Activity log asked every 2 s and re-read it each time)."""
+        p = self._history_path
+        if not p:
+            return []
+        try:
+            st = p.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return []
+        hit = getattr(self, "_hist_cache", None)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+        out = []
+        try:
+            for ln in reversed(p.read_text().splitlines()):
+                try:
+                    out.append(json.loads(ln))
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+        self._hist_cache = (stamp, out)
+        return out
+
     def history(self) -> list[dict]:
         """Finished jobs, newest first: this run's plus the remembered ones."""
         seen, out = set(), []
@@ -268,14 +294,11 @@ class JobManager:
             if j.status != "running":
                 seen.add(j.id + str(j.started))
                 out.append(j.summary())
-        try:
-            for ln in reversed((self._history_path.read_text() if self._history_path else "").splitlines()):
-                d = json.loads(ln)
-                if d.get("id", "") + str(d.get("started")) not in seen:
-                    seen.add(d.get("id", "") + str(d.get("started")))
-                    out.append(d)
-        except (OSError, ValueError):
-            pass
+        for d in self._history_file():
+            k = d.get("id", "") + str(d.get("started"))
+            if k not in seen:
+                seen.add(k)
+                out.append(d)
         return sorted(out, key=lambda d: d.get("finished") or 0, reverse=True)
 
     def get(self, job_id: str) -> Job | None:

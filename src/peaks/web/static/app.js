@@ -34,7 +34,8 @@ const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bu
 // on (Duplicates) are never served from a copy.
 const SWR = new Map();                  // path -> { data, text, at }
 const INFLIGHT = new Map();             // path -> Promise
-const SWR_SKIP = /^\/api\/(jobs|activity|perf|memory|duplicates|dupes|login|logout)|\/progress|\/status|[?&](refresh|fresh)=/;
+const SWR_SKIP = /^\/api\/(jobs|activity|perf|memory|duplicates|dupes|login|logout|floor|warm|hold|watch|seedbox|seedjobs|ingest|today)|\/progress|\/status|[?&](refresh|fresh)=/;
+const SWR_MAX = 100;                     // pages remembered in memory (the oldest go first)
 const swrDB = (() => {
   let db = null;
   const open = () => db || (db = new Promise((res) => {
@@ -83,7 +84,12 @@ const api = async (path, opts) => {
     if (INFLIGHT.has(path)) return INFLIGHT.get(path);
     const p = rawApi(path, opts).then((d) => {
       if (!SWR_SKIP.test(path) && d && typeof d === "object" && !(d instanceof Response)) {
-        try { const text = JSON.stringify(d); SWR.set(path, { data: d, text, at: Date.now() }); swrDB.put(path, text); } catch {}
+        try {
+          const text = JSON.stringify(d);
+          SWR.delete(path); SWR.set(path, { data: d, text, at: Date.now() });
+          while (SWR.size > SWR_MAX) SWR.delete(SWR.keys().next().value);
+          if (text.length < 200000) swrDB.put(path, text);           // a 500-row queue isn't worth a disk write
+        } catch {}
       }
       return d;
     }).finally(() => INFLIGHT.delete(path));
@@ -92,7 +98,7 @@ const api = async (path, opts) => {
   }
   const out = await rawApi(path, opts);
   if (!TELEMETRY_WRITES.test(path)) swrForget();   // a library change: no copy outlives it (telemetry isn't one)
-  if (LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar();
+  if (LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar(/grade|keep/.test(path) ? 10000 : 250);
   return out;
 };
 // the last answer for a GET, from memory or IndexedDB (null if none)
@@ -243,7 +249,7 @@ document.querySelectorAll(".nav[data-view], .tab-b[data-tab-view]").forEach((b) 
   b.addEventListener("touchstart", () => prefetchView(v()), { passive: true });
 });
 (window.requestIdleCallback || ((f) => setTimeout(f, 2500)))(() => {
-  setTimeout(() => ["lab", "performers", "statistics"].forEach(prefetchView), 4000);
+  setTimeout(() => ["lab", "performers"].forEach(prefetchView), 4000);
 });
 // phones: the bottom tab bar (More opens the full menu)
 document.querySelectorAll(".tab-b[data-tab-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.tabView)));
@@ -462,6 +468,10 @@ function wireJob(btn, statusEl, logEl, start, stopBtn) {
 }
 async function poll(id, statusEl, logEl, btn, stopBtn) {
   const done = () => { btn.disabled = false; if (stopBtn) stopBtn.hidden = true; };
+  // the per-job log only matters while Activity is on screen: elsewhere (or in a
+  // background tab) the 4 s tray carries the progress — this just checks in every 5 s
+  const watching = $("#activity")?.classList.contains("active") && !document.hidden;
+  if (!watching) return setTimeout(() => poll(id, statusEl, logEl, btn, stopBtn), 5000);
   try {
     const j = await api("/api/jobs/" + id);
     const p = j.progress || {};
@@ -1163,6 +1173,7 @@ function lanePump() {
 }
 function laneWant(img) {
   if (!img.dataset.lsrc || imgLane.q.some((j) => j.img === img)) return;
+  if (imgLane.io) imgLane.io.unobserve(img);
   imgLane.q.unshift({ img });                // just came into view: before the ones further away
   lanePump();
 }
@@ -1177,7 +1188,8 @@ function laneWatch(root) {
 if ("IntersectionObserver" in window) {
   imgLane.io = new IntersectionObserver((entries) => {
     for (const e of entries) {
-      if (e.isIntersecting) { imgLane.io.unobserve(e.target); laneWant(e.target); }
+      if (e.isIntersecting) laneWant(e.target);
+      else imgLane.q = imgLane.q.filter((j) => j.img !== e.target);   // scrolled past before it loaded: not fetched
     }
   }, { rootMargin: "400px 0px" });
 }
@@ -1223,7 +1235,7 @@ async function applyGrade(sid, grade, undoKey = "Z", { settle = false } = {}) {
     body: JSON.stringify({ scene_id: String(sid), grade: nl ? "reject" : grade, no_learn: nl, settle }),
   });
   const entry = { sid: String(sid), prev: r.previous, grade, settled: !!r.settled, rulingPrev: r.ruling_prev || null };
-  gradeUndo.push(entry);
+  gradeUndo.push(entry); if (gradeUndo.length > 200) gradeUndo.shift();
   toast(`${gradeName(grade)} — ${undoKey} to undo`);
   if (r.in_ingest) {                       // still in the running ingest: once the reject sticks, it's dropped
     setTimeout(() => { if (gradeUndo.includes(entry)) toast(`${gradeName(grade)} — dropped from the running ingest (not embedded)`); }, 5500);
@@ -3305,7 +3317,7 @@ async function loadPicSettings() {
   $("#pic-start")?.addEventListener("click", async () => { await api("/api/picture/backfill?on=true", { method: "POST" }); loadPicSettings(); });
   $("#pic-stop")?.addEventListener("click", async () => { await api("/api/picture/backfill?on=false", { method: "POST" }); loadPicSettings(); });
   $("#pic-go-teach")?.addEventListener("click", () => setTimeout(() => document.querySelector('#taste-tabs [data-tab="picture"]')?.click(), 0));
-  if (run && !$("#pic-set").closest(".sec").hidden) pic.poll = setTimeout(loadPicSettings, 5000);
+  if (run && !$("#pic-set").closest(".sec").hidden) pic.poll = setTimeout(() => { if (!document.hidden && $("#pic-set")?.closest(".view")?.classList.contains("active")) loadPicSettings(); else pic.poll = setTimeout(loadPicSettings, 15000); }, 5000);
 }
 // a file's picture in a few words: the score once Peaks has learned your bar, else what's wrong
 const PIC_SUBS = [["detail", "Detail"], ["compression", "Compression"], ["noise", "Noise"], ["motion", "Motion"], ["framing", "Framing"]];
@@ -3391,8 +3403,8 @@ async function argueLoad(sid, el, i) {
   if (!argCache[sid]) el.innerHTML = '<span class="faint small">Weighing it up…</span>';
   try { argCache[sid] = argCache[sid] || await api(`/api/tiers/explain/${encodeURIComponent(sid)}`); }
   catch (e) { el.innerHTML = `<span class="faint small">${esc(e.message)}</span>`; return; }
-  el.innerHTML = argueHTML(argCache[sid], i) + `<div class="crit" data-crit-sid="${esc(sid)}"></div>`;
-  critLoad(sid);
+  el.innerHTML = argueHTML(argCache[sid], i) + `<div class="crit" data-crit-sid="${esc(sid)}">${critState[sid] ? critHTML(sid, critState[sid]) : ""}</div>`;
+  if (!critState[sid]) critLoad(sid);
 }
 function argueHTML(e, i) {
   if (!e.ok) return `<span class="faint small">${esc(e.reason || "no argument to make")}</span>`;
@@ -3464,12 +3476,31 @@ document.addEventListener("click", (ev) => {
   }
 });
 // cards in the disagreement lists open their argument straight away
+const argueQ = { q: [], active: 0, io: null };
+function arguePump() {
+  while (argueQ.active < 3 && argueQ.q.length) {
+    const { c } = argueQ.q.shift();
+    const el = c.querySelector(".argue"), it = cat.items[+c.dataset.i];
+    if (!el || !it || !it.pred || !el.hidden || !c.isConnected) continue;
+    argueQ.active++;
+    Promise.resolve(argueLoad(it.scene_id, el, +c.dataset.i)).finally(() => { argueQ.active--; arguePump(); });
+  }
+}
 function argueAutoOpen() {
   if (!["promote", "second", "arbiter"].includes(cat.view)) return;
+  // as each card scrolls into view, three at a time — not ~120 requests the moment the page draws
+  if (!argueQ.io && "IntersectionObserver" in window) {
+    argueQ.io = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) { argueQ.io.unobserve(e.target); argueQ.q.push({ c: e.target }); }
+      arguePump();
+    }, { rootMargin: "200px 0px" });
+  }
   document.querySelectorAll("#cat-list .cat-card").forEach((c) => {
     const el = c.querySelector(".argue"), it = cat.items[+c.dataset.i];
-    if (el && it && it.pred && el.hidden) argueLoad(it.scene_id, el, +c.dataset.i);
+    if (!(el && it && it.pred && el.hidden)) return;
+    if (argueQ.io) argueQ.io.observe(c); else { argueQ.q.push({ c }); }
   });
+  if (!argueQ.io) arguePump();
 }
 
 // --- charts (small, single-series, plain SVG + a hover readout) ----------------------------
@@ -4008,7 +4039,7 @@ function drawLab(d) {
       it makes Peaks better on your library — finding your moments, or grading — tested on scenes it didn't learn from.</p>
     <div class="lab-grid">${(d.senses || []).map(senseCard).join("")}<div id="lab-faces"></div></div>`;
   loadFacesCard();
-  if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden) openLab(true); }, 4000);
+  if (run && run.status === "running") labPoll = setTimeout(() => { if (!$("#lab-body").hidden && $("#lab")?.classList.contains("active") && !document.hidden) openLab(true); else openLab.resume = labPoll = setTimeout(() => openLab(true), 15000); }, 4000);
 }
 const SENSE_API = { sound: "/api/hear", motion: "/api/motion", faces: "/api/faces" };
 // Faces: who is in each scene (InsightFace) — names for Orphans, "may also be in" on a performer's page
@@ -5308,6 +5339,7 @@ function catDraw(d, append, refresh, keepPlace = false) {
   {
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     applyTierState(d.tier_state);
+    const before = cat.items.length;
     cat.items = append ? cat.items.concat(d.items) : d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model; cat.drain = d.drain;
     cat.grace = d.grace || cat.grace;
@@ -5324,7 +5356,14 @@ function catDraw(d, append, refresh, keepPlace = false) {
       [...cat.sel].forEach((id) => { if (!have.has(id)) cat.sel.delete(id); });
       cat.focus = Math.min(cat.focus, Math.max(0, cat.items.length - 1));
     }
-    renderCatChips(); renderCatTriage(); renderCatList(); renderCatBulk(); renderCatStorage(d.storage);
+    renderCatChips(); renderCatTriage();
+    if (append && before && $("#cat-list .cat-card")) {              // the new page only: no rebuild of 35k nodes
+      $("#cat-list").insertAdjacentHTML("beforeend", cat.items.slice(before).map((r, k) => catCardHTML(r, before + k)).join(""));
+      $("#btn-cat-more").hidden = cat.items.length >= cat.total;
+      if (cat.view === "orphans") orphLoadAll();
+      argueAutoOpen();
+    } else renderCatList();
+    renderCatBulk(); renderCatStorage(d.storage);
     renderCatFChips();
     if (!append && !refresh) catSyncUrl();
     $("#cat-status").textContent = `${cat.items.length.toLocaleString()} of ${d.total.toLocaleString()}`;
@@ -5693,7 +5732,7 @@ function pickCatSuggest(i) {
   if (!cat.view) cat.tier = "";        // finding: look across every tier (the chips show where they are)
   openCatalogue();
 }
-$("#cat-q")?.addEventListener("input", () => { clearTimeout(csg.t); csg.t = setTimeout(loadCatSuggest, 150); });
+$("#cat-q")?.addEventListener("input", () => { clearTimeout(csg.t); csg.t = setTimeout(loadCatSuggest, 250); });
 $("#cat-q")?.addEventListener("keydown", (e) => {
   const box = $("#cat-suggest");
   if (box.hidden || !csg.items.length) return;
@@ -6160,7 +6199,8 @@ $("#cat-list")?.addEventListener("click", (e) => {
   focusCat(i, false);
 });
 let catQT;
-$("#cat-q")?.addEventListener("input", () => { clearTimeout(catQT); catQT = setTimeout(() => openCatalogue(), 300); });
+$("#cat-q")?.addEventListener("input", () => { clearTimeout(catQT); catQT = setTimeout(() => openCatalogue(), 500); });
+$("#cat-q")?.addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(catQT); openCatalogue(); } });
 for (const sel of ["#cat-res", "#cat-mbps"]) $(sel)?.addEventListener("change", () => openCatalogue());
 $("#cat-sort")?.addEventListener("change", () => {
   cat.sortTouched = true; cat.sortDir = "";          // a new key starts in its natural direction
@@ -6674,6 +6714,7 @@ function renderDupeQueue(q) {
   if ((busy || undoable.length) && !dqTimer) dqTimer = setInterval(pollDupeQueue, 2000);
 }
 async function pollDupeQueue() {
+  if (document.hidden) return;                 // a background tab: the queue waits for you
   try {
     const q = await api("/api/duplicates/queue");
     renderDupeQueue(q);
@@ -6755,7 +6796,9 @@ $("#btn-logout").addEventListener("click", async () => {
   location.reload();
 });
 
-refreshDashboard();  // conn status + job reattach (runs even though it's not the landing view)
+// the connection dot, from one light call — Activity's own data loads when you open it
+swr("/api/capabilities", () => { $("#conn").textContent = "Stash connected"; $("#conn-dot")?.classList.remove("off"); })
+  .catch((e) => { $("#conn").textContent = "disconnected"; $("#conn-dot")?.classList.add("off"); toast("Cannot reach backend: " + e.message, true); });
 
 
 // --- live job tray (sidebar): whatever is running, from any page -------------------
@@ -6781,12 +6824,12 @@ function dur(s) {
 async function pollJobTray() {
   const tray = $("#job-tray");
   if (!tray || document.hidden) return;
-  let jobs;
-  try { jobs = await api("/api/jobs"); } catch { return; }
-  const running = jobs.filter((j) => j.status === "running");
+  let running;
+  try { running = await api("/api/jobs/running"); } catch { return; }
   const kinds = new Set(running.map((j) => j.kind));
   const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync", "warmup"];
-  if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || kinds.has("ingest")) refreshSidebar();
+  const ingestTick = kinds.has("ingest") && Date.now() - (pollJobTray.sideAt || 0) > 30000;
+  if ((pollJobTray.prev || []).some((k) => LIB.includes(k) && !kinds.has(k)) || ingestTick) { pollJobTray.sideAt = Date.now(); refreshSidebar(); }
   if ((pollJobTray.prev || []).includes("sync") && !kinds.has("sync") && $("#activity")?.classList.contains("active")) {
     loadCleanup(); loadCopies(); loadRenamerMoves();     // a Sync just finished: show what it tidied
   }
@@ -7106,7 +7149,7 @@ async function rvLiveTick(known) {
     }
   }
   if (rv.source === "ingest" && !known) await rvMergeFresh();
-  if (ing.live && $("#review")?.classList.contains("active")) rv.live = setTimeout(() => rvLiveTick(), 8000);
+  if (ing.live && $("#review")?.classList.contains("active")) rv.live = setTimeout(() => rvLiveTick(), document.hidden ? 30000 : 8000);
   else if (!known && rv.source === "ingest") await rvMergeFresh();     // one last refresh at the end
 }
 async function rvMergeFresh() {
@@ -7324,7 +7367,7 @@ function rvPicksGet(sid) {
     e = { list: null };
     e.p = api(`/api/scene/${encodeURIComponent(sid)}/picks`).then((ps) => {
       e.list = ps;
-      for (const p of ps) if (p.thumb) lanePrefetch(p.thumb);
+      for (const p of [...ps].sort((a, b) => (+b.score || 0) - (+a.score || 0)).slice(0, 3)) if (p.thumb) lanePrefetch(p.thumb);
       return ps;
     }).catch((err) => { rvPickCache.delete(sid); throw err; });
     rvPickCache.set(sid, e);
@@ -7865,6 +7908,7 @@ setInterval(() => { if (!document.hidden && $("#activity")?.classList.contains("
 // memory yet — say so instead of showing blank cards, and refresh when it's in
 let warmTimer = null, warmWasLoading = false;
 async function checkWarm(start) {
+  if (document.hidden && warmTimer) return;    // a background tab: no 2 s polling
   let w;
   try { w = await api("/api/warm" + (start ? "?start=true" : "")); } catch { return; }
   const el = $("#warm-banner"); if (!el) return;

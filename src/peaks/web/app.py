@@ -810,6 +810,16 @@ def create_app(cfg=None):
         return {"now": _t.time(), "running": running, "finished": finished, "waiting": waiting,
                 "lines": lines[-400:]}
 
+    @app.get("/api/jobs/running")
+    def running_jobs():
+        """The job tray's poll: running jobs only, without logs or results
+        (the full list carried 200 jobs with their results every 4 s)."""
+        import time as _t
+
+        return [{"id": j.id, "kind": j.kind, "status": j.status, "started": j.started, "elapsed": round(_t.time() - j.started),
+                 "progress": j.progress, "timing": j.timing(), "paused_for": getattr(j, "paused_for", None)}
+                for j in jobs.list() if j.status == "running"]
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
         job = jobs.get(job_id)
@@ -1250,7 +1260,10 @@ def create_app(cfg=None):
 
     @app.get("/api/taste/metrics")
     def taste_metrics(threshold: float | None = None):
-        """Taste-score distribution + how many moments/scenes meet your bar."""
+        """Taste-score distribution + how many moments/scenes meet your bar
+        (a whole-library pass: snapshotted like the summary)."""
+        if threshold is None:
+            return _snap("taste_metrics", service.taste_metrics)
         return service.taste_metrics(threshold=threshold)
 
     @app.get("/api/foryou/board")
