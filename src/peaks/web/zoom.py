@@ -549,6 +549,7 @@ class ZoomMixin:
                              else "shape picks win — Peaks now ranks moments by shape") if use else
                             f"not better yet — Peaks keeps frame picks{'' if n >= SWITCH_MIN_SCENES else f' (compared on {n} of the {SWITCH_MIN_SCENES} scenes it needs)'}"),
                    weights=self._zoom_words(names, m.coef_[0]))
+        self._log_gains(rep)                       # the health report: what the moment model adds
         return self._zoom_store_model((sc, m, names), rep)
 
     @staticmethod

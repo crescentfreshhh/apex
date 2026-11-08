@@ -208,6 +208,14 @@ class JobManager:
             self._by_kind[kind] = job.id
             self._prune_locked()
 
+        try:
+            from ..health import proc_io
+
+            job._io0 = proc_io()                     # disk at the start (the health report's per-job IO)
+            job._others0 = sorted(k for k in self.running_kinds() if k != kind)
+        except Exception:  # noqa: BLE001
+            pass
+
         def _run():
             status = "error"
             try:
@@ -236,6 +244,10 @@ class JobManager:
 
         threading.Thread(target=_run, daemon=True, name=f"job-{job.id}").start()
         return job
+
+    def running_kinds(self) -> list[str]:
+        with self._lock:
+            return [j.kind for j in self._jobs.values() if j.status == "running"]
 
     def _remember(self, job: Job, status: str | None = None) -> None:
         """Append a finished job to the history file (kept to the last HISTORY_KEEP)."""

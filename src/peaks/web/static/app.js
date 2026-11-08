@@ -370,9 +370,33 @@ async function refreshDashboard() {
 let dashMem = null;
 // Activity → Speed: how long each page's answers take (last 30 min), the memory
 // purges, and what was running — so a lag can be pinned on a route or a purge
+// "This week": the nightly report — verdicts first, then routes, Stash, GPU, disk and jobs
+function speedWeekHTML(w) {
+  if (!w || !w.samples) return `<h4>This week</h4><p class="dim">Not enough history yet — Peaks samples every 5 minutes and writes the week's report each night.</p>`;
+  const ms = (x) => (x == null ? "—" : x >= 1000 ? (x / 1000).toFixed(1) + " s" : x + " ms");
+  const tone = (x) => (x >= 3000 ? "bad" : x >= 1000 ? "warn" : "");
+  const when = new Date(w.at * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const verdicts = (w.verdicts || []).map((v) => `<li class="${/turning it off/.test(v) ? "warn" : ""}">${esc(v)}</li>`).join("");
+  const lines = [
+    w.stash ? `Stash answered in <b>${ms(w.stash.median_ms)}</b> typically, ${ms(w.stash.p90_ms)} when slow (${w.stash.calls.toLocaleString()} calls)` : "",
+    w.gpu ? `GPU busy <b>${w.gpu.busy_pct}%</b> of the time (peak ${(w.gpu.peak_mem_mb / 1024).toFixed(1)} GB)` : "",
+    w.disk ? `Peaks read <b>${w.disk.read_gb} GB</b> and wrote ${w.disk.write_gb} GB` : "",
+  ].filter(Boolean).join(" · ");
+  const jobs = (w.jobs || []).slice(0, 12).map((j) => `<tr><td>${esc(JOB_LABEL[j.kind] || j.kind)}</td><td>${j.runs}</td><td>${j.hours} h</td>
+    <td>${j.read_gb} GB${j.approximate ? ' <span class="faint" title="Ran alongside another job: they share this number">≈</span>' : ""}</td>
+    <td>${j.gain_pts == null ? "—" : (j.gain_pts > 0 ? "+" : "") + j.gain_pts + " pts"}</td></tr>`).join("");
+  const routes = (w.routes || []).slice(0, 6).map((r) => `<tr><td><code>${esc(r.route.replace(/^GET /, "").replace("/api/", "/"))}</code></td>
+    <td>${r.n.toLocaleString()}</td><td>${ms(r.p50_ms)}</td><td class="${tone(r.p95_ms)}">${ms(r.p95_ms)}</td></tr>`).join("");
+  return `<h4>This week <span class="faint small">· report from ${esc(when)}</span></h4>
+    ${verdicts ? `<ul class="speed-verdicts">${verdicts}</ul>` : ""}
+    ${lines ? `<p class="dim">${lines}</p>` : ""}
+    ${jobs ? `<table class="speed-t"><thead><tr><th>Job</th><th>runs</th><th>time</th><th>read</th><th title="What it adds to grade accuracy (latest retrain)">accuracy</th></tr></thead><tbody>${jobs}</tbody></table>` : ""}
+    ${routes ? `<table class="speed-t"><thead><tr><th>Slowest pages this week</th><th>calls</th><th>typical</th><th>slow (p95)</th></tr></thead><tbody>${routes}</tbody></table>` : ""}
+    <h4>Last 30 minutes</h4>`;
+}
 async function loadSpeed() {
-  let d;
-  try { d = await api("/api/perf?minutes=30"); } catch { return; }
+  let d, w = null;
+  try { [d, w] = await Promise.all([api("/api/perf?minutes=30"), api("/api/perf/report").catch(() => null)]); } catch { return; }
   const slow = d.routes.filter((r) => r.p95_ms >= 1000);
   const sum = $("#speed-sum");
   if (sum) sum.textContent = (slow.length ? `${slow.length} slow route${slow.length > 1 ? "s" : ""}` : "all quick") +
@@ -385,7 +409,7 @@ async function loadSpeed() {
   const busy = ld.one_min != null && ld.cores ? ld.one_min / ld.cores : null;
   const why = `<p class="dim">Stash ${st.calls ? `answers in <b class="${tone(st.median_ms)}">${ms(st.median_ms)}</b> typically, <span class="${tone(st.p90_ms)}">${ms(st.p90_ms)}</span> when slow (${st.calls} calls, last 5 min)` : "hasn't been asked anything in the last 5 min"}
     ${busy != null ? ` · server load <b class="${busy >= 1 ? "bad" : busy >= 0.7 ? "warn" : ""}">${ld.one_min}</b> on ${ld.cores} cores${busy >= 1 ? " — every core is busy, so everything waits" : ""}` : ""}</p>`;
-  body.innerHTML = why + `<table class="speed-t"><thead><tr><th>Route</th><th>calls</th><th>typical</th><th>slow (p95)</th><th>worst</th><th title="How much of its time was spent waiting on Stash">waiting on Stash</th></tr></thead><tbody>
+  body.innerHTML = speedWeekHTML(w) + why + `<table class="speed-t"><thead><tr><th>Route</th><th>calls</th><th>typical</th><th>slow (p95)</th><th>worst</th><th title="How much of its time was spent waiting on Stash">waiting on Stash</th></tr></thead><tbody>
     ${d.routes.slice(0, 25).map((r) => `<tr><td><code>${esc(r.route.replace(/^GET /, "").replace("/api/", "/"))}</code></td><td>${r.n}</td><td>${ms(r.p50_ms)}</td>
       <td class="${tone(r.p95_ms)}">${ms(r.p95_ms)}</td><td class="${tone(r.max_ms)}">${ms(r.max_ms)}</td><td>${r.stash_share ? Math.round(100 * r.stash_share) + "%" : "—"}</td></tr>`).join("")
       || '<tr><td colspan="6" class="dim">No requests yet.</td></tr>'}</tbody></table>

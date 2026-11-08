@@ -94,6 +94,9 @@ def _idle_world(tmp_path, monkeypatch):
 def test_an_idle_server_touches_nothing_for_ten_minutes(tmp_path, monkeypatch):
     pytest.importorskip("sklearn")
     svc, stash, jobs, sch, clock = _idle_world(tmp_path, monkeypatch)
+    from peaks.web import forensics
+
+    forensics._timings.clear()                                 # no requests yet (earlier tests made some)
     sch.run_due(event=True)                                    # start-up: every step looks once
     assert not [j for j in jobs.list() if j.status == "running"]
     touched = []
@@ -115,7 +118,7 @@ def test_an_idle_server_touches_nothing_for_ten_minutes(tmp_path, monkeypatch):
         monkeypatch.setattr(stash, n, spy("stash." + n, getattr(stash, n)))
     for _ in range(600):                                       # ten minutes, second by second
         clock.t += 1
-        assert sch.run_due() == []
+        assert set(sch.run_due()) <= {"health-sample"}            # the 5-minute health sample, from memory
     assert touched == []
 
 

@@ -329,6 +329,7 @@ def create_app(cfg=None):
             free_gpu()
         if getattr(job, "paused_for", None) and job.kind in ("hear", "motion", "zoom"):
             service._retrain_owed = True             # its retrain was skipped: the resumed run does it
+        _job_io(service, jobs, job)                  # the weekly health report: hours and disk per job
         sched = getattr(app.state, "scheduler", None)
         if sched is not None:
             sched.wake("job finished")               # what was waiting for it can start
@@ -3044,6 +3045,12 @@ def create_app(cfg=None):
         """RSS vs the watchdog's soft limit (for diagnosing OOMs)."""
         return service.memory_status()
 
+    @app.get("/api/perf/report")
+    def perf_report():
+        """The week in one page: the nightly report (built now if there's none yet)."""
+        rep = service.store().map_get("health_report", "week")
+        return rep if rep else _health_report(service)
+
     @app.get("/api/perf")
     def perf(minutes: float = 30):
         """The Speed panel: per-route timings, recent memory purges, what's running."""
@@ -3835,6 +3842,60 @@ def _scheduler_once(service: Service, jobs: JobManager, state: dict, _embed_then
             return
 
 
+def _job_io(service: Service, jobs: JobManager, job) -> None:
+    """One finished job's hours and disk (process-wide /proc/self/io, so a job that
+    ran beside another shares the bill: marked `overlapped`)."""
+    import time as _t
+
+    from ..health import io_delta, proc_io
+
+    try:
+        d = io_delta(getattr(job, "_io0", None), proc_io()) or {}
+        others = set(getattr(job, "_others0", []) or []) | {k for k in jobs.running_kinds() if k != job.kind}
+        service.store().log_append("jobs_io", {
+            "kind": job.kind, "at": job.finished or _t.time(), "started": job.started,
+            "elapsed_s": round((job.finished or _t.time()) - job.started, 1),
+            "read": d.get("read"), "write": d.get("write"), "overlapped": bool(others)}, at=job.finished or _t.time())
+    except Exception:  # noqa: BLE001 — bookkeeping never fails a job
+        pass
+
+
+def _health_sample(service: Service, jobs: JobManager, state: dict) -> None:
+    """Every 5 minutes: routes, Stash, GPU, disk since the last sample."""
+    import time as _t
+
+    from .. import health, stashtiming
+    from . import floor, forensics
+
+    now = _t.time()
+    since = state.get("at") or now - 300
+    if not jobs.running_kinds() and not forensics.perf_summary(since):
+        # nothing happened: a quiet sample from memory alone (an idle server touches nothing)
+        state["at"] = now
+        service.store().log_append(health.SAMPLES, {"at": now, "since": since, "quiet": True, "gpu": {"util": 0}}, at=now)
+        return
+    io = health.proc_io()
+    row = health.sample(since, forensics.perf_summary(since), stashtiming.summary(), floor.gpu_load(),
+                        health.io_delta(state.get("io"), io), jobs.running_kinds(), now=now)
+    state.update(at=now, io=io)
+    service.store().log_append(health.SAMPLES, row, at=now)
+
+
+def _health_report(service: Service) -> dict:
+    """The last 7 days, saved for the Speed panel; older samples are dropped."""
+    import time as _t
+
+    from .. import health
+
+    st, now = service.store(), _t.time()
+    rep = health.build_report(st.log_since(health.SAMPLES, now - health.WEEK), st.log_since(health.JOBS, now - health.WEEK),
+                              st.log_since(health.GAINS, now - 60 * 86400), now=now)
+    st.map_set("health_report", "week", rep)
+    for name in (health.SAMPLES, health.JOBS):
+        st.log_prune(name, now - health.KEEP_DAYS * 86400)
+    return rep
+
+
 def _next_local(now: float, hour: int, minute: int = 0) -> float:
     import time as _t
 
@@ -3920,6 +3981,8 @@ def _scheduler_steps(service: Service, jobs: JobManager, state: dict, _embed_the
     def library_check():                          # Stash's scene list, every 30 minutes while idle
         service._catalogue_all()
 
+    health_state: dict = {}                       # the last health sample's time and disk counters
+
     def daily_grades():                           # the day's grade backup (was riding on the catalogue refresh)
         rows = (service.__dict__.get("_cat_cache") or (0, None))[1]
         if rows:
@@ -3946,4 +4009,6 @@ def _scheduler_steps(service: Service, jobs: JobManager, state: dict, _embed_the
         Step("text-models", lambda: service.unload_idle_text_models(), text_next),
         Step("library", library_check, every=1800, on_event=False),
         Step("daily-grades", daily_grades, lambda now: _next_local(now, 0, 5), on_event=False),
+        Step("health-sample", lambda: _health_sample(service, jobs, health_state), every=300, on_event=False),
+        Step("health-report", lambda: _health_report(service), lambda now: _next_local(now, 3, 40), on_event=False),
     ]

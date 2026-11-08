@@ -69,6 +69,7 @@ class Store:
                 " scene_id TEXT, value TEXT NOT NULL);"
                 "CREATE INDEX IF NOT EXISTS logs_name ON logs(name, id);"
                 "CREATE INDEX IF NOT EXISTS logs_scene ON logs(name, scene_id);"
+                "CREATE INDEX IF NOT EXISTS logs_at ON logs(name, at);"
                 "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
             self._conn = c
         return self._conn
@@ -201,6 +202,21 @@ class Store:
             self._db().execute("DELETE FROM logs WHERE name=?", (name,))
             self._bump(name)
 
+    def log_since(self, name: str, since: float) -> list[dict]:
+        """Records of one log at or after `since` (unix time), oldest first."""
+        with self._lock:
+            rows = self._db().execute("SELECT value FROM logs WHERE name=? AND at>=? ORDER BY id",
+                                      (name, float(since))).fetchall()
+        return [json.loads(v) for (v,) in rows]
+
+    def log_prune(self, name: str, before: float) -> int:
+        """Drop records older than `before` (a rolling window, e.g. a week of samples)."""
+        with self._lock, self._tx():
+            n = self._db().execute("DELETE FROM logs WHERE name=? AND at<?", (name, float(before))).rowcount
+            if n:
+                self._bump(name)
+        return int(n or 0)
+
     def log_iter_lines(self, name: str):
         """Every record as a JSON line, oldest first (a download)."""
         with self._lock:
@@ -308,6 +324,9 @@ LOG_FILES = (
     ("settle_history", "settle_history.jsonl"),
     ("moment_checks", "moment_checks.jsonl"),
     ("pick_feedback", "pick_feedback.jsonl"),
+    ("health", "health.jsonl"),
+    ("jobs_io", "jobs_io.jsonl"),
+    ("gains", "gains.jsonl"),
 )
 
 

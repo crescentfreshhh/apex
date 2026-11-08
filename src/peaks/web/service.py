@@ -6067,6 +6067,21 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                                "tier": row["tier"]})
         return {"scene": row}
 
+    def _log_gains(self, report: dict) -> None:
+        """What each input added to accuracy this retrain (fractions), dated —
+        the health report's verdicts read the latest of each."""
+        try:
+            import time as _t
+
+            g = {k: v for k, v in report.items() if k.endswith("_gain") and isinstance(v, (int, float))}
+            fr, sets, uses = report.get("frame"), report.get("sets"), report.get("uses")
+            if fr and sets and uses and (sets.get(uses) or {}).get("top3") is not None and fr.get("top3") is not None:
+                g["moment_gain"] = float(sets[uses]["top3"]) - float(fr["top3"])
+            if g:
+                self.store().log_append("gains", {"at": _t.time(), **g}, at=_t.time())
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a retrain
+            pass
+
     def _quick_learn(self, sid: str, row: dict | None) -> dict | None:
         """After a grade: nudge the tier model's last layer toward it and re-score
         the ungraded scenes at once (peaks.quick_head). Best-effort and quick —
@@ -6390,6 +6405,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             path = model.save(self._tier_model_path())
             atomic.write_text(path.with_suffix(".json"), json.dumps(report, indent=2))
             self._tier_state = {"model": model, "report": report}
+            self._log_gains(report)                     # the weekly health report's "is it worth it?"
             # the old predictions keep serving; the next page kicks a background re-score
             self._grades_since_train = 0
             try:
