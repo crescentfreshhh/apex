@@ -89,7 +89,9 @@ def test_samples_jobs_and_the_report_endpoint(tmp_path, monkeypatch):
     from test_snappy import _client
 
     import peaks.web.app as app_mod
+    from peaks.web import forensics
 
+    forensics._timings.clear()                                     # earlier tests made requests
     c, app = _client(tmp_path, monkeypatch, lambda: {"n": 1})
     svc, jobs = app.state.service, app.state.jobs
     state = {}
