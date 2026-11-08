@@ -21,6 +21,7 @@ import numpy as np
 from ..cache import EmbeddingCache
 from ..config import Config
 from ..embedding import canonical_name
+from ..gpu import GpuLease, gpu_owned
 from ..search import Hit, SearchIndex
 from ..tiers import TIER_WEIGHT, tier_of
 from .library import LibraryMixin
@@ -54,6 +55,9 @@ from .criteria import CriteriaMixin
 from .senses_explore import SenseExploreMixin
 
 
+_GPU_INIT = threading.Lock()
+
+
 class IndexMemoryError(RuntimeError):
     """Not enough memory to load the library index right now (retried later)."""
 
@@ -68,6 +72,17 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
               HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin, TimelineMixin, CriteriaMixin):
+    @property
+    def gpu(self) -> GpuLease:
+        """The GPU lease (peaks.gpu): who holds the card, batches, text-search borrows."""
+        g = self.__dict__.get("_gpu")
+        if g is None:
+            with _GPU_INIT:
+                g = self.__dict__.get("_gpu")
+                if g is None:
+                    g = self.__dict__["_gpu"] = GpuLease()
+        return g
+
     def __init__(self, cfg: Config | None = None):
         self.cfg = cfg or Config.load()
         self._index: dict[str, SearchIndex] = {}
@@ -723,10 +738,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             kwargs["pretrained"] = self._active_clip_pretrained()
         elif canon == "dinov2":
             kwargs["model_name"] = self._active_dino_model()
-        return get_embedder(name, **kwargs)
+        return self.gpu.guard(get_embedder(name, **kwargs))      # every batch through the GPU lease
 
     # --- embed / score (job targets) ----------------------------------------
 
+    @gpu_owned("embed", "Embedding")
     def run_embed(
         self,
         job=None,
@@ -898,8 +914,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             log(f"scoring with model {model_path.name}")
         else:
             refs_dir = resolve_references_dir(self.cfg.scoring.references_dir, tag)
-            embedder = get_embedder_for_references(self.cfg)
-            refs = load_references(embedder, refs_dir)
+            with self.gpu.owner("score", job, "Writing markers"):    # a model on the GPU: hold the lease
+                embedder = get_embedder_for_references(self.cfg)
+                refs = load_references(embedder, refs_dir)
+                del embedder
             score_frames = make_similarity_scorer(refs, reduce or self.cfg.scoring.reduce)
             log(f"scoring with {refs.shape[0]} references from {refs_dir}")
 
@@ -1815,6 +1833,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             reasons[why] += 1
         return {"dropped": len(drop), "reasons": reasons, "left": len(flog)}
 
+    @gpu_owned("fix", "Fix")
     def run_fix(self, job=None, limit: int = 0, dry_run: bool = False) -> dict:
         """Retry scenes recorded in the failure log through a fallback ladder.
 
@@ -5003,17 +5022,21 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return self.index(model).sid_key.get(str(scene_id))
 
     def _ensure_clip(self):
-        """Lazily build (once) the CLIP embedder used for text vectors."""
+        """Lazily build (once) the CLIP embedder used for text vectors. It's
+        built as a short GPU borrow (never racing a job's batch), kept as a
+        resident of the lease, and every query borrows the GPU between batches."""
         with self._clip_lock:
             if self._clip is None:
                 from ..embedding import ClipEmbedder
 
-                self._clip = ClipEmbedder(
-                    model_name=self._active_clip_model(),          # match the INDEX space, not
-                    pretrained=self._active_clip_pretrained(),      # the (possibly stale) config
-                    device=self.cfg.embedding.device or None,
-                ).text_only()                                      # only text is ever asked of it here
-        return self._clip
+                with self.gpu.borrow("loading the text-search model"):
+                    self._clip = ClipEmbedder(
+                        model_name=self._active_clip_model(),          # match the INDEX space, not
+                        pretrained=self._active_clip_pretrained(),      # the (possibly stale) config
+                        device=self.cfg.embedding.device or None,
+                    ).text_only()                                      # only text is ever asked of it here
+                self._text_resident()
+        return self.gpu.guard(self._clip, borrow=True)
 
     def _clip_text_vector(self, text: str) -> np.ndarray:
         self._text_models_used()
@@ -5021,6 +5044,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
     def _text_models_used(self) -> None:
         self._text_models_at = time.time()
+        self.gpu.used("text-models")
+
+    def _text_resident(self) -> None:
+        """The text towers are one resident of the GPU lease: a job taking the
+        GPU drops them once they've been idle a minute (and the scheduler after 10)."""
+        self.gpu.resident("text-models", lambda: self.unload_idle_text_models(idle_s=0.0))
 
     def unload_idle_text_models(self, idle_s: float = 600.0) -> list[str]:
         """The CLIP (text) and CLAP (text) models leave the GPU after `idle_s`
@@ -5039,6 +5068,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if gone:
             from ..embedding import free_gpu
 
+            self.gpu.forget("text-models")
             free_gpu()
         return gone
 

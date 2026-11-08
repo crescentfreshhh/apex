@@ -17,6 +17,8 @@ without a click (Orphans' Add, the performer page's "may also be in").
 
 from __future__ import annotations
 
+from ..gpu import gpu_owned
+
 import time
 
 import numpy as np
@@ -99,7 +101,7 @@ class FacesMixin:
     def _face_embedder(self):
         from ..faces import FaceEmbedder
 
-        return FaceEmbedder(log=getattr(self, "_faces_log", print))
+        return self.gpu.guard(FaceEmbedder(log=getattr(self, "_faces_log", print)))
 
     def _face_frame(self, path: str, t: float):
         from ..sampling import FrameSampler
@@ -160,6 +162,7 @@ class FacesMixin:
             self.__dict__.pop("_face_gal", None)
         return done
 
+    @gpu_owned("faces", "Faces")
     def run_faces(self, job=None, limit: int | None = None) -> dict:
         from .hear import SenseRun
 

@@ -225,6 +225,11 @@ def set_index_probe(fn) -> None:
     _state["index"] = fn
 
 
+def set_gpu_lease(lease) -> None:
+    """The GPU lease (peaks.gpu) — the health line says who holds the card."""
+    _state["lease"] = lease
+
+
 def health_line(jobs=None) -> str:
     from . import memwatch
 
@@ -237,6 +242,15 @@ def health_line(jobs=None) -> str:
     g = _gpu()
     if g:
         parts.append(g)
+    lease = _state.get("lease")
+    if lease is not None:
+        try:
+            h = lease.holder()
+            res = lease.residents()
+            if h or res:
+                parts.append("lease=" + (h["kind"] if h else "-") + (f"+{','.join(res)}" if res else ""))
+        except Exception:  # noqa: BLE001
+            pass
     if jobs is not None:
         running = sorted({j.kind for j in jobs.list() if j.status == "running"})
         parts.append("jobs=" + (",".join(running) or "-"))

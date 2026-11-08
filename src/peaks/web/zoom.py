@@ -18,6 +18,8 @@ a start, a peak and an end.
 
 from __future__ import annotations
 
+from ..gpu import gpu_owned
+
 from ..atomic import settings_saver as _settings_saver
 
 import json
@@ -316,6 +318,7 @@ class ZoomMixin:
         except Exception:  # noqa: BLE001
             return False
 
+    @gpu_owned("zoom", "Moment zoom")
     def run_zoom(self, job=None, limit: int | None = None) -> dict:
         log = job.log if job else print
         per_run = self.zoom_settings()["per_run"] * (40 if self._zoom_library_dense() else 1)   # reading is cheap

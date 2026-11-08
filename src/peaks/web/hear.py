@@ -16,6 +16,8 @@ says it helps.
 
 from __future__ import annotations
 
+from ..gpu import gpu_owned
+
 from ..atomic import settings_saver as _settings_saver
 
 
@@ -242,7 +244,7 @@ class HearMixin:
     def _hear_embedder(self):
         from ..embedding import ClapAudioEmbedder
 
-        return ClapAudioEmbedder(device=self.cfg.embedding.device or None)
+        return self.gpu.guard(ClapAudioEmbedder(device=self.cfg.embedding.device or None))
 
     def _hear_decode(self, path: str, sr: int):
         return decode_audio(path, sr)
@@ -289,6 +291,7 @@ class HearMixin:
         self.__dict__.get("_sound_vec_memo", {}).pop(str(sid), None)
         return {"blocks": len(ct)}
 
+    @gpu_owned("hear", "Hearing")
     def run_hear(self, job=None, limit: int | None = None) -> dict:
         log = job.log if job else print
         todo = self.hear_todo()[: limit or self.hear_settings()["per_run"]]
@@ -514,8 +517,14 @@ class HearMixin:
         with self.__dict__.setdefault("_clap_lock", threading.Lock()):   # one CLAP, however many searches
             emb = self.__dict__.get("_clap_text")
             if emb is None:
-                emb = self._hear_embedder()
+                with self.gpu.borrow("loading the sound-search model"):   # never racing a job's batch
+                    emb = self._hear_embedder()
+                    emb = getattr(emb, "unguarded", emb)          # kept bare; each query is guarded below
+                    if hasattr(emb, "text_only"):
+                        emb = emb.text_only()                     # search needs the text tower only
                 self._clap_text = emb
+                self._text_resident()
+        emb = self.gpu.guard(emb, borrow=True)        # each query: a short borrow between a job's batches
         self._text_models_used()
         w = emb.embed_text([q])[0]
         w = w / max(float(np.linalg.norm(w)), 1e-9)

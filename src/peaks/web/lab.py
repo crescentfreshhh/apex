@@ -20,6 +20,8 @@ switching back is instant.
 
 from __future__ import annotations
 
+from ..gpu import gpu_owned
+
 import hashlib
 import json
 import time
@@ -160,7 +162,7 @@ class LabMixin:
     def _lab_embedder(self, cand: str):
         from ..embedding import make_dino
 
-        return make_dino(cand, device=self.cfg.embedding.device or None)
+        return self.gpu.guard(make_dino(cand, device=self.cfg.embedding.device or None))
 
     def _lab_sampler(self):
         from ..sampling import FrameSampler
@@ -299,6 +301,7 @@ class LabMixin:
         except Exception:  # noqa: BLE001 — a progress line, never an error
             return None
 
+    @gpu_owned("lab", "Lab trial")
     def _lab_embed(self, cand: str, rows: list[dict], job=None) -> dict:
         """Embed the sample with the candidate into its own namespace, at the
         library's sampling. Resumable: cached scenes are skipped. Returns

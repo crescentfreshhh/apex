@@ -14,6 +14,8 @@ motion group — each kept only where the honest held-out test says it helps.
 
 from __future__ import annotations
 
+from ..gpu import gpu_owned
+
 from ..atomic import settings_saver as _settings_saver
 
 
@@ -151,7 +153,7 @@ class MotionMixin:
     def _motion_embedder(self):
         from ..embedding import MotionEmbedder
 
-        return MotionEmbedder(device=self.cfg.embedding.device or None, log=getattr(self, "_motion_log", None))
+        return self.gpu.guard(MotionEmbedder(device=self.cfg.embedding.device or None, log=getattr(self, "_motion_log", None)))
 
     def _motion_sampler(self):
         from ..sampling import FrameSampler
@@ -194,6 +196,7 @@ class MotionMixin:
         self.__dict__.get("_motion_vec_memo", {}).pop(str(sid), None)
         return {"clips": len(times), "bad": len(bad)}
 
+    @gpu_owned("motion", "Motion")
     def run_motion(self, job=None, limit: int | None = None) -> dict:
         log = job.log if job else print
         todo = self.motion_todo()[: limit or self.motion_settings()["per_run"]]

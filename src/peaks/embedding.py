@@ -341,6 +341,20 @@ class ClapAudioEmbedder:
         with self._torch.no_grad():
             return self._norm(self._embeds(self.model.get_text_features(**inputs), "text"))
 
+    def text_only(self) -> "ClapAudioEmbedder":
+        """Drop the audio tower: sound search only ever asks for text vectors, so the
+        instance kept for it holds the text tower alone (the audio side is the bulk)."""
+        for name in ("audio_model", "audio_projection"):
+            part = getattr(self.model, name, None)
+            if part is not None:
+                try:
+                    setattr(self.model, name, None)
+                    del part
+                except Exception:  # noqa: BLE001
+                    pass
+        free_gpu()
+        return self
+
 
 class MotionUnavailable(RuntimeError):
     """The V-JEPA 2.1 video encoder couldn't be loaded (network, torch.hub)."""

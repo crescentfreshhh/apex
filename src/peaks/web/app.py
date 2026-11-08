@@ -3104,6 +3104,7 @@ def create_app(cfg=None):
 
     _start_memwatch(app, service)
     forensics.set_index_probe(service.index_health)
+    forensics.set_gpu_lease(service.gpu)
     _start_heartbeat(app, jobs)
 
     @app.exception_handler(IndexMemoryError)
