@@ -2069,10 +2069,43 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             except Exception:  # noqa: BLE001 — never in the way of the change itself
                 pass
 
-    def _cat_changed(self) -> None:
-        """The scene list itself changed (not just one row's fields)."""
+    def _cat_changed(self, tell_pages: bool = True) -> None:
+        """The scene list itself changed (not just one row's fields): the
+        scheduler looks again, and open pages refresh their counts (the live
+        stream's "version" — a background change isn't an HTTP write)."""
         self._cat_ver = self.__dict__.get("_cat_ver", 0) + 1
+        if tell_pages:
+            self._data_version = self.__dict__.get("_data_version", 0) + 1
         self._changed("catalogue")
+
+    # --- Stash tells us when its library changes (peaks.stash_events) ----------------------
+
+    def start_stash_events(self, url: str | None = None, api_key: str | None = None):
+        """Listen to Stash's scan / job events; each one re-reads the scene list
+        (only the new scenes' details) a moment later, once per burst."""
+        from ..stash_events import StashEvents
+
+        old = self.__dict__.get("_stash_events")
+        if old is not None:
+            old.stop()
+        ev = self._stash_events = StashEvents(
+            url or f"{self.cfg.stash.url.rstrip('/')}/graphql",
+            self.cfg.stash.api_key if api_key is None else api_key, self._stash_changed).start()
+        return ev
+
+    def _stash_changed(self, reason: str) -> None:
+        import threading
+
+        t = self.__dict__.get("_stash_change_timer")
+        if t is not None:
+            t.cancel()                         # a burst of events: one re-read after it settles
+        t = self._stash_change_timer = threading.Timer(1.0, lambda: self._refresh_catalogue_bg())
+        t.daemon = True
+        t.start()
+
+    def stash_events_status(self) -> dict:
+        ev = self.__dict__.get("_stash_events")
+        return dict(ev.status) if ev is not None else {"connected": False, "events": 0, "off": True}
 
     def index_state(self) -> str:
         m = self._model_name()
@@ -5261,7 +5294,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 self._meta.setdefault(sid, meta.get(sid) or {})
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._cat_cache = (_t.monotonic() - self._CAT_TTL - 1, rows)   # stale: refresh soon
-        self._cat_changed()
+        self._cat_changed(tell_pages=False)                # the first read: nothing an open page had changed
         return rows
 
     def _refresh_catalogue_bg(self, full: bool = False) -> None:
@@ -5307,7 +5340,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         old = (self.__dict__.get("_cat_cache") or (0, None))[1]
         self._cat_cache = (_t.monotonic(), rows)
         if old is None or len(old) != len(rows) or [r["scene_id"] for r in old] != new_ids:
-            self._cat_changed()                               # scenes came or went: the scheduler looks again
+            self._cat_changed(tell_pages=old is not None)     # scenes came or went: the scheduler looks again
         self._maybe_daily_backup(rows)
         sig = (tuple(ids), self.__dict__.get("_cat_edit_seq", 0))
         if want or sig != self.__dict__.get("_cat_saved_sig"):  # nothing changed: no gzip rewrite

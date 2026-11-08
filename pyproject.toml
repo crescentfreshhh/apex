@@ -36,6 +36,7 @@ web = [
     "fastapi>=0.110",   # control-panel + explorer API
     "uvicorn>=0.27",    # ASGI server
     "python-multipart", # form/file uploads (reference stills)
+    "websockets>=12",   # Stash change notifications (GraphQL subscriptions)
 ]
 dev = [
     "pytest>=7",      # the offline test suite (no torch/ffmpeg/Stash needed)

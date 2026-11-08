@@ -543,6 +543,7 @@ def create_app(cfg=None):
             "embed_running": jobs.running("embed") is not None,
             "score_running": jobs.running("score") is not None,
             "auth": _auth_on,
+            "stash_events": service.stash_events_status(),
         }
 
     # --- jobs ---------------------------------------------------------------
@@ -3095,6 +3096,13 @@ def create_app(cfg=None):
 
     if _os.environ.get("PEAKS_SCHEDULER", "1").strip().lower() not in ("0", "false", "no", "off"):
         _start_scheduler(app, service, jobs)  # always on; it reads the interval live
+        if __import__("os").environ.get("PEAKS_STASH_EVENTS", "1") != "0":
+            try:                                  # Stash tells us when a scan adds scenes (no-op without websockets)
+                import websockets  # noqa: F401
+
+                service.start_stash_events()
+            except ImportError:
+                pass
 
     @app.on_event("shutdown")
     def _stop_scheduler():
