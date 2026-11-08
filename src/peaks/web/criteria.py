@@ -53,11 +53,18 @@ class CriteriaMixin:
     def _pcrit_path(self) -> Path:
         return self._state_dir() / "performer_criteria.json"
 
+    def _crit_store(self):
+        st = self.store()
+        st.migrate_map("criteria", self._crit_path())
+        st.migrate_map("performer_criteria", self._pcrit_path())
+        return st
+
     def criteria_reasons(self) -> dict:
-        return atomic.read_json(self._crit_path(), default={}) or {}
+        """{scene_id: {aspect: ±1, at}} — shared with other readers (read-only)."""
+        return self._crit_store().map_all("criteria")
 
     def performer_criteria(self) -> dict:
-        return atomic.read_json(self._pcrit_path(), default={}) or {}
+        return self._crit_store().map_all("performer_criteria")
 
     def set_scene_criterion(self, scene_id: str, aspect: str, value: int) -> dict:
         """▲ (+1) / ▼ (−1) / clear (0) one criterion for a scene."""
@@ -66,7 +73,8 @@ class CriteriaMixin:
         sid = str(scene_id)
         p = self._crit_path()
         with atomic.edit_lock(p):
-            d = self.criteria_reasons()
+            st = self._crit_store()
+            d = st.map_all("criteria")
             e = dict(d.get(sid) or {})
             if int(value):
                 e[aspect] = int(value)
@@ -74,11 +82,9 @@ class CriteriaMixin:
                 e.pop(aspect, None)
             e["at"] = time.time()
             if any(k in e for k in ASPECTS):
-                d[sid] = e
+                st.map_set("criteria", sid, e)
             else:
-                d.pop(sid, None)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            atomic.write_json(p, d, indent=1)
+                st.map_delete("criteria", sid)
         self._crit_dirty()
         row = next((r for r in self._catalogue_all() if r["scene_id"] == sid), None)
         if row is not None and int(value):
@@ -92,16 +98,14 @@ class CriteriaMixin:
         pid = str(pid)
         p = self._pcrit_path()
         with atomic.edit_lock(p):
-            d = self.performer_criteria()
-            e = dict(d.get(pid) or {})
+            st = self._crit_store()
+            e = dict(st.map_all("performer_criteria").get(pid) or {})
             if value is None:
                 e.pop(aspect, None)
             else:
                 e[aspect] = int(value)
             e["at"] = time.time()
-            d[pid] = e
-            p.parent.mkdir(parents=True, exist_ok=True)
-            atomic.write_json(p, d, indent=1)
+            st.map_set("performer_criteria", pid, e)
         self._crit_dirty()
         return {"id": pid, "ratings": {k: e[k] for k in PERFORMER_ASPECTS if k in e}}
 
@@ -235,10 +239,11 @@ class CriteriaMixin:
                     for a in ASPECTS}
         return self._crit_build()
 
-    def _crit_stamp(self) -> tuple:
-        return (self._crit_path().stat().st_mtime_ns if self._crit_path().exists() else 0,
-                self._pcrit_path().stat().st_mtime_ns if self._pcrit_path().exists() else 0,
-                getattr(self.index(self._model_name()), "gen", 0), len(self._catalogue_all()),
+    def _crit_stamp(self, rows=None) -> tuple:
+        st = self._crit_store()
+        return (st.version("criteria"), st.version("performer_criteria"),
+                getattr(self.index(self._model_name()), "gen", 0),
+                len(rows) if rows is not None else len(self._catalogue_all()),
                 len(self.__dict__.get("_face_all") or ()))
 
     def _crit_rebuild_soon(self) -> None:
@@ -258,10 +263,7 @@ class CriteriaMixin:
 
     def _crit_build(self) -> dict:
         rows = {r["scene_id"]: r for r in self._catalogue_all()}
-        stamp = (self._crit_path().stat().st_mtime_ns if self._crit_path().exists() else 0,
-                 self._pcrit_path().stat().st_mtime_ns if self._pcrit_path().exists() else 0,
-                 getattr(self.index(self._model_name()), "gen", 0), len(rows),
-                 len(self.__dict__.get("_face_all") or ()))
+        stamp = self._crit_stamp(rows)
         hit = self.__dict__.get("_crit_cache")
         if hit is not None and hit[0] == stamp:
             return hit[1]

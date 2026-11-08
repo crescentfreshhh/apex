@@ -56,23 +56,8 @@ class TrendMixin:
 
     def _trend_deletes(self) -> list[dict]:
         """Every file deletion from the action log: {d, bytes}, oldest first."""
-        out = []
-        path = self.action_log().path
-        try:
-            fh = path.open(encoding="utf-8")
-        except OSError:
-            return out
-        with fh:
-            for ln in fh:
-                if '"delete"' not in ln:
-                    continue
-                try:
-                    e = json.loads(ln)
-                except ValueError:
-                    continue
-                if e.get("action") == "delete" and e.get("file_deleted", True):
-                    out.append({"d": str(e.get("ts", ""))[:10], "bytes": int(e.get("size") or 0)})
-        return out
+        return [{"d": str(e.get("ts", ""))[:10], "bytes": int(e.get("size") or 0)}
+                for e in self.action_log().where("delete") if e.get("file_deleted", True)]
 
     def library_trend(self, days: int = 365) -> dict:
         rows = self._catalogue_all()

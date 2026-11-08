@@ -41,8 +41,9 @@ DEFAULTS = {"backup_on": True, "backup_day": 6, "backup_hour": 4, "backup_minute
 
 
 def _scratch(name: str) -> bool:
-    """Half-written saves and set-aside damaged copies — never backed up."""
-    return name.endswith(".tmp") or ".damaged-" in name
+    """Half-written saves, set-aside damaged copies and SQLite's side files
+    (the database itself is copied consistently) — never backed up."""
+    return name.endswith((".tmp", ".db-wal", ".db-shm", ".restore-tmp")) or ".damaged-" in name
 
 
 def _sha(path: Path) -> str:
@@ -228,7 +229,8 @@ class BackupMixin:
                     continue                           # vanished mid-run (a cache being rewritten)
                 old = prev / part / rel if prev else None
                 did_link = False
-                if links_ok and old is not None:
+                is_db = src.suffix == ".db"
+                if links_ok and old is not None and not is_db:      # a live database is never "unchanged"
                     try:
                         ost = old.stat()
                         if ost.st_size == st.st_size and int(ost.st_mtime) == int(st.st_mtime):
@@ -244,7 +246,10 @@ class BackupMixin:
                     from .. import atomic
 
                     with atomic.temp_for(dest) as tmp:
-                        shutil.copy2(src, tmp)
+                        if is_db:
+                            self.store().snapshot_to(tmp)
+                        else:
+                            shutil.copy2(src, tmp)
                     copied += 1
                     new_bytes += st.st_size
                 pb += st.st_size
@@ -321,6 +326,7 @@ class BackupMixin:
         log("safety snapshot of the current state first…")
         safety = self.run_backup(job=None, label="before restore", prune=False)["name"]
         sources = self._part_sources()
+        self.store().close()                            # the WAL folds into the file; nothing stale is replayed later
         restored = 0
         for part in PARTS:
             pdir = d / part
@@ -342,6 +348,9 @@ class BackupMixin:
                     tmp.unlink(missing_ok=True)
                     raise RuntimeError(f"checksum mismatch for {part}/{rel} — the snapshot is damaged")
                 with atomic.edit_lock(dest):        # no save in progress can put the old file back after
+                    if dest.suffix == ".db":
+                        for side in ("-wal", "-shm"):
+                            dest.with_name(dest.name + side).unlink(missing_ok=True)
                     os.replace(tmp, dest)
                 have.discard(rel)
                 restored += 1
@@ -366,6 +375,10 @@ class BackupMixin:
         """Forget everything read from disk so the restored files take effect."""
         self._settings_cache = None
         try:
+            self.store().close()                    # re-read the restored database
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self.invalidate_index()
         except Exception:  # noqa: BLE001
             pass
@@ -377,7 +390,8 @@ class BackupMixin:
         for attr in ("_tier_state", "_tier_preds", "_cat_cache", "_who_cache", "_perf_dir_cache",
                      "_perf_by_id", "_exposure", "_scale_cache", "_vis_feat_cache",
                      # in-memory copies of state files: else the next save writes the old state back
-                     "_vd_mem", "_dq_mem", "_orph_mem", "_watch_mem", "_motion_span_memo", "_motion_bank_cache",
+                     "_vd_mem", "_vd_touched", "_action_log", "_dq_mem", "_orph_mem", "_watch_mem",
+                     "_motion_span_memo", "_motion_bank_cache",
                      "_zoom_model_cache", "_hear_keys_cache", "_sound_vec_memo", "_motion_vec_memo"):
             self.__dict__.pop(attr, None)
         self._perf_stats_cache = None

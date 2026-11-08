@@ -10,7 +10,6 @@ and suggestion, whether Settle would ask about it, and who its faces are.
 
 from __future__ import annotations
 
-import json
 import time
 
 
@@ -31,22 +30,7 @@ def _epoch(ts: str | float | None) -> float | None:
 class TimelineMixin:
     def _tl_actions(self, sid: str, fp: str | None) -> list[dict]:
         """Action-log lines about this scene (by id, or by file fingerprint after a re-scan)."""
-        p = self._state_dir() / "actions.jsonl"
-        out = []
-        try:
-            with p.open(encoding="utf-8") as fh:
-                for ln in fh:
-                    if sid not in ln and not (fp and fp in ln):
-                        continue                         # cheap filter before parsing
-                    try:
-                        e = json.loads(ln)
-                    except ValueError:
-                        continue
-                    if str(e.get("scene_id")) == sid or (fp and e.get("fingerprint") == fp):
-                        out.append(e)
-        except OSError:
-            pass
-        return out
+        return self.action_log().about(sid, fp)
 
     def _tl_event(self, e: dict, names: dict) -> dict | None:
         a, src = e.get("action"), str(e.get("source") or "")

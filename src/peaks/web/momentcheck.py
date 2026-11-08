@@ -18,7 +18,6 @@ from __future__ import annotations
 from ..atomic import settings_saver as _settings_saver
 
 
-import json
 import time
 from pathlib import Path
 
@@ -34,24 +33,16 @@ class MomentCheckMixin:
     def _mc_path(self, name: str) -> Path:
         return self._state_dir() / name
 
-    def _mc_append(self, name: str, rec: dict) -> None:
-        p = self._mc_path(name)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a") as fh:
-            fh.write(json.dumps(rec) + "\n")
+    def _mc_store(self, name: str):
+        st = self.store()
+        st.migrate_log(name.removesuffix(".jsonl"), self._mc_path(name))
+        return st
 
-    def _mc_read(self, name: str) -> list[dict]:
-        try:
-            lines = self._mc_path(name).read_text().splitlines()
-        except OSError:
-            return []
-        out = []
-        for ln in lines:
-            try:
-                out.append(json.loads(ln))
-            except ValueError:
-                continue
-        return out
+    def _mc_append(self, name: str, rec: dict) -> None:
+        self._mc_store(name).log_append(name.removesuffix(".jsonl"), rec, scene_id=rec.get("scene_id"))
+
+    def _mc_read(self, name: str, scene_id=None) -> list[dict]:
+        return self._mc_store(name).log_read(name.removesuffix(".jsonl"), scene_id=scene_id)
 
     @staticmethod
     def _mc_hit(picks: list[float], t: float) -> int | None:
@@ -91,7 +82,7 @@ class MomentCheckMixin:
 
     def answered_picks(self, scene_id: str) -> list[float]:
         """Times of this scene's picks you've already answered (👍/👎)."""
-        return [float(x["t"]) for x in self._mc_read("pick_feedback.jsonl") if x.get("scene_id") == str(scene_id)]
+        return [float(x["t"]) for x in self._mc_read("pick_feedback.jsonl", scene_id=str(scene_id))]
 
     def pick_prompts_on(self) -> bool:
         return bool(self._settings().get("pick_prompts", True))

@@ -278,12 +278,10 @@ class TodayMixin:
         """This week's decisions from the action log (every screen, not just this one)."""
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 7 * 86400))
         out = {"decisions": 0, "promoted": 0, "let_go": 0, "freed": 0}
-        try:
-            p = self.action_log().path
-            st = p.stat()
-            stamp = (st.st_mtime_ns, st.st_size, cutoff[:13])
-        except OSError:
+        stamp = self.action_log().stamp()
+        if stamp is None:
             return out
+        stamp = (stamp, cutoff[:13])
         hit = self.__dict__.get("_week_tally_cache")
         if hit is not None and hit[0] == stamp:
             return dict(hit[1])

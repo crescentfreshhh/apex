@@ -2553,10 +2553,13 @@ def create_app(cfg=None):
 
     @app.get("/api/history/download")
     def history_download():
-        path = service.action_log().path
-        if not path.is_file():
+        from starlette.responses import StreamingResponse
+
+        log = service.action_log()
+        if not log.tail(1):
             raise HTTPException(404, "nothing logged yet")
-        return FileResponse(path, media_type="application/x-ndjson", filename="peaks-actions.jsonl")
+        return StreamingResponse(log.lines(), media_type="application/x-ndjson",
+                                 headers={"Content-Disposition": 'attachment; filename="peaks-actions.jsonl"'})
 
     @app.get("/api/backups")
     def backups():

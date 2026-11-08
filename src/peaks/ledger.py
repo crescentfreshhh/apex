@@ -20,18 +20,99 @@ from .tiers import tier_of
 
 
 class ActionLog:
-    def __init__(self, path: str | Path):
+    """Appends to ``actions.jsonl`` — or, given a ``peaks.store.Store``, to its
+    ``actions`` log (the file, if one is there, is imported first)."""
+
+    LOG = "actions"
+
+    def __init__(self, path: str | Path, store=None):
         self.path = Path(path)
+        self.store = store
+        if store is not None:
+            store.migrate_log(self.LOG, self.path, at_key="ts")
 
     def append(self, action: str, **fields) -> dict:
         entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "action": action, **fields}
+        if self.store is not None:
+            self.store.log_append(self.LOG, entry, at=time.time(), scene_id=fields.get("scene_id"))
+            return entry
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         return entry
 
+    def stamp(self):
+        """Changes whenever the log does (memo keys)."""
+        if self.store is not None:
+            return ("store", self.store.version(self.LOG))
+        try:
+            st = self.path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def about(self, scene_id: str, fingerprint: str | None = None) -> list[dict]:
+        """Every entry about one scene (by id; by file fingerprint too, after a re-scan)."""
+        sid = str(scene_id)
+        if self.store is not None:
+            out = self.store.log_read(self.LOG, scene_id=sid)
+            if fingerprint:
+                have = {(e.get("ts"), e.get("action")) for e in out}
+                out += [e for e in self.store.log_read(self.LOG, contains=fingerprint)
+                        if e.get("fingerprint") == fingerprint and (e.get("ts"), e.get("action")) not in have]
+                out.sort(key=lambda e: e.get("ts") or "")
+            return out
+        out = []
+        try:
+            with self.path.open(encoding="utf-8") as fh:
+                for ln in fh:
+                    if sid not in ln and not (fingerprint and fingerprint in ln):
+                        continue                         # cheap filter before parsing
+                    try:
+                        e = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if str(e.get("scene_id")) == sid or (fingerprint and e.get("fingerprint") == fingerprint):
+                        out.append(e)
+        except OSError:
+            pass
+        return out
+
+    def where(self, action: str) -> list[dict]:
+        """Every entry of one action, oldest first."""
+        if self.store is not None:
+            return [e for e in self.store.log_read(self.LOG, contains=f'"action":"{action}"') if e.get("action") == action]
+        out = []
+        try:
+            with self.path.open(encoding="utf-8") as fh:
+                for ln in fh:
+                    if f'"{action}"' not in ln:
+                        continue
+                    try:
+                        e = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if e.get("action") == action:
+                        out.append(e)
+        except OSError:
+            pass
+        return out
+
+    def lines(self):
+        """Every entry as a JSON line, oldest first (a download)."""
+        if self.store is not None:
+            yield from self.store.log_iter_lines(self.LOG)
+            return
+        try:
+            with self.path.open(encoding="utf-8") as fh:
+                yield from fh
+        except OSError:
+            return
+
     def tail(self, n: int = 200) -> list[dict]:
         """The latest `n` entries, newest first. Unreadable lines are skipped."""
+        if self.store is not None:
+            return self.store.log_tail(self.LOG, n)
         if not self.path.is_file():
             return []
         last: deque[str] = deque(maxlen=max(1, int(n)))

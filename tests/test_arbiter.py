@@ -1,6 +1,5 @@
 """The Arbiter (honest verdicts + the argument), moment checks, and the shrink trendline."""
 
-import json
 import os
 import sys
 
@@ -141,10 +140,8 @@ def test_trend_backfill_and_daily_snapshot(tmp_path, monkeypatch):
         v["size"] = 1_000_000_000
     svc.catalogue(refresh=True)
     gone_day = (today - timedelta(days=10)).isoformat()
-    svc.action_log().path.parent.mkdir(parents=True, exist_ok=True)
-    with svc.action_log().path.open("a") as fh:
-        fh.write(json.dumps({"ts": f"{gone_day}T09:00:00", "action": "delete", "size": 5_000_000_000,
-                             "file_deleted": True}) + "\n")
+    svc.store().log_append("actions", {"ts": f"{gone_day}T09:00:00", "action": "delete", "size": 5_000_000_000,
+                                       "file_deleted": True}, at=0.0)
     t = svc.library_trend(days=30)
     by_d = {p["d"]: p for p in t["points"]}
     n = len(stash.s)

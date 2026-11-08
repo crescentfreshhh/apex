@@ -16,7 +16,6 @@ evidence. A tier changed outside Peaks voids the verdict.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from pathlib import Path
@@ -38,20 +37,26 @@ class VerdictMixin:
     def _vd(self) -> dict:
         d = self.__dict__.get("_vd_mem")
         if d is None:
-            try:
-                d = json.loads(self._vd_path().read_text())
-            except (OSError, ValueError):
-                d = {}
-            self._vd_mem = d
+            st = self.store()
+            st.migrate_map("verdicts", self._vd_path())
+            d = self._vd_mem = dict(st.map_all("verdicts"))
+            self._vd_touched = set()
         return d
 
-    def _vd_save(self) -> None:
-        p = self._vd_path()
-        from .. import atomic
+    def _vd_touch(self, sid: str) -> None:
+        self.__dict__.setdefault("_vd_touched", set()).add(str(sid))
 
+    def _vd_save(self) -> None:
+        """Write the rows that changed (never the whole map)."""
         self._vd_ver = self.__dict__.get("_vd_ver", 0) + 1       # memo keys: the answers changed
         self._vd_dirty = False
-        atomic.write_json(p, self._vd())
+        d = self._vd()
+        touched = self.__dict__.get("_vd_touched") or set()
+        self._vd_touched = set()
+        if not touched:
+            return
+        self.store().map_set_many("verdicts", {s: d[s] for s in touched if s in d},
+                                  delete=[s for s in touched if s not in d])
 
     def _vd_flush_soon(self) -> None:
         """Evidence noted while a page was built is saved a little later, once —
@@ -83,6 +88,7 @@ class VerdictMixin:
             if prev:
                 prev = {k: v for k, v in prev.items() if k != "prev"}   # one level of undo
             d[sid] = {"tier": tier, "at": time.time(), "src": source, "ev": None, "prev": prev}
+            self._vd_touch(sid)
             self._vd_save()
 
     def undo_verdict(self, sid: str) -> None:
@@ -93,6 +99,7 @@ class VerdictMixin:
             v = d.pop(sid, None)
             if v and v.get("prev"):
                 d[sid] = v["prev"]
+            self._vd_touch(sid)
             self._vd_save()
 
     def keep_as_is(self, scene_id: str) -> dict:
@@ -145,6 +152,7 @@ class VerdictMixin:
             with self._vd_lock():
                 v["ev"] = {"saves": int(sig.get("saves") or 0), "pred": guess,
                            "showings": float(sig.get("showings") or 0)}
+                self._vd_touch(row["scene_id"])
             self._vd_flush_soon()
             return True
         ev = v["ev"]
@@ -172,5 +180,7 @@ class VerdictMixin:
     def clear_verdicts(self) -> dict:
         with self._vd_lock():
             self._vd().clear()
-            self._vd_save()
+            self._vd_touched = set()
+            self._vd_ver = self.__dict__.get("_vd_ver", 0) + 1
+            self.store().map_replace("verdicts", {})
         return self.verdict_status()

@@ -971,7 +971,7 @@ def test_board_exposure_api(svc):
     client = TestClient(app_mod.create_app(svc.cfg))
     r = client.post("/api/board/exposure", json={"shows": {"5": 1.0}, "pos": {"6": 1}})
     assert r.status_code == 200 and r.json()["scenes"] == 2
-    st = ExposureStore(svc.exposure().path)
+    st = ExposureStore(svc.exposure().path, store=svc.store())            # persisted in the store
     assert st.summary("5")["showings"] == 1.0 and st.summary("6")["pos"] == 1
 
 

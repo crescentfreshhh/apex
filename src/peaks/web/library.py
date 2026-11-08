@@ -24,10 +24,22 @@ class LibraryMixin:
     def _backup_dir(self) -> Path:
         return self._state_dir() / "backups"
 
+    def store(self):
+        """Peaks' own state (peaks.store): one SQLite file in the state dir."""
+        st = self.__dict__.get("_store")
+        if st is None:
+            from ..store import open_store
+
+            st = self._store = open_store(self._state_dir() / "peaks.db")
+        return st
+
     def action_log(self):
         from ..ledger import ActionLog
 
-        return ActionLog(self._state_dir() / "actions.jsonl")
+        log = self.__dict__.get("_action_log")
+        if log is None or log.store is not self.store():
+            log = self._action_log = ActionLog(self._state_dir() / "actions.jsonl", store=self.store())
+        return log
 
     def _log_scene(self, action: str, row: dict | None, **fields) -> None:
         """One action-log line about a scene, identified every way that survives

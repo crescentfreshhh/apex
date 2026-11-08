@@ -123,7 +123,6 @@ def test_a_ruling_settles_a_disagreement_until_you_regrade(tmp_path, monkeypatch
 
 
 def test_history_projection_and_the_api(tmp_path, monkeypatch):
-    import json
     import time
 
     from fastapi.testclient import TestClient
@@ -131,10 +130,10 @@ def test_history_projection_and_the_api(tmp_path, monkeypatch):
     import peaks.web.app as app_mod
 
     svc, stash, (wrong,), _ = _library(tmp_path, monkeypatch)
-    p = svc._settle_history_path()
     now = time.time()
-    p.write_text("".join(json.dumps({"at": now - 86400 * (3 - i), "unsettled": 40 - 10 * i, "answers": 20 * i}) + "\n"
-                         for i in range(4)))
+    svc.store().log_clear("settle_history")                                     # the history is exactly these points
+    for i in range(4):
+        svc.store().log_append("settle_history", {"at": now - 86400 * (3 - i), "unsettled": 40 - 10 * i, "answers": 20 * i})
     st = svc.settle_state()
     assert st["projection"] and st["projection"]["per_answer"] == 0.5
     assert st["projection"]["answers"] == int(np.ceil(st["unsettled"] / 0.5))

@@ -2557,8 +2557,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         path = Path(self.cfg.modeling.dir) / "board_exposure.json"
         st = self.__dict__.get("_exposure")
-        if st is None or st.path != path:
-            st = self._exposure = ExposureStore(path)
+        if st is None or st.path != path or st.store is not self.store():
+            st = self._exposure = ExposureStore(path, store=self.store())
         return st
 
     def record_board_exposure(self, shows: dict | None = None, pos: dict | None = None,

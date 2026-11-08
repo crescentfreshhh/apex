@@ -50,8 +50,7 @@ def test_a_get_never_writes_verdicts(tmp_path, monkeypatch):
     svc, stash = _triage_svc(tmp_path, monkeypatch)
     svc.train_tier_model()
     svc.grade_scene("u1", "legendaire")                       # an answer, recorded
-    p = svc._vd_path()
-    before = p.stat().st_mtime_ns
+    before = svc.store().version("verdicts")
     writes = []
     real = type(svc)._vd_save
     monkeypatch.setattr(type(svc), "_vd_save", lambda self: writes.append(1) or real(self))
@@ -59,7 +58,7 @@ def test_a_get_never_writes_verdicts(tmp_path, monkeypatch):
         svc.catalogue(view="saved", limit=20)
         svc.catalogue(view="trim", limit=20)
         svc.library_summary()
-    assert writes == [] and p.stat().st_mtime_ns == before    # nothing written inside the GETs
+    assert writes == [] and svc.store().version("verdicts") == before    # nothing written inside the GETs
 
 
 def test_telemetry_writes_keep_the_snapshots(tmp_path, monkeypatch):

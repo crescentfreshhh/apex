@@ -75,9 +75,9 @@ class HearMixin:
         return Path(self.cfg.modeling.dir) / "sense_failures.json"
 
     def _sense_fail_all(self) -> dict:
-        from .. import atomic
-
-        return atomic.read_json(self._sense_fail_path(), default={}) or {}
+        st = self.store()
+        st.migrate_map("sense_failures", self._sense_fail_path())
+        return st.map_all("sense_failures")
 
     def sense_failures(self, sense: str) -> dict:
         """{scene_id: {n, at, msg, fp}} for one sense ("motion", "hear")."""
@@ -89,14 +89,12 @@ class HearMixin:
         p = self._sense_fail_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         with atomic.edit_lock(p):
-            d = self._sense_fail_all()
-            cur = dict(d.get(sense) or {})
+            cur = dict(self._sense_fail_all().get(sense) or {})
             fn(cur)
             if cur:
-                d[sense] = cur
+                self.store().map_set("sense_failures", sense, cur)
             else:
-                d.pop(sense, None)
-            atomic.write_json(p, d, indent=1)
+                self.store().map_delete("sense_failures", sense)
         self.__dict__.pop("_sense_fail_memo", None)
 
     def _sense_failed(self, sense: str, row: dict, exc) -> None:

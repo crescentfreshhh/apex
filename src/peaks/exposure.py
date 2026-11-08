@@ -29,13 +29,24 @@ MAX_DAYS = 120          # per scene, the most recent days kept
 
 
 class ExposureStore:
-    def __init__(self, path: str | Path):
+    """Given a ``peaks.store.Store``, the rows live in its ``board_exposure`` map
+    (the JSON file, if there is one, is imported first) and a batch writes only
+    the scenes it touched; without one, the JSON file is the store."""
+
+    MAP = "board_exposure"
+
+    def __init__(self, path: str | Path, store=None):
         self.path = Path(path)
+        self.store = store
         self._lock = threading.Lock()
         self._rows: dict[str, dict] | None = None
         self._mtime: float | None = None
+        if store is not None:
+            store.migrate_map(self.MAP, self.path, unwrap="scenes")
 
     def _load(self) -> dict[str, dict]:
+        if self.store is not None:
+            return self.store.map_all(self.MAP)
         try:
             mtime = self.path.stat().st_mtime
         except OSError:
@@ -50,11 +61,17 @@ class ExposureStore:
 
     def version(self):
         """Changes whenever the record does (memo keys)."""
+        if self.store is not None:
+            return self.store.version(self.MAP)
         with self._lock:
             self._load()
             return self._mtime
 
-    def _save(self) -> None:
+    def _save(self, touched=None, gone=()) -> None:
+        if self.store is not None:
+            rows = self._load()
+            self.store.map_set_many(self.MAP, {s: rows[s] for s in (touched or ()) if s in rows}, delete=list(gone))
+            return
         from . import atomic
 
         atomic.write_text(self.path, json.dumps({"scenes": self._rows}, separators=(",", ":")))
@@ -91,7 +108,7 @@ class ExposureStore:
                         r["last_pos"] = now
                     touched.add(str(sid))
             if touched:
-                self._save()
+                self._save(touched)
         return len(touched)
 
     def summary(self, sid: str) -> dict:
@@ -117,7 +134,7 @@ class ExposureStore:
         with self._lock:
             old = self._load().pop(str(sid), None)
             if old is not None:
-                self._save()
+                self._save(gone=[str(sid)])
         return old
 
     def restore(self, sid: str, row: dict | None) -> None:
@@ -125,7 +142,7 @@ class ExposureStore:
             return
         with self._lock:
             self._load()[str(sid)] = row
-            self._save()
+            self._save([str(sid)])
 
     def drop(self, sids) -> None:
         with self._lock:
@@ -134,4 +151,4 @@ class ExposureStore:
             for s in gone:
                 del rows[s]
             if gone:
-                self._save()
+                self._save(gone=gone)

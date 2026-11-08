@@ -17,7 +17,6 @@ The two kinds are interleaved. The calibration (where Peaks is right 9 times in
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -74,37 +73,17 @@ class SettleMixin:
     def _rulings_path(self) -> Path:
         return self._state_dir() / "rulings.json"
 
+    def _rulings_store(self):
+        st = self.store()
+        st.migrate_map("rulings", self._rulings_path())
+        return st
+
     def rulings(self) -> dict:
-        """Your rulings, read once per change of the file (several views ask per page)."""
-        p = self._rulings_path()
-        try:
-            st = p.stat()
-            stamp = (st.st_mtime_ns, st.st_size)
-        except OSError:
-            return {}
-        hit = self.__dict__.get("_rulings_cache")
-        if hit is not None and hit[0] == stamp:
-            return hit[1]
-        try:
-            d = json.loads(p.read_text())
-        except (OSError, ValueError):
-            d = {}
-        self._rulings_cache = (stamp, d)
-        return d
+        """Your rulings: {scene_id: {grade, at}} (shared with other readers — read-only)."""
+        return self._rulings_store().map_all("rulings")
 
     def _rulings_stamp(self):
-        try:
-            st = self._rulings_path().stat()
-            return (st.st_mtime_ns, st.st_size)
-        except OSError:
-            return None
-
-    def _rulings_save(self, d: dict) -> None:
-        from .. import atomic
-
-        self._rulings_path().parent.mkdir(parents=True, exist_ok=True)
-        atomic.write_json(self._rulings_path(), d, indent=1)
-        self.__dict__.pop("_rulings_cache", None)
+        return self._rulings_store().version("rulings")
 
     def settle_rule(self, sid: str, _verdict_only: bool = False) -> dict:
         """"Keep mine": your grade stands against Peaks' disagreement, for good —
@@ -115,10 +94,8 @@ class SettleMixin:
         from .. import atomic
 
         with atomic.edit_lock(self._rulings_path()):
-            d = self.rulings()
-            prev = d.get(str(sid))
-            d[str(sid)] = {"grade": row["tier"], "at": time.time()}
-            self._rulings_save(d)
+            prev = self.rulings().get(str(sid))
+            self._rulings_store().map_set("rulings", str(sid), {"grade": row["tier"], "at": time.time()})
         self._settle_log(answer=True)
         if not _verdict_only:                 # "Keep mine" also answers the suggestion lists
             try:
@@ -145,22 +122,22 @@ class SettleMixin:
         from .. import atomic
 
         with atomic.edit_lock(self._rulings_path()):
-            d = self.rulings()
             if restore and restore.get("grade"):
-                d[str(sid)] = {"grade": restore["grade"], "at": restore.get("at") or time.time()}
+                self._rulings_store().map_set("rulings", str(sid), {"grade": restore["grade"], "at": restore.get("at") or time.time()})
             else:
-                d.pop(str(sid), None)
-            self._rulings_save(d)
+                self._rulings_store().map_delete("rulings", str(sid))
         return {"ruled": bool(restore), "scene_id": str(sid)}
 
     def _settle_history_path(self) -> Path:
         return self._state_dir() / "settle_history.jsonl"
 
+    def _settle_history_store(self):
+        st = self.store()
+        st.migrate_log("settle_history", self._settle_history_path())
+        return st
+
     def settle_history(self) -> list[dict]:
-        try:
-            return [json.loads(x) for x in self._settle_history_path().read_text().splitlines() if x.strip()]
-        except (OSError, ValueError):
-            return []
+        return self._settle_history_store().log_read("settle_history")
 
     def _settle_log(self, answer: bool = False, state: dict | None = None, force: bool = False) -> None:
         """One history point: the unsettled count and how many answers so far.
@@ -179,10 +156,8 @@ class SettleMixin:
             st = state or self.settle_state(log=False)
         except Exception:  # noqa: BLE001 — no model yet: nothing to log
             return
-        p = self._settle_history_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a") as fh:
-            fh.write(json.dumps({"at": time.time(), "unsettled": st["unsettled"], "answers": self._settle_answers}) + "\n")
+        self._settle_history_store().log_append(
+            "settle_history", {"at": time.time(), "unsettled": st["unsettled"], "answers": self._settle_answers})
         self._settle_logged_at = time.time()
 
     # --- the questions ---------------------------------------------------------------------
