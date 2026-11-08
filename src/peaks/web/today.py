@@ -279,6 +279,15 @@ class TodayMixin:
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 7 * 86400))
         out = {"decisions": 0, "promoted": 0, "let_go": 0, "freed": 0}
         try:
+            p = self.action_log().path
+            st = p.stat()
+            stamp = (st.st_mtime_ns, st.st_size, cutoff[:13])
+        except OSError:
+            return out
+        hit = self.__dict__.get("_week_tally_cache")
+        if hit is not None and hit[0] == stamp:
+            return dict(hit[1])
+        try:
             entries = self.action_log().tail(20000)
         except Exception:  # noqa: BLE001
             return out
@@ -295,6 +304,7 @@ class TodayMixin:
                     out["let_go"] += 1
             elif a == "delete":
                 out["freed"] += int(e.get("size") or 0)
+        self._week_tally_cache = (stamp, dict(out))
         return out
 
 

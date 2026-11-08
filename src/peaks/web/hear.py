@@ -168,7 +168,7 @@ class HearMixin:
         idx = self.index(self._model_name())
         hit = self.__dict__.get("_hear_keys_cache")
         if hit is None or hit[0] != idx.gen:          # by build number: never pins an old index in memory
-            hit = (idx.gen, {str(m.get("scene_id")): k for k, m in idx.key_meta.items()})
+            hit = (idx.gen, idx.sid_key)
             self._hear_keys_cache = hit
         return hit[1]
 

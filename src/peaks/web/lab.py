@@ -260,7 +260,7 @@ class LabMixin:
         try:
             rows = self.lab_sample()
             idx = self.index(self._model_name())
-            key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+            key_of = idx.sid_key
             sampler = self._lab_sampler()
             sig = getattr(sampler, "interval_signature", sampler.interval)
             cache = EmbeddingCache(self.cfg.embedding.cache_dir)
@@ -290,7 +290,7 @@ class LabMixin:
         sig = getattr(sampler, "interval_signature", sampler.interval)
         ns = dino_cache_name(cand)
         idx = self.index(self._model_name())
-        key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        key_of = idx.sid_key
         bad = self._lab_drop_broken(cache, ns, [key_of[str(sc.id)] for sc in scenes if str(sc.id) in key_of])
         if bad:
             log(f"{bad} scene(s) were embedded with broken (NaN) frames by an earlier version — embedding them again")
@@ -320,7 +320,7 @@ class LabMixin:
 
         cache = EmbeddingCache(self.cfg.embedding.cache_dir)
         idx = self.index(self._model_name())
-        key_of = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        key_of = idx.sid_key
         out = {}
         for r in rows:
             k = key_of.get(r["scene_id"])

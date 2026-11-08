@@ -126,7 +126,7 @@ class MomentCheckMixin:
         by_scene: dict[str, list[float]] = {}
         for s in apex:
             by_scene.setdefault(str(s["scene_id"]), []).append(float(s["time"]))
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         owner = np.array([str(s.get("scene_id") or "") for s in sources])
         out = {"scenes": 0, "saves": 0, "top1": 0, "top3": 0, "examples": []}
         if arr.shape[0] == 0:

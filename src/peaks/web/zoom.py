@@ -224,7 +224,7 @@ class ZoomMixin:
         """Dense frames around each candidate of one scene, embedded and cached."""
         sid = row["scene_id"]
         idx = self.index(self._model_name())
-        key = next((k for k, m in idx.key_meta.items() if str(m.get("scene_id")) == sid), None)
+        key = idx.sid_key.get(sid)
         if key is None:
             raise LookupError(f"scene {sid} isn't embedded")
         cands = self.zoom_candidates(sid, saved)

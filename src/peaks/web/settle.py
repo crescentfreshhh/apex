@@ -75,16 +75,36 @@ class SettleMixin:
         return self._state_dir() / "rulings.json"
 
     def rulings(self) -> dict:
+        """Your rulings, read once per change of the file (several views ask per page)."""
+        p = self._rulings_path()
         try:
-            return json.loads(self._rulings_path().read_text())
-        except (OSError, ValueError):
+            st = p.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
             return {}
+        hit = self.__dict__.get("_rulings_cache")
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        self._rulings_cache = (stamp, d)
+        return d
+
+    def _rulings_stamp(self):
+        try:
+            st = self._rulings_path().stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
 
     def _rulings_save(self, d: dict) -> None:
         from .. import atomic
 
         self._rulings_path().parent.mkdir(parents=True, exist_ok=True)
         atomic.write_json(self._rulings_path(), d, indent=1)
+        self.__dict__.pop("_rulings_cache", None)
 
     def settle_rule(self, sid: str, _verdict_only: bool = False) -> dict:
         """"Keep mine": your grade stands against Peaks' disagreement, for good —
@@ -258,7 +278,7 @@ class SettleMixin:
             value = unc * (0.25 + rep)
             order = [have[j] for j in spread_order(value, X, min(QUEUE, len(have)))]
             order += [r for r in drains if r["scene_id"] not in vecs][: max(0, QUEUE - len(order))]
-        dis = sorted(c["disagree"], key=lambda r: -preds[r["scene_id"]]["conf"])
+        dis = sorted(c["disagree"], key=lambda r: -preds[r["scene_id"]]["conf"])[:QUEUE * 3]   # a page's worth of questions, not thousands
         # the two kinds interleaved in proportion, so neither waits for the other to run out
         out: list[dict] = []
         di = oi = 0
@@ -286,7 +306,7 @@ class SettleMixin:
                                               f"({round(100 * p['conf'])}%, {'sure' if sure else 'leaning'})"}
         try:                                        # your criteria on every question: Peaks' read, your reasons, one to teach
             reasons = self.criteria_reasons()
-            self.criteria_models(wait=False)        # built once (cached) for the whole list
+            cm = self.criteria_models(wait=False)   # once for the whole list (not stats + a lock per question)
         except Exception:  # noqa: BLE001 — criteria are extra
             reasons = None
         if reasons is not None:
@@ -296,7 +316,7 @@ class SettleMixin:
                 sid = r["scene_id"]
                 try:                                # one scene failing never blanks the rest
                     info[sid]["criteria"] = {"reasons": {k: v for k, v in (reasons.get(sid) or {}).items() if k in ASPECTS},
-                                             "read": self.criteria_read(sid), "teach": self.criteria_teach(sid)}
+                                             "read": self.criteria_read(sid, cm), "teach": self.criteria_teach(sid, cm, reasons)}
                 except Exception:  # noqa: BLE001
                     continue
         self._settle_info = info

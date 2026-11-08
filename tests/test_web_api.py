@@ -479,11 +479,17 @@ def test_auth_rejects_garbage_and_sets_ttl(cfg):
     assert "max-age=3600" in set_cookie and "httponly" in set_cookie
 
 
-def test_capabilities_reports_index(client):
-    r = client.get("/api/capabilities")
-    body = r.json()
-    assert body["indexed_frames"] == 3
+def test_capabilities_reports_index(client, monkeypatch):
+    from peaks.web import service as svc
+
+    body = client.get("/api/capabilities").json()
+    assert body["indexed_frames"] == 0 and body["index_loaded"] is False     # a status call never builds the index
     assert body["has_clip"] is False  # no clip cache seeded
+    monkeypatch.setattr(svc.Service, "stream_url", lambda self, sid, start=0.0: "http://x/")
+    monkeypatch.setattr(svc.Service, "scene_meta", lambda self, ids: {})
+    client.get("/api/search/similar", params={"key": "k1", "t": 0.0, "top_k": 5})   # a search does load it
+    body = client.get("/api/capabilities").json()
+    assert body["indexed_frames"] == 3 and body["index_loaded"] is True
 
 
 def test_similarity_search_returns_hits_with_thumb_urls(client, monkeypatch):

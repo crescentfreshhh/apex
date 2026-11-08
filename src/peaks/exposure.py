@@ -48,6 +48,12 @@ class ExposureStore:
             self._mtime = mtime
         return self._rows
 
+    def version(self):
+        """Changes whenever the record does (memo keys)."""
+        with self._lock:
+            self._load()
+            return self._mtime
+
     def _save(self) -> None:
         from . import atomic
 

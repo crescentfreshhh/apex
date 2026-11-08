@@ -21,6 +21,9 @@ if (INSTALLED) {
   }, true);
 }
 // writes that change what the library-management counts show
+// writes that change nothing a page shows (exposure pings, watching, 👍/👎, the pause
+// button, picture answers, job controls): they don't throw away every cached page
+const TELEMETRY_WRITES = /^\/api\/(board\/exposure|taste\/engage|hold|watch|jobs\/|picture\/(answer|rate)|floor|seedjobs?|prefs\/|labels$|memory\/|moments\/(check|feedback)|pick\/)/;
 const LIBRARY_WRITES = /^\/api\/(catalogue\/(grade|restore|grade-bulk|restore-bulk|delete|tag-sync|train|keep)|verdicts\/|duplicates\/(resolve|ignore)|backups\/|ingest|scene\/)/;
 // --- the page cache: never wait on a page you've seen ---------------------------
 // GETs remember their last answer (in memory, and in IndexedDB so a reopened app
@@ -88,7 +91,7 @@ const api = async (path, opts) => {
     return p;
   }
   const out = await rawApi(path, opts);
-  swrForget();                         // any change: no copy outlives it
+  if (!TELEMETRY_WRITES.test(path)) swrForget();   // a library change: no copy outlives it (telemetry isn't one)
   if (LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar();
   return out;
 };

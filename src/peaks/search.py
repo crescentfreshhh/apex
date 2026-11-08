@@ -114,6 +114,21 @@ class SearchIndex:
         self._key_rows: dict[str, tuple[int, int]] = {}  # key -> (start, end)
         self.key_meta: dict[str, dict] = {}  # key -> {scene_id, path}
         self._bf16 = False  # storage: bfloat16 bits (uint16) vs float32
+        self._sid_key: tuple | None = None   # (len(key_meta), {scene_id: key}) — built once, not per call
+
+    @property
+    def sid_key(self) -> dict[str, str]:
+        """scene_id → cache key, built once per index build (about fifteen call
+        sites used to rebuild this 6k-entry dict on every request)."""
+        c = self._sid_key
+        if c is None or c[0] != len(self.key_meta):
+            d: dict[str, str] = {}
+            for k, m in self.key_meta.items():
+                sid = (m or {}).get("scene_id")
+                if sid is not None:
+                    d.setdefault(str(sid), k)
+            c = self._sid_key = (len(self.key_meta), d)
+        return c[1]
 
     @property
     def size(self) -> int:

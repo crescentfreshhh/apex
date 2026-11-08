@@ -392,7 +392,7 @@ def create_app(cfg=None):
 
         waited = stashtiming.request_start()          # how much of this request is waiting on Stash
         t0 = _time.monotonic()
-        write = request.method not in ("GET", "HEAD", "OPTIONS")
+        write = request.method not in ("GET", "HEAD", "OPTIONS") and not _TELEMETRY.match(p)
         if write:
             _bump_version()                       # page snapshots are stale from here on
         resp = await call_next(request)
@@ -523,9 +523,10 @@ def create_app(cfg=None):
 
     @app.get("/api/capabilities")
     def capabilities():
-        idx = service.index()
+        idx = service.index_if_loaded()               # never builds the index inside a status call
         return {
-            "indexed_frames": idx.size,
+            "indexed_frames": idx.size if idx is not None else 0,
+            "index_loaded": idx is not None,
             "has_clip": service.has_clip_index(),
             "embed_running": jobs.running("embed") is not None,
             "score_running": jobs.running("score") is not None,
@@ -3624,6 +3625,17 @@ def _hold_tick(service: Service, jobs: JobManager) -> bool:
     if jobs.held_restart and not any(jobs.running(k) for k in HOLD_RESTART):
         _restart_held(service, jobs)
     return False
+
+
+# writes that change nothing a page snapshot shows — the megaboard's exposure pings,
+# watching a scene, 👍/👎 labels, the pause button, picture answers, job controls:
+# they never invalidate the summary / statistics / lab snapshots (the sidebar used
+# to recompute the whole library every 30 s while the megaboard was open)
+import re as _re
+
+_TELEMETRY = _re.compile(r"^/api/(board/exposure|taste/engage|hold|watch|jobs/|picture/(answer|rate)|floor|"
+                         r"seedjobs?|prefs/|labels$|memory/|criteria$|scene/[^/]+/criteria|performer/[^/]+/criteria|"
+                         r"moments/(check|feedback)|pick/)")
 
 
 def _scheduler_once(service: Service, jobs: JobManager, state: dict, _embed_then_sync) -> None:

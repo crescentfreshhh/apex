@@ -190,13 +190,16 @@ class LibraryMixin:
     def _retired_tag_ids(self) -> set[str]:
         """Stash ids of retired tiers' tags (e.g. "personal upscale") that exist."""
         cache = self.__dict__.setdefault("_tag_id_cache", {})
+        misses = self.__dict__.setdefault("_tag_id_misses", {})      # name → when it wasn't there
         out = set()
         for name in self._retired_tag_names().values():
             key = name.lower()
-            if key not in cache:
+            if key not in cache and time.time() - misses.get(key, 0.0) > 600:   # not a Stash call per grade
                 t = self.client().find_tag_by_name(name)
                 if t is not None:
                     cache[key] = str(t.id)
+                else:
+                    misses[key] = time.time()
             if cache.get(key):
                 out.add(cache[key])
         return out
@@ -315,7 +318,7 @@ class LibraryMixin:
         model = self._model_name()
         try:
             idx = self.index(model)
-            sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+            sid_key = idx.sid_key
         except Exception:  # noqa: BLE001 — no index: only the catalogue rows follow
             idx, sid_key = None, {}
         fixed = 0
@@ -1023,7 +1026,7 @@ class LibraryMixin:
         if distance is None:
             raise ValueError(f"unknown accuracy: {accuracy}")
         # the phash comparison can take minutes on a big library at low accuracy
-        client = self.client()
+        client = self.fresh_client()
         client.timeout = 900
         if job is not None:
             dur = "any duration" if duration_diff < 0 else f"duration ±{duration_diff:g}s"
@@ -1153,12 +1156,25 @@ class LibraryMixin:
         return self._state_dir() / "ingest.json"
 
     def last_ingest(self) -> dict:
+        """The last ingest's record, read once per change of the file (every
+        catalogue page asks)."""
         import json
 
+        p = self._ingest_path()
         try:
-            return json.loads(self._ingest_path().read_text())
-        except (OSError, ValueError):
+            st = p.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
             return {}
+        hit = self.__dict__.get("_ingest_rec_cache")
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        self._ingest_rec_cache = (stamp, d)
+        return d
 
     def _wait_stash_job(self, client, stash_job: str, label: str, job) -> dict:
         """Poll a Stash job until it ends. Stopping the Peaks job stops it."""
@@ -1298,7 +1314,7 @@ class LibraryMixin:
         log = job.log if job is not None else print
         for op in ("metadataScan", "findJob"):
             self.require_op(op)
-        client = self.client()
+        client = self.fresh_client()
         client.timeout = 120
         stages: dict[str, str] = {}
         record = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "running": True, "trigger": trigger,

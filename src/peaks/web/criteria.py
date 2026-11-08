@@ -226,8 +226,13 @@ class CriteriaMixin:
             if hit is not None and hit[0] == self._crit_stamp():
                 return hit[1]
             self._crit_rebuild_soon()
-            return hit[1] if hit is not None else {a: {"labels": 0, "yes": 0, "no": 0, "acc": None, "used": False,
-                                                        "scores": {}} for a in ASPECTS}
+            if hit is not None:
+                return hit[1]
+            # nothing learned yet: the answer counts are cheap and current; the models come behind
+            labels = self._crit_labels({r["scene_id"]: r for r in self._catalogue_all()})
+            return {a: {"labels": len(labels[a]), "yes": sum(1 for _, y, *_ in labels[a] if y > 0.5),
+                        "no": sum(1 for _, y, *_ in labels[a] if y <= 0.5), "acc": None, "used": False, "scores": {}}
+                    for a in ASPECTS}
         return self._crit_build()
 
     def _crit_stamp(self) -> tuple:
@@ -316,10 +321,12 @@ class CriteriaMixin:
         self._crit_cache = self._crit_last = (stamp, out)
         return out
 
-    def criteria_scene_vector(self, sid: str) -> np.ndarray | None:
+    def criteria_scene_vector(self, sid: str, m: dict | None = None) -> np.ndarray | None:
         """The five scores for the tier model (0.5 where a criterion has nothing to
-        say). None when no criterion has a model yet, or the scene has no score at all."""
-        m = self.criteria_models(wait=False)        # never retrain inside a page request
+        say). None when no criterion has a model yet, or the scene has no score at all.
+        `m`: the models, when the caller already has them (one fetch per pass)."""
+        if m is None:
+            m = self.criteria_models(wait=False)    # never retrain inside a page request
         used = [a for a in ASPECTS if m[a]["used"]]
         if not used:
             return None
@@ -328,9 +335,10 @@ class CriteriaMixin:
             return None
         return np.asarray([0.5 if x is None else x for x in v], np.float32)
 
-    def criteria_read(self, sid: str) -> dict:
+    def criteria_read(self, sid: str, m: dict | None = None) -> dict:
         """Peaks' read of a scene on each criterion: {aspect: {score, band}} (used ones only)."""
-        m = self.criteria_models(wait=False)
+        if m is None:
+            m = self.criteria_models(wait=False)
         out = {}
         for a in ASPECTS:
             s = m[a]["scores"].get(str(sid)) if m[a]["used"] else None
@@ -347,11 +355,12 @@ class CriteriaMixin:
             read = {}
         return {"scene_id": sid, "reasons": mine, "read": read, "aspects": list(ASPECTS), "words": WORDS}
 
-    def criteria_teach(self, sid: str) -> str | None:
+    def criteria_teach(self, sid: str, m: dict | None = None, reasons: dict | None = None) -> str | None:
         """The one criterion worth asking about on this scene: the one Peaks is least
         sure of (score nearest the middle), preferring those with the fewest labels."""
-        m = self.criteria_models(wait=False)
-        mine = self.criteria_reasons().get(str(sid)) or {}
+        if m is None:
+            m = self.criteria_models(wait=False)
+        mine = (reasons if reasons is not None else self.criteria_reasons()).get(str(sid)) or {}
         best, key = None, None
         for a in ASPECTS:
             if a in mine:
@@ -369,7 +378,7 @@ class CriteriaMixin:
         and how much it moves your grades (rank correlation with the grade)."""
         from ..tier_model import ORDINAL, train_class
 
-        m = self.criteria_models()
+        m = self.criteria_models(wait=False)      # the card never fits models on the request path
         rows = [r for r in self._catalogue_all() if train_class(r["tier"])]
         rep = (self._tier_model_state().get("report") or {})
         out = []

@@ -178,7 +178,7 @@ class ArbiterMixin:
 
     def _arb_moments(self, m, sid: str, a: str, b: str, k: int = 2) -> dict:
         idx = self.index(self._model_name())
-        key = next((kk for kk, mm in idx.key_meta.items() if str(mm.get("scene_id")) == sid), None)
+        key = idx.sid_key.get(sid)
         span = idx._key_rows.get(key) if key else None
         if not span:
             return {}

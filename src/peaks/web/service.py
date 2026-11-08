@@ -99,6 +99,17 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     # --- library / scenes ----------------------------------------------------
 
     def client(self):
+        """The Stash client, one per process: its HTTP session stays open (keep-alive),
+        so a grade's few calls don't each pay a new TCP connection to Stash."""
+        c = self.__dict__.get("_client_main")
+        if c is None:
+            from ..stash_client import StashClient
+
+            c = self._client_main = StashClient.from_config(self.cfg)
+        return c
+
+    def fresh_client(self):
+        """A client of your own, for a long job that changes its timeout."""
         from ..stash_client import StashClient
 
         return StashClient.from_config(self.cfg)
@@ -107,12 +118,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         """A short-timeout, no-retry client for NON-critical reads (metadata).
         If Stash is slow/down, these fail fast and the UI degrades to blank
         rather than blocking a search response behind retry backoff."""
-        from ..stash_client import StashClient
+        c = self.__dict__.get("_client_meta")
+        if c is None:
+            from ..stash_client import StashClient
 
-        c = StashClient(
-            url=self.cfg.stash.url, api_key=self.cfg.stash.api_key, timeout=5
-        )
-        c.RETRY_SLEEPS = ()  # no retries for cosmetic data
+            c = StashClient(url=self.cfg.stash.url, api_key=self.cfg.stash.api_key, timeout=5)
+            c.RETRY_SLEEPS = ()  # no retries for cosmetic data
+            self._client_meta = c
         return c
 
     def scenes(self, limit: int = 0):
@@ -1900,47 +1912,67 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         rebuilt whenever the cache has grown since it was built (so the swipe
         trainer's candidate pool keeps expanding as scenes embed)."""
         model = model or self._model_name()
-        with self._index_lock:
-            idx = self._index.get(model)
-            rebuild = idx is None or idx.size == 0 or _rebuild
-            if refresh and not rebuild:
-                cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-                if len(cache.keys(model)) != getattr(idx, "source_key_count", -1):
-                    rebuild = True
-            if rebuild:
-                cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-                keys = cache.keys(model)
-                # never allocate a second whole-library matrix the container can't
-                # hold: free the derived caches first, else keep serving the old one
-                if not self._index_room(cache, model, keys, old=idx):
-                    if idx is not None and idx.size:
-                        self._index_stale.add(model)          # retried when memory frees up
-                        return idx
-                    raise IndexMemoryError(self._index_room_msg)
-                # drop the old index first so its matrix is freed before the new
-                # one is allocated — a whole-library float32 matrix is GBs, and
-                # holding both at once is what spiked RSS during an embed.
-                self._index.pop(model, None)
-                idx = None
-                outer = getattr(self, "_build_progress", None)
+        idx = self._index.get(model)                   # the common case: loaded — no lock at all
+        if idx is not None and idx.size and not _rebuild and not refresh:
+            return idx
+        builds = self.__dict__.setdefault("_index_builds", {})     # model → Event while a build runs
+        while True:
+            with self._index_lock:
+                idx = self._index.get(model)
+                rebuild = idx is None or idx.size == 0 or _rebuild
+                if refresh and not rebuild:
+                    cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+                    if len(cache.keys(model)) != getattr(idx, "source_key_count", -1):
+                        rebuild = True
+                if not rebuild:
+                    return idx
+                ev = builds.get(model)
+                if ev is None:                         # ours to build: others wait on the event, not the lock
+                    ev = builds[model] = threading.Event()
+                    cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+                    keys = cache.keys(model)
+                    # never allocate a second whole-library matrix the container can't
+                    # hold: free the derived caches first, else keep serving the old one
+                    if not self._index_room(cache, model, keys, old=idx):
+                        builds.pop(model, None)
+                        ev.set()
+                        if idx is not None and idx.size:
+                            self._index_stale.add(model)          # retried when memory frees up
+                            return idx
+                        raise IndexMemoryError(self._index_room_msg)
+                    # drop the old index first so its matrix is freed before the new
+                    # one is allocated — a whole-library float32 matrix is GBs, and
+                    # holding both at once is what spiked RSS during an embed.
+                    self._index.pop(model, None)
+                    break
+            ev.wait()                                  # someone else is building it (no lock held meanwhile)
+            if not _rebuild:
+                got = self._index.get(model)
+                if got is not None and got.size:
+                    return got
+            _rebuild = False                           # the build we waited for is the rebuild
+        outer = getattr(self, "_build_progress", None)
 
-                def progress(done, n):
-                    self._build_last = {"done": done, "total": n}
-                    if outer:
-                        outer(done, n)
+        def progress(done, n):
+            self._build_last = {"done": done, "total": n}
+            if outer:
+                outer(done, n)
 
-                import time as _t
+        import time as _t
 
-                self._index_building = _t.time()
-                self._build_last = {"done": 0, "total": len(keys)}
-                try:
-                    idx = SearchIndex(cache, model).build(keys, on_progress=progress)
-                finally:
-                    self._index_building = None
-                idx.source_key_count = len(keys)
+        self._index_building = _t.time()
+        self._build_last = {"done": 0, "total": len(keys)}
+        try:
+            idx = SearchIndex(cache, model).build(keys, on_progress=progress)
+            idx.source_key_count = len(keys)
+            with self._index_lock:
                 self._index[model] = idx
                 self._index_stale.discard(model)
             return idx
+        finally:
+            self._index_building = None
+            builds.pop(model, None)
+            ev.set()
 
     # --- index memory: stale instead of dropped, and never two copies past the limit ---
 
@@ -2162,6 +2194,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 if km is not None:
                     km["path"] = path
 
+    def index_if_loaded(self, model: str | None = None):
+        """The index when it's in memory, else None — lock-free, never builds
+        (status pages must never start a minute-long load inside a request)."""
+        return self._index.get(model or self._model_name())
+
     def index_loaded(self, model: str | None = None) -> bool:
         """Is the main index in memory? Lock-free on purpose: a build holds the
         index lock for the whole (minute-long) load."""
@@ -2194,8 +2231,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         rss = memwatch.rss_bytes()
         limit = memwatch.soft_limit_bytes()
-        with self._index_lock:
-            idx = dict(self._index)
+        idx = dict(self._index)                        # lock-free: a build may hold the lock for a minute
         detail = []
         for m, ix in sorted(idx.items()):
             mat = getattr(ix, "matrix", None)
@@ -3157,6 +3193,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         ids = set(self.hidden_scene_ids())
         sid = str(scene_id)
+        if (sid in ids) == bool(hidden):
+            return                                     # already so: no fsync'd rewrite per grade
         if hidden:
             ids.add(sid)
         else:
@@ -3260,7 +3298,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             if _t.monotonic() - hit[0] >= self._MARKER_TTL:
                 self._refresh_markers_bg(profile)     # past its freshness: answer now, re-read behind
             return hit[1]
-        markers = list(self.client().iter_markers_by_tag(profile))
+        failed = self.__dict__.get("_marker_fail_at", 0.0)
+        if _t.monotonic() - failed < 60:               # Stash was down a moment ago: don't stall every page
+            return []
+        try:
+            markers = list(self._meta_client().iter_markers_by_tag(profile))   # 5 s, no retries
+        except Exception:
+            self._marker_fail_at = _t.monotonic()
+            raise
         cache[profile] = (_t.monotonic(), markers)
         return markers
 
@@ -3890,7 +3935,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         model = model or self._model_name()
         idx = self.index(model)
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         hits: list[Hit] = []
         for sid in scene_ids:
             key = sid_key.get(str(sid))
@@ -3990,7 +4035,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if idx.size == 0 or query_vec is None:
             return []
         q = self._unit(np.asarray(query_vec, dtype=np.float32).reshape(-1))
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         hits: list[Hit] = []
         for sid in scene_ids:
             key = sid_key.get(str(sid))
@@ -4092,7 +4137,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         model = self._model_name()
         idx = self.index(model)
         # scene_id -> (key, n_frames)
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         embedded = list(sid_key)
         if not embedded:
             self._perf_stats_cache = []
@@ -4454,7 +4499,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             pk = self._peak_index(model)
             peaks = pk["peaks"]
             scene_mtime = self._scene_mtimes(model)
-            sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+            sid_key = idx.sid_key
             order = sorted(scene_mtime, key=scene_mtime.get, reverse=True)
             hits: list[Hit] = []
             for sid in order:
@@ -4495,7 +4540,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             return []
         clip = self._clip_name()
         idx = self.index(clip)
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         vsum, n = None, 0
         for sid in scene_ids:
             key = sid_key.get(str(sid))
@@ -4535,7 +4580,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if c is not None:
             idx = self.index(model)
             cu = self._unit(c)
-            sid_key = {str(m.get("scene_id")): kk for kk, m in idx.key_meta.items()}
+            sid_key = idx.sid_key
             parts = []
             for sid in scenes:
                 rs = idx._key_rows.get(sid_key.get(str(sid), ""))
@@ -4680,10 +4725,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         the trained model's — so "Strong" means top 5% of YOUR library. None until
         the model's scores exist. Cached per score array."""
         model = self._model_name()
+        idx = self.index_if_loaded(model)             # a page-load call: never builds the index
+        if idx is None:
+            return None
         try:
-            idx = self.index(model)
             scores, by = self._taste_scores(model, wait=False)
-        except Exception:  # noqa: BLE001 — no index / model yet
+        except Exception:  # noqa: BLE001 — no model yet
             return None
         if scores is None or by not in ("classifier", "modes") or scores.shape[0] != idx.size or not idx.size:
             return None
@@ -4879,11 +4926,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _key_for_scene(self, scene_id: str, model: str) -> str | None:
         """Reverse-lookup a scene's cache key (the megaboard knows scene_id, not
         the fingerprint key)."""
-        idx = self.index(model)
-        for k, m in idx.key_meta.items():
-            if str(m.get("scene_id")) == str(scene_id):
-                return k
-        return None
+        return self.index(model).sid_key.get(str(scene_id))
 
     def _ensure_clip(self):
         """Lazily build (once) the CLIP embedder used for text vectors."""
@@ -4915,11 +4958,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if missing:
             try:
                 fetched = self._meta_client().scene_details(missing)
-            except Exception:
+            except Exception:  # noqa: BLE001 — Stash down: nothing remembered, asked again next time
                 fetched = {}
             with self._meta_lock:
                 for sid in missing:
-                    self._meta[sid] = fetched.get(sid, {})
+                    if sid in fetched:                 # never a blank the catalogue would take as the scene
+                        self._meta[sid] = fetched[sid]
         return {s: self._meta.get(s, {}) for s in want}
 
     def invalidate_meta(self, scene_id: str | None = None) -> None:
@@ -5157,15 +5201,31 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         with self._meta_lock:
             self._meta[sid] = fresh
             self._cat_edit_seq = self.__dict__.get("_cat_edit_seq", 0) + 1
-            self.__dict__.setdefault("_cat_edited", {})[sid] = self._cat_edit_seq
+            edited = self.__dict__.setdefault("_cat_edited", {})
+            edited[sid] = self._cat_edit_seq
+            if len(edited) > 5000:                    # only edits newer than a running read matter
+                floor = self._cat_edit_seq - 2000
+                for k in [k for k, v in edited.items() if v < floor]:
+                    edited.pop(k, None)
         row = self._cat_row(sid, fresh)
         cached = getattr(self, "_cat_cache", None)
         if cached:
-            for i, r in enumerate(cached[1]):
-                if r["scene_id"] == sid:
-                    cached[1][i] = row
-                    break
+            i = self._cat_pos(cached[1]).get(sid)
+            if i is not None and i < len(cached[1]) and cached[1][i]["scene_id"] == sid:
+                cached[1][i] = row
+            else:
+                for i, r in enumerate(cached[1]):
+                    if r["scene_id"] == sid:
+                        cached[1][i] = row
+                        break
         return row
+
+    def _cat_pos(self, rows: list[dict]) -> dict[str, int]:
+        """scene_id → position in the cached listing (built once per listing)."""
+        hit = self.__dict__.get("_cat_pos_cache")
+        if hit is None or hit[0] is not rows or hit[1] != len(rows):
+            hit = self._cat_pos_cache = (rows, len(rows), {r["scene_id"]: i for i, r in enumerate(rows)})
+        return hit[2]
 
     # sort key → (value of a row or None when it has none, natural order is descending?)
     SORT_DESC_DEFAULT = {"date": True, "duration": True, "title": False, "bitrate": True,
@@ -5357,24 +5417,28 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         for r in pool:
             counts[r["tier"]] += 1
 
-        # keeper triage: model predictions + the learned quality floor
+        # keeper triage: model predictions + the learned quality floor — from the
+        # shared derived state when the list is the whole library (the usual case)
         from ..tier_model import quality_flag, quality_flag_detail, quality_floor
 
-        floor = quality_floor(rows)
         preds = self._tier_predictions(rows)
-        if preds:          # features are loaded anyway: remember any new 1★ scenes
-            try:
-                self._remember_rejects([r for r in rows if r["tier"] == "rejected"])
-            except Exception:  # noqa: BLE001 — memory is best-effort
-                pass
-        signals = self._scene_signals(rows)
-        views = {v: (self.settle_count(pool, preds) if v == "settle" else len(self._triage(v, pool, preds, floor, signals)))
-                 for v in self.TRIAGE_VIEWS}
+        whole = len(pool) == len(rows)
         in_view = view in self.TRIAGE_VIEWS or view == "arbiter"
+        if whole:
+            d = self._derived(rows, preds)
+            floor, signals, views = d["floor"], d["signals"], dict(d["views"])
+        else:
+            floor = quality_floor(rows)
+            signals = self._scene_signals(rows)
+            d = None
+            views = ({} if ids_only and not in_view else
+                     {v: (self.settle_count(pool, preds) if v == "settle" else len(self._triage(v, pool, preds, floor, signals)))
+                      for v in self.TRIAGE_VIEWS})
         if view == "arbiter":                  # a cell of the Insights agreement grid
             pool = self.arbiter_cell(pool, preds, cell or "")
         elif in_view:
-            pool = self._triage(view, pool, preds, floor, signals)      # the view's own order
+            pool = (d["lists"][view] if d is not None and view in d["lists"]
+                    else self._triage(view, pool, preds, floor, signals))      # the view's own order
         elif tiers:
             pool = [r for r in pool if r["tier"] in tiers]
 
@@ -5432,7 +5496,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "tier_state": self.tier_state(),
             "model": self.tier_model_status(), "floor": floor,
             "ingest": {"finished": ingest.get("finished"), "new": len(ingest.get("new") or [])},
-            "storage": self._storage(pool_all),
+            "storage": d["storage"] if d is not None else self._storage(pool_all),
         }
 
     def library_summary(self) -> dict:
@@ -5452,10 +5516,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         for r in rows:
             counts[r["tier"]] += 1
         preds = self._tier_predictions(rows)
-        floor = quality_floor(rows)
-        signals = self._scene_signals(rows)
-        views = {v: (self.settle_count(rows, preds) if v == "settle" else len(self._triage(v, rows, preds, floor, signals)))
-                 for v in self.TRIAGE_VIEWS}
+        views = dict(self._derived(rows, preds)["views"])      # shared with the catalogue: computed once
         fresh = set(self.last_ingest().get("new") or [])
         new = sum(1 for r in rows if r["scene_id"] in fresh and r["tier"] == "unreviewed")
         dupes = self.cached_duplicates()
@@ -5594,7 +5655,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             return {}
         if idx.size == 0:
             return {}
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         try:
             scores, _ = self._taste_scores(model)
         except Exception:  # noqa: BLE001
@@ -5702,6 +5763,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         rejected_at = self.__dict__.setdefault("_rejected_at", {})
         if grade == "reject":
             rejected_at[sid] = time.time()        # a running ingest drops it once this sticks
+            if len(rejected_at) > 2000:           # long settled ones: nothing reads them again
+                old = time.time() - 3600
+                for k in [k for k, t in rejected_at.items() if t < old]:
+                    rejected_at.pop(k, None)
         else:
             rejected_at.pop(sid, None)
         # "Reject, don't learn": a reject for a reason Peaks can't see — 1★ like any
@@ -5719,7 +5784,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             self.set_scene_hidden(sid, False)
         # your verdict is newer than the megaboard's evidence: start its record over
         # (kept for an undo)
-        self.__dict__.setdefault("_expo_undo", {})[sid] = self.exposure().reset(sid)
+        undo = self.__dict__.setdefault("_expo_undo", {})
+        undo[sid] = self.exposure().reset(sid)
+        while len(undo) > 500:                        # one undo window's worth, not a session's
+            undo.pop(next(iter(undo)))
         row = self._cat_update_row(sid)
         said = ((getattr(self, "_tier_preds", None) or (None, {}))[1] or {}).get(sid)   # what Peaks thought, for the timeline
         self._log_scene("grade", row, grade=grade + (" (don't learn)" if grade == "reject" and no_learn else ""),
@@ -5803,11 +5871,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._grades_since_backup = getattr(self, "_grades_since_backup", 0) + 1
         if self._grades_since_backup >= 25:
             self._grades_since_backup = 0
-            try:
-                cached = getattr(self, "_cat_cache", None)
-                self.backup_grades(cached[1] if cached else None)
-            except Exception:  # noqa: BLE001 — backups are best-effort
-                pass
+            cached = getattr(self, "_cat_cache", None)
+
+            def _bk(rows=cached[1] if cached else None):
+                try:
+                    self.backup_grades(rows)
+                except Exception:  # noqa: BLE001 — backups are best-effort
+                    pass
+            threading.Thread(target=_bk, daemon=True, name="peaks-grade-backup").start()   # not inside your grade
         # (predictions are NOT invalidated: a grade changes a scene's tier, not
         # its picture or bitrate — views are re-derived from rows every request)
         if self.settling():
@@ -5898,7 +5969,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             cache = (tag, {})
             self._vis_feat_cache = cache
         vis = cache[1]
-        sid_key = {str(m.get("scene_id")): k for k, m in idx.key_meta.items()}
+        sid_key = idx.sid_key
         out: dict[str, tuple] = {}
         for r in rows:
             sid = r["scene_id"]
@@ -5961,8 +6032,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         p.parent.mkdir(parents=True, exist_ok=True)
         atomic.write_json(p, {"scenes": d}, indent=1)
         self.__dict__.pop("_no_learn_cache", None)
-        self._tier_preds = None
+        self._no_learn_ver = self.__dict__.get("_no_learn_ver", 0) + 1
         self.__dict__.pop("_who_cache", None)
+        self.__dict__.pop("_derived_cache", None)        # the views: this scene's answer changed
 
     def _sense_rows(self, sids: list) -> dict[str, np.ndarray]:
         """Extra senses for the tier model, one row per scene (None ids: deleted
@@ -5970,8 +6042,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tier_model import sense_row
 
         out = {}
+        crit = {"m": None}
+
+        def crit_vec(sid):                      # the criteria models once per pass, not once per scene
+            if crit["m"] is None:
+                crit["m"] = self.criteria_models(wait=False)
+            return self.criteria_scene_vector(sid, crit["m"])
         for name, fn in (("sound", self.sound_scene_vector), ("motion", self.motion_scene_vector),
-                         ("criteria", self.criteria_scene_vector)):      # your five criteria, once they've learned
+                         ("criteria", crit_vec)):      # your five criteria, once they've learned
             vecs = []
             for sid in sids:
                 try:
@@ -6071,7 +6149,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             path = model.save(self._tier_model_path())
             atomic.write_text(path.with_suffix(".json"), json.dumps(report, indent=2))
             self._tier_state = {"model": model, "report": report}
-            self._tier_preds = None
+            # the old predictions keep serving; the next page kicks a background re-score
             self._grades_since_train = 0
             try:
                 self._settle_log(force=True)          # a point on the settling chart per retrain
@@ -6116,8 +6194,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         cached = getattr(self, "_tier_preds", None)
         if cached is not None and cached[0] == key:
             return cached[1]
-        if cached is not None and cached[0][0] == key[0]:
-            # same model, newer index / more scenes: answer now, re-score behind (one at a time)
+        if cached is not None:
+            # a newer model, index or row count: answer now, re-score behind (one at a time)
             self._tier_preds_bg(rows)
             return cached[1]
         with self.__dict__.setdefault("_preds_lock", threading.Lock()):   # two at once: one computes
@@ -6198,7 +6276,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             graded += [(w, "reject") for w in mem.who(fps) if w is not None]
         except Exception:  # noqa: BLE001 — no memory yet
             pass
-        sig = hash(tuple((tuple(w["performers"]), w["studio"], c) for w, c in graded))
+        sig = (id(rows), len(rows), self.__dict__.get("_cat_edit_seq", 0), len(graded),
+               self.__dict__.get("_no_learn_ver", 0))
         cached = getattr(self, "_who_cache", None)
         if cached is not None and cached[0] == sig:
             return cached[1]
@@ -6307,7 +6386,85 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
     PROMOTABLE = ("unreviewed", "merveilleuse", "exceptionnelle", "anomaly")
 
+    def _lib_key(self, rows: list[dict]) -> tuple:
+        """What the per-scene signals and the views depend on: when none of it has
+        changed, the last answer is the answer (a page used to recompute all of it)."""
+        import datetime as _dt
+
+        from ..tiers import draining
+
+        model = self._model_name()
+        idx = self._index.get(model)
+        try:
+            scores, _ = self._taste_scores(model, wait=False)
+        except Exception:  # noqa: BLE001
+            scores = None
+        try:
+            ev = self.exposure().version()
+        except Exception:  # noqa: BLE001
+            ev = None
+        try:
+            pics = self._picture_entries()
+        except Exception:  # noqa: BLE001
+            pics = None
+        try:
+            self._taste_markers(self.cfg.markers.tag_name)   # warm (cached): the key must see the same list the answer used
+        except Exception:  # noqa: BLE001 — Stash down: the key sees "no markers", as the answer will
+            pass
+        mk = self.__dict__.get("_marker_cache", {}).get(self.cfg.markers.tag_name)
+        return (id(rows), len(rows), self.__dict__.get("_cat_edit_seq", 0), id(scores), getattr(idx, "gen", 0),
+                id(mk), self.__dict__.get("_marker_edits", {}).get(self.cfg.markers.tag_name, 0), ev, id(pics),
+                self.__dict__.get("_vd_ver", 0), self._rulings_stamp(), tuple(draining()),
+                _dt.date.today().toordinal())
+
     def _scene_signals(self, rows: list[dict]) -> dict:
+        """(see _scene_signals_raw) — computed once per library state: the catalogue,
+        the summary, Today and the health page all ask for the same thing."""
+        cached = getattr(self, "_cat_cache", None)
+        if not cached or rows is not cached[1]:        # a subset (one scene's timeline): not the library's answer
+            return self._scene_signals_raw(rows)
+        key = self._lib_key(rows)
+        hit = self.__dict__.get("_signals_cache")
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        with self.__dict__.setdefault("_signals_lock", threading.Lock()):
+            hit = self.__dict__.get("_signals_cache")
+            if hit is not None and hit[0] == key:
+                return hit[1]
+            out = self._scene_signals_raw(rows)
+            self._signals_cache = (key, out)
+            return out
+
+    def _derived(self, rows: list[dict], preds: dict) -> dict:
+        """Everything a page derives from the whole library — the per-scene signals,
+        the quality floor, every smart view's list and count, storage per tier —
+        computed once per (library state, predictions) and shared by the catalogue,
+        the sidebar summary and Today. Two requests arriving together compute it once."""
+        from ..tier_model import quality_floor
+
+        key = (self._lib_key(rows), id(preds))
+        hit = self.__dict__.get("_derived_cache")
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        with self.__dict__.setdefault("_derived_lock", threading.Lock()):
+            hit = self.__dict__.get("_derived_cache")
+            if hit is not None and hit[0] == key:
+                return hit[1]
+            signals = self._scene_signals(rows)
+            floor = quality_floor(rows)
+            if preds:          # features are loaded anyway: remember any new 1★ scenes (once, not per page)
+                try:
+                    self._remember_rejects([r for r in rows if r["tier"] == "rejected"])
+                except Exception:  # noqa: BLE001 — memory is best-effort
+                    pass
+            lists = {v: self._triage(v, rows, preds, floor, signals) for v in self.TRIAGE_VIEWS if v != "settle"}
+            views = {v: len(x) for v, x in lists.items()}
+            views["settle"] = self.settle_count(rows, preds)
+            out = {"signals": signals, "floor": floor, "lists": lists, "views": views, "storage": self._storage(rows)}
+            self._derived_cache = (key, out)
+            return out
+
+    def _scene_signals_raw(self, rows: list[dict]) -> dict:
         """Per scene: {saves, best, age_days, new} — your saved moments (legacy
         auto-markers excluded), the taste model's best moment in the scene, and
         how long ago it was added to Stash (`new` = inside the grace period).

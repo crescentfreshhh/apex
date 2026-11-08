@@ -49,7 +49,27 @@ class VerdictMixin:
         p = self._vd_path()
         from .. import atomic
 
+        self._vd_ver = self.__dict__.get("_vd_ver", 0) + 1       # memo keys: the answers changed
+        self._vd_dirty = False
         atomic.write_json(p, self._vd())
+
+    def _vd_flush_soon(self) -> None:
+        """Evidence noted while a page was built is saved a little later, once —
+        never a full fsync'd rewrite per row inside a GET."""
+        import threading
+
+        if self.__dict__.get("_vd_dirty"):
+            return
+        self._vd_dirty = True
+
+        def run():
+            with self._vd_lock():
+                if self.__dict__.get("_vd_dirty"):
+                    try:
+                        self._vd_save()
+                    except OSError:
+                        pass
+        threading.Timer(3.0, run).start()
 
     # --- recording ------------------------------------------------------------------
 
@@ -125,7 +145,7 @@ class VerdictMixin:
             with self._vd_lock():
                 v["ev"] = {"saves": int(sig.get("saves") or 0), "pred": guess,
                            "showings": float(sig.get("showings") or 0)}
-                self._vd_save()
+            self._vd_flush_soon()
             return True
         ev = v["ev"]
 
