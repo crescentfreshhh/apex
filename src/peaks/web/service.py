@@ -109,10 +109,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return c
 
     def fresh_client(self):
-        """A client of your own, for a long job that changes its timeout."""
+        """A client of your own, for a long job that changes its timeout (the
+        shared one keeps its settings). Anything else standing in for the client
+        — a fake in tests — is returned as it is."""
         from ..stash_client import StashClient
 
-        return StashClient.from_config(self.cfg)
+        c = self.client()
+        return StashClient.from_config(self.cfg) if type(c) is StashClient else c
 
     def _meta_client(self):
         """A short-timeout, no-retry client for NON-critical reads (metadata).
