@@ -1189,7 +1189,7 @@ function laneWant(img) {
   imgLane.q.unshift({ img });                // just came into view: before the ones further away
   lanePump();
 }
-function lanePrefetch(url) { imgLane.q.push({ url }); lanePump(); }     // warming the cache: last in line
+function lanePrefetch(url, warm = false) { imgLane.q.push({ url, warm }); lanePump(); }     // warming the cache: last in line
 function laneWatch(root) {
   const imgs = root.matches?.("img[data-lsrc]") ? [root] : [...(root.querySelectorAll?.("img[data-lsrc]") || [])];
   for (const im of imgs) {
@@ -5355,6 +5355,12 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
   $("#cat-status").textContent = refresh ? "re-reading grades from Stash…" : "loading…";
   if (!append) $("#cat-list").innerHTML = '<p class="dim">Reading your library…</p>';
   const path = "/api/catalogue?" + catParams(offset, refresh);
+  const ahead = cat.ahead; cat.ahead = null;
+  if (append && ahead && ahead.path === path && Date.now() - ahead.at < 300000 && seq === cat.seq) {
+    catDraw(ahead.d, true, false);                 // warmed while you were idle: no request, no wait
+    cat.busy = false;
+    return;
+  }
   // busy machine: say so instead of hanging silently
   const slow = setTimeout(() => {
     if (seq === cat.seq && cat.busy) $("#cat-status").textContent = "Peaks is busy with running jobs — still loading…";
@@ -8036,6 +8042,52 @@ function liveClose() {
 }
 document.addEventListener("visibilitychange", () => { document.hidden ? liveClose() : liveConnect(); });
 liveConnect();
+
+// --- idle warm-up: what you'll open next, fetched while you're away ------------------------------
+// After a minute with no input, no request in flight, no job running and no pause,
+// one quiet round per page: the Catalogue's next page and its first covers, the next
+// Review scenes' covers and best picks, the Performers photos not loaded yet. All of it
+// goes through the image lane at the back of the queue (3 at a time), and the first
+// key, click, scroll or tap drops whatever hasn't started.
+const idle = { at: Date.now(), busy: false, last: {} };
+const IDLE_AFTER = 60000, IDLE_EVERY = 300000;
+function idleReset() {
+  idle.at = Date.now();
+  if (imgLane.q.some((j) => j.warm)) imgLane.q = imgLane.q.filter((j) => !j.warm);   // you're back: only what you look at loads
+  idle.busy = false;
+}
+["pointerdown", "keydown", "wheel", "touchstart", "scroll"].forEach((ev) =>
+  addEventListener(ev, idleReset, { passive: true, capture: true }));
+function idleReady() {
+  return !document.hidden && Date.now() - idle.at >= IDLE_AFTER && !INFLIGHT.size && !idle.busy
+    && !(live.running || []).length && !(typeof hold !== "undefined" && hold.until);
+}
+async function idleWarm() {
+  if (!idleReady()) return;
+  const view = document.querySelector(".view.active")?.id;
+  if (!view || Date.now() - (idle.last[view] || 0) < IDLE_EVERY) return;
+  idle.last[view] = Date.now();
+  idle.busy = true;
+  const stamp = idle.at;
+  try {
+    if (view === "catalogue" && !cat.busy && cat.items.length < (cat.total || 0)) {
+      const path = "/api/catalogue?" + catParams(cat.items.length);
+      const d = await api(path);
+      if (idle.at !== stamp) return;               // you came back meanwhile: leave it
+      cat.ahead = { path, d, at: Date.now() };
+      for (const r of (d.items || []).slice(0, 24)) lanePrefetch(`/api/scene/${encodeURIComponent(r.scene_id)}/cover`, true);
+    } else if (view === "review" && rv.items.length) {
+      for (const r of rv.items.slice(rv.i + 1, rv.i + 3)) {
+        lanePrefetch(`/api/scene/${encodeURIComponent(r.scene_id)}/cover`, true);
+        rvPicksGet(r.scene_id).catch(() => {});      // and their best 3 picks' thumbnails
+      }
+    } else if (view === "performers") {
+      for (const im of [...document.querySelectorAll("#performers img[data-lsrc]")].slice(0, 40)) lanePrefetch(im.dataset.lsrc, true);
+    }
+  } catch { /* a warm-up is extra */ }
+  finally { if (idle.at === stamp) setTimeout(() => { idle.busy = false; }, 1000); else idle.busy = false; }
+}
+setInterval(idleWarm, 5000);
 
 // (last, so every page's code is defined before the first route runs)
 // land on the page in the URL (#/catalogue …), else For You — the home page
