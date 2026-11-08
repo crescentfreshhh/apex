@@ -262,6 +262,10 @@ class CriteriaMixin:
         threading.Thread(target=run, name="criteria-rebuild", daemon=True).start()
 
     def _crit_build(self) -> dict:
+        with self._train_lock:                 # one heavy fit at a time, process-wide (the segfaults)
+            return self._crit_build_locked()
+
+    def _crit_build_locked(self) -> dict:
         rows = {r["scene_id"]: r for r in self._catalogue_all()}
         stamp = self._crit_stamp(rows)
         hit = self.__dict__.get("_crit_cache")

@@ -78,9 +78,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._meta_lock = threading.Lock()
         self._taste: dict[str, object] = {}  # taste classifiers, keyed by file
         self._taste_lock = threading.Lock()
-        # one heavy model fit at a time (tier retrain, taste training): concurrent
-        # native BLAS/LAPACK fits are the prime suspect in the segfaults
-        self._train_lock = threading.Lock()
+        # one heavy model fit at a time (tier retrain, taste training, the moment
+        # model, the criteria models): concurrent native BLAS/LAPACK fits are the
+        # prime suspect in the segfaults while grading. Re-entrant: the tier
+        # retrain reads the criteria models, which may fit them.
+        self._train_lock = threading.RLock()
         self._train_gate = threading.Lock()   # guards claiming the tier retrain
         self._vocab_cache = None  # (labels, CLIP-text matrix) for classification
         self._pool = None  # cached scene pool for the shuffle board
