@@ -158,6 +158,7 @@ class DinoV2Embedder(Embedder):
         self._torch = torch
         self.name = dino_cache_name(model_name)  # cache namespaced by backbone
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        gpu_fast_math(torch)
         self.model = torch.hub.load("facebookresearch/dinov2", model_name)
         self.model.eval().to(self.device)
         self.dim = int(self.model.embed_dim)
@@ -185,22 +186,24 @@ class DinoV2Embedder(Embedder):
         if not images:
             return np.zeros((0, self.dim), dtype=np.float32)
         batch = torch.stack([self.transform(im.convert("RGB")) for im in images])
-        with torch.no_grad():
-            feats = self.model(batch.to(self.device))
+        with torch.inference_mode(), autocast_for(torch, self.device):
+            feats = self.model(batch.to(self.device)).float()
         feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
     def embed_array(self, frames: np.ndarray) -> np.ndarray:
-        """Raw path: uint8 (n, 224, 224, 3) → normalize on device → model."""
+        """Raw path: uint8 (n, 224, 224, 3) → normalize on device → model, under
+        bf16 autocast (2–3× the fp32 throughput on a modern GPU; the vectors agree
+        to about 1e-3, far inside what a cosine search can tell apart)."""
         torch = self._torch
         if frames.shape[0] == 0:
             return np.zeros((0, self.dim), dtype=np.float32)
         t = torch.from_numpy(np.ascontiguousarray(frames))
-        with torch.no_grad():
+        with torch.inference_mode(), autocast_for(torch, self.device):
             t = t.to(self.device, non_blocking=True)
             t = t.permute(0, 3, 1, 2).float().div_(255.0)
             t = (t - self._mean_t) / self._std_t
-            feats = self.model(t)
+            feats = self.model(t).float()
             feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
@@ -327,8 +330,10 @@ class ClapAudioEmbedder:
         # argument across transformers versions (audios= / audio=), the extractor hasn't
         inputs = self.processor.feature_extractor(arrs, sampling_rate=self.sr, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items() if hasattr(v, "to")}
-        with self._torch.no_grad():
-            return self._norm(self._embeds(self.model.get_audio_features(**inputs), "audio"))
+        torch = self._torch
+        with getattr(torch, "inference_mode", torch.no_grad)(), autocast_for(torch, self.device):
+            out = self._embeds(self.model.get_audio_features(**inputs), "audio")
+            return self._norm(out.float() if hasattr(out, "float") else out)
 
     def embed_text(self, prompts: Sequence[str]) -> np.ndarray:
         inputs = self.processor(text=list(prompts), return_tensors="pt", padding=True)
@@ -564,6 +569,7 @@ class ClipEmbedder(Embedder):
         self._torch = torch
         self.name = clip_cache_name(model_name)  # cache namespaced by variant
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        gpu_fast_math(torch)
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained
         )
@@ -581,32 +587,45 @@ class ClipEmbedder(Embedder):
         if not images:
             return np.zeros((0, self.dim), dtype=np.float32)
         batch = torch.stack([self.preprocess(im.convert("RGB")) for im in images])
-        with torch.no_grad():
-            feats = self.model.encode_image(batch.to(self.device))
+        with torch.inference_mode(), autocast_for(torch, self.device):
+            feats = self.model.encode_image(batch.to(self.device)).float()
         feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
     def embed_array(self, frames: np.ndarray) -> np.ndarray:
-        """Raw path: uint8 (n, 224, 224, 3) → normalize on device → model."""
+        """Raw path: uint8 (n, 224, 224, 3) → normalize on device → model (bf16 autocast)."""
         torch = self._torch
         if frames.shape[0] == 0:
             return np.zeros((0, self.dim), dtype=np.float32)
         t = torch.from_numpy(np.ascontiguousarray(frames))
-        with torch.no_grad():
+        with torch.inference_mode(), autocast_for(torch, self.device):
             t = t.to(self.device, non_blocking=True)
             t = t.permute(0, 3, 1, 2).float().div_(255.0)
             t = (t - self._mean_t) / self._std_t
-            feats = self.model.encode_image(t)
+            feats = self.model.encode_image(t).float()
             feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
 
     def embed_text(self, prompts: Sequence[str]) -> np.ndarray:
         torch = self._torch
         tokens = self.tokenizer(list(prompts))
-        with torch.no_grad():
-            feats = self.model.encode_text(tokens.to(self.device))
+        with torch.inference_mode(), autocast_for(torch, self.device):
+            feats = self.model.encode_text(tokens.to(self.device)).float()
         feats = torch.nn.functional.normalize(feats, dim=1)
         return feats.cpu().numpy().astype(np.float32)
+
+    def text_only(self) -> "ClipEmbedder":
+        """Drop the image tower: a text-search instance keeps a few hundred MB
+        resident instead of the whole ViT (gigabytes) while it idles."""
+        vis = getattr(self.model, "visual", None)
+        if vis is not None:
+            try:
+                self.model.visual = None
+                del vis
+            except Exception:  # noqa: BLE001
+                pass
+        free_gpu()
+        return self
 
 
 _REGISTRY = {
@@ -638,6 +657,49 @@ def model_cache_name(alias: str, cfg_embedding) -> str:
     if key == "clip":
         return clip_cache_name(getattr(cfg_embedding, "clip_model", "ViT-B-32"))
     return canonical_name(alias)
+
+
+def gpu_fast_math(torch) -> None:
+    """TF32 matmuls on Ampere+ (once): the same accuracy class as bf16 inference,
+    at up to 2× the fp32 speed for anything left in fp32."""
+    if getattr(torch, "_peaks_fast", False):
+        return
+    try:
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:  # noqa: BLE001
+        pass
+    torch._peaks_fast = True
+
+
+def autocast_for(torch, device: str):
+    """bf16 autocast on CUDA (fp16 where bf16 isn't supported), nothing on CPU."""
+    import contextlib
+
+    if not str(device).startswith("cuda"):
+        return contextlib.nullcontext()
+    try:
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    except Exception:  # noqa: BLE001
+        dtype = torch.float16
+    return torch.autocast("cuda", dtype=dtype)
+
+
+def pick_batch(default: int, frame_bytes: int = 224 * 224 * 3 * 4, per_frame_work: int = 48) -> int:
+    """A batch size from the GPU's free memory: `default` on CPU or when it can't
+    be read; otherwise about a tenth of what's free, between default and 128.
+    (`per_frame_work`: activations are tens of times the input for a ViT-L.)"""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return default
+        free, _ = torch.cuda.mem_get_info()
+    except Exception:  # noqa: BLE001
+        return default
+    fit = int(free * 0.10 // (frame_bytes * per_frame_work))
+    return max(int(default), min(128, fit))
 
 
 def cap_cpu_threads() -> None:

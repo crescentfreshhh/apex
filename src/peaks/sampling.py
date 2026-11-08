@@ -505,11 +505,13 @@ class FrameSampler:
             return []
         scale = (f"scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}"
                  if size else self._scale_filter())
+        raw = bool(size)                      # square frames of a known size: raw RGB, no JPEG round trip
         cmd = [
             self.ffmpeg, "-v", "error", *self._input_args(),
             "-ss", f"{max(0.0, start):g}", "-i", path, "-t", f"{duration:g}",
             "-vf", ",".join([f"fps=1/{step:g}", *([scale] if scale else [])]),
-            "-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "-",
+            *(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"] if raw
+              else ["-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]),
         ]
         try:
             out = run_low(cmd, timeout=max(120.0, 6 * duration))
@@ -518,6 +520,15 @@ class FrameSampler:
         except subprocess.CalledProcessError as exc:
             raise SamplerError(f"ffmpeg window failed for {path}@{start}s: {exc.stderr[:200]}") from exc
         frames = []
+        if raw:
+            import numpy as np
+
+            n = size * size * 3
+            buf = out.stdout
+            for i in range(len(buf) // n):
+                arr = np.frombuffer(buf[i * n:(i + 1) * n], np.uint8).reshape(size, size, 3)
+                frames.append((round(max(0.0, start) + i * step, 2), PILImage.fromarray(arr.copy(), "RGB")))
+            return frames
         for i, jpg in enumerate(iter_jpegs(BytesIO(out.stdout))):
             frames.append((round(max(0.0, start) + i * step, 2), PILImage.open(BytesIO(jpg)).convert("RGB")))
         return frames

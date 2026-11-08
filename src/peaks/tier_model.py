@@ -306,7 +306,13 @@ class TierModel:
         if getattr(self, "use_visual", True):
             if fit:
                 k = max(1, min(self.pca_dim, Xv.shape[0] - 1, Xv.shape[1]))
-                self._pca = PCA(n_components=k, random_state=0).fit(Xv)
+                cache, key = getattr(self, "_pca_cache", None), getattr(self, "_pca_key", None)
+                hit = cache.get((key, k)) if cache is not None and key is not None else None
+                if hit is None:
+                    hit = PCA(n_components=k, random_state=0).fit(Xv)
+                    if cache is not None and key is not None:
+                        cache[(key, k)] = hit      # the same fold's rows: one PCA for every configuration tried
+                self._pca = hit
             parts.append(self._pca.transform(Xv))
         if self.use_quality:
             parts.append(Xq)
@@ -505,7 +511,8 @@ def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bo
                    folds: int = 5, pca_dim: int = 48, use_who: bool = False,
                    who: list | None = None, use_visual: bool = True,
                    use_picture: bool = False, pic: np.ndarray | None = None,
-                   use_senses: tuple[str, ...] = (), senses: dict | None = None) -> dict:
+                   use_senses: tuple[str, ...] = (), senses: dict | None = None,
+                   pca_cache: dict | None = None) -> dict:
     """Stratified k-fold: exact accuracy and 'within one tier' accuracy (the
     predicted tier is at most one step from the real one on the ordinal).
     Performer/studio records are rebuilt inside each fold from its training
@@ -516,9 +523,11 @@ def cross_validate(Xv: np.ndarray, Xq: np.ndarray, y: list[str], use_quality: bo
     live = live_ordinal(set(y))
     k = max(2, min(folds, min(np.unique(y_arr, return_counts=True)[1])))
     exact = near = 0
-    for tr, te in StratifiedKFold(n_splits=k, shuffle=True, random_state=0).split(Xq, y_arr):
+    for fi, (tr, te) in enumerate(StratifiedKFold(n_splits=k, shuffle=True, random_state=0).split(Xq, y_arr)):
         m = TierModel(use_quality=use_quality, pca_dim=pca_dim, use_who=use_who,
                       use_visual=use_visual, use_picture=use_picture, use_senses=use_senses)
+        if pca_cache is not None:              # the folds are the same for every configuration (random_state=0)
+            m._pca_cache, m._pca_key = pca_cache, (fi, k)
         m.fit(None if Xv is None else Xv[tr], Xq[tr], list(y_arr[tr]),
               who=[who[i] for i in tr] if use_who else None,
               pic=pic[tr] if use_picture else None, senses=_take(senses, use_senses, tr))
@@ -600,18 +609,19 @@ def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
     facts already say a lot about its picture, so it's kept only when it adds.
     """
     n = len(y)
+    pca_cache: dict = {}                      # (fold, k) → fitted PCA: ~55 fits become ~8
     grid = [k for k in PCA_GRID if k <= max(PCA_GRID[0], n // 4)] or [PCA_GRID[0]]
     best_k, best = grid[0], None
     for k in grid:
-        cv = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=k)
+        cv = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=k, pca_cache=pca_cache)
         if best is None or (cv["exact"], cv["within_one"]) > (best["exact"], best["within_one"]):
             best_k, best = k, cv
-    without = cross_validate(Xv, Xq, y, use_quality=False, pca_dim=best_k)
+    without = cross_validate(Xv, Xq, y, use_quality=False, pca_dim=best_k, pca_cache=pca_cache)
     rep = {"pca_dim": best_k, "cv": best, "cv_without_quality": without,
            "quality_gain": round(best["exact"] - without["exact"], 3)}
     use_who = False
     if who is not None and any(w for w in who):
-        with_who = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=best_k, use_who=True, who=who)
+        with_who = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=best_k, use_who=True, who=who, pca_cache=pca_cache)
         gain = round(with_who["exact"] - best["exact"], 3)
         use_who = gain > WHO_MARGIN
         rep.update({"cv_with_who": with_who, "who_gain": gain, "use_who": use_who})
@@ -622,7 +632,7 @@ def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
     if pic is not None and _has_pictures(pic):
         cur = rep["cv"]
         with_pic = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=best_k, use_who=use_who,
-                                  who=who if use_who else None, use_picture=True, pic=pic)
+                                  who=who if use_who else None, use_picture=True, pic=pic, pca_cache=pca_cache)
         gain = round(with_pic["exact"] - cur["exact"], 3)
         use_pic = gain > WHO_MARGIN
         rep.update({"cv_with_picture": with_pic, "picture_gain": gain, "use_picture": use_pic})
@@ -638,7 +648,7 @@ def fit_best(Xv: np.ndarray, Xq: np.ndarray, y: list[str],
         trial = (*use_senses, name)
         with_s = cross_validate(Xv, Xq, y, use_quality=True, pca_dim=best_k, use_who=use_who,
                                 who=who if use_who else None, use_picture=use_pic, pic=pic if use_pic else None,
-                                use_senses=trial, senses=senses)
+                                use_senses=trial, senses=senses, pca_cache=pca_cache)
         gain = round(with_s["exact"] - cur["exact"], 3)
         keep = gain > WHO_MARGIN
         rep.update({f"cv_with_{name}": with_s, f"{name}_gain": gain, f"use_{name}": keep})

@@ -303,7 +303,7 @@ class HearMixin:
         todo = self.hear_todo()[: limit or self.hear_settings()["per_run"]]
         if not todo:
             if self.__dict__.pop("_retrain_owed", False):
-                self._senses_retrain(log)
+                self._senses_retrain(log, "hear")
             return {"heard": 0}
         try:
             embedder = self._hear_embedder()
@@ -348,7 +348,7 @@ class HearMixin:
         if getattr(job, "paused_for", None):
             log("retrain waits until it resumes")       # never rebuild the index during an ingest
         elif done > silent or self.__dict__.pop("_retrain_owed", False):
-            self._senses_retrain(log)
+            self._senses_retrain(log, "hear")
         return {"heard": done, "silent": silent, "failed": run.failed}
 
     # --- what the last run did, for the Lab cards -----------------------------------------
@@ -396,8 +396,20 @@ class HearMixin:
         except (OSError, ValueError):
             return None
 
-    def _senses_retrain(self, log) -> None:
-        """New sense data: the moment model and the tier model re-decide what helps."""
+    def _senses_retrain(self, log, sense: str | None = None) -> None:
+        """New sense data: the moment model and the tier model re-decide what helps —
+        once this sense's queue is empty. While it still has batches of scenes to
+        go, the retrain is owed, not run (it used to run after every batch of a
+        few hundred scenes: dozens of full retrains while a sense filled in)."""
+        try:
+            more = bool({"hear": lambda: self.hear_todo(first=True), "motion": lambda: self.motion_todo(first=True)}
+                        .get(sense, lambda: [])())
+        except Exception:  # noqa: BLE001
+            more = False
+        if more:
+            self._retrain_owed = True
+            log("retrain waits until this sense's queue is empty")
+            return
         for name, fn in (("moment model", self.train_moment_model), ("tier model", self.train_tier_model)):
             try:
                 rep = fn()
@@ -408,7 +420,18 @@ class HearMixin:
     # --- what the moment model and the tier model get --------------------------------------
 
     def _sound_load(self, sid: str):
-        """(env_times, env, clap_times, clap) for a heard scene, else None."""
+        """(env_times, env, clap_times, clap) for a heard scene, else None. While the
+        moment model trains, each scene is read once (`_sense_memo`), not once per
+        window per feature."""
+        memo = self.__dict__.get("_sense_memo")
+        if memo is not None and ("sound", str(sid)) in memo:
+            return memo[("sound", str(sid))]
+        out = self._sound_load_raw(sid)
+        if memo is not None:
+            memo[("sound", str(sid))] = out
+        return out
+
+    def _sound_load_raw(self, sid: str):
         k = self._hear_keys().get(str(sid))
         cache = self._hear_cache()
         if not k or not cache.has(k, ENV_NS):
@@ -502,6 +525,7 @@ class HearMixin:
             if emb is None:
                 emb = self._hear_embedder()
                 self._clap_text = emb
+        self._text_models_used()
         w = emb.embed_text([q])[0]
         w = w / max(float(np.linalg.norm(w)), 1e-9)
         bank = self._clap_bank()

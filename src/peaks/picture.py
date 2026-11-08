@@ -82,9 +82,14 @@ def read_stills(path: str, info: dict, n: int = N_STILLS, ffmpeg: str = "ffmpeg"
     size = w * h
     for i in range(n):
         t = dur * (0.1 + 0.8 * i / max(1, n - 1)) if dur else 0.0
-        r = subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", path, "-an", "-sn",
-                            "-frames:v", "2", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
-                           capture_output=True, timeout=timeout)
+        from .sampling import decode_threads_for, run_low
+
+        try:
+            r = run_low([ffmpeg, "-v", "error", "-nostdin", "-threads", str(decode_threads_for(2)), "-ss", f"{t:.3f}",
+                         "-i", path, "-an", "-sn", "-frames:v", "2", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                        timeout=timeout)
+        except subprocess.CalledProcessError as exc:
+            r = subprocess.CompletedProcess(exc.cmd, exc.returncode, exc.output, exc.stderr)
         buf = r.stdout or b""
         if len(buf) < size:
             continue
@@ -263,9 +268,14 @@ def poster_still(path: str, rec: dict, out, ffmpeg: str = "ffmpeg", at: float = 
     """The whole frame (960 px wide, one eye of VR) shown while a comparison
     video loads."""
     eye = f"crop={rec['w']}:{rec['h']}:0:0," if rec.get("vr") else ""
-    subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-ss", f"{max(0.0, duration * at):.3f}", "-i", path,
-                    "-an", "-sn", "-frames:v", "1", "-vf", eye + "scale=960:-2", "-q:v", "3", str(out)],
-                   capture_output=True, timeout=timeout)
+    from .sampling import decode_threads_for, run_low
+
+    try:
+        run_low([ffmpeg, "-v", "error", "-nostdin", "-y", "-threads", str(decode_threads_for(2)),
+                 "-ss", f"{max(0.0, duration * at):.3f}", "-i", path,
+                 "-an", "-sn", "-frames:v", "1", "-vf", eye + "scale=960:-2", "-q:v", "3", str(out)], timeout=timeout)
+    except subprocess.CalledProcessError:
+        pass
 
 
 def measure(path: str, ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe", n: int = N_STILLS) -> dict:

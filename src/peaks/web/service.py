@@ -768,6 +768,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         embedder = self._embedder(model)
         n_workers = e.workers if workers is None else workers
         n_batch = e.batch_size if batch_size is None else batch_size
+        if batch_size is None:                               # the configured size is the floor: free VRAM may allow more
+            from ..embedding import pick_batch
+
+            n_batch = pick_batch(n_batch)
         cache = EmbeddingCache(e.cache_dir)
         # Only work the scenes that AREN'T already embedded (at this sampling
         # signature), so progress reflects real work — "N of the new ones", not a
@@ -1950,6 +1954,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         trainer's candidate pool keeps expanding as scenes embed)."""
         model = model or self._model_name()
         idx = self._index.get(model)                   # the common case: loaded — no lock at all
+        if refresh and idx is not None and idx.size:
+            import time as _t
+
+            last = self.__dict__.setdefault("_refresh_checked", {})
+            if _t.time() - last.get(model, 0.0) < 300:    # a live view's "any new scenes?": every 5 min at most
+                refresh = False                            # (each yes rewrote the whole 4 GB snapshot)
+            else:
+                last[model] = _t.time()
         if idx is not None and idx.size and not _rebuild and not refresh:
             return idx
         builds = self.__dict__.setdefault("_index_builds", {})     # model → Event while a build runs
@@ -4981,13 +4993,38 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     model_name=self._active_clip_model(),          # match the INDEX space, not
                     pretrained=self._active_clip_pretrained(),      # the (possibly stale) config
                     device=self.cfg.embedding.device or None,
-                )
+                ).text_only()                                      # only text is ever asked of it here
         return self._clip
 
     def _clip_text_vector(self, text: str) -> np.ndarray:
+        self._text_models_used()
         return self._ensure_clip().embed_text([text])[0]
 
+    def _text_models_used(self) -> None:
+        self._text_models_at = time.time()
+
+    def unload_idle_text_models(self, idle_s: float = 600.0) -> list[str]:
+        """The CLIP (text) and CLAP (text) models leave the GPU after `idle_s`
+        without a query — reloading takes seconds; keeping them held gigabytes
+        of VRAM while the embed, Motion and Stash's decoder shared the card."""
+        if time.time() - self.__dict__.get("_text_models_at", 0.0) < idle_s:
+            return []
+        gone = []
+        with self._clip_lock:
+            if self._clip is not None:
+                self._clip = None
+                gone.append("clip-text")
+        with self.__dict__.setdefault("_clap_lock", threading.Lock()):
+            if self.__dict__.pop("_clap_text", None) is not None:
+                gone.append("clap-text")
+        if gone:
+            from ..embedding import free_gpu
+
+            free_gpu()
+        return gone
+
     def _clip_text_batch(self, labels: list[str]) -> np.ndarray:
+        self._text_models_used()
         """CLIP-embed many prompts in one forward pass (the vocab-matrix seam)."""
         return np.asarray(self._ensure_clip().embed_text(list(labels)), dtype=np.float32)
 
@@ -6041,7 +6078,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             scores, _ = self._taste_scores(model)
         except Exception:  # noqa: BLE001
             scores = None
-        tag = (getattr(idx, 'gen', id(idx)), id(scores))
+        meta = (self.__dict__.get("_score_meta") or {}).get((model, self.cfg.markers.tag_name))
+        tag = (getattr(idx, 'gen', id(idx)),
+               (tuple(meta["model_sig"]), meta["rows_sig"]) if meta and meta.get("model_sig") else id(scores))
         cache = getattr(self, "_vis_feat_cache", None)
         if cache is None or cache[0] != tag:
             cache = (tag, {})

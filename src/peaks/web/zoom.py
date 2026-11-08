@@ -467,7 +467,11 @@ class ZoomMixin:
         at a time (zoom, Hearing, Motion and the Train button can all ask)."""
 
         with self.__dict__.setdefault("_moment_train_lock", threading.Lock()):
-            return self._train_moment_model()
+            self._sense_memo = {}                  # each scene's sound / motion read once for the whole fit
+            try:
+                return self._train_moment_model()
+            finally:
+                self.__dict__.pop("_sense_memo", None)
 
     def _train_moment_model(self) -> dict:
         from sklearn.linear_model import LogisticRegression

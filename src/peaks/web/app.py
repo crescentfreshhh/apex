@@ -3715,3 +3715,7 @@ def _scheduler_once(service: Service, jobs: JobManager, state: dict, _embed_then
         _rewarm(service, jobs)
     except Exception:  # noqa: BLE001
         pass
+    try:   # text-search models idle for ten minutes leave the GPU
+        service.unload_idle_text_models()
+    except Exception:  # noqa: BLE001
+        pass

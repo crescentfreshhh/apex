@@ -199,7 +199,7 @@ class MotionMixin:
         todo = self.motion_todo()[: limit or self.motion_settings()["per_run"]]
         if not todo:
             if self.__dict__.pop("_retrain_owed", False):
-                self._senses_retrain(log)
+                self._senses_retrain(log, "motion")
             return {"seen": 0}
         try:
             self._motion_log = log                        # a first run fetches the weights: say so
@@ -247,7 +247,7 @@ class MotionMixin:
         if getattr(job, "paused_for", None):
             log("retrain waits until it resumes")
         elif done or self.__dict__.pop("_retrain_owed", False):
-            self._senses_retrain(log)
+            self._senses_retrain(log, "motion")
             try:
                 log("moment length: " + self.motion_span_check()["verdict"])
             except Exception as exc:  # noqa: BLE001 — a check, never in the way
@@ -257,6 +257,15 @@ class MotionMixin:
     # --- what the moment model and the tier model get --------------------------------------
 
     def _motion_load(self, sid: str):
+        memo = self.__dict__.get("_sense_memo")
+        if memo is not None and ("motion", str(sid)) in memo:
+            return memo[("motion", str(sid))]
+        out = self._motion_load_raw(sid)
+        if memo is not None:
+            memo[("motion", str(sid))] = out
+        return out
+
+    def _motion_load_raw(self, sid: str):
         e = self._zoom_view()["scenes"].get(str(sid))
         cache = self._motion_cache()
         if not e or not cache.has(e["key"], MOTION_NS):
