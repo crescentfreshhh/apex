@@ -68,6 +68,37 @@ def read_json_cached(path, default=None):
     return val
 
 
+_OWNED: dict = {}
+_MISSING = object()
+
+
+def read_json_owned(path, default=None):
+    """`read_json` for a file only Peaks writes (through this module): parsed
+    once, then served from memory with no stat at all — every save here drops
+    the copy, and `forget_owned()` drops them all (a restore puts files back
+    behind our back). The idle scheduler asks these every time it wakes."""
+    key = os.path.abspath(str(path))
+    with _JSON_MEMO_LOCK:
+        hit = _OWNED.get(key, None)
+    if hit is None:
+        try:
+            val = read_json(path, default=_MISSING)
+        except DamagedFile:
+            raise
+        with _JSON_MEMO_LOCK:
+            _OWNED[key] = val
+        hit = val
+    return copy.deepcopy(default) if hit is _MISSING else copy.deepcopy(hit)
+
+
+def forget_owned(path=None) -> None:
+    with _JSON_MEMO_LOCK:
+        if path is None:
+            _OWNED.clear()
+        else:
+            _OWNED.pop(os.path.abspath(str(path)), None)
+
+
 @contextlib.contextmanager
 def temp_for(path, suffix: str = ".tmp"):
     """A unique temp path next to `path`; on a clean exit it replaces `path`
@@ -89,12 +120,15 @@ def temp_for(path, suffix: str = ".tmp"):
 
 def write_bytes(path, data: bytes, fsync: bool = True) -> Path:
     path = Path(path)
-    with temp_for(path) as tmp:
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            if fsync:
-                fh.flush()
-                os.fsync(fh.fileno())
+    try:
+        with temp_for(path) as tmp:
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+                if fsync:
+                    fh.flush()
+                    os.fsync(fh.fileno())
+    finally:
+        forget_owned(path)                 # the next owned read sees what was just written
     return path
 
 

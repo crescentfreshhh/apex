@@ -175,18 +175,41 @@ class BackupMixin:
                 "snapshots": snaps, "last": self.__dict__.get("_last_backup"),
                 "links_ok": snaps[0]["links_ok"] if snaps else None, "due": self.backup_due()}
 
+    def _newest_snapshot_at(self) -> float:
+        """When the newest snapshot (not a "before restore" one) was made — read
+        from the share once, then kept (a backup, prune or restore drops it)."""
+        v = self.__dict__.get("_snap_newest")
+        if v is None:
+            snaps = [x for x in self.list_snapshots() if x.get("label") != "before restore"]
+            v = self._snap_newest = float(snaps[0].get("created") or 0) if snaps else 0.0
+        return v
+
     def backup_due(self, now: float | None = None) -> bool:
-        """Weekly: on the set day, from the set time, if no snapshot in 6 days."""
+        """Weekly: on the set day, from the set time, if no snapshot in 6 days.
+        The clock first — the media share is looked at only when it's time."""
         s = self.backup_settings()
-        if not s["backup_on"] or not self._backup_writable()[0]:
+        if not s["backup_on"]:
             return False
-        t = time.localtime(now if now is not None else time.time())
+        now = time.time() if now is None else now
+        t = time.localtime(now)
         if t.tm_wday != int(s["backup_day"]) or (t.tm_hour, t.tm_min) < (int(s["backup_hour"]), int(s["backup_minute"])):
             return False
-        snaps = [x for x in self.list_snapshots() if x.get("label") != "before restore"]
-        if snaps and snaps[0].get("created") and (now or time.time()) - float(snaps[0]["created"]) < 6 * 86400:
+        if now - self._newest_snapshot_at() < 6 * 86400:
             return False
-        return True
+        return self._backup_writable()[0]
+
+    def backup_next(self, now: float | None = None) -> float | None:
+        """The start of the next weekly window (the scheduler sleeps until then)."""
+        s = self.backup_settings()
+        if not s["backup_on"]:
+            return None
+        now = time.time() if now is None else now
+        lt = time.localtime(now)
+        day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(s["backup_hour"]), int(s["backup_minute"]), 0, 0, 0, -1))
+        at = day0 + ((int(s["backup_day"]) - lt.tm_wday) % 7) * 86400
+        while at + 86400 <= now:                   # this week's window is over
+            at += 7 * 86400
+        return at
 
     # --- making a snapshot ------------------------------------------------------------
 
@@ -268,14 +291,20 @@ class BackupMixin:
                "linked": linked, "copied": copied, "links_ok": links_ok, "sha256": sums}
         (work / "manifest.json").write_text(json.dumps(man, indent=1))
         work.rename(root / name)
+        self.__dict__.pop("_snap_newest", None)
         if prune:
             self.prune_backups()
+        self.__dict__.pop("_snap_newest", None)
         self._last_backup = {"name": name, "at": time.time(), "new_bytes": new_bytes, "linked": linked,
                              "copied": copied, "links_ok": links_ok}
         log(f"snapshot {name}: {total:,} files, {copied:,} new/changed, {linked:,} unchanged (linked)")
         return {**self._last_backup, "files": total, "bytes": all_bytes}
 
     def prune_backups(self) -> int:
+        self.__dict__.pop("_snap_newest", None)
+        return self._prune_backups()
+
+    def _prune_backups(self) -> int:
         keep = int(self.backup_settings()["backup_keep"])
         snaps = self.list_snapshots()
         gone = 0
@@ -374,6 +403,8 @@ class BackupMixin:
     def _reload_after_restore(self) -> None:
         """Forget everything read from disk so the restored files take effect."""
         self._settings_cache = None
+        atomic.forget_owned()                       # files put back behind our back: read them again
+        self.__dict__.pop("_snap_newest", None)
         try:
             self.store().close()                    # re-read the restored database
         except Exception:  # noqa: BLE001
@@ -458,4 +489,5 @@ class BackupMixin:
             with tar.extractfile(m) as src, open(dest, "wb") as out:
                 shutil.copyfileobj(src, out)
         work.rename(root / name)
+        self.__dict__.pop("_snap_newest", None)
         return {"name": name}

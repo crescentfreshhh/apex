@@ -125,10 +125,14 @@ class PictureMixin:
         return rec
 
     def _pic_state(self) -> dict:
+        from .. import atomic
+        from pathlib import Path
+
         try:
-            return json.loads((self._pic_dir() / "state.json").read_text())
+            d = atomic.read_json_owned(Path(self.cfg.modeling.dir) / "picture" / "state.json", default={})
         except (OSError, ValueError):
             return {}
+        return d if isinstance(d, dict) else {}
 
     def _pic_save_state(self, d: dict) -> None:
         from .. import atomic
@@ -156,8 +160,10 @@ class PictureMixin:
             m_stamp = (mst.st_mtime_ns, mst.st_size)
         except OSError:
             m_stamp = None
-        key = (id(rows), len(rows), self.__dict__.get("_cat_edit_seq", 0), m_stamp,
-               id(self.last_ingest()), bool(self._pic_state().get("backfill")), id(self.cached_duplicates()))
+        li = self.last_ingest()
+        key = (self.__dict__.get("_cat_ver", 0), len(rows), self.__dict__.get("_cat_edit_seq", 0), m_stamp,
+               li.get("finished") or li.get("at") or li.get("started"), bool(self._pic_state().get("backfill")),
+               id(self.cached_duplicates()))
         hit = self.__dict__.get("_pic_todo_cache")
         if hit is not None and hit[0] == key and time.monotonic() - hit[2] < 600:
             return hit[1]

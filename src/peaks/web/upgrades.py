@@ -114,7 +114,7 @@ class UpgradesMixin:
         from .. import atomic
 
         try:
-            d = atomic.read_json_cached(self._upg_path(), default=None)
+            d = atomic.read_json_owned(self._upg_path(), default=None)
         except atomic.DamagedFile:
             d = None
         d = d if isinstance(d, dict) else {}
@@ -226,6 +226,13 @@ class UpgradesMixin:
         if not (s["auto"] and s["url"] and s["api_key"]):
             return False
         return time.time() - (self._upg_load().get("last_pass") or 0) >= 20 * 3600
+
+    def upgrade_next(self) -> float | None:
+        s = self.upgrade_settings(reveal=True)
+        if not (s["auto"] and s["url"] and s["api_key"]):
+            return None
+        at = (self._upg_load().get("last_pass") or 0) + 20 * 3600
+        return at if at > time.time() else time.time() + 600   # due but waiting on a job: look again later
 
     def run_upgrade_pass(self, job=None, client: pw.ProwlarrClient | None = None,
                          sleep=time.sleep) -> dict:

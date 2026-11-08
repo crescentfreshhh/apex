@@ -190,10 +190,13 @@ class ZoomMixin:
         saved = self._zoom_saved()
         idx = self.index(self._model_name())
         have = {str(m.get("scene_id")) for m in idx.key_meta.values()}
+        fails, now = self.sense_failures("zoom"), time.time()
         out = []
         for r in self._catalogue_all():
             sid = r["scene_id"]
             if r["tier"] == "rejected" or sid not in have or not r.get("path"):
+                continue
+            if self._sense_skip(fails, r, now):              # couldn't read it lately: not every run again
                 continue
             e = st.get(sid)
             covered = e is not None and all(any(abs(t - c) <= 3.0 for c in e.get("centers", []))
@@ -327,6 +330,7 @@ class ZoomMixin:
             return {"zoomed": 0}
         embedder, sampler = _Lazy(self._embedder), _Lazy(self._zoom_sampler)
         done = failed = 0
+        ok_ids, failed_ids, errors = [], [], set()
         t0 = time.time()
         for i, row in enumerate(todo):
             if job is not None and job.cancelled:
@@ -335,13 +339,26 @@ class ZoomMixin:
             try:
                 self.zoom_scene(row, saved.get(row["scene_id"]), embedder=embedder, sampler=sampler)
                 done += 1
+                ok_ids.append(row["scene_id"])
             except Exception as exc:  # noqa: BLE001 — one unreadable file mustn't stop the run
                 failed += 1
-                log(f"scene {row['scene_id']}: {exc}")
+                log(f"scene {row['scene_id']}: {str(exc)[:300]} — skipped for a week")
+                self._sense_failed("zoom", row, exc)        # remembered: the next runs don't start on it again
+                failed_ids.append(row["scene_id"])
+                errors.add(type(exc).__name__)
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
         self._zoom_flush()
+        if not done and failed >= 5:
+            # every file failed: the setup (model, GPU, ffmpeg), not the files — don't park
+            # them for a week; zoom backs off for an hour instead (as Hearing and Motion do)
+            self._sense_unfail("zoom", failed_ids)
+            self._zoom_error = f"every scene failed ({'; '.join(sorted(errors))[:200]})"
+            log(self._zoom_error + " — trying again in an hour")
+        else:
+            self.__dict__.pop("_zoom_error", None)
+        self._sense_unfail("zoom", ok_ids)
         log(f"zoomed {done} scene(s){f', {failed} unreadable' if failed else ''}")
         del embedder
         if getattr(job, "paused_for", None):

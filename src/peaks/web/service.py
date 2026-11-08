@@ -2019,6 +2019,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             with self._index_lock:
                 self._index[model] = idx
                 self._index_stale.discard(model)
+            self._changed("index")
             return idx
         finally:
             self._index_building = None
@@ -2037,6 +2038,22 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         for m in (models or list(self._index)):
             if m in self._index:
                 self._index_stale.add(m)
+        self._changed("index stale")
+
+    # --- telling the scheduler something changed (it sleeps until then) -----------------
+
+    def _changed(self, reason: str) -> None:
+        cb = self.__dict__.get("_on_change")
+        if cb is not None:
+            try:
+                cb(reason)
+            except Exception:  # noqa: BLE001 — never in the way of the change itself
+                pass
+
+    def _cat_changed(self) -> None:
+        """The scene list itself changed (not just one row's fields)."""
+        self._cat_ver = self.__dict__.get("_cat_ver", 0) + 1
+        self._changed("catalogue")
 
     def index_state(self) -> str:
         m = self._model_name()
@@ -2265,6 +2282,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "since": building}
 
     def invalidate_index(self, model: str | None = None) -> None:
+        self._changed("index dropped")
         with self._index_lock:
             if model is None:
                 self._index.clear()
@@ -2929,7 +2947,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         from .. import atomic
 
-        d = atomic.read_json_cached(self._measure_state_path(), default=None)
+        d = atomic.read_json_owned(self._measure_state_path(), default=None)
         return d if isinstance(d, dict) else {"signals": 0, "last_full": 0.0}
 
     def _measure_state_update(self, add: int = 0, reset: bool = False) -> None:
@@ -2963,12 +2981,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         ratings/grades piled up, and not twice in one night."""
         import time as _t
 
-        sch = self.measure_schedule()
-        if sch["hour"] < 0:
-            return False
+        hour = int(self.cfg.modeling.taste_measure_hour)
         now = _t.time() if now is None else now
-        if _t.localtime(now).tm_hour != sch["hour"]:
-            return False
+        if hour < 0 or _t.localtime(now).tm_hour != hour:
+            return False                      # the clock first: the state is read only in the hour
+        sch = self.measure_schedule()
         if sch["signals"] < sch["needed"]:
             return False
         return (now - float(sch["last_full"] or 0)) > 20 * 3600
@@ -5214,6 +5231,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 self._meta.setdefault(sid, meta.get(sid) or {})
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._cat_cache = (_t.monotonic() - self._CAT_TTL - 1, rows)   # stale: refresh soon
+        self._cat_changed()
         return rows
 
     def _refresh_catalogue_bg(self, full: bool = False) -> None:
@@ -5255,7 +5273,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 ids = [s for s in ids if self._in_scope(self._meta.get(s))]
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._sync_hidden_from_ratings(rows)
+        new_ids = [r["scene_id"] for r in rows]
+        old = (self.__dict__.get("_cat_cache") or (0, None))[1]
         self._cat_cache = (_t.monotonic(), rows)
+        if old is None or len(old) != len(rows) or [r["scene_id"] for r in old] != new_ids:
+            self._cat_changed()                               # scenes came or went: the scheduler looks again
         self._maybe_daily_backup(rows)
         sig = (tuple(ids), self.__dict__.get("_cat_edit_seq", 0))
         if want or sig != self.__dict__.get("_cat_saved_sig"):  # nothing changed: no gzip rewrite
@@ -5320,6 +5342,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             self._cat_edit_seq = self.__dict__.get("_cat_edit_seq", 0) + 1
             edited = self.__dict__.setdefault("_cat_edited", {})
             edited[sid] = self._cat_edit_seq
+            self._cat_ver = self.__dict__.get("_cat_ver", 0) + 1
             if len(edited) > 5000:                    # only edits newer than a running read matter
                 floor = self._cat_edit_seq - 2000
                 for k in [k for k, v in edited.items() if v < floor]:

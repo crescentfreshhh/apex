@@ -329,6 +329,9 @@ def create_app(cfg=None):
             free_gpu()
         if getattr(job, "paused_for", None) and job.kind in ("hear", "motion", "zoom"):
             service._retrain_owed = True             # its retrain was skipped: the resumed run does it
+        sched = getattr(app.state, "scheduler", None)
+        if sched is not None:
+            sched.wake("job finished")               # what was waiting for it can start
     jobs.on_finish = _job_done
     app = FastAPI(title="peaks", docs_url="/api/docs")
     from .compress import TextGzip
@@ -403,6 +406,10 @@ def create_app(cfg=None):
         resp = await call_next(request)
         if write:
             _bump_version()                       # …and anything computed during the write
+        if write or (request.method != "GET" and p.startswith(_WAKES)):
+            sched = getattr(app.state, "scheduler", None)
+            if sched is not None:
+                sched.wake(p)                     # something changed: the scheduler looks once
         secs = _time.monotonic() - t0
         st, sn = stashtiming.request_take(waited)
         resp.headers["Server-Timing"] = f"app;dur={secs * 1000:.0f}" + (f", stash;dur={st * 1000:.0f}" if sn else "")
@@ -3500,6 +3507,10 @@ def _start_zoom(service: Service, jobs: JobManager):
     10 minutes, and only with the index already in memory (never loads it just to look)."""
     import time as _t
 
+    if _t.time() < _zoom_next["at"]:
+        _zoom_next["missed"] = True               # asked too soon: the scheduler comes back then
+        return None
+    _zoom_next["missed"] = False
     if (_t.time() < _zoom_next["at"] or jobs.stopped_by_you("zoom")
             or any(jobs.running(k) for k in (*_ZOOM_WAIT_FOR, "hear", "lab", "motion"))
             or _bg_turn_taken(jobs, "zoom")):
@@ -3510,6 +3521,9 @@ def _start_zoom(service: Service, jobs: JobManager):
     if not service.zoom_due():
         jobs.pause_pop("zoom")                     # nothing to do (or switched off): don't hold the queue
         return None
+    if getattr(service, "_zoom_error", None):      # the last run failed on every file: an hour's back-off
+        _zoom_next["at"] = _t.time() + 3600
+        _zoom_next["missed"] = True
     try:
         j = jobs.start("zoom", service.run_zoom, blockers=_others("zoom"))
     except RuntimeError:
@@ -3528,6 +3542,10 @@ def _start_hear(service: Service, jobs: JobManager):
     (no model, no network) so it doesn't retry in a loop."""
     import time as _t
 
+    if _t.time() < _hear_next["at"]:
+        _hear_next["missed"] = True               # asked too soon: the scheduler comes back then
+        return None
+    _hear_next["missed"] = False
     if (_t.time() < _hear_next["at"] or jobs.stopped_by_you("hear") or any(jobs.running(k) for k in _HEAR_WAIT_FOR)
             or _bg_turn_taken(jobs, "hear")):
         return None
@@ -3539,6 +3557,7 @@ def _start_hear(service: Service, jobs: JobManager):
         return None
     if getattr(service, "_hear_error", None):
         _hear_next["at"] = _t.time() + 3600
+        _hear_next["missed"] = True           # retry after the back-off
     try:
         j = jobs.start("hear", service.run_hear, blockers=_others("hear"))
     except RuntimeError:
@@ -3556,6 +3575,10 @@ def _start_motion(service: Service, jobs: JobManager):
     Checked at most every 10 minutes; backs off an hour after a failure."""
     import time as _t
 
+    if _t.time() < _motion_next["at"]:
+        _motion_next["missed"] = True               # asked too soon: the scheduler comes back then
+        return None
+    _motion_next["missed"] = False
     if (_t.time() < _motion_next["at"] or jobs.stopped_by_you("motion")
             or any(jobs.running(k) for k in _MOTION_WAIT_FOR) or _bg_turn_taken(jobs, "motion")):
         return None
@@ -3567,6 +3590,7 @@ def _start_motion(service: Service, jobs: JobManager):
         return None
     if getattr(service, "_motion_error", None):
         _motion_next["at"] = _t.time() + 3600
+        _motion_next["missed"] = True           # retry after the back-off
     try:
         j = jobs.start("motion", service.run_motion, blockers=_others("motion"))
     except RuntimeError:
@@ -3584,6 +3608,10 @@ def _start_faces(service: Service, jobs: JobManager):
     minutes; backs off an hour after a failure."""
     import time as _t
 
+    if _t.time() < _faces_next["at"]:
+        _faces_next["missed"] = True               # asked too soon: the scheduler comes back then
+        return None
+    _faces_next["missed"] = False
     if (_t.time() < _faces_next["at"] or jobs.stopped_by_you("faces")
             or any(jobs.running(k) for k in _FACES_WAIT_FOR) or _bg_turn_taken(jobs, "faces")):
         return None
@@ -3595,6 +3623,7 @@ def _start_faces(service: Service, jobs: JobManager):
         return None
     if getattr(service, "_faces_error", None):
         _faces_next["at"] = _t.time() + 3600
+        _faces_next["missed"] = True           # retry after the back-off
     try:
         j = jobs.start("faces", service.run_faces, blockers=_others("faces"))
     except RuntimeError:
@@ -3693,23 +3722,18 @@ def _start_scheduler(app, service: Service, jobs: JobManager):
     """Recurring incremental-embed scheduler. Always running; it polls the
     settings each minute and reads the interval/enabled state live, so the
     Dashboard toggle takes effect without a container restart (interval 0 = off)."""
-    stop = threading.Event()
+    from .scheduler import Scheduler
+
     state = {"last": 0.0}
 
     def _embed_then_sync(job):
         return _scheduled_embed_pass(service, job)
 
-    def _loop():
-        if stop.wait(30):  # small initial delay so startup isn't slammed
-            return
-        while not stop.wait(60):  # poll every minute; interval read live
-            try:
-                _scheduler_once(service, jobs, state, _embed_then_sync)
-            except Exception:  # noqa: BLE001 — never let the scheduler die
-                pass
-
-    threading.Thread(target=_loop, daemon=True, name="peaks-scheduler").start()
-    app.state._scheduler_stop = stop
+    sched = Scheduler(_scheduler_steps(service, jobs, state, _embed_then_sync))
+    app.state.scheduler = sched
+    service._on_change = sched.wake               # the index / the scene list changed
+    sched.start()
+    app.state._scheduler_stop = sched
 
 
 # --- "Pause jobs for an hour" (the top bar's ⏸) ----------------------------------------------
@@ -3779,85 +3803,138 @@ def _hold_tick(service: Service, jobs: JobManager) -> bool:
 # to recompute the whole library every 30 s while the megaboard was open)
 import re as _re
 
+# telemetry writes that still matter to the scheduler (the pause, the folder watch,
+# the seedbox jobs, stopping a job)
+_WAKES = ("/api/hold", "/api/watch", "/api/seedjob", "/api/jobs/")
 _TELEMETRY = _re.compile(r"^/api/(board/exposure|taste/engage|hold|watch|jobs/|picture/(answer|rate)|floor|"
                          r"seedjobs?|prefs/|labels$|memory/|criteria$|scene/[^/]+/criteria|performer/[^/]+/criteria|"
                          r"moments/(check|feedback)|pick/)")
 
 
 def _scheduler_once(service: Service, jobs: JobManager, state: dict, _embed_then_sync) -> None:
-    """One scheduler tick. While you've paused jobs (the top bar's ⏸), nothing
-    starts on its own; when the pause ends, what it stopped starts again first."""
-    if _hold_tick(service, jobs):
-        return
-    try:
-        secs = service.schedule_settings().get("embed_seconds", 0.0)
-    except Exception:  # noqa: BLE001
-        secs = 0.0
-    try:   # overnight full taste measure, when idle and enough is new
+    """Every step an event runs, once, in order. While you've paused jobs (the top
+    bar's ⏸), nothing starts on its own; when the pause ends, what it stopped
+    starts again first."""
+    for st in _scheduler_steps(service, jobs, state, _embed_then_sync):
+        if not st.on_event:
+            continue
+        try:
+            out = st.fn()
+        except Exception:  # noqa: BLE001 — never let the scheduler die
+            out = None
+        if st.stops_rest and out:
+            return
+
+
+def _next_local(now: float, hour: int, minute: int = 0) -> float:
+    import time as _t
+
+    lt = _t.localtime(now)
+    at = _t.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, 0, 0, -1))
+    return at if at > now else at + 86400
+
+
+def _scheduler_steps(service: Service, jobs: JobManager, state: dict, _embed_then_sync) -> list:
+    """The scheduler's steps, in the order they're asked. Each `fn` is what the
+    minute tick used to do; each deadline says when the clock alone could make
+    it due — read from memory, so a sleeping scheduler touches nothing."""
+    from .scheduler import Step
+
+    def secs():
+        try:
+            return float(service.schedule_settings().get("embed_seconds", 0.0))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def measure():
         busy = any(jobs.running(k) for k in ("embed", "ingest", "taste-measure", "train"))
         if not busy and service.measure_due():
             jobs.start("taste-measure", lambda j: service.train_taste(mode="full", job=j))
-    except Exception:  # noqa: BLE001 — never let the scheduler die
-        pass
-    try:   # the weekly backup — waits for an embed / ingest to finish
+
+    def measure_next(now):
+        h = int(service.cfg.modeling.taste_measure_hour)
+        return None if h < 0 else _next_local(now, h)
+
+    def backup():
         busy = any(jobs.running(k) for k in ("embed", "ingest", "backup", "restore"))
         if not busy and service.backup_due():
             jobs.start("backup", service.run_backup)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # duplicate deletions waiting (after a restart / another library job)
-        _start_dupe_drain(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # the folder watch: new downloads → one Ingest, after they settle
-        _watch_go(service, jobs)
-    except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
-        service.watch_check_failed(exc)
-    _scheduled_embeds(service, jobs, state, secs, _embed_then_sync)
-    try:   # paused / queued background work goes before anything new starts
-        _resume_paused(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # picture quality: new files, and the library once you've started it
-        _start_picture(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # moment zoom: dense looks at candidate moments, when nothing else runs
-        _start_zoom(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # hearing: Peaks listens to scenes, when nothing else runs
-        _start_hear(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # motion: Peaks watches candidate moments move, the heaviest — last
-        _start_motion(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # faces: who is in each scene, when nothing else runs
-        _start_faces(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # files the pull just brought in: scan exactly where they landed
-        _seed_ingest_go(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    for kind in ("pull", "purge", "report"):   # the seedbox jobs, once you've taken them over
+
+    def watch():
         try:
+            _watch_go(service, jobs)
+        except Exception as exc:  # noqa: BLE001 — never kill the loop, but say so
+            service.watch_check_failed(exc)
+
+    def watch_on():                               # a filesystem poll by design, only while it's on
+        try:
+            cfg = service.watch_settings()
+            return bool(cfg["watch_on"] and service._watch_roots(cfg))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def embeds_next(now):
+        s = secs()
+        return state["last"] + s if s > 0 else None
+
+    def sense_next(timer):
+        return lambda now: timer["at"] if timer.get("missed") else None
+
+    def seed_ingest_next(now):
+        try:
+            p = service._sj_load().get("ingest_pending") or {}
+        except Exception:  # noqa: BLE001
+            return None
+        if not p.get("paths"):
+            return None
+        return float(p.get("retry_after") or 0) or None
+
+    def seedjob(kind):
+        def run():
             if not jobs.running(f"seed-{kind}") and service.seedjob_due(kind):
                 jobs.start(f"seed-{kind}", getattr(service, f"run_seed_{kind}"))
-        except Exception:  # noqa: BLE001 — a job's error is in its own log
-            pass
-    try:   # upgrades: the daily Prowlarr search, when you've switched it on
+        return run
+
+    def seedjob_next(kind):
+        return lambda now: service.seedjob_next(kind, now)
+
+    def upgrades():
         if not any(jobs.running(k) for k in ("ingest", "upgrades", "restore")) and service.upgrade_due():
             jobs.start("upgrades", service.run_upgrade_pass)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # anything that dropped the index: reload it before anyone opens a page
-        _rewarm(service, jobs)
-    except Exception:  # noqa: BLE001
-        pass
-    try:   # text-search models idle for ten minutes leave the GPU
-        service.unload_idle_text_models()
-    except Exception:  # noqa: BLE001
-        pass
+
+    def text_next(now):
+        d = service.__dict__
+        if d.get("_clip") is None and d.get("_clap_text") is None:
+            return None
+        return d.get("_text_models_at", 0.0) + 600
+
+    def library_check():                          # Stash's scene list, every 30 minutes while idle
+        service._catalogue_all()
+
+    def daily_grades():                           # the day's grade backup (was riding on the catalogue refresh)
+        rows = (service.__dict__.get("_cat_cache") or (0, None))[1]
+        if rows:
+            service._maybe_daily_backup(rows)
+
+    return [
+        Step("hold", lambda: _hold_tick(service, jobs), lambda now: jobs.hold_until if jobs.held() else None,
+             stops_rest=True),
+        Step("measure", measure, measure_next),
+        Step("backup", backup, lambda now: service.backup_next(now)),
+        Step("dupe-drain", lambda: _start_dupe_drain(service, jobs)),
+        Step("watch", watch, every=60, active=watch_on),
+        Step("embeds", lambda: _scheduled_embeds(service, jobs, state, secs(), _embed_then_sync), embeds_next),
+        Step("resume", lambda: _resume_paused(service, jobs)),
+        Step("picture", lambda: _start_picture(service, jobs)),
+        Step("zoom", lambda: _start_zoom(service, jobs), sense_next(_zoom_next)),
+        Step("hear", lambda: _start_hear(service, jobs), sense_next(_hear_next)),
+        Step("motion", lambda: _start_motion(service, jobs), sense_next(_motion_next)),
+        Step("faces", lambda: _start_faces(service, jobs), sense_next(_faces_next)),
+        Step("seed-ingest", lambda: _seed_ingest_go(service, jobs), seed_ingest_next),
+        *[Step(f"seed-{k}", seedjob(k), seedjob_next(k)) for k in ("pull", "purge", "report")],
+        Step("upgrades", upgrades, lambda now: service.upgrade_next()),
+        Step("rewarm", lambda: _rewarm(service, jobs)),
+        Step("text-models", lambda: service.unload_idle_text_models(), text_next),
+        Step("library", library_check, every=1800, on_event=False),
+        Step("daily-grades", daily_grades, lambda now: _next_local(now, 0, 5), on_event=False),
+    ]

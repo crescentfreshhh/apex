@@ -218,16 +218,9 @@ class HearMixin:
         """A sense's "nothing to do" is remembered per (index build, library edit,
         scene count, failures file) — the scan behind it used to walk every scene's
         cache file each time. A "yes" is never remembered."""
-        import os
-
-        try:
-            fst = os.stat(self._sense_fail_path())
-            fails = (fst.st_mtime_ns, fst.st_size)
-        except OSError:
-            fails = None
         idx = self._index.get(self._model_name())
-        key = (getattr(idx, "gen", 0), self.__dict__.get("_cat_edit_seq", 0), len(self._catalogue_all()), fails,
-               self.__dict__.get("_sense_runs", 0))
+        key = (getattr(idx, "gen", 0), self.__dict__.get("_cat_edit_seq", 0), self.__dict__.get("_cat_ver", 0),
+               self.store().version("sense_failures"), self.__dict__.get("_sense_runs", 0))
         memo = self.__dict__.setdefault("_due_memos", {})
         hit = memo.get(name)
         if hit is not None and hit[0] == key and time.time() - hit[2] < 3600:

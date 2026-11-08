@@ -112,21 +112,50 @@ class WatchMixin:
         roots that couldn't be read."""
         files: dict[str, tuple[int, float]] = {}
         bad = []
+        # A folder whose mtime hasn't moved has the same entries as last time: its
+        # files are taken from memory (one stat for the folder, not one per file) —
+        # unless something in it is still settling (a download grows in place
+        # without touching the folder's mtime).
+        memo = self.__dict__.setdefault("_watch_dirs", {})
+        live = {os.path.dirname(p) for p in (self._watch_state().get("seen") or {})}
+        fresh: dict = {}
+
+        def walk(d):
+            try:
+                mt = os.stat(d).st_mtime_ns
+            except OSError:
+                return
+            hit = memo.get(d)
+            if hit is not None and hit[0] == mt and d not in live:
+                mine, subs = hit[1], hit[2]
+            else:
+                mine, subs = {}, []
+                try:
+                    with os.scandir(d) as it:
+                        for e in it:
+                            if e.name.startswith("."):
+                                continue
+                            try:
+                                if e.is_dir(follow_symlinks=True):
+                                    subs.append(e.path)
+                                elif _is_candidate(e.name):
+                                    st = e.stat()
+                                    mine[e.path] = (st.st_size, st.st_mtime)
+                            except OSError:
+                                continue
+                except OSError:
+                    return
+            fresh[d] = (mt, mine, subs)
+            files.update(mine)
+            for s in subs:
+                walk(s)
+
         for root in roots:
             if not os.path.isdir(root):
                 bad.append(root)
                 continue
-            for d, dirs, names in os.walk(root, onerror=lambda e: None):
-                dirs[:] = [x for x in dirs if not x.startswith(".")]
-                for n in names:
-                    if not _is_candidate(n):
-                        continue
-                    p = os.path.join(d, n)
-                    try:
-                        st = os.stat(p)
-                    except OSError:
-                        continue
-                    files[p] = (st.st_size, st.st_mtime)
+            walk(root)
+        self._watch_dirs = fresh
         return files, bad
 
     def _folder_watch_lock(self):
@@ -147,6 +176,7 @@ class WatchMixin:
         if not cfg["watch_on"] or not roots:
             return None
         st = self._watch_state()
+        before = json.dumps({k: v for k, v in st.items() if k != "checked"}, sort_keys=True, default=str)
         files, bad = self._watch_list(roots)
         st["checked"], st["unreadable"] = now, bad
         st.pop("check_error", None)
@@ -169,7 +199,8 @@ class WatchMixin:
         go = bool(settled) and settling == 0 and (force or now - st["last_change"] >= cfg["watch_quiet"])
         if go and not force and now < float(st.get("retry_after") or 0):   # a failed batch waits
             go = False
-        self._watch_save()
+        if json.dumps({k: v for k, v in st.items() if k != "checked"}, sort_keys=True, default=str) != before:
+            self._watch_save()                     # only when something changed ("checked" lives in memory)
         return {"paths": roots, "files": settled} if go else None
 
     def _pull_dests(self) -> list[str]:
@@ -247,7 +278,7 @@ class WatchMixin:
         from .. import atomic
 
         try:
-            ids = atomic.read_json_cached(self._followup_path(), default=None) or []
+            ids = atomic.read_json_owned(self._followup_path(), default=None) or []
             return sorted({str(x) for x in ids}, key=lambda x: int(x) if x.isdigit() else 0)
         except Exception:  # noqa: BLE001
             return []

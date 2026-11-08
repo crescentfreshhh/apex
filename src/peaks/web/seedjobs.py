@@ -124,7 +124,7 @@ class SeedJobsMixin:
         from .. import atomic
 
         try:
-            d = atomic.read_json_cached(self._sj_state_path(), default=None)
+            d = atomic.read_json_owned(self._sj_state_path(), default=None)
         except atomic.DamagedFile:
             d = None
         d = d if isinstance(d, dict) else {}
@@ -678,13 +678,30 @@ class SeedJobsMixin:
         s = self.seedjob_settings()
         if not s["cutover"] or not s[f"{kind}_on"]:
             return False
-        if kind != "report" and self._sj_ready(s, kind):      # the page says why; don't retry every minute
-            return False
         last = self._sj_load()["last"].get(kind) or 0
         if kind == "pull":
-            return now - last >= s["pull_every_min"] * 60
-        at = self._at_today(s[f"{kind}_at"], now)
-        return now >= at and last < at
+            due = now - last >= s["pull_every_min"] * 60
+        else:
+            at = self._at_today(s[f"{kind}_at"], now)
+            due = now >= at and last < at
+        if not due:
+            return False                      # the clock first: the setup (runs.log…) is checked only when it's time
+        return not (kind != "report" and self._sj_ready(s, kind))   # the page says why; don't retry every minute
+
+    def seedjob_next(self, kind: str, now: float | None = None) -> float | None:
+        """When the clock alone next makes `kind` due (the scheduler sleeps until then)."""
+        now = time.time() if now is None else now
+        s = self.seedjob_settings()
+        if not s["cutover"] or not s[f"{kind}_on"]:
+            return None
+        last = self._sj_load()["last"].get(kind) or 0
+        if kind == "pull":
+            at = last + s["pull_every_min"] * 60
+        else:
+            at = self._at_today(s[f"{kind}_at"], now)
+            if now >= at and last >= at:
+                at += 86400                      # done today: tomorrow
+        return at if at > now else now + 600     # due but it couldn't start (setup, a job): look again in 10 min
 
     def seedjob_status(self) -> dict:
         s = self.seedjob_settings()
