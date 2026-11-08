@@ -466,7 +466,8 @@ def cmd_web(args) -> int:
 
     app = create_app(cfg)
     print(f"peaks web on http://{args.host}:{args.port}  (Ctrl-C to stop)")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning",
+                timeout_graceful_shutdown=5)   # open live streams never hold a stop
     return 0
 
 

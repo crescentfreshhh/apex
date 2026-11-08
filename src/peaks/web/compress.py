@@ -1,7 +1,8 @@
 """Gzip for the text Peaks sends (JSON, JS, CSS, HTML) — never for video,
 images or anything sent in ranges, so seeking in a stream is untouched.
 
-Starlette's GZipMiddleware compresses any type; a ranged mp4 must not be."""
+Starlette's GZipMiddleware compresses any type; a ranged mp4 must not be. A live
+event stream (/api/events) goes out as it is: buffering it would hold it forever."""
 
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ class TextGzip:
                 h = {k.lower(): v for k, v in message.get("headers", [])}
                 ctype = h.get(b"content-type", b"").decode("latin-1")
                 if (b"content-encoding" in h or message.get("status", 200) == 206
-                        or not ctype.startswith(TEXT)):
+                        or not ctype.startswith(TEXT) or ctype.startswith("text/event-stream")):   # a live stream: never held back
                     passthrough = True
                     return await send(message)
                 start = message

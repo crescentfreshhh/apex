@@ -15,6 +15,11 @@ from pathlib import Path
 
 from .jobs import JobManager
 
+try:                                   # routes taking the raw request resolve this name
+    from starlette.requests import Request
+except ImportError:  # pragma: no cover — the web extra isn't installed
+    Request = None
+
 # what each background job is called, and its colour family in the Activity log
 JOB_LABELS = {"embed": "Embedding", "ingest": "Ingest", "score": "Writing markers", "sync": "Syncing",
               "fix": "Retrying failed", "reel": "Exporting video", "playlist": "Building board",
@@ -401,7 +406,7 @@ def create_app(cfg=None):
         secs = _time.monotonic() - t0
         st, sn = stashtiming.request_take(waited)
         resp.headers["Server-Timing"] = f"app;dur={secs * 1000:.0f}" + (f", stash;dur={st * 1000:.0f}" if sn else "")
-        if not p.startswith(("/api/jobs", "/api/perf")):
+        if not p.startswith(("/api/jobs", "/api/perf", "/api/events")):
             route = getattr(request.scope.get("route"), "path", None)
             forensics.note_duration(request.method, p, secs, route=route, stash=st, stash_calls=sn)
         return resp
@@ -812,13 +817,42 @@ def create_app(cfg=None):
 
     @app.get("/api/jobs/running")
     def running_jobs():
-        """The job tray's poll: running jobs only, without logs or results
-        (the full list carried 200 jobs with their results every 4 s)."""
-        import time as _t
+        """The job tray's fallback poll (the live stream carries the same list):
+        running jobs only, without logs or results."""
+        return _running_jobs(jobs)
 
-        return [{"id": j.id, "kind": j.kind, "status": j.status, "started": j.started, "elapsed": round(_t.time() - j.started),
-                 "progress": j.progress, "timing": j.timing(), "paused_for": getattr(j, "paused_for", None)}
-                for j in jobs.list() if j.status == "running"]
+    @app.get("/api/events")
+    async def live_events(request: Request, once: bool = False):
+        """One stream per open tab: the job tray, the pause countdown, the
+        warm-up banner, "the library changed" and new job log lines, pushed
+        when they change — so an idle tab asks the server nothing."""
+        import asyncio
+
+        from starlette.responses import StreamingResponse
+
+        feed = LiveFeed(service, jobs)
+
+        async def gen():
+            yield "retry: 3000\n\n"
+            for ch, data in feed.tick(full=True).items():
+                yield _sse(ch, data)
+            if once:
+                return
+            quiet = 0.0
+            while True:
+                await asyncio.sleep(LiveFeed.TICK)
+                if await request.is_disconnected():
+                    return
+                out = feed.tick()
+                for ch, data in out.items():
+                    yield _sse(ch, data)
+                quiet = 0.0 if out else quiet + LiveFeed.TICK
+                if quiet >= 15.0:
+                    quiet = 0.0
+                    yield ": ka\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
@@ -3103,6 +3137,98 @@ def create_app(cfg=None):
 
 
 _HEARTBEAT: dict = {}
+
+
+def _running_jobs(jobs: JobManager) -> list[dict]:
+    import time as _t
+
+    return [{"id": j.id, "kind": j.kind, "status": j.status, "started": j.started, "elapsed": round(_t.time() - j.started),
+             "progress": j.progress, "timing": j.timing(), "paused_for": getattr(j, "paused_for", None)}
+            for j in jobs.list() if j.status == "running"]
+
+
+def _sse(event: str, data) -> str:
+    import json as _json
+
+    return f"event: {event}\ndata: {_json.dumps(data, separators=(',', ':'), default=str)}\n\n"
+
+
+class LiveFeed:
+    """What /api/events pushes, read from memory only (no disk, no Stash):
+    `tick()` returns the channels that changed since the last tick.
+
+    jobs     the running jobs (as /api/jobs/running), at most once a second
+    hold     {held, until} — the client counts the seconds down itself
+    warm     the "Loading your library" banner state, at most every 2 s while loading
+    version  the server's data version: the library changed (refresh the counts)
+    lines    new job log lines [{t, kind, job, msg}]"""
+
+    TICK = 0.5
+    JOBS_EVERY = 1.0
+    WARM_EVERY = 2.0
+
+    def __init__(self, service: Service, jobs: JobManager):
+        import time as _t
+
+        self.service, self.jobs = service, jobs
+        self.prev: dict = {}
+        self.sent_at: dict = {}
+        self.lines_t = _t.time()
+
+    def state(self) -> dict:
+        import json as _json
+        import time as _t
+
+        running = _running_jobs(self.jobs)
+        held = self.jobs.held()
+        st = self.service.warm_status()
+        w = self.jobs.running("warmup")
+        building = bool(st.get("building"))
+        stage = pct = None
+        if w is not None and not (st["loaded"] and not building):
+            building, stage, pct = True, (w.progress or {}).get("stage"), (w.progress or {}).get("pct")
+        warm = {"loading": (not st["loaded"]) or building, "stage": stage, "pct": pct,
+                "done": st.get("done"), "total": st.get("total")}
+        sig = _json.dumps([{k: v for k, v in j.items() if k != "elapsed"} for j in running],
+                          sort_keys=True, default=str)
+        return {"jobs": (sig, running),
+                "hold": ((held, self.jobs.hold_until if held else None), {"held": held, "until": self.jobs.hold_until if held else None,
+                                "left_s": round(max(0.0, self.jobs.hold_until - _t.time())) if held else 0}),
+                "warm": (_json.dumps(warm, sort_keys=True, default=str), warm),
+                "version": (self.service.__dict__.get("_data_version", 0),
+                            {"v": self.service.__dict__.get("_data_version", 0)})}
+
+    def _new_lines(self) -> list[dict]:
+        since, out = self.lines_t, []
+        for j in self.jobs.list():
+            if j.status != "running" and (getattr(j, "finished", None) or 0) < since - 1.0:
+                continue                                  # long finished: nothing new to read
+            for t, msg in j.lines(since):
+                out.append({"t": t, "kind": j.kind, "job": j.id, "msg": msg})
+        if out:
+            out.sort(key=lambda x: x["t"])
+            self.lines_t = out[-1]["t"]
+        return out[-400:]
+
+    def tick(self, full: bool = False, now: float | None = None) -> dict:
+        import time as _t
+
+        now = _t.monotonic() if now is None else now
+        cur, out = self.state(), {}
+        for ch, (sig, data) in cur.items():
+            if not full and ch in self.prev and self.prev[ch] == sig:
+                continue
+            gap = {"jobs": self.JOBS_EVERY, "warm": self.WARM_EVERY}.get(ch, 0.0)
+            if not full and gap and now - self.sent_at.get(ch, -1e9) < gap:
+                if ch == "jobs" or (ch == "warm" and data.get("loading")):
+                    continue                              # sent again on a later tick
+            self.prev[ch], self.sent_at[ch] = sig, now
+            out[ch] = data
+        if not full:
+            lines = self._new_lines()
+            if lines:
+                out["lines"] = lines
+        return out
 
 
 def _start_warmup(service: Service, jobs: JobManager) -> None:

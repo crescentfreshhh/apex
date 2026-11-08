@@ -101,6 +101,10 @@ const api = async (path, opts) => {
   if (LIBRARY_WRITES.test(path) && typeof refreshSidebar === "function") refreshSidebar(/grade|keep/.test(path) ? 10000 : 250);
   return out;
 };
+// The live stream (/api/events): while it's open, the server pushes job progress,
+// the pause, the warm-up banner and "the library changed" — the timers below
+// that used to ask for those stand down (live.ok) and only take over if it fails.
+const live = { es: null, ok: false, wait: 1000, retry: 0, waiters: new Set() };
 // the last answer for a GET, from memory or IndexedDB (null if none)
 async function swrPeek(path) {
   const hit = SWR.get(path); if (hit) return hit;
@@ -477,7 +481,15 @@ async function poll(id, statusEl, logEl, btn, stopBtn) {
     const p = j.progress || {};
     statusEl.textContent = `${j.status} · ${p.done ?? 0}/${p.total ?? "?"} · ${j.elapsed}s`;
     logEl.textContent = (j.log || []).join("\n"); logEl.scrollTop = logEl.scrollHeight;
-    if (j.status === "running") return setTimeout(() => poll(id, statusEl, logEl, btn, stopBtn), 1000);
+    if (j.status === "running") {
+      const again = () => poll(id, statusEl, logEl, btn, stopBtn);
+      if (!live.ok) return setTimeout(again, 1000);
+      let fired = false;                               // the next "jobs" event (≤ 1/s), or 10 s at the latest
+      const once = () => { if (fired) return; fired = true; live.waiters.delete(once); clearTimeout(t); again(); };
+      const t = setTimeout(once, 10000);
+      live.waiters.add(once);
+      return;
+    }
     done();
     if (j.status === "error") toast("Job failed: " + j.error, true);
     else if (j.status === "cancelled") { toast("Stopped."); refreshDashboard(); }
@@ -5375,12 +5387,17 @@ function openCatWith(p) { showView("catalogue"); return applyCatParams(p); }
 // undos, bulk, deletes, duplicates, tag syncs, restores, training, ingest), when a
 // background job finishes, and every 30 s (changes from another tab or device).
 // Grades made directly in Stash show after Catalogue → ⋯ → Re-read from Stash.
-const side = { views: null, model: null, timer: null, busy: false, again: false };
+const side = { views: null, model: null, timer: null, pending: false, busy: false, again: false };
 function refreshSidebar(delay = 250) {
   clearTimeout(side.timer);
+  side.pending = true;
   side.timer = setTimeout(loadSidebar, delay);
 }
+// another tab or device changed the library: catch up within ~10 s, never
+// cutting short a refresh already waiting (your own grade's quiet 10 s)
+function refreshSidebarLazy() { if (!side.pending) refreshSidebar(10000); }
 async function loadSidebar() {
+  side.pending = false;
   if (side.busy) { side.again = true; return; }
   side.busy = true;
   try {
@@ -5408,7 +5425,7 @@ function drawSidebar(d) {
     renderCatTriage();
   }
 }
-setInterval(() => { if (!document.hidden) refreshSidebar(0); }, 30000);
+setInterval(() => { if (!document.hidden && !live.ok) refreshSidebar(0); }, 30000);
 // kept for existing callers: counts now come from the library-wide summary
 function setNavCounts() { refreshSidebar(); }
 function setDupeCount(n) {
@@ -6822,10 +6839,13 @@ function dur(s) {
   return h ? `${h} h ${String(m).padStart(2, "0")} m` : m ? `${m} m ${String(x).padStart(2, "0")} s` : `${x} s`;
 }
 async function pollJobTray() {
-  const tray = $("#job-tray");
-  if (!tray || document.hidden) return;
+  if (!$("#job-tray") || document.hidden) return;
   let running;
   try { running = await api("/api/jobs/running"); } catch { return; }
+  drawJobTray(running);
+}
+function drawJobTray(running) {
+  const tray = $("#job-tray"); if (!tray) return;
   const kinds = new Set(running.map((j) => j.kind));
   const LIB = ["library", "ingest", "dupes", "train", "taste-measure", "embed", "fix", "sync", "warmup"];
   const ingestTick = kinds.has("ingest") && Date.now() - (pollJobTray.sideAt || 0) > 30000;
@@ -6860,7 +6880,8 @@ const hhmmss = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit
 async function pollActlog() {
   clearTimeout(actlog.timer);
   const open = $("#activity")?.classList.contains("active");
-  actlog.timer = setTimeout(pollActlog, open && !document.hidden ? 2000 : 10000);
+  if (!live.ok) actlog.timer = setTimeout(pollActlog, open && !document.hidden ? 2000 : 10000);   // else: the stream says when
+  actlog.at = Date.now();
   if (!open || actlog.busy || !$("#actlog")) return;
   actlog.busy = true;
   let d;
@@ -6944,7 +6965,7 @@ document.addEventListener("click", async (e) => {
 });
 pollActlog();
 pollJobTray();
-setInterval(pollJobTray, 4000);
+setInterval(() => { if (!live.ok) pollJobTray(); }, 4000);
 
 // --- ⌘K command palette: jump anywhere, run anything, or search ---------------------
 const CMDS = [
@@ -7911,6 +7932,9 @@ async function checkWarm(start) {
   if (document.hidden && warmTimer) return;    // a background tab: no 2 s polling
   let w;
   try { w = await api("/api/warm" + (start ? "?start=true" : "")); } catch { return; }
+  drawWarm(w);
+}
+function drawWarm(w) {
   const el = $("#warm-banner"); if (!el) return;
   if (w.loading) {
     const pct = w.pct != null ? Math.round(100 * w.pct)
@@ -7921,7 +7945,7 @@ async function checkWarm(start) {
       <div class="warm-bar"><i style="width:${pct || 3}%"></i></div>`;
     el.hidden = false;
     warmWasLoading = true;
-    if (!warmTimer) warmTimer = setInterval(() => checkWarm(false), 2000);
+    if (!warmTimer) warmTimer = setInterval(() => { if (!live.ok) checkWarm(false); }, 2000);
   } else {
     el.hidden = true;
     clearInterval(warmTimer); warmTimer = null;
@@ -7935,6 +7959,48 @@ async function checkWarm(start) {
 checkWarm(true);
 // coming back to a tab after a while: the index may have been dropped meanwhile
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkWarm(true); });
+
+// --- the live stream: one per visible tab ---------------------------------------------
+function liveOn(type, fn) {
+  live.es.addEventListener(type, (e) => { let d; try { d = JSON.parse(e.data); } catch { return; } fn(d); });
+}
+function liveConnect() {
+  if (live.es || document.hidden || typeof EventSource === "undefined") return;
+  const es = live.es = new EventSource("/api/events");
+  es.onopen = () => { live.ok = true; live.wait = 1000; };
+  es.onerror = () => {
+    if (es.readyState !== EventSource.CLOSED) { live.ok = false; return; }     // the browser retries on its own
+    live.ok = false; live.es = null;
+    clearTimeout(live.retry);                                                  // closed for good: back off and retry
+    live.retry = setTimeout(liveConnect, live.wait);
+    live.wait = Math.min(30000, live.wait * 2);
+  };
+  liveOn("jobs", (running) => {
+    const had = new Set(live.running || []), now = new Set(running.map((j) => j.id));
+    live.running = [...now];
+    drawJobTray(running);
+    const w = [...live.waiters]; w.forEach((f) => f());
+    if ([...had].some((id) => !now.has(id)) || [...now].some((id) => !had.has(id))) actlogKick(0);
+    else actlogKick(1000);
+  });
+  liveOn("hold", (d) => { hold.until = d.held ? Date.now() / 1000 + d.left_s : null; holdDraw(); });
+  liveOn("warm", (w) => drawWarm(w));
+  liveOn("version", (d) => { if (live.version != null && d.v !== live.version) refreshSidebarLazy(); live.version = d.v; });
+  liveOn("lines", () => actlogKick(500));
+}
+// the Activity log follows the stream: refetched when something happened, at most once a second
+function actlogKick(min) {
+  if (!$("#activity")?.classList.contains("active") || document.hidden) return;
+  clearTimeout(actlog.kick);
+  actlog.kick = setTimeout(pollActlog, Math.max(0, (actlog.at || 0) + Math.max(min, 1000) - Date.now()));
+}
+function liveClose() {
+  clearTimeout(live.retry);
+  if (live.es) { live.es.close(); live.es = null; }
+  live.ok = false;
+}
+document.addEventListener("visibilitychange", () => { document.hidden ? liveClose() : liveConnect(); });
+liveConnect();
 
 // (last, so every page's code is defined before the first route runs)
 // land on the page in the URL (#/catalogue …), else For You — the home page
@@ -8396,4 +8462,4 @@ $("#btn-hold")?.addEventListener("click", async (e) => {
   if (typeof pollJobTray === "function") pollJobTray();
 });
 holdLoad();
-setInterval(() => { if (!document.hidden) holdLoad(); }, 30000);
+setInterval(() => { if (!document.hidden && !live.ok) holdLoad(); }, 30000);
