@@ -5967,6 +5967,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                                 "tier": tier_of(prev["rating100"], prev["o_counter"])},
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
+        self._quick_learn(sid, row)               # the other scenes' guesses move now, not at the retrain
         self._note_grade()
         self.record_verdict(sid, row["tier"], source=source)         # your answer, remembered
         self._watch_path(sid, cur.get("path") or row.get("path"))   # follow the renamer's move
@@ -6032,6 +6033,41 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
         return {"scene": row}
+
+    def _quick_learn(self, sid: str, row: dict | None) -> dict | None:
+        """After a grade: nudge the tier model's last layer toward it and re-score
+        the ungraded scenes at once (peaks.quick_head). Best-effort and quick —
+        the honest retrain still runs and replaces it."""
+        try:
+            from ..quick_head import QuickHead
+            from ..tier_model import train_class
+
+            m = self._tier_model_state()["model"]
+            cached = self.__dict__.get("_tier_X")
+            held = self.__dict__.get("_tier_preds")
+            if m is None or not cached or cached[0] is not m or held is None or row is None or row.get("no_learn"):
+                return None
+            cls = train_class(row.get("tier"))
+            _, sids, X = cached
+            pos = {s: i for i, s in enumerate(sids)}.get(str(sid))
+            if cls is None or pos is None:
+                return None
+            head = self.__dict__.get("_quick_head")
+            if head is None or head.model is not m:
+                head = self._quick_head = QuickHead(m)
+            if not head.learn(X[pos], cls):
+                return None
+            rows = {r["scene_id"]: r for r in self._catalogue_all()}
+            open_ = [i for i, s in enumerate(sids) if s in rows and not train_class(rows[s]["tier"])]
+            key, preds = held
+            new = dict(preds)                        # a new dict: the views (keyed on its id) recompute
+            if open_:
+                for i, summ in zip(open_, m.summarize(head.proba(X[open_]))):
+                    new[sids[i]] = {**summ, "quick": True}
+            self._tier_preds = (key, new)
+            return {"rescored": len(open_)}
+        except Exception:  # noqa: BLE001 — a quick guess is extra, never in the way of a grade
+            return None
 
     def _note_grade(self) -> None:
         """Count grades since the last triage training; retrain in the background
@@ -6406,21 +6442,24 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         m = st["model"]
         preds: dict[str, dict] = {}
 
-        def run(model, sids, Xv, Xq, source=None):
+        def run(model, sids, Xv, Xq, source=None, keep_rows=False):
             rs = [by_id[s] for s in sids]
             who = [who_of(r) for r in rs]
             own = [train_class(r["tier"]) for r in rs]
             pic = np.stack([picture_features(pics.get(s)) for s in sids])
             sen = self._sense_rows(sids) if getattr(model, "use_senses", ()) else None
-            for s, summ in zip(sids, model.summarize(model.predict_proba(Xv, Xq, who=who, own=own, pic=pic,
-                                                                           senses=sen))):
+            X = model.design_row(Xv, Xq, who=who, own=own, pic=pic, senses=sen)
+            if keep_rows:                            # the feature rows quick guesses re-score (peaks.quick_head)
+                self._tier_X = (model, list(sids), X)
+            for s, summ in zip(sids, model.summarize(model._clf.predict_proba(X))):
                 if source:
                     summ["from"] = source
                 preds[s] = summ
 
         sids = list(feats)
         if sids:
-            run(m, sids, np.stack([feats[s][0] for s in sids]), np.stack([feats[s][1] for s in sids]))
+            run(m, sids, np.stack([feats[s][0] for s in sids]), np.stack([feats[s][1] for s in sids]),
+                keep_rows=True)
         fb = getattr(m, "fallback", None)
         rest = [r["scene_id"] for r in rows if r["scene_id"] not in feats
                 and (r.get("performer_ids") or r.get("studio"))]

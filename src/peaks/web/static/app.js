@@ -3868,7 +3868,9 @@ async function sxOpen(sense) {
         <div class="sx-player"><video id="sx-v-${sense}" playsinline preload="auto"></video>
           <div class="sx-start"><button class="btn pri xl" data-sx-start="${sense}">▶ ${SX_WORD[sense].start}</button>
             <p class="faint small">${sense === "sound" ? "Sound on — each clip is about 10 seconds." : "Each clip is about 8 seconds."}</p></div></div>
-        <div class="sx-meta"><b class="sx-title"></b><span class="sx-why faint small"></span><span class="grow"></span><span class="sx-count faint small"></span></div>
+        <div class="sx-meta"><b class="sx-title"></b><span class="sx-why faint small"></span><span class="grow"></span><span class="sx-count faint small"></span>
+          <span class="sx-vol"><button class="btn sm ghost" data-sx-mute="${sense}" title="Mute / unmute (M)">🔊</button>
+            <input type="range" min="0" max="1" step="0.05" data-sx-vol="${sense}" title="Volume (↑ / ↓)" aria-label="Volume" /></span></div>
         <div class="sx-ctl">
           <button class="btn sx-less" data-sx="less" data-sense="${sense}">◀ Less of this <kbd>H</kbd></button>
           <button class="btn ghost" data-sx="skip" data-sense="${sense}">Skip <kbd>S</kbd></button>
@@ -3880,10 +3882,38 @@ async function sxOpen(sense) {
       </div>
       <aside class="sx-side card pad"></aside></div>`;
   }
+  sxVolApply(sense);
   await sxSide(sense);
   if (!st.deck.length) await sxLoad(sense, true);
   sxRender(sense);
 }
+// --- the Lab players' volume: one level for Sound and Motion, remembered on this device ---
+const sxVol = (() => {
+  let vol = 0.8, muted = false;
+  try { const v = parseFloat(localStorage.getItem("peaks.lab.vol")); if (!isNaN(v)) vol = v; muted = localStorage.getItem("peaks.lab.muted") === "1"; } catch {}
+  return { vol, muted };
+})();
+function sxVolApply(sense) {
+  const v = $(`#sx-v-${sense}`); if (!v) return;
+  v.volume = sxVol.vol; v.muted = sxVol.muted || sxVol.vol === 0;
+  const r = document.querySelector(`[data-sx-vol="${sense}"]`), b = document.querySelector(`[data-sx-mute="${sense}"]`);
+  if (r) r.value = v.muted ? 0 : sxVol.vol;
+  if (b) b.textContent = v.muted ? "🔇" : sxVol.vol < 0.5 ? "🔉" : "🔊";
+}
+function sxVolSet(sense, vol, muted) {
+  if (vol != null) sxVol.vol = Math.max(0, Math.min(1, Math.round(vol * 100) / 100));
+  sxVol.muted = muted != null ? muted : sxVol.vol === 0;
+  try { localStorage.setItem("peaks.lab.vol", sxVol.vol); localStorage.setItem("peaks.lab.muted", sxVol.muted ? "1" : "0"); } catch {}
+  ["sound", "motion"].forEach(sxVolApply);
+}
+document.addEventListener("input", (e) => {
+  const r = e.target.closest?.("[data-sx-vol]"); if (!r) return;
+  const v = parseFloat(r.value); sxVolSet(r.dataset.sxVol, v, v === 0);
+});
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.("[data-sx-mute]"); if (!b) return;
+  if (sxVol.vol === 0) sxVolSet(b.dataset.sxMute, 0.8, false); else sxVolSet(b.dataset.sxMute, null, !sxVol.muted);
+});
 async function sxLoad(sense, reset) {
   const st = sxS(sense);
   const qs = new URLSearchParams({ mode: st.mode, n: 12 });
@@ -4012,6 +4042,9 @@ document.addEventListener("keydown", (e) => {
   else if (k === "z") { e.preventDefault(); sxUndo(labCur); }
   else if (k === "r") { e.preventDefault(); sxRender(labCur); }
   else if (k === " ") { e.preventDefault(); const v = $(`#sx-v-${labCur}`); if (v.paused) v.play().catch(() => {}); else v.pause(); }
+  else if (k === "m") { e.preventDefault(); sxVolSet(labCur, sxVol.vol || 0.8, !sxVol.muted && sxVol.vol > 0 ? true : false); }
+  else if (k === "arrowup") { e.preventDefault(); sxVolSet(labCur, sxVol.vol + 0.1, false); }
+  else if (k === "arrowdown") { e.preventDefault(); sxVolSet(labCur, sxVol.vol - 0.1); }
 });
 
 // --- the Lab: a new model has to beat the current one on your library first ---------------------
@@ -5914,7 +5947,8 @@ function catCardHTML(r, i) {
     + `<button class="cat-g g-reject g-nl ${r.no_learn ? "cur" : ""}" data-g="${NO_LEARN}" title="${esc(NO_LEARN_TIP)}"><b>N</b><span>Rej ⊘</span></button>`;
   const predLine = p
     ? `<div class="cat-pred">${predHTML(p)}` + (keeperHTML(p) ? ` · ${keeperHTML(p)}` : "") +
-      (p.from === "who" ? ` <span class="faint" title="Not embedded yet: this guess comes only from how you've graded these performers and this studio">(from performer/studio history — not seen yet)</span>` : "") + `</div>`
+      (p.from === "who" ? ` <span class="faint" title="Not embedded yet: this guess comes only from how you've graded these performers and this studio">(from performer/studio history — not seen yet)</span>` : "") +
+      (p.quick ? ` <span class="faint quick-guess" title="Updated from your latest grades without a full retrain — the next retrain confirms or corrects it">· quick guess</span>` : "") + `</div>`
     : "";
   const flag = (r.flag ? `<div class="cat-flag">⚠ ${textNum(r.flag, r.flag_detail)}</div>` : "") +
     (r.dupe ? `<div class="cat-flag">⧉ Stash thinks this has a duplicate</div>` : "");
@@ -7279,6 +7313,7 @@ function renderReview() {
     : '<span class="faint">Not embedded yet — the model\'s opinion appears once it is.</span>');
   $("#rv-why").innerHTML = [r.pred ? `<b class="rv-verdict">${predHTML(r.pred)}</b>` : "", keeperHTML(r.pred),
     r.pred && r.pred.from === "who" ? '<span class="faint">From performer/studio history — not seen yet</span>' : "",
+    r.pred && r.pred.quick ? '<span class="faint quick-guess" title="Updated from your latest grades without a full retrain — the next retrain confirms or corrects it">Quick guess — the next retrain confirms it</span>' : "",
     r.flag ? `<span class="warn">⚠ ${textNum(r.flag, r.flag_detail)}</span>` : "",
     r.suggest ? `Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}` : "",
     r.dupe ? "⧉ Stash thinks this has a duplicate" : ""].filter(Boolean).join("<br>") + whoLines(r, 6)

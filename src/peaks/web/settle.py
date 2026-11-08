@@ -172,7 +172,7 @@ class SettleMixin:
         disagree, drains, agree = [], [], 0
         for r in rows:
             sid, p = r["scene_id"], preds.get(r["scene_id"])
-            if p is None or p.get("from") == "who":
+            if p is None or p.get("from") == "who" or p.get("quick"):     # quick guesses are never questions
                 continue                             # not embedded yet: nothing honest to say
             graded = train_class(r["tier"])
             if r.get("no_learn"):

@@ -1186,6 +1186,8 @@ body.picks-off .pick-span { display: none !important; }
   background: rgba(0, 0, 0, .55); text-align: center; padding: 16px; }
 .sx-start[hidden] { display: none !important; }
 .sx-meta { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.sx-vol { display: inline-flex; align-items: center; gap: 4px; }
+.sx-vol input { width: 96px; }
 .sx-ctl { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; }
 .sx-ctl .btn { padding-block: 12px; font-size: 15px; }
 .sx-ctl2 { display: flex; gap: 8px; flex-wrap: wrap; }
