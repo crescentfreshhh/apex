@@ -212,7 +212,39 @@ class HearMixin:
                 "error": getattr(self, "_hear_error", None), "last_run": self.sense_last_run("hear")}
 
     def hear_due(self) -> bool:
-        return self.hear_settings()["on"] and bool(self.hear_todo(first=True))
+        return self.hear_settings()["on"] and self._due_memo("hear", lambda: bool(self.hear_todo(first=True)))
+
+    # --- "is there work?" asked every ten minutes: a "no" stands until something changes ----
+
+    def _due_memo(self, name: str, fn) -> bool:
+        """A sense's "nothing to do" is remembered per (index build, library edit,
+        scene count, failures file) — the scan behind it used to walk every scene's
+        cache file each time. A "yes" is never remembered."""
+        import os
+
+        try:
+            fst = os.stat(self._sense_fail_path())
+            fails = (fst.st_mtime_ns, fst.st_size)
+        except OSError:
+            fails = None
+        idx = self._index.get(self._model_name())
+        key = (getattr(idx, "gen", 0), self.__dict__.get("_cat_edit_seq", 0), len(self._catalogue_all()), fails,
+               self.__dict__.get("_sense_runs", 0))
+        memo = self.__dict__.setdefault("_due_memos", {})
+        hit = memo.get(name)
+        if hit is not None and hit[0] == key and time.time() - hit[2] < 3600:
+            return False
+        due = bool(fn())
+        if due:
+            memo.pop(name, None)
+        else:
+            memo[name] = (key, False, time.time())
+        return due
+
+    def _sense_ran(self) -> None:
+        """A sense run finished: the "nothing to do" memos start over."""
+        self._sense_runs = self.__dict__.get("_sense_runs", 0) + 1
+        self.__dict__.pop("_due_memos", None)
 
     # --- the job --------------------------------------------------------------------------
 
@@ -325,6 +357,7 @@ class HearMixin:
         return self._state_dir() / "senses_runs.json"
 
     def _sense_record(self, kind: str, rec: dict) -> None:
+        self._sense_ran()
         import json
 
         from .. import atomic
@@ -471,17 +504,41 @@ class HearMixin:
                 self._clap_text = emb
         w = emb.embed_text([q])[0]
         w = w / max(float(np.linalg.norm(w)), 1e-9)
-        cache = self._hear_cache()
-        keys = self._hear_keys()
+        bank = self._clap_bank()
         out = []
+        if bank["M"].shape[0]:
+            s = bank["M"] @ w
+            for (sid, k, a, b) in bank["spans"]:
+                j = a + int(np.argmax(s[a:b]))
+                out.append(Hit(scene_id=sid, key=k, time=float(max(0.0, bank["t"][j] - 5.0)), score=float(s[j])))
+        out.sort(key=lambda h: -h.score)
+        return out[:top_k]
+
+    def _clap_bank(self) -> dict:
+        """Every heard scene's CLAP vectors stacked once (per hear run / index build),
+        so a sound search is one matrix product — not 6,000 file opens."""
+        keys = self._hear_keys()
+        stamp = (len(keys), self.__dict__.get("_sense_runs", 0), self._index.get(self._model_name()) is not None)
+        hit = self.__dict__.get("_clap_bank_cache")
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+        cache = self._hear_cache()
+        mats, ts, spans, pos = [], [], [], 0
         for sid, k in keys.items():
             if not cache.has(k, CLAP_NS):
                 continue
-            ct, cv, meta = cache.load(k, CLAP_NS)
+            try:
+                ct, cv, meta = cache.load(k, CLAP_NS)
+            except Exception:  # noqa: BLE001
+                continue
             if meta.get("no_audio") or not len(ct):
                 continue
-            s = (cv / np.maximum(np.linalg.norm(cv, axis=1, keepdims=True), 1e-9)) @ w
-            j = int(np.argmax(s))
-            out.append(Hit(scene_id=sid, key=k, time=float(max(0.0, ct[j] - 5.0)), score=float(s[j])))
-        out.sort(key=lambda h: -h.score)
-        return out[:top_k]
+            cv = np.asarray(cv, np.float32)
+            mats.append(cv / np.maximum(np.linalg.norm(cv, axis=1, keepdims=True), 1e-9))
+            ts.append(np.asarray(ct, np.float32))
+            spans.append((sid, k, pos, pos + len(ct)))
+            pos += len(ct)
+        out = {"M": np.concatenate(mats) if mats else np.zeros((0, 1), np.float32),
+               "t": np.concatenate(ts) if ts else np.zeros(0, np.float32), "spans": spans}
+        self._clap_bank_cache = (stamp, out)
+        return out

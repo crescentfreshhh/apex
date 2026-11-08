@@ -18,6 +18,7 @@ than pretending a damaged file is empty.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import tempfile
@@ -41,6 +42,30 @@ def edit_lock(path):
     """Hold `path` for a whole load → change → save (other saves wait)."""
     with _lock(path):
         yield
+
+
+_JSON_MEMO: dict = {}
+_JSON_MEMO_LOCK = threading.Lock()
+
+
+def read_json_cached(path, default=None):
+    """`read_json`, but a file is parsed once per change (mtime + size): the
+    scheduler asks the same small state files every minute, and pages ask the
+    same ones per request."""
+    path = Path(path)
+    try:
+        st = path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return default
+    with _JSON_MEMO_LOCK:
+        hit = _JSON_MEMO.get(str(path))
+    if hit is not None and hit[0] == stamp:
+        return copy.deepcopy(hit[1])
+    val = read_json(path, default=default)
+    with _JSON_MEMO_LOCK:
+        _JSON_MEMO[str(path)] = (stamp, copy.deepcopy(val))
+    return val
 
 
 @contextlib.contextmanager

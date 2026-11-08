@@ -21,6 +21,7 @@ from __future__ import annotations
 from ..atomic import settings_saver as _settings_saver
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -254,14 +255,42 @@ class ZoomMixin:
         self._zoom_cache().save(key, self._zoom_ns(), np.asarray(times)[order],
                                 np.asarray(vecs, np.float32)[order] if vecs else np.zeros((0, idx.dim), np.float32),
                                 meta={"scene_id": sid, "candidates": cands})
+        entry = {"key": key, "centers": [c["c"] for c in cands], "at": time.time(), "frames": len(times)}
+        self._zoom_note(sid, entry)
+        self.__dict__.pop("_zoom_rows_cache", None)
+        return entry
+
+    # --- the state file: noted per scene in memory, written in batches ------------------------
+    # (a dense run zooms thousands of scenes; a read-parse-fsync of the whole file per
+    # scene was O(N²) in disk writes)
+
+    def _zoom_note(self, sid: str, entry: dict) -> None:
+        with self.__dict__.setdefault("_zoom_note_lock", threading.Lock()):
+            pend = self.__dict__.setdefault("_zoom_pending", {})
+            pend[sid] = entry
+            view = self._zoom_view()                        # readers see it at once, from memory
+            view["scenes"][sid] = entry
+            n = len(pend)
+        if n >= 100:
+            self._zoom_flush()
+
+    def _zoom_flush(self) -> None:
         from .. import atomic
 
-        with atomic.edit_lock(self._zoom_path()):          # one read-change-save at a time
-            d = self._zoom_state()
-            d["scenes"][sid] = {"key": key, "centers": [c["c"] for c in cands], "at": time.time(), "frames": len(times)}
-            self._zoom_save(d)
-        self.__dict__.pop("_zoom_rows_cache", None)
-        return d["scenes"][sid]
+        with self.__dict__.setdefault("_zoom_note_lock", threading.Lock()):
+            pend = self.__dict__.pop("_zoom_pending", None)
+            if not pend:
+                return
+            p = self._zoom_path()
+            with atomic.edit_lock(p):                       # one read-change-save at a time
+                d = self._zoom_state()
+                d["scenes"].update(pend)
+                self._zoom_save(d)
+            try:
+                st = p.stat()
+                self._zoom_view_cache = ((str(p), st.st_mtime_ns, st.st_size), d)
+            except OSError:
+                self.__dict__.pop("_zoom_view_cache", None)
 
     def _zoom_dense(self, key: str):
         """(times, vecs) straight from the main index when it was sampled at least
@@ -312,6 +341,7 @@ class ZoomMixin:
             if job is not None:
                 rate = (time.time() - t0) / (i + 1)
                 job.progress = {"total": len(todo), "done": i + 1, "eta_s": round(rate * (len(todo) - i - 1))}
+        self._zoom_flush()
         log(f"zoomed {done} scene(s){f', {failed} unreadable' if failed else ''}")
         del embedder
         if getattr(job, "paused_for", None):
@@ -435,7 +465,6 @@ class ZoomMixin:
     def train_moment_model(self) -> dict:
         """Fit the moment model and score it honestly against frame picks — one fit
         at a time (zoom, Hearing, Motion and the Train button can all ask)."""
-        import threading
 
         with self.__dict__.setdefault("_moment_train_lock", threading.Lock()):
             return self._train_moment_model()

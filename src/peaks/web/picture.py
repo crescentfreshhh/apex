@@ -146,8 +146,26 @@ class PictureMixin:
 
     def _pic_todo(self) -> tuple[list[dict], list[dict]]:
         """(owed: new scenes from the last ingest, backfill: the rest — unreviewed
-        first, then best tiers first) still needing a measure."""
+        first, then best tiers first) still needing a measure. Remembered until
+        the library, the measures, the ingest record or the backfill switch
+        change: the scheduler asks every minute, and the answer used to cost a
+        stat of every video file on the share."""
         rows = self._catalogue_all()
+        try:
+            mst = (self._pic_dir() / "measures.jsonl").stat()
+            m_stamp = (mst.st_mtime_ns, mst.st_size)
+        except OSError:
+            m_stamp = None
+        key = (id(rows), len(rows), self.__dict__.get("_cat_edit_seq", 0), m_stamp,
+               id(self.last_ingest()), bool(self._pic_state().get("backfill")), id(self.cached_duplicates()))
+        hit = self.__dict__.get("_pic_todo_cache")
+        if hit is not None and hit[0] == key and time.monotonic() - hit[2] < 600:
+            return hit[1]
+        out = self._pic_todo_raw(rows)
+        self._pic_todo_cache = (key, out, time.monotonic())
+        return out
+
+    def _pic_todo_raw(self, rows) -> tuple[list[dict], list[dict]]:
         fresh = set(self.last_ingest().get("new") or [])
         # copies in a duplicate group come first: until every copy is measured,
         # the keep/delete recommendation can't go by the picture

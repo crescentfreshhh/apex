@@ -640,7 +640,26 @@ def model_cache_name(alias: str, cfg_embedding) -> str:
     return canonical_name(alias)
 
 
+def cap_cpu_threads() -> None:
+    """torch's CPU pool takes about half the cores (once): a scoring or training
+    burst in the web process must never starve Stash or the page you're on."""
+    import os
+
+    try:
+        import torch
+    except ImportError:
+        return
+    if getattr(torch, "_peaks_capped", False):
+        return
+    try:
+        torch.set_num_threads(max(1, (os.cpu_count() or 2) // 2))
+    except Exception:  # noqa: BLE001
+        pass
+    torch._peaks_capped = True
+
+
 def get_embedder(name: str, **kwargs) -> Embedder:
+    cap_cpu_threads()
     key = name.lower()
     if key not in _REGISTRY:
         raise ValueError(f"unknown embedder {name!r}; choices: {sorted(_REGISTRY)}")

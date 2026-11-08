@@ -124,7 +124,7 @@ class SeedJobsMixin:
         from .. import atomic
 
         try:
-            d = atomic.read_json(self._sj_state_path(), default=None)
+            d = atomic.read_json_cached(self._sj_state_path(), default=None)
         except atomic.DamagedFile:
             d = None
         d = d if isinstance(d, dict) else {}

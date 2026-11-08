@@ -109,7 +109,7 @@ def test_every_settle_question_carries_the_chips_even_if_one_fails(tmp_path, mon
     bad = q[0]["scene_id"]
     real = svc_mod.Service.criteria_read
 
-    def flaky(self, sid):
+    def flaky(self, sid, *a, **k):
         if str(sid) == bad:
             raise RuntimeError("boom")
         return real(self, sid)

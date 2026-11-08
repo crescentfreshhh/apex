@@ -48,6 +48,9 @@ def _stable(sid: str) -> str:
     return hashlib.sha1(str(sid).encode()).hexdigest()
 
 
+_DIR_BYTES_MEMO: dict = {}
+
+
 class LabMixin:
     # --- state ---------------------------------------------------------------------------
 
@@ -183,6 +186,17 @@ class LabMixin:
 
     @staticmethod
     def _dir_bytes(d: Path) -> tuple[int, int]:
+        import time as _t
+
+        hit = _DIR_BYTES_MEMO.get(str(d))
+        if hit is not None and _t.monotonic() - hit[0] < 60:    # the Lab polls every 4 s while a trial runs
+            return hit[1]
+        out = LabMixin._dir_bytes_raw(d)
+        _DIR_BYTES_MEMO[str(d)] = (_t.monotonic(), out)
+        return out
+
+    @staticmethod
+    def _dir_bytes_raw(d: Path) -> tuple[int, int]:
         size = n = 0
         for f in d.rglob("*"):
             try:
@@ -258,15 +272,30 @@ class LabMixin:
         from ..embedding import dino_cache_name
 
         try:
-            rows = self.lab_sample()
+            cache = EmbeddingCache(self.cfg.embedding.cache_dir)
+            ns = dino_cache_name(cand)
+            folder = cache.root / ns
+            try:
+                fst = folder.stat()
+                fstamp = (fst.st_mtime_ns, )
+            except OSError:
+                fstamp = None
             idx = self.index(self._model_name())
+            key = (cand, fstamp, idx.gen, len(self._catalogue_all()))
+            memo = self.__dict__.setdefault("_lab_progress_memo", {})
+            hit = memo.get(cand)
+            if hit is not None and hit[0] == key:
+                return hit[1]
+            rows = self.lab_sample()
             key_of = idx.sid_key
             sampler = self._lab_sampler()
             sig = getattr(sampler, "interval_signature", sampler.interval)
-            cache = EmbeddingCache(self.cfg.embedding.cache_dir)
-            ns = dino_cache_name(cand)
-            done = sum(1 for r in rows if key_of.get(r["scene_id"]) and cache.has(key_of[r["scene_id"]], ns, interval=sig))
-            return {"done": done, "total": len(rows)}
+            sigs = cache.signatures(ns)                     # one folder pass, not a file open per scene
+            done = sum(1 for r in rows if (k := key_of.get(r["scene_id"])) and (sv := sigs.get(k)) is not None
+                       and abs(float(sv) - sig) < 1e-6)
+            out = {"done": done, "total": len(rows)}
+            memo[cand] = (key, out)
+            return out
         except Exception:  # noqa: BLE001 — a progress line, never an error
             return None
 

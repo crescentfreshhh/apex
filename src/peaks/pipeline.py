@@ -483,9 +483,11 @@ def sync_cache(
         current[scene_key(scene)] = scene
 
     stats = {"cached": 0, "moved": 0, "orphaned": 0, "pruned": 0}
+    if model_name.endswith("@performers"):
+        return stats                    # keyed by performer, not by scene: nothing here is an orphan
     for key in cache.keys(model_name):
         try:
-            times, vecs, meta = cache.load(key, model_name)
+            meta = cache.peek_meta(key, model_name)     # the vectors only when an entry has to be rewritten
         except Exception:
             continue  # unreadable entry: leave it for a human
         stats["cached"] += 1
@@ -505,6 +507,10 @@ def sync_cache(
         if path_changed or id_changed:
             meta["path"] = new_path
             meta["scene_id"] = scene.id
+            try:
+                times, vecs, _ = cache.load(key, model_name)
+            except Exception:
+                continue
             cache.save(key, model_name, times, vecs, meta=meta)
             stats["moved"] += 1
             if moved_out is not None:

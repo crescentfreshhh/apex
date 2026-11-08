@@ -76,7 +76,7 @@ class FacesMixin:
         return sorted(rows, key=lambda r: (not self._is_orphan(r, excluded), -TIER_RANK_SORT.get(r["tier"], 0)))
 
     def faces_due(self) -> bool:
-        return self.faces_settings()["on"] and bool(self.faces_todo())
+        return self.faces_settings()["on"] and self._due_memo("faces", lambda: bool(self.faces_todo()))
 
     def faces_status(self) -> dict:
         try:
@@ -156,6 +156,7 @@ class FacesMixin:
             done += 1
         if done:
             log(f"faces: {done} performer photo(s) read")
+            self._face_refs_n = self.__dict__.get("_face_refs_n", 0) + done
             self.__dict__.pop("_face_gal", None)
         return done
 
@@ -237,7 +238,9 @@ class FacesMixin:
         from ..tier_model import who_of
 
         rows = self._catalogue_all()
-        stamp = (len(rows), self.__dict__.get("_cat_edit_seq", 0))
+        credits = hash(tuple((r["scene_id"], tuple(r.get("performer_ids") or ()), r["tier"] == "rejected")
+                             for r in rows))       # who is credited where (a grade alone changes nothing here)
+        stamp = (len(rows), credits, self.__dict__.get("_sense_runs", 0), self.__dict__.get("_face_refs_n", 0))
         hit = self.__dict__.get("_face_gal")
         if hit is not None and hit[0] == stamp:
             return hit[1]

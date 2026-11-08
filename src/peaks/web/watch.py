@@ -244,9 +244,12 @@ class WatchMixin:
         return self._state_dir() / "embed_followup.json"
 
     def embed_followup(self) -> list[str]:
+        from .. import atomic
+
         try:
-            return sorted(set(json.loads(self._followup_path().read_text())), key=lambda x: int(x) if x.isdigit() else 0)
-        except (OSError, ValueError):
+            ids = atomic.read_json_cached(self._followup_path(), default=None) or []
+            return sorted({str(x) for x in ids}, key=lambda x: int(x) if x.isdigit() else 0)
+        except Exception:  # noqa: BLE001
             return []
 
     def _save_followup(self, ids) -> None:

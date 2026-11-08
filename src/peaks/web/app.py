@@ -337,7 +337,7 @@ def create_app(cfg=None):
     app.add_middleware(TextGzip)                 # JSON/JS/CSS only: video and ranges untouched
     # background jobs share this interpreter; a short switch interval lets a
     # page request take its turn quickly instead of queueing behind them
-    sys.setswitchinterval(0.001)
+    sys.setswitchinterval(0.005)
 
     # crash forensics (diagnostics only): native crash traces, a health
     # heartbeat and a clean-exit marker in crash.log next to settings.json
@@ -1395,8 +1395,12 @@ def create_app(cfg=None):
                 jobs.start("perf-photos", service.warm_performer_photos)
             except RuntimeError:
                 pass
-        body = _json.dumps(d, separators=(",", ":"))
-        etag = '"' + hashlib.md5(body.encode()).hexdigest() + '"'
+        ver = (id(d.get("performers")), d.get("stats_ready"), d.get("photos_missing"), len(d.get("performers") or ()))
+        memo = service.__dict__.get("_perf_dir_body")
+        if memo is None or memo[0] != ver:
+            body = _json.dumps(d, separators=(",", ":"))
+            memo = service._perf_dir_body = (ver, body, '"' + hashlib.md5(body.encode()).hexdigest() + '"')
+        _, body, etag = memo
         if if_none_match == etag:
             return Response(status_code=304, headers={"ETag": etag})
         return Response(content=body, media_type="application/json", headers={"ETag": etag})

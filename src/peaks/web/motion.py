@@ -144,7 +144,7 @@ class MotionMixin:
                 "error": getattr(self, "_motion_error", None), "last_run": self.sense_last_run("motion")}
 
     def motion_due(self) -> bool:
-        return self.motion_settings()["on"] and bool(self.motion_todo(first=True))
+        return self.motion_settings()["on"] and self._due_memo("motion", lambda: bool(self.motion_todo(first=True)))
 
     # --- the job --------------------------------------------------------------------------
 

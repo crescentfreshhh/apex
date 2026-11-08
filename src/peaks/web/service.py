@@ -108,6 +108,35 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             c = self._client_main = StashClient.from_config(self.cfg)
         return c
 
+    def _quick_client(self):
+        """For reads on the page path: the short-timeout, no-retry client — unless
+        something stands in for the client (a fake in tests), which is used as is."""
+        from ..stash_client import StashClient
+
+        c = self.client()
+        return self._meta_client() if type(c) is StashClient else c
+
+    def _scenes_of_performer(self, pid: str) -> list[str]:
+        """Her scene ids, from the catalogue rows (built once per listing). Falls back
+        to asking Stash only when the catalogue can't be read."""
+        pid = str(pid)
+        try:
+            rows = self._catalogue_all()
+        except Exception:  # noqa: BLE001
+            try:
+                return [str(s) for s in self.client().scenes_for_performer(pid)]
+            except Exception:  # noqa: BLE001
+                return []
+        hit = self.__dict__.get("_perf_scenes_map")
+        key = (id(rows), len(rows), self.__dict__.get("_cat_edit_seq", 0))
+        if hit is None or hit[0] != key:
+            m: dict[str, list[str]] = {}
+            for r in rows:
+                for p in r.get("performer_ids") or []:
+                    m.setdefault(str(p), []).append(r["scene_id"])
+            hit = self._perf_scenes_map = (key, m)
+        return list(hit[1].get(pid, []))
+
     def fresh_client(self):
         """A client of your own, for a long job that changes its timeout (the
         shared one keeps its settings). Anything else standing in for the client
@@ -747,8 +776,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         scanned = self.scenes()
         if scene_ids is not None:
             scanned = [sc for sc in scanned if str(sc.id) in scene_ids]
-        pending = [sc for sc in scanned
-                   if not cache.has(scene_key(sc), embedder.name, interval=signature)]
+        if hasattr(cache, "signatures"):                   # one pass over the folder (memoized by mtime)…
+            sigs = cache.signatures(embedder.name)
+            pending = [sc for sc in scanned
+                       if (sv := sigs.get(scene_key(sc))) is None or abs(float(sv) - signature) >= 1e-6]
+        else:                                              # …(a stand-in cache: the per-scene check)
+            pending = [sc for sc in scanned
+                       if not cache.has(scene_key(sc), embedder.name, interval=signature)]
         if limit:
             pending = pending[:limit]
         total = len(pending)
@@ -2879,10 +2913,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _measure_state(self) -> dict:
         import json
 
-        try:
-            return json.loads(self._measure_state_path().read_text())
-        except (OSError, ValueError):
-            return {"signals": 0, "last_full": 0.0}
+        from .. import atomic
+
+        d = atomic.read_json_cached(self._measure_state_path(), default=None)
+        return d if isinstance(d, dict) else {"signals": 0, "last_full": 0.0}
 
     def _measure_state_update(self, add: int = 0, reset: bool = False) -> None:
         """Count new ratings/grades since the last full measure (persisted, so a
@@ -3305,7 +3339,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if _t.monotonic() - failed < 60:               # Stash was down a moment ago: don't stall every page
             return []
         try:
-            markers = list(self._meta_client().iter_markers_by_tag(profile))   # 5 s, no retries
+            markers = list(self._quick_client().iter_markers_by_tag(profile))  # 5 s, no retries
         except Exception:
             self._marker_fail_at = _t.monotonic()
             raise
@@ -3980,10 +4014,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         # pick the performer with the most *embedded* scenes to play from
         best_name, best_scenes = None, []
         for p in perfs:
-            try:
-                scenes = self.client().scenes_for_performer(p["id"])
-            except Exception:  # noqa: BLE001
-                scenes = []
+            scenes = self._scenes_of_performer(p["id"])         # from the catalogue: no Stash call per name
             keep = [s for s in scenes if str(s) in embedded]
             if len(keep) > len(best_scenes):
                 best_name, best_scenes = p.get("name") or "this performer", keep
@@ -4083,7 +4114,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         best = None
         for p in candidates:
             try:
-                scenes = [s for s in self.client().scenes_for_performer(p["id"]) if str(s) in embedded]
+                scenes = [s for s in self._scenes_of_performer(p["id"]) if str(s) in embedded]
             except Exception:  # noqa: BLE001
                 scenes = []
             if best is None or len(scenes) > len(best[2]):
@@ -4145,8 +4176,17 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         if not embedded:
             self._perf_stats_cache = []
             return []
+        details = None
         try:
-            details = self.client().scene_details(embedded)
+            self._catalogue_all()                                 # the same metadata, already in memory
+            got = {sid: self._meta.get(sid) or {} for sid in embedded}
+            if all(got.values()):
+                details = got
+        except Exception:  # noqa: BLE001 — no catalogue: ask Stash as before
+            details = None
+        try:
+            if details is None:
+                details = self.client().scene_details(embedded)
         except Exception:  # noqa: BLE001 — Stash down
             cached = getattr(self, "_perf_stats_cache", None)
             if cached is not None:
@@ -5105,11 +5145,16 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             try:
                 from .. import atomic
 
-                with atomic.temp_for(p) as tmp, gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                with atomic.temp_for(p) as tmp, gzip.open(tmp, "wt", encoding="utf-8", compresslevel=3) as fh:
                     json.dump({"ts": _t.time(), "ids": ids, "meta": meta}, fh)
             except (OSError, TypeError, ValueError):
                 pass
-        threading.Thread(target=run, daemon=True, name="peaks-catalogue-save").start()
+        lk = self.__dict__.setdefault("_cat_save_lock", threading.Lock())
+
+        def one():
+            with lk:                                           # one save at a time
+                run()
+        threading.Thread(target=one, daemon=True, name="peaks-catalogue-save").start()
 
     def _load_catalogue_disk(self) -> list[dict] | None:
         """The last scene list + details, as saved after the previous read from
@@ -5152,8 +5197,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         import time as _t
 
         started = self.__dict__.get("_cat_edit_seq", 0)
-        ids = [str(s.id) for s in self.scenes()]
-        want = ids if refresh else [s for s in ids if s not in self._meta]
+        if refresh:
+            ids = [str(s.id) for s in self.scenes()]           # re-read grades: the full listing
+            want = ids
+        else:
+            ids = self._scene_ids_light()                      # the 5-minute check: ids only (one call)
+            want = [s for s in ids if s not in self._meta]
         if want:
             fetched = self._meta_client().scene_details(want)   # raises if Stash is down
             edited = self.__dict__.get("_cat_edited", {})
@@ -5161,13 +5210,39 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 for sid in want:
                     if edited.get(sid, 0) > started:          # graded while this read: yours is newer
                         continue
-                    self._meta[sid] = fetched.get(sid, {})
+                    if sid in fetched:
+                        self._meta[sid] = fetched[sid]
+            if not refresh:                                   # scope: only files under the library path
+                ids = [s for s in ids if self._in_scope(self._meta.get(s))]
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._sync_hidden_from_ratings(rows)
         self._cat_cache = (_t.monotonic(), rows)
         self._maybe_daily_backup(rows)
-        self._save_catalogue_disk(ids)
+        sig = (tuple(ids), self.__dict__.get("_cat_edit_seq", 0))
+        if want or sig != self.__dict__.get("_cat_saved_sig"):  # nothing changed: no gzip rewrite
+            self._cat_saved_sig = sig
+            self._save_catalogue_disk(ids)
         return rows
+
+    def _in_scope(self, meta: dict | None) -> bool:
+        prefix = (self.cfg.library.path or "").rstrip("/")
+        if not prefix:
+            return True
+        p = (meta or {}).get("path") or ""
+        return p == prefix or p.startswith(prefix + "/")
+
+    def _scene_ids_light(self) -> list[str]:
+        """Every scene id, from Stash's lightest query — not the files-and-markers
+        listing paged 60 times just to learn the ids. Ids never seen before get
+        their details right after (that's where the path for scope comes from)."""
+        known = set(self._meta)
+        try:
+            ids = self.client().all_scene_ids()
+        except Exception:
+            ids = {str(s.id) for s in self.scenes()}           # an older Stash: the paged listing
+            known = set()
+        out = sorted(ids, key=lambda x: int(x) if x.isdigit() else 0)
+        return [s for s in out if s not in known or self._in_scope(self._meta.get(s))]
 
     def _sync_hidden_from_ratings(self, rows: list[dict]) -> None:
         with self.__dict__.setdefault("_hidden_lock", threading.RLock()):   # two quick 1★/unhide never drop one

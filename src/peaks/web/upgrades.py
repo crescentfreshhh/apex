@@ -114,7 +114,7 @@ class UpgradesMixin:
         from .. import atomic
 
         try:
-            d = atomic.read_json(self._upg_path(), default=None)
+            d = atomic.read_json_cached(self._upg_path(), default=None)
         except atomic.DamagedFile:
             d = None
         d = d if isinstance(d, dict) else {}
