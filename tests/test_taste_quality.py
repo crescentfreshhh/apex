@@ -1029,6 +1029,7 @@ def test_bulk_grades_are_followed_in_batched_reads(svc, monkeypatch):
 def test_unmoved_scenes_stop_being_watched_and_hidden_moves_are_listed(svc, monkeypatch, tmp_path):
     _no_worker(svc, monkeypatch)
     st = svc.client()
+    st.s["21"]["path"] = str(tmp_path / "gone" / "21.mp4")           # a folder that isn't here: no alarm
     st.s["22"]["path"] = str(tmp_path / "moved-behind-stash.mp4")   # folder visible, file gone
     svc.grade_scene("21", "merveilleuse")                          # a renamer that leaves it put
     svc.grade_scene("22", "merveilleuse")
@@ -1037,7 +1038,7 @@ def test_unmoved_scenes_stop_being_watched_and_hidden_moves_are_listed(svc, monk
         svc._path_watch_tick(now=far)
     assert svc._path_watch == {}
     un = svc.renamer_follow_status()["unresolved"]
-    assert [u["scene_id"] for u in un] == ["22"]                # /data/21.mp4's folder isn't here: no alarm
+    assert [u["scene_id"] for u in un] == ["22"]                # 21's folder isn't here: no alarm
 
 
 def test_undo_is_followed_and_the_setting_turns_it_off(svc, monkeypatch):

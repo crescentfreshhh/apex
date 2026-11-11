@@ -6446,7 +6446,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             cached = getattr(self, "_tier_preds", None)
             return cached[1] if cached else {}
         cached = getattr(self, "_tier_preds", None)
-        if cached is not None and self.index_if_loaded() is None:
+        loaded = self.__dict__.get("_index")
+        if cached is not None and loaded is not None and self._model_name() not in loaded:
             # the index isn't in memory (a restart, a memory purge): the last results stand —
             # loading it is a minute's work and never happens inside a click
             return cached[1]
