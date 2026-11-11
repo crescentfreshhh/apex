@@ -908,6 +908,9 @@ def create_app(cfg=None):
         if getattr(job, "paused_for", None):         # it was pausing for other work: now it's a stop
             job.paused_for = None
             job.log("stopped by you — it won't resume on its own")
+        if job.status == "paused":                   # it had already wound down: drop its resume too
+            jobs.pause_pop(job.kind)
+            job.status = "cancelled"
         job.request_cancel()
         if job.kind in PAUSABLE:
             jobs.stop_by_you(job.kind)               # and the scheduler leaves it alone until tomorrow

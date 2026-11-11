@@ -234,7 +234,11 @@ class JobManager:
                 # finished time and history first, the status last: anyone who sees
                 # the job done also finds it in the history
                 job.finished = time.time()
+                if status == "paused" and not getattr(job, "paused_for", None):
+                    status = "cancelled"             # a Stop landed while it was pausing: a stop it is
                 self._remember(job, status)
+                if status == "paused" and not getattr(job, "paused_for", None):
+                    status = "cancelled"             # …or while the history was being written
                 job.status = status
                 if self.on_finish is not None:
                     try:
