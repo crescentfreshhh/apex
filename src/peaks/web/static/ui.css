@@ -1336,3 +1336,26 @@ body.picks-off .pick-span { display: none !important; }
 .speed-verdicts { margin: 4px 0 10px; padding-left: 18px; }
 .speed-verdicts li { margin: 2px 0; }
 .speed-verdicts li.warn { color: var(--warn, #e0a64a); }
+
+/* --- transitions: quick, never in the way --------------------------------------------------
+   Pages and tabs fade in on opacity only (a transform on a page would shift its fixed-position
+   children — Review's theater, the performer picker — while it played). Opening overlays fade
+   and settle; closing is instant. All of it is off when the system asks for reduced motion. */
+@keyframes viewIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes viewHead { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes popIn { from { opacity: 0; transform: scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes toastIn { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.view.active { animation: viewIn 160ms ease-out; }
+.view.active > .head { animation: viewHead 200ms ease-out; }
+#floor.view.active { animation: none; }                        /* the Floor is a live canvas: no fade */
+[data-pane]:not([hidden]) { animation: viewIn 140ms ease-out; }
+.fresh { animation: viewIn 120ms ease-out; }
+.nav, .seg > span, .seg .cat-chip, .tab-b { transition: background-color .15s, color .15s, box-shadow .15s; }
+.cmdk:not([hidden]), .pf-picker:not([hidden]), .dcmp:not([hidden]) { animation: viewIn 140ms ease-out; }
+.cmdk:not([hidden]) .cmdk-box, .pf-picker:not([hidden]) .box { animation: popIn 140ms ease-out; }
+#toast:not([hidden]) { animation: toastIn 160ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .view.active, .view.active > .head, [data-pane]:not([hidden]), .fresh, .cmdk, .cmdk-box, .pf-picker, .pf-picker .box,
+  .dcmp, #toast { animation: none !important; }
+  .nav, .seg > span, .seg .cat-chip, .tab-b { transition: none !important; }
+}

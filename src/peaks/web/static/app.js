@@ -211,6 +211,26 @@ function showView(name) {
   $("#content")?.scrollTo(0, 0);
   if (location.hash.split("?")[0] !== "#/" + name) history.replaceState(null, "", "#/" + name);
 }
+// content that replaces a "Loading…" line fades in (a cached instant draw never shows
+// one, so revisits don't flicker); purely visual — nothing waits on it
+(() => {
+  const root = document.getElementById("content") || document.body;
+  if (!root || typeof MutationObserver === "undefined") return;
+  const LOADING = /^(Loading|Checking|Asking|Reading|Looking)\b/;
+  new MutationObserver((muts) => {
+    for (const m of muts) {
+      if (!m.addedNodes.length) continue;
+      let was = false;
+      for (const n of m.removedNodes) {
+        if (n.nodeType === 1 && n.classList.contains("dim") && LOADING.test(n.textContent || "")) { was = true; break; }
+      }
+      if (!was || !(m.target instanceof Element) || m.target.querySelector(":scope > .dim:only-child")) continue;
+      const el = m.target;
+      el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh");
+      el.addEventListener("animationend", () => el.classList.remove("fresh"), { once: true });
+    }
+  }).observe(root, { childList: true, subtree: true });
+})();
 // open a page and load what it shows
 function go(name) {
   showView(name);
