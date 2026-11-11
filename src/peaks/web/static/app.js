@@ -3714,11 +3714,18 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-settle-keep]"); if (!b) return;
   b.disabled = true;
+  // move on at once (like a grade): the ruling saves behind you, and comes back if it fails
+  const r = rv.items[rv.i], was = r && r.settle;
+  const saving = api(`/api/settle/rule/${encodeURIComponent(b.dataset.settleKeep)}`, { method: "POST" });
+  if (r && r.scene_id === b.dataset.settleKeep) r.settle = null;
+  toast("Your grade stands — settled");
+  try { rvMove(1); } catch (err) { console.warn(err); }
   try {
-    await api(`/api/settle/rule/${encodeURIComponent(b.dataset.settleKeep)}`, { method: "POST" });
-    const r = rv.items[rv.i]; if (r) r.settle = null;
-    toast("Your grade stands — settled"); rvMove(1);
-  } catch (err) { toast(err.message, true); b.disabled = false; }
+    await saving;
+  } catch (err) {
+    if (r && was && !r.settle) r.settle = was;
+    toast(`Keep mine didn't save (${err.message}) — the question is back on that scene`, true);
+  }
 });
 
 // --- Insights → Arbiter ----------------------------------------------------------------

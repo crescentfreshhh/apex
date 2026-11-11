@@ -213,3 +213,36 @@ def test_keep_mine_and_keep_as_is_answer_both_places_and_undo_keeps_an_earlier_r
     assert r["settled"] and r["ruling_prev"]["grade"] == first["grade"]
     c.request("DELETE", f"/api/settle/rule/{wrong}", json={"restore": r["ruling_prev"]})   # what Z does
     assert svc.rulings()[wrong]["grade"] == first["grade"]       # the earlier "Keep mine" is back
+
+
+def test_keep_mine_never_loads_the_index_inside_the_click(tmp_path, monkeypatch):
+    """The settling chart's point (every 10 minutes) counts the unsettled scenes,
+    which can mean loading the index — a minute's work that also held up every
+    other page. The click returns at once; the point is worked out behind it."""
+    import threading
+    import time
+
+    svc, stash, (wrong,), _ = _library(tmp_path, monkeypatch)
+    svc._tier_predictions(svc._catalogue_all())
+    gate, loads = threading.Event(), []
+    orig = type(svc).index
+
+    def cold_index(self, *a, **k):
+        if not self._index:
+            loads.append(threading.current_thread().name)
+            gate.wait(5)                                  # a slow cold load
+        return orig(self, *a, **k)
+    monkeypatch.setattr(type(svc), "index", cold_index)
+    svc._index = {}                                       # a restart or a memory purge dropped it
+    svc._settle_logged_at = 0.0                           # a chart point is due
+    t = time.perf_counter()
+    assert svc.settle_rule(wrong)["ruled"]
+    assert time.perf_counter() - t < 1.0
+    assert "MainThread" not in loads                      # never in the request
+    assert svc._tier_predictions(svc._catalogue_all())    # pages keep the last results meanwhile
+    gate.set()
+    for _ in range(100):
+        if svc._settle_logged_at:
+            break
+        time.sleep(0.05)
+    assert svc._settle_logged_at and svc.settle_history()[-1]["answers"] >= 1

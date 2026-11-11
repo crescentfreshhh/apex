@@ -17,6 +17,7 @@ The two kinds are interleaved. The calibration (where Peaks is right 9 times in
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -152,6 +153,21 @@ class SettleMixin:
         last = getattr(self, "_settle_logged_at", 0.0)
         if not force and time.time() - last < 600:
             return
+        if state is None and not force:
+            # an answer (Keep mine, a grade): the click returns now and the chart point is
+            # worked out behind it — counting the unsettled scenes can mean loading the index
+            lk = self.__dict__.setdefault("_settle_log_bg", threading.Lock())
+            if lk.acquire(blocking=False):
+                def run():
+                    try:
+                        self._settle_log_point(None)
+                    finally:
+                        lk.release()
+                threading.Thread(target=run, name="peaks-settle-log", daemon=True).start()
+            return
+        self._settle_log_point(state)
+
+    def _settle_log_point(self, state: dict | None) -> None:
         try:
             st = state or self.settle_state(log=False)
         except Exception:  # noqa: BLE001 — no model yet: nothing to log

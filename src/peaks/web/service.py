@@ -6445,10 +6445,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             # memory was high: no index reloads while Stash's ingest stages run — last results stand
             cached = getattr(self, "_tier_preds", None)
             return cached[1] if cached else {}
+        cached = getattr(self, "_tier_preds", None)
+        if cached is not None and self.index_if_loaded() is None:
+            # the index isn't in memory (a restart, a memory purge): the last results stand —
+            # loading it is a minute's work and never happens inside a click
+            return cached[1]
         # valid for this model + this index build (new embeds → new index → re-score)
         pics = self._picture_entries()
         key = (id(st["model"]), getattr(self.index(self._model_name()), 'gen', 0), len(rows), id(pics))
-        cached = getattr(self, "_tier_preds", None)
         if cached is not None and cached[0] == key:
             return cached[1]
         if cached is not None:
