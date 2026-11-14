@@ -117,6 +117,14 @@ class FakeStash:
             v["performers"] = [p["name"] for p in v["performers_detail"]]
         return {}
 
+    def add_scene_tags(self, scene_ids, tag_ids):
+        """bulkSceneUpdate in ADD mode: appended, the rest untouched."""
+        self.calls.append(("add_tags", sorted(str(s) for s in scene_ids), [str(t) for t in tag_ids]))
+        for sid in scene_ids:
+            v = self.s[str(sid)]
+            v["tag_ids"] = list(v["tag_ids"]) + [str(t) for t in tag_ids if str(t) not in v["tag_ids"]]
+        return len(scene_ids)
+
     no_o_batch = False            # an older Stash: sceneAddO / sceneDeleteO without `times`
 
     def scene_add_o(self, sid, n=1):

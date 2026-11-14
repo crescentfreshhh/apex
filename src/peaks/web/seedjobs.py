@@ -71,6 +71,16 @@ class SeedJobsMixin:
         s["remote"] = os.environ.get("PEAKS_SEEDBOX_REMOTE") or s["remote"]
         return s
 
+    def vr_folders(self) -> list[str]:
+        """Pull destinations for VR: any category whose name or folder says "vr"
+        (default: /data/#VR). Scenes inside them are tagged VR_TAG at ingest."""
+        out = []
+        for c in self.seedjob_settings().get("categories") or []:
+            cat, dest = str(c.get("cat") or ""), str(c.get("dest") or "").rstrip("/")
+            if dest and ("vr" in cat.lower() or "vr" in Path(dest).name.lower()):
+                out.append(dest)
+        return sorted(set(out))
+
     @_settings_saver
     def save_seedjob_settings(self, body: dict) -> dict:
         from .. import atomic

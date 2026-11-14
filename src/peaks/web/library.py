@@ -1264,6 +1264,47 @@ class LibraryMixin:
             self.invalidate_meta(sid)
         self._cat_cache = None
 
+    VR_TAG = "Virtual Reality"
+
+    def _tag_vr_folder_scenes(self, log, rows: list[dict] | None = None) -> int:
+        """Every scene whose file is in a VR pull folder (Seedbox → categories, e.g.
+        /data/#VR) carries the "Virtual Reality" tag in Stash. Added in one bulk
+        call that appends it — the scene's other tags, grade and flags are untouched.
+        A sweep of the whole folder from the listing in memory: free when nothing's
+        missing, and the first run after an update tags what was already there."""
+        try:
+            folders = [f + "/" for f in self.vr_folders()]
+        except Exception:  # noqa: BLE001 — no seedbox settings: nothing to do
+            return 0
+        if not folders:
+            return 0
+        rows = rows if rows is not None else self._catalogue_all()
+        inside = [r for r in rows if any((r.get("path") or "").startswith(f) for f in folders)]
+        if not inside:
+            return 0
+        client = self.client()
+        tag = client.find_tag_by_name(self.VR_TAG)
+        tid = str(tag.id) if tag else None
+        todo = [r["scene_id"] for r in inside if tid is None or tid not in [str(t) for t in r.get("tag_ids") or []]]
+        if not todo:
+            return 0
+        if tid is None:
+            tid = str(client.find_or_create_tag(self.VR_TAG).id)
+        for i in range(0, len(todo), 200):
+            client.add_scene_tags(todo[i:i + 200], [tid])
+        try:                                    # the listing shows the tag at once
+            for sid, m in self._meta_client().scene_details(todo).items():
+                self._cat_put_row(sid, m)
+        except Exception:  # noqa: BLE001 — the next listing read catches up
+            pass
+        msg = f"tagged {len(todo)} scene(s) in {', '.join(f.rstrip('/') for f in folders)} '{self.VR_TAG}'"
+        log(msg)
+        try:
+            self.action_log().append("vr-tag", detail=msg)
+        except Exception:  # noqa: BLE001
+            pass
+        return len(todo)
+
     def _repair_new_tier_tags(self, new: list[str], log) -> int:
         """Scenes graded while the ingest runs can lose their tier tag to a later
         Stash stage (e.g. identify overwriting tags). Re-tag any new scene whose
@@ -1465,6 +1506,13 @@ class LibraryMixin:
             self._write_ingest(record)
             self._cat_cache = None                 # new scenes → re-read the listing
 
+        try:                                       # VR pull folders carry the "Virtual Reality" tag
+            n = self._tag_vr_folder_scenes(log, rows=self._catalogue_all(refresh=True))
+            if n:
+                stages["vr tag"] = f"{n} tagged '{self.VR_TAG}'"
+        except Exception as exc:  # noqa: BLE001 — never fail an ingest on this
+            stages["vr tag"] = f"skipped: {exc}"
+            log(f"VR tag skipped: {exc}")
         try:                                       # the same download attached twice
             c = self.file_copies_step(log)
             if c is not None:
