@@ -158,3 +158,26 @@ def test_vr_files_are_measured_without_the_backfill_switch(svc, stash):
     ids = [r["scene_id"] for r in owed]
     assert rest == [] and set(ids) >= {"100", "101", "200", "201"} and "1" not in ids
     assert ids.index("101") < ids.index("200")                      # keepers first: they set the bar
+
+
+def test_vr_files_are_sampled_every_10s_but_count_as_done_at_the_library_rate():
+    from types import SimpleNamespace
+
+    from peaks.pipeline import _vr_meta
+    from peaks.sampling import FrameSampler
+
+    s = FrameSampler(interval_seconds=2.0, mode="sparse")
+    s.vr_test = lambda p: "/#VR/" in p
+    sig = s.interval_signature
+    s.vr_interval = 10.0
+    assert s._interval_for("/data/#VR/a.mp4") == 10.0 and s._interval_for("/data/flat/a.mp4") == 2.0
+    assert s.interval_signature == sig                                 # recorded as the library's sampling
+    i = FrameSampler(interval_seconds=2.0, mode="interval")
+    i.vr_test, i.vr_interval = s.vr_test, 10.0
+    assert i._raw_vf(256, 224, True, i._interval_for("/data/#VR/a.mp4")).startswith("fps=1/10,crop=")
+    assert i._raw_vf(256, 224, False, i._interval_for("/data/flat/a.mp4")).startswith("fps=1/2,scale=")
+    assert i._linear_fallback_sampler().vr_interval == 10.0
+    assert _vr_meta(s, SimpleNamespace(path="/data/#VR/a.mp4")) == {"vr_interval": 10.0}
+    assert _vr_meta(s, SimpleNamespace(path="/data/flat/a.mp4")) == {}
+    s.vr_interval = 1.0                                                # never denser than the library
+    assert s._interval_for("/data/#VR/a.mp4") == 2.0

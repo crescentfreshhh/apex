@@ -786,7 +786,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             pipeline=(s.pipeline if pipeline is None else pipeline),
             scene_timeout=(s.scene_timeout if scene_timeout is None else scene_timeout),
         )
-        sampler.vr_test = self.is_vr_path            # VR files: sampled at the left eye's centre
+        sampler.vr_test = self.is_vr_path            # VR files: sampled at the left eye's centre…
+        sampler.vr_interval = self.VR_EMBED_INTERVAL   # …a frame every 10 s (long 8K files)
         embedder = self._embedder(model)
         n_workers = e.workers if workers is None else workers
         n_batch = e.batch_size if batch_size is None else batch_size
@@ -809,6 +810,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         else:                                              # …(a stand-in cache: the per-scene check)
             pending = [sc for sc in scanned
                        if not cache.has(scene_key(sc), embedder.name, interval=signature)]
+        # flat scenes first: a new ingest is never held up behind the VR backlog
+        pending.sort(key=lambda sc: self.is_vr_path(getattr(sc, "path", "") or ""))
         if limit:
             pending = pending[:limit]
         total = len(pending)
@@ -1932,6 +1935,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         signature=lib_sig,
                     )
                     sampler.vr_test = self.is_vr_path    # VR files: the left eye's centre, as embedded
+                    sampler.vr_interval = self.VR_EMBED_INTERVAL
                     lines: list[str] = []
                     try:
                         st = embed_library(
@@ -5356,6 +5360,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return rows
 
     # --- VR: a scene in a VR pull folder, or tagged "Virtual Reality" -----------------
+
+    VR_EMBED_INTERVAL = 10.0     # VR embeds a frame every 10 s: plenty for its model, search and picks
 
     def _vr_prefixes(self) -> tuple[str, ...]:
         try:

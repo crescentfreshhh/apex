@@ -106,6 +106,17 @@ def _skipping(scenes: Iterable[Scene], should_skip, log: Logger, counts: dict, s
             yield sc
 
 
+def _vr_meta(sampler, scene) -> dict:
+    """A VR file sampled sparser than the library says so (it's still recorded at
+    the library's signature, so it counts as done)."""
+    f = getattr(sampler, "_interval_for", None)
+    try:
+        iv = f(scene.path) if f and scene.path else None
+    except Exception:  # noqa: BLE001
+        iv = None
+    return {"vr_interval": iv} if iv and iv != getattr(sampler, "interval", iv) else {}
+
+
 def embed_library(
     scenes: Iterable[Scene],
     sampler: FrameSampler,
@@ -251,6 +262,7 @@ def embed_library(
                     "model": embedder.name,
                     "dim": embedder.dim,
                     "n_frames": len(times),
+                    **_vr_meta(sampler, scene),
                 },
             )
             dt = _time.monotonic() - started
@@ -397,6 +409,7 @@ def _embed_library_parallel(
                     "model": embedder.name,
                     "dim": embedder.dim,
                     "n_frames": len(times),
+                    **_vr_meta(sampler, scene),
                 },
             )
             stats["embedded"] += 1

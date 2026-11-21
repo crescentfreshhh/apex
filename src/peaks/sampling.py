@@ -401,6 +401,15 @@ class FrameSampler:
         self.decode_threads = 0
         # vr_test(path) -> bool: VR files are sampled at the left eye's centre (VR_VIEW)
         self.vr_test = None
+        # vr_interval: VR files sampled this sparsely (long 8K files; recorded at the
+        # library's signature, so they count as done) — None = the library's interval
+        self.vr_interval = None
+
+    def _interval_for(self, path: str) -> float:
+        """The sampling interval for this file: VR's sparser one when set, else the library's."""
+        if self.vr_interval and self.vr_interval > self.interval and self._is_vr(path):
+            return float(self.vr_interval)
+        return self.interval
 
     def _is_vr(self, path: str) -> bool:
         try:
@@ -468,12 +477,12 @@ class FrameSampler:
             args += ["-threads", str(int(self.decode_threads))]
         return args
 
-    def _vf(self, vr: bool = False) -> str:
+    def _vf(self, vr: bool = False, interval: float | None = None) -> str:
         """The ffmpeg filtergraph for the current mode."""
         if self.mode == "keyframes":
             parts = ["showinfo"]  # exact pts_time per emitted frame
         else:
-            parts = [f"fps=1/{self.interval:g}"]
+            parts = [f"fps=1/{(interval or self.interval):g}"]
         if vr:
             parts.append(vr_crop_filter())
         scale = self._scale_filter()
@@ -481,13 +490,13 @@ class FrameSampler:
             parts.append(scale)
         return ",".join(parts)
 
-    def _raw_vf(self, resize_short: int, crop: int, vr: bool = False) -> str:
+    def _raw_vf(self, resize_short: int, crop: int, vr: bool = False, interval: float | None = None) -> str:
         """Filtergraph for the raw pipeline: sample, then reproduce the
         model's preprocessing in ffmpeg (bicubic short-side resize + center
         crop), so frames arrive at exactly the network's input size. A VR file
         is first cropped to the left eye's centre."""
         return (
-            f"fps=1/{self.interval:g},"
+            f"fps=1/{(interval or self.interval):g},"
             + (vr_crop_filter() + "," if vr else "") +
             f"scale=w={resize_short}:h={resize_short}"
             ":force_original_aspect_ratio=increase:flags=bicubic,"
@@ -617,6 +626,7 @@ class FrameSampler:
         )
         fb.decode_threads = self.decode_threads
         fb.vr_test = self.vr_test
+        fb.vr_interval = self.vr_interval
         return fb
 
     def _iter_frames_sparse(self, path: str, *, resize_short: int, crop: int):
@@ -648,8 +658,8 @@ class FrameSampler:
         ctx = mp.get_context("spawn")  # fresh interpreter: no CUDA-fork hazards
         proc = ctx.Process(
             target=_sparse_extract_worker,
-            args=(path, self.interval, resize_short, crop, out_path, int(getattr(self, "decode_threads", 0) or 0),
-                  self._is_vr(path)),
+            args=(path, self._interval_for(path), resize_short, crop, out_path,
+                  int(getattr(self, "decode_threads", 0) or 0), self._is_vr(path)),
         )
         try:
             proc.start()
@@ -704,13 +714,14 @@ class FrameSampler:
 
         if self.interval <= 0:
             return
+        iv = self._interval_for(path)
         frame_bytes = crop * crop * 3
         cmd = [
             self.ffmpeg,
             "-v", "error",
             *self._input_args(),
             "-i", path,
-            "-vf", self._raw_vf(resize_short, crop, self._is_vr(path)),
+            "-vf", self._raw_vf(resize_short, crop, self._is_vr(path), iv),
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
             "-",
@@ -756,7 +767,7 @@ class FrameSampler:
                 if chunk is None:
                     break
                 arr = np.frombuffer(chunk, dtype=np.uint8).reshape(crop, crop, 3)
-                yield round(i * self.interval, 3), arr
+                yield round(i * iv, 3), arr
                 i += 1
             rc = proc.wait()
             if rc != 0:
@@ -779,12 +790,13 @@ class FrameSampler:
 
         if self.interval <= 0:
             return
+        iv = self._interval_for(path)
         cmd = [
             self.ffmpeg,
             "-v", "error",
             *self._input_args(),
             "-i", path,
-            "-vf", self._vf(self._is_vr(path)),
+            "-vf", self._vf(self._is_vr(path), iv),
             "-q:v", "3",
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
@@ -827,7 +839,7 @@ class FrameSampler:
                 if jpg is None:
                     break
                 with PILImage.open(BytesIO(jpg)) as im:
-                    yield round(i * self.interval, 3), im.convert("RGB")
+                    yield round(i * iv, 3), im.convert("RGB")
                 i += 1
             rc = proc.wait()
             if rc != 0:
