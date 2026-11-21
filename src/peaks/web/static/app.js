@@ -1151,6 +1151,14 @@ function tierOf(rating100, o, vr = false) {
 // your VR keepers — the smell test you'd otherwise need the headset for (only a suggestion)
 const VRQ_LABEL = { meets: "Meets your VR bar", borderline: "VR: borderline", below: "Below your VR bar",
   unmeasured: "VR quality: not checked yet" };
+// the VR grade model: what it still needs, or how sure it is — shown where a VR scene has no suggestion
+function vrModelLine() {
+  const st = cat.vrModel; if (!st || !st.report) return "";
+  const r = st.report;
+  if (r.trained) return `<div class="vrq faint">VR model: ${Math.round(100 * r.accuracy)}% right on VR it didn't learn from (a guess would get ${Math.round(100 * r.baseline)}%) · uses ${esc(r.uses.replace(/\+/g, " + "))}</div>`;
+  const need = Object.entries(r.needs || {}).map(([c, n]) => `${n} more ${c === "reject" ? "rejects" : esc(TIER_NAMES[c] || c)}`).join(", ");
+  return `<div class="vrq faint">VR model: needs ${need} before it suggests grades</div>`;
+}
 function vrqHTML(v, all = false) {
   if (!v) return "";
   const why = all ? v.reasons.map(esc).join(" · ") : esc(v.reasons[0] || "");
@@ -5484,6 +5492,7 @@ function catDraw(d, append, refresh, keepPlace = false, offset = 0) {
       cat.items = cat.items.concat(d.items.filter((x) => !have.has(x.scene_id)));   // an overlap, not twice
     } else cat.items = d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model; cat.drain = d.drain;
+    if (d.vr_model) cat.vrModel = d.vr_model;
     cat.grace = d.grace || cat.grace;
     renderCatViewbar();
     const nb = $("#btn-cat-new"), ing = d.ingest || {};
@@ -5949,7 +5958,8 @@ function predHTML(p) {
   const lead = conf === "Hard to call" ? `Hard to call — ${tc(p.tier)}` : `${conf} ${tc(p.tier)}`;
   const maybe = second && W.closeRunnerUp(p.conf, second[1]) ? `, maybe ${tc(second[0])}` : "";
   const title = ranked.map(([c, v]) => `${className(c)} ${W.pct(v)}`).join(" · ");
-  return `<span title="${esc(title)}">${lead}${maybe}</span>${fig(W.pct(p.conf))}`;
+  return `<span title="${esc(title)}">${lead}${maybe}</span>${fig(W.pct(p.conf))}`
+    + (p.from === "vr" ? ' <span class="faint small" title="From the VR grade model: your VR grades only">· VR model</span>' : "");
 }
 function keeperHTML(p) {
   if (!p || p.keeper == null || p.tier === "reject") return "";
@@ -7412,7 +7422,7 @@ function renderReview() {
   }).join("") : (r.moments && r.moments.length
     ? '<span class="faint">The tier model isn\'t trained yet — Catalogue → ⋯ → Train.</span>'
     : '<span class="faint">Not embedded yet — the model\'s opinion appears once it is.</span>');
-  $("#rv-why").innerHTML = [r.vr ? vrqHTML(r.vrq, true) : "", r.pred ? `<b class="rv-verdict">${predHTML(r.pred)}</b>` : "", keeperHTML(r.pred),
+  $("#rv-why").innerHTML = [r.vr ? vrqHTML(r.vrq, true) : "", r.vr && !r.pred ? vrModelLine() : "", r.pred ? `<b class="rv-verdict">${predHTML(r.pred)}</b>` : "", keeperHTML(r.pred),
     r.pred && r.pred.from === "who" ? '<span class="faint">From performer/studio history — not seen yet</span>' : "",
     r.pred && r.pred.quick ? '<span class="faint quick-guess" title="Updated from your latest grades without a full retrain — the next retrain confirms or corrects it">Quick guess — the next retrain confirms it</span>' : "",
     r.flag ? `<span class="warn">⚠ ${textNum(r.flag, r.flag_detail)}</span>` : "",

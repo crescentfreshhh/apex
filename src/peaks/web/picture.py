@@ -93,7 +93,8 @@ class PictureMixin:
         return r
 
     def _pic_needs(self, row: dict) -> bool:
-        if row.get("tier") in SKIP_TIERS or not row.get("path"):
+        # (a VR reject is measured too: the VR grade model learns from what it looked like)
+        if (row.get("tier") in SKIP_TIERS and not row.get("vr")) or not row.get("path"):
             return False
         r = self._pic_measures().get(self._pic_key(row))
         if r is None or r.get("v") != pq.VERSION:

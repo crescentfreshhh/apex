@@ -181,3 +181,64 @@ def test_vr_files_are_sampled_every_10s_but_count_as_done_at_the_library_rate():
     assert _vr_meta(s, SimpleNamespace(path="/data/flat/a.mp4")) == {}
     s.vr_interval = 1.0                                                # never denser than the library
     assert s._interval_for("/data/#VR/a.mp4") == 2.0
+
+
+def _graded_vr(stash, n=10):
+    """n VR scenes per grade: rejects soft (upscaled), keepers sharp; plus one unreviewed sharp and one soft."""
+    import peaks.picture as pq
+
+    meas, sid = {}, 300
+    for tier, rating, eyes in (("reject", 20, (1500, 2100)), ("exceptionnelle", 80, (2900, 3300)),
+                               ("legendaire", 100, (3400, 3900))):
+        for i in range(n):
+            sid += 1
+            s = str(sid)
+            eye = eyes[0] + (eyes[1] - eyes[0]) * i / max(1, n - 1)
+            stash.s[s] = {"rating100": rating, "o_counter": 0, "tag_ids": [], "organized": rating > 20,
+                          "fingerprint": f"fp{s}", "path": f"/data/#VR/{s}.mp4", "width": 8192, "height": 4096,
+                          "bit_rate": 60e6, "frame_rate": 60, "studio": "Alpha", "date": "2023-01-01"}
+            meas[f"fp{s}"] = {"v": pq.VERSION, "eff_h": eye, "eff_factor": 4096 / eye, "sharp": eye / 1000}
+    for s, eye in (("398", 3700), ("399", 1600)):
+        stash.s[s] = {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False, "fingerprint": f"fp{s}",
+                      "path": f"/data/#VR/{s}.mp4", "width": 8192, "height": 4096, "bit_rate": 60e6,
+                      "frame_rate": 60, "studio": "Alpha", "date": "2023-01-01"}
+        meas[f"fp{s}"] = {"v": pq.VERSION, "eff_h": eye, "eff_factor": 4096 / eye, "sharp": eye / 1000}
+    return meas
+
+
+def test_the_vr_model_trains_on_vr_grades_and_suggests_for_unreviewed_vr(svc, stash):
+    pytest.importorskip("sklearn")
+    meas = _graded_vr(stash)
+    svc._pic_measures = lambda: meas
+    svc._catalogue_all(refresh=True)
+    rep = svc.train_vr_model()
+    assert rep["trained"] and rep["counts"] == {"reject": 10, "exceptionnelle": 10, "legendaire": 10}
+    d = svc.catalogue(tier="unreviewed", vr="vr")
+    by = {i["scene_id"]: i["pred"] for i in d["items"]}
+    assert by["399"]["tier"] == "reject" and by["398"]["tier"] in ("exceptionnelle", "legendaire")
+    assert by["399"]["from"] == "vr" and d["vr_model"]["trained"]
+
+
+def test_vr_rejects_are_remembered_apart_and_count_after_deletion(svc, stash):
+    pytest.importorskip("sklearn")
+    meas = _graded_vr(stash, n=8)
+    svc._pic_measures = lambda: meas
+    rows = svc._catalogue_all(refresh=True)
+    assert svc._remember_rejects(rows) == 0                       # never into the flat model's memory
+    assert svc._remember_vr_rejects(rows) == 8
+    mem = svc.store().map_all("vr_rejects")
+    assert mem["fp301"]["y"] == "reject" and mem["fp301"]["pic"]["eff_h"] == 1500
+    for s in [k for k, v in stash.s.items() if v.get("rating100") == 20]:   # the files are deleted
+        del stash.s[s]
+    svc._catalogue_all(refresh=True)
+    ex = svc._vr_examples(svc._catalogue_all())
+    assert sum(e["y"] == "reject" for e in ex) == 8                # still examples, from memory
+
+
+def test_without_enough_vr_grades_the_model_says_what_it_needs(svc, stash):
+    meas = _graded_vr(stash, n=3)
+    svc._pic_measures = lambda: meas
+    svc._catalogue_all(refresh=True)
+    rep = svc.train_vr_model()
+    assert not rep["trained"] and rep["needs"] == {"reject": 5, "exceptionnelle": 5, "legendaire": 5}
+    assert svc.vr_model_status()["trained"] is False

@@ -5681,6 +5681,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tier_model import quality_flag, quality_flag_detail, quality_floor
 
         preds = self._tier_predictions(rows)
+        try:
+            vrp = self._vr_predictions(rows)
+        except Exception:  # noqa: BLE001 — VR suggestions are extra
+            vrp = {}
+        if vrp:
+            preds = {**preds, **vrp}
         whole = len(pool) == len(rows)
         in_view = view in self.TRIAGE_VIEWS or view == "arbiter"
         if whole:
@@ -5759,6 +5765,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "names": self.tier_display_names(), "offset": offset, "limit": limit,
             "tier_state": self.tier_state(),
             "model": self.tier_model_status(), "floor": floor,
+            "vr_model": self.vr_model_status() if any(r.get("vr") for r in page) else None,
             "ingest": {"finished": ingest.get("finished"), "new": len(ingest.get("new") or [])},
             "storage": d["storage"] if d is not None else self._storage(pool_all),
         }
@@ -6393,6 +6400,94 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 out[name] = np.stack([sense_row(v, dim) for v in vecs])
         return out
 
+    # --- the VR grade model (peaks.vr_model): its own, from VR grades only ---------------
+
+    def _vr_model_path(self):
+        from pathlib import Path
+
+        return Path(self.cfg.modeling.dir) / "vr_tier_model.pkl"
+
+    def _vr_examples(self, rows: list[dict]) -> list[dict]:
+        """Graded VR scenes (with their picture measures) + remembered VR rejects
+        whose files are gone."""
+        from ..vr_model import example, label_of
+
+        out, live = [], set()
+        for r in rows:
+            if not r.get("vr"):
+                continue
+            if r.get("fingerprint"):
+                live.add(r["fingerprint"])
+            if label_of(r.get("tier")) and not r.get("no_learn"):
+                out.append(example(r, self._pic_rec(r)))
+        for fp, e in self.store().map_all("vr_rejects").items():
+            if fp not in live and e.get("y") == "reject":
+                out.append(e)
+        return out
+
+    def train_vr_model(self) -> dict:
+        """Fit the VR grade model (honest CV picks its feature groups). Saved
+        beside the flat model; the report says what it needs when it can't train."""
+        import pickle
+
+        from .. import atomic, vr_model
+
+        rows = self._catalogue_all()
+        try:
+            self._remember_vr_rejects(rows)           # 1★ VR not deleted yet counts too
+        except Exception:  # noqa: BLE001
+            pass
+        model, rep = vr_model.train(self._vr_examples(rows))
+        rep["at"] = time.time()
+        p = self._vr_model_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if model is not None:
+            with atomic.temp_for(p) as tmp, open(tmp, "wb") as fh:
+                pickle.dump(model, fh)
+        self.store().map_set("vr_model", "report", rep)
+        self._vr_model_cache = model if model is not None else self.__dict__.get("_vr_model_cache")
+        self.__dict__.pop("_vr_preds", None)
+        return rep
+
+    def _vr_model(self):
+        m = self.__dict__.get("_vr_model_cache")
+        if m is not None:
+            return m
+        import pickle
+
+        p = self._vr_model_path()
+        if not p.exists():
+            return None
+        try:
+            with open(p, "rb") as fh:                   # our own file in models/ (pickle runs code on load)
+                m = pickle.load(fh)
+        except Exception:  # noqa: BLE001 — unreadable: as if untrained
+            return None
+        self._vr_model_cache = m
+        return m
+
+    def vr_model_status(self) -> dict:
+        rep = self.store().map_get("vr_model", "report") or {}
+        return {"trained": bool(rep.get("trained")) and self._vr_model() is not None, "report": rep or None}
+
+    def _vr_predictions(self, rows: list[dict]) -> dict[str, dict]:
+        """Unreviewed VR scenes → the VR model's suggestion (same shape as the flat
+        model's, marked from: vr). Empty until the VR model is trained."""
+        from ..vr_model import example
+
+        m = self._vr_model()
+        if m is None:
+            return {}
+        sig = (id(m), self.__dict__.get("_cat_ver", 0), self.__dict__.get("_cat_edit_seq", 0), len(rows),
+               id(self._pic_measures()))
+        hit = self.__dict__.get("_vr_preds")
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        todo = [r for r in rows if r.get("vr") and r.get("tier") in ("unreviewed", "anomaly")]
+        preds = dict(zip([r["scene_id"] for r in todo], m.predict([example(r, self._pic_rec(r), None) for r in todo])))
+        self._vr_preds = (sig, preds)
+        return preds
+
     def train_tier_model(self) -> dict:
         """Fit the triage model on every graded, embedded scene. Returns the
         report (per-class counts, CV accuracy with and without quality
@@ -6406,6 +6501,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             CLASSES, fit_best, fit_fallback, fit_folds, picture_features, quality_features, train_class,
             usable_classes, who_of,
         )
+
+        try:                                            # VR's own model retrains alongside
+            self.train_vr_model()
+        except Exception:  # noqa: BLE001 — never in the flat model's way
+            pass
         from . import forensics
 
         self._tier_training = True

@@ -718,7 +718,8 @@ class LibraryMixin:
 
         mem = self.reject_memory()
         have = mem.fingerprints()
-        rejects = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint") and not r.get("no_learn")]
+        rejects = [r for r in rows if r.get("tier") == "rejected" and r.get("fingerprint") and not r.get("no_learn")
+                   and not r.get("vr")]           # VR has its own memory (below) and its own model
         todo = [r for r in rejects if r["fingerprint"] not in have]
         # remembered before performers/studio were kept: fill them in while knowable
         stale = [r for r in rejects if r["fingerprint"] in have]
@@ -729,6 +730,27 @@ class LibraryMixin:
         feats = self._scene_features(todo) if feats is None else feats
         return mem.add({r["fingerprint"]: (*feats[r["scene_id"]][:2], who_of(r)) for r in todo
                         if r["scene_id"] in feats})
+
+    def _remember_vr_rejects(self, rows: list[dict], measure: bool = False) -> int:
+        """Keep what the VR grade model needs of each VR reject — its picture
+        measure, file facts, studio, year and performers — so it still counts as
+        an example after the file is deleted. `measure`: a reject never measured is
+        measured first (the delete is about to take the file)."""
+        from ..vr_model import example
+
+        st = self.store()
+        have = set(st.map_all("vr_rejects"))
+        todo = [r for r in rows if r.get("vr") and r.get("tier") == "rejected" and r.get("fingerprint")
+                and not r.get("no_learn") and r["fingerprint"] not in have]
+        for r in todo:
+            rec = self._pic_rec(r)
+            if rec is None and measure and r.get("path"):
+                try:
+                    rec = self.picture_measure_row(r)
+                except Exception:  # noqa: BLE001 — remembered without its picture
+                    rec = None
+            st.map_set("vr_rejects", r["fingerprint"], {**example(r, rec, "reject"), "at": time.time()})
+        return len(todo)
 
     def delete_preview(self, scene_ids: list[str] | None = None) -> dict:
         """The rejected (1★) scenes a delete would remove — all of them, or the
@@ -824,6 +846,11 @@ class LibraryMixin:
                 except Exception as exc:  # noqa: BLE001 — never block a delete on memory
                     if job is not None:
                         job.log(f"reject memory: {exc}")
+                try:                                    # VR: its picture, studio, year — measured now if need be
+                    self._remember_vr_rejects(ok_rows, measure=True)
+                except Exception as exc:  # noqa: BLE001
+                    if job is not None:
+                        job.log(f"VR reject memory: {exc}")
             try:
                 client.destroy_scenes([r["scene_id"] for r in ok_rows],
                                       delete_file=bool(delete_file), delete_generated=True)
