@@ -1367,3 +1367,9 @@ body.picks-off .pick-span { display: none !important; }
   border-radius: 4px; color: var(--accent2); border: 1px solid color-mix(in srgb, var(--accent2) 45%, transparent);
   vertical-align: 1px; }
 .rv-player.vr video { width: 200%; max-width: none; object-fit: cover; object-position: 0 50%; }
+.vrq { font-size: 12px; color: var(--dim); margin-top: 3px; }
+.vrq b { font-weight: 600; }
+.vrq-meets b { color: #6fcf8e; }
+.vrq-borderline b { color: var(--gold); }
+.vrq-below b { color: #e0604d; }
+.vrq-unmeasured b { color: var(--faint, #888); font-weight: 500; }

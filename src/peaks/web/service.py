@@ -5473,7 +5473,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     # sort key → (value of a row or None when it has none, natural order is descending?)
     SORT_DESC_DEFAULT = {"date": True, "duration": True, "title": False, "bitrate": True,
                          "quality": True, "predicted": True, "size": True, "added": True,
-                         "performer": False, "tier": True, "picture": True}
+                         "performer": False, "tier": True, "picture": True, "vrquality": True}
 
     @staticmethod
     def _fold(text: str) -> str:
@@ -5496,6 +5496,13 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             sort = "date"
         desc = self.SORT_DESC_DEFAULT[sort] if direction not in ("asc", "desc") else direction == "desc"
         fold = self._fold
+        if sort == "vrquality":
+            from ..vr_quality import RANK as RANK_VRQ
+
+            try:
+                vrq = self.vr_quality()
+            except Exception:  # noqa: BLE001
+                vrq = {}
 
         def perf(r):
             names = [fold(p) for p in (r.get("performers") or []) if str(p).strip()]
@@ -5520,6 +5527,9 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             # best → worst (ties: newest first, via the date tiebreak below)
             "tier": lambda r: TIER_RANK_SORT.get(r.get("tier"), 0),
             # your picture score; before calibration where it ranks; before any picks, its real detail
+            # VR: the quality check's verdict, then its real detail (unmeasured / flat: last)
+            "vrquality": lambda r: (lambda v: None if not v or v["verdict"] == "unmeasured" else
+                                    (RANK_VRQ[v["verdict"]], v.get("eye_h") or 0))((vrq or {}).get(r["scene_id"])),
             "picture": lambda r: (lambda p: None if not p or p.get("vr") else
                                   next((v for v in (p.get("score"), p.get("rank"), p.get("real")) if v is not None), None))(
                 (pics or {}).get(r["scene_id"])),
@@ -5699,6 +5709,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             except Exception:  # noqa: BLE001 — picture quality is extra, never in the way
                 pics = {}
         names = self.tier_display_names()
+        try:
+            vrq = self.vr_quality() if any(r.get("vr") for r in page) else {}
+        except Exception:  # noqa: BLE001 — the quality check is extra, never in the way
+            vrq = {}
         moments = self._scene_moment_strips([r["scene_id"] for r in page])
         who_enc = self._who_records(rows)
         items = []
@@ -5715,6 +5729,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "who": self._who_reasons(r, who_enc, names),
                 "dupe": r["scene_id"] in dupe_ids,
                 "picture": pics.get(r["scene_id"]),
+                "vrq": vrq.get(r["scene_id"]) if r.get("vr") else None,
                 "concept": cscores.get(r["scene_id"]) if cscores is not None else None,
                 "settle": self.settle_info(r["scene_id"]) if view == "settle" else None,
             })

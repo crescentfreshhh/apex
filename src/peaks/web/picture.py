@@ -180,6 +180,12 @@ class PictureMixin:
         fresh |= dupes
         owed = sorted((r for r in rows if r["scene_id"] in fresh and self._pic_needs(r)),
                       key=lambda r: r["scene_id"] not in dupes)
+        # VR is always measured (the VR quality check needs it, backfill or not):
+        # keepers first — they set the bar — then the rest
+        vr_rank = {"legendaire": 0, "exceptionnelle": 1, "unreviewed": 2}
+        owed += sorted((r for r in rows if r.get("vr") and r["scene_id"] not in fresh and self._pic_needs(r)),
+                       key=lambda r: vr_rank.get(r["tier"], 3))
+        fresh |= {r["scene_id"] for r in owed}
         if not self._pic_state().get("backfill"):
             return owed, []
         order = {"unreviewed": 0, "legendaire": 1, "exceptionnelle": 2, "merveilleuse": 3, "anomaly": 4}
@@ -434,6 +440,28 @@ class PictureMixin:
     # --- the score where it's used ------------------------------------------------------------
 
     _PIC_SCORES_FRESH = 60.0
+
+    def vr_quality(self) -> dict[str, dict]:
+        """scene_id → the VR quality check (peaks.vr_quality) for every VR scene:
+        its measured real detail and bitrate, and its studio's years, against your
+        VR keepers. Remembered until the listing or the measures change."""
+        from .. import vr_quality as vq
+
+        meas = self._pic_measures()
+        rows = self._catalogue_all()
+        sig = (self.__dict__.get("_cat_ver", 0), self.__dict__.get("_cat_edit_seq", 0), len(rows), id(meas))
+        hit = self.__dict__.get("_vrq_cache")
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        by_sid = {}
+        for r in rows:
+            if r.get("vr"):
+                rec = meas.get(self._pic_key(r))
+                if rec and not rec.get("error") and rec.get("v") == pq.VERSION:
+                    by_sid[r["scene_id"]] = rec
+        out = vq.assess(rows, by_sid)
+        self._vrq_cache = (sig, out)
+        return out
 
     def picture_scores(self) -> dict[str, dict]:
         """scene_id → {score (0–100 on your scale, once calibrated), band,

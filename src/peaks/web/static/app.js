@@ -1147,6 +1147,15 @@ function tierOf(rating100, o, vr = false) {
   const t = ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
   return RETIRED.has(t) ? "anomaly" : t;
 }
+// VR quality check: the file's real detail and bitrate, and its studio's years, against
+// your VR keepers — the smell test you'd otherwise need the headset for (only a suggestion)
+const VRQ_LABEL = { meets: "Meets your VR bar", borderline: "VR: borderline", below: "Below your VR bar",
+  unmeasured: "VR quality: not checked yet" };
+function vrqHTML(v, all = false) {
+  if (!v) return "";
+  const why = all ? v.reasons.map(esc).join(" · ") : esc(v.reasons[0] || "");
+  return `<div class="vrq vrq-${v.verdict}" title="${esc(v.reasons.join("\n"))}"><b>${VRQ_LABEL[v.verdict] || v.verdict}</b>${why ? " · " + why : ""}</div>`;
+}
 // VR is graded on its stars alone: no Merveilleuse, no O-count, no tier tag
 const VR_GRADE_OK = new Set(["exceptionnelle", "legendaire", "reject", "reject-nl"]);
 const VR_GRADE_DESC = { legendaire: "5★ · organized", exceptionnelle: "4★ · organized" };
@@ -5372,6 +5381,7 @@ const SORT_DIRS = {
   bitrate: ["desc", "Highest first", "Lowest first"], duration: ["desc", "Longest first", "Shortest first"],
   size: ["desc", "Largest first", "Smallest first"],
   picture: ["desc", "Best picture first", "Worst picture first"],
+  vrquality: ["desc", "Meets your bar first", "Below your bar first"],
 };
 // a suggestion list opens in its own order, a tier list newest-first — until you pick a sort
 function catSyncSort() {
@@ -6054,7 +6064,7 @@ function catCardHTML(r, i) {
     <div class="cat-body">
       <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true, vr: r.vr })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="cat-who">${esc(who)}</div>
-      <div class="qual">${qualityChips(r)}${picChipHTML(r.picture)}</div>
+      <div class="qual">${qualityChips(r)}${r.vr ? "" : picChipHTML(r.picture)}</div>${r.vr ? vrqHTML(r.vrq) : ""}
       ${sigLine(r)}${predLine}${whoLines(r)}${flag}${suggest}${tagLine(r)}
       ${cat.view === "orphans" ? `<div class="orph" data-sid="${esc(r.scene_id)}">${orphHTML(r.scene_id)}</div>` : ""}
     </div>
@@ -7402,7 +7412,7 @@ function renderReview() {
   }).join("") : (r.moments && r.moments.length
     ? '<span class="faint">The tier model isn\'t trained yet — Catalogue → ⋯ → Train.</span>'
     : '<span class="faint">Not embedded yet — the model\'s opinion appears once it is.</span>');
-  $("#rv-why").innerHTML = [r.pred ? `<b class="rv-verdict">${predHTML(r.pred)}</b>` : "", keeperHTML(r.pred),
+  $("#rv-why").innerHTML = [r.vr ? vrqHTML(r.vrq, true) : "", r.pred ? `<b class="rv-verdict">${predHTML(r.pred)}</b>` : "", keeperHTML(r.pred),
     r.pred && r.pred.from === "who" ? '<span class="faint">From performer/studio history — not seen yet</span>' : "",
     r.pred && r.pred.quick ? '<span class="faint quick-guess" title="Updated from your latest grades without a full retrain — the next retrain confirms or corrects it">Quick guess — the next retrain confirms it</span>' : "",
     r.flag ? `<span class="warn">⚠ ${textNum(r.flag, r.flag_detail)}</span>` : "",

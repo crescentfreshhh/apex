@@ -117,3 +117,44 @@ def test_vr_keepers_never_set_the_flat_quality_floor():
     floor = quality_floor(vr + flat)
     assert floor["lowest_res"] == "1080p" and "6K" not in floor["by_res"]
     assert quality_flag({"res": "4K", "mbps": 1, "vr": True}, floor) is None
+
+
+def _vr_library(stash, n_keep=6):
+    """VR keepers (real ~6K per eye) plus an upscale and a good unreviewed file."""
+    import peaks.picture as pq
+
+    meas = {}
+    for i in range(n_keep):
+        sid = str(100 + i)
+        stash.s[sid] = {"rating100": 100 if i % 2 else 80, "o_counter": 0, "tag_ids": [], "organized": True,
+                        "fingerprint": f"fp{sid}", "path": f"/data/#VR/k{sid}.mp4", "width": 8192, "height": 4096,
+                        "bit_rate": 60e6, "frame_rate": 60, "studio": "Alpha", "date": "2023-01-01"}
+        meas[f"fp{sid}"] = {"v": pq.VERSION, "eff_h": 2900 + 50 * i, "eff_factor": 1.1}
+    for sid, eye in (("200", 1800), ("201", 3200)):
+        stash.s[sid] = {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False,
+                        "fingerprint": f"fp{sid}", "path": f"/data/#VR/u{sid}.mp4", "width": 8192, "height": 4096,
+                        "bit_rate": 60e6, "frame_rate": 60, "studio": "Alpha", "date": "2023-06-01"}
+        meas[f"fp{sid}"] = {"v": pq.VERSION, "eff_h": eye, "eff_factor": 4096 / eye}
+    return meas
+
+
+def test_vr_quality_reaches_the_listing_and_sorts_it(svc, stash):
+    meas = _vr_library(stash)
+    svc._pic_measures = lambda: meas
+    svc._catalogue_all(refresh=True)
+    d = svc.catalogue(tier="unreviewed", vr="vr", sort="vrquality")
+    order = [i["scene_id"] for i in d["items"]]
+    assert order == ["201", "200"]                                  # meets your bar first
+    by = {i["scene_id"]: i["vrq"] for i in d["items"]}
+    assert by["201"]["verdict"] == "meets" and by["200"]["verdict"] == "below"
+    assert "under a 8K label" in by["200"]["reasons"][0]
+
+
+def test_vr_files_are_measured_without_the_backfill_switch(svc, stash):
+    _vr_library(stash)
+    svc._pic_measures = lambda: {}
+    svc._catalogue_all(refresh=True)
+    owed, rest = svc._pic_todo_raw(svc._catalogue_all())
+    ids = [r["scene_id"] for r in owed]
+    assert rest == [] and set(ids) >= {"100", "101", "200", "201"} and "1" not in ids
+    assert ids.index("101") < ids.index("200")                      # keepers first: they set the bar
