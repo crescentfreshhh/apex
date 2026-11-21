@@ -139,7 +139,7 @@ def backup_entry(row: dict) -> dict:
     return {
         "rating100": row.get("rating100"),
         "o_counter": int(row.get("o_counter") or 0),
-        "tier": row.get("tier") or tier_of(row.get("rating100"), row.get("o_counter")),
+        "tier": row.get("tier") or tier_of(row.get("rating100"), row.get("o_counter"), vr=bool(row.get("vr"))),
         "organized": bool(row.get("organized")),
         "tags": list(row.get("tags") or []),
         "title": row.get("title") or "",
@@ -227,6 +227,6 @@ def backup_diff(backup: dict, rows: list[dict]) -> dict:
             "from": {"rating100": cur_r, "o_counter": int(row.get("o_counter") or 0),
                      "tier": row.get("tier")},
             "to": {"rating100": want_r, "o_counter": int(want.get("o_counter") or 0),
-                   "tier": tier_of(want_r, want.get("o_counter"))},
+                   "tier": tier_of(want_r, want.get("o_counter"), vr=bool(row.get("vr")))},
         })
     return {"changes": changes, "missing": missing, "same": same}

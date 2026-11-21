@@ -177,13 +177,16 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         return c
 
     def scenes(self, limit: int = 0):
-        prefix = self.cfg.library.path
-        it = self.client().iter_scenes(path_prefix=prefix)
-        out = []
-        for s in it:
-            out.append(s)
-            if limit and len(out) >= limit:
-                break
+        """Scenes in scope: the library path and the VR pull folders (see _scope_prefixes)."""
+        out, seen = [], set()
+        for prefix in self._scope_prefixes() or [None]:
+            for s in self.client().iter_scenes(path_prefix=prefix):
+                if str(s.id) in seen:
+                    continue
+                seen.add(str(s.id))
+                out.append(s)
+                if limit and len(out) >= limit:
+                    return out
         return out
 
     def stats(self) -> dict:
@@ -783,6 +786,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             pipeline=(s.pipeline if pipeline is None else pipeline),
             scene_timeout=(s.scene_timeout if scene_timeout is None else scene_timeout),
         )
+        sampler.vr_test = self.is_vr_path            # VR files: sampled at the left eye's centre
         embedder = self._embedder(model)
         n_workers = e.workers if workers is None else workers
         n_batch = e.batch_size if batch_size is None else batch_size
@@ -1927,6 +1931,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         # record it as such so later runs don't retry the scene
                         signature=lib_sig,
                     )
+                    sampler.vr_test = self.is_vr_path    # VR files: the left eye's centre, as embedded
                     lines: list[str] = []
                     try:
                         st = embed_library(
@@ -4294,7 +4299,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 e["o"] += int(meta.get("o_counter") or 0)
                 # the O-count is a GRADE above 5★ (peaks.tiers), not an event
                 # count — tally tiers instead of summing it
-                t = tier_of(meta.get("rating100"), meta.get("o_counter"))
+                t = tier_of(meta.get("rating100"), meta.get("o_counter"), vr=self.is_vr_meta(meta))
                 e["tiers"][t] = e["tiers"].get(t, 0) + 1
                 if meta.get("rating100") is not None:
                     e["rating_sum"] += float(meta["rating100"])
@@ -5191,9 +5196,11 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         from ..tiers import quality_of, tag_state, tier_of
 
         path = m.get("path") or ""
-        tier = tier_of(m.get("rating100"), m.get("o_counter"))
+        vr = self.is_vr_meta(m)
+        tier = tier_of(m.get("rating100"), m.get("o_counter"), vr=vr)
         return {
             "scene_id": sid,
+            "vr": vr,
             "title": m.get("title") or os.path.splitext(os.path.basename(path))[0],
             "date": m.get("date") or "",
             "details": (m.get("details") or "")[:600],
@@ -5207,7 +5214,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "rating100": m.get("rating100"),
             "o_counter": int(m.get("o_counter") or 0),
             "tier": tier,
-            "quality": quality_of(m),
+            "quality": {**quality_of(m), "vr": True} if vr else quality_of(m),
             "path": path,
             "tag_ids": m.get("tag_ids") or [],
             "organized": bool(m.get("organized")),
@@ -5217,7 +5224,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             "no_learn": tier == "rejected" and self._is_no_learn(sid, m.get("fingerprint")),
             "phash": m.get("phash"),
             "tag_state": tag_state(tier, m.get("tags") or [], bool(m.get("organized")),
-                                   self.tier_tag_names(), self._retired_tag_names()),
+                                   self.tier_tag_names(), self._retired_tag_names(), vr=vr),
         }
 
     def _catalogue_all(self, refresh: bool = False) -> list[dict]:
@@ -5348,12 +5355,45 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             self._save_catalogue_disk(ids)
         return rows
 
+    # --- VR: a scene in a VR pull folder, or tagged "Virtual Reality" -----------------
+
+    def _vr_prefixes(self) -> tuple[str, ...]:
+        try:
+            return tuple(f.rstrip("/") + "/" for f in self.vr_folders())
+        except Exception:  # noqa: BLE001 — no seedbox settings: no VR folders
+            return ()
+
+    def is_vr_meta(self, m: dict | None) -> bool:
+        """VR is graded on its stars alone (peaks.tiers.VR_GRADES), so this is a
+        sure rule — its folder or its tag — never a guess from the frame's shape."""
+        m = m or {}
+        p = m.get("path") or ""
+        if p and any(p.startswith(f) for f in self._vr_prefixes()):
+            return True
+        return any(str(t).strip().lower() == "virtual reality" for t in m.get("tags") or [])
+
+    def is_vr_path(self, path: str) -> bool:
+        return bool(path) and any(path.startswith(f) for f in self._vr_prefixes())
+
+    def _scope_prefixes(self) -> list[str]:
+        """Where Peaks works: the library path (PEAKS_LIBRARY_PATH) plus the VR pull
+        folders. Empty = the whole library."""
+        lib = (self.cfg.library.path or "").rstrip("/")
+        if not lib:
+            return []
+        out = [lib]
+        for f in self._vr_prefixes():
+            f = f.rstrip("/")
+            if not (f == lib or f.startswith(lib + "/")):
+                out.append(f)
+        return out
+
     def _in_scope(self, meta: dict | None) -> bool:
-        prefix = (self.cfg.library.path or "").rstrip("/")
-        if not prefix:
+        prefixes = self._scope_prefixes()
+        if not prefixes:
             return True
         p = (meta or {}).get("path") or ""
-        return p == prefix or p.startswith(prefix + "/")
+        return any(p == x or p.startswith(x + "/") for x in prefixes)
 
     def _scene_ids_light(self) -> list[str]:
         """Every scene id, from Stash's lightest query — not the files-and-markers
@@ -5838,7 +5878,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             cur = self._meta_client().scene_details([sid]).get(sid) or {}
         except Exception:  # noqa: BLE001 — Stash down: the saved view catches it later
             return None
-        tier = tier_of(cur.get("rating100"), cur.get("o_counter"))
+        tier = tier_of(cur.get("rating100"), cur.get("o_counter"), vr=self.is_vr_meta(cur))
         if tier not in self.PROMOTABLE:
             return None
         res = self.grade_scene(sid, "legendaire", source="auto: saved a moment")
@@ -5962,7 +6002,17 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             raise LookupError(f"scene {sid} not found in Stash")
         prev = {"rating100": cur.get("rating100"), "o_counter": int(cur.get("o_counter") or 0),
                 "tag_ids": list(cur.get("tag_ids") or []), "organized": bool(cur.get("organized"))}
-        rating, o = GRADES[grade]
+        vr = self.is_vr_meta(cur)
+        if vr:                                     # VR: stars only (4★ / 5★ + organized), see tiers.VR_GRADES
+            from ..tiers import VR_GRADES
+
+            if grade not in VR_GRADES:
+                raise ValueError(f"VR scenes are graded {self.tier_display_names().get('exceptionnelle')} (4★) "
+                                 f"or {self.tier_display_names().get('legendaire')} (5★) — not "
+                                 f"{self.tier_display_names().get(grade, grade)}")
+            rating, o = VR_GRADES[grade], None
+        else:
+            rating, o = GRADES[grade]
         rejected_at = self.__dict__.setdefault("_rejected_at", {})
         if grade == "reject":
             rejected_at[sid] = time.time()        # a running ingest drops it once this sticks
@@ -5977,8 +6027,12 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._set_no_learn(sid, cur.get("fingerprint"), grade == "reject" and no_learn)
         if o is not None:
             self.set_o_count(sid, o, current=prev["o_counter"])
-        tag_ids = self._tier_tag_list(prev["tag_ids"], grade)
-        if tag_ids is None:                               # reject: rating only
+        tag_ids = None if vr else self._tier_tag_list(prev["tag_ids"], grade)
+        if vr and grade != "reject":                      # VR keeper: the stars + organized, tags untouched
+            self.client().update_scene(sid, rating100=rating, organized=True)
+            self.invalidate_meta(sid)
+            self.set_scene_hidden(sid, False)
+        elif tag_ids is None:                             # reject: rating only
             self.update_scene(sid, rating100=rating)      # also syncs 1★ → hidden
             self._drop_engagement(sid)                    # lingering there meant nothing
         else:
@@ -5997,13 +6051,14 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                         source=source,
                         peaks={"tier": said["tier"], "conf": round(float(said.get("conf") or 0), 3)} if said else None,
                         before={"rating100": prev["rating100"], "o_counter": prev["o_counter"],
-                                "tier": tier_of(prev["rating100"], prev["o_counter"])},
+                                "tier": tier_of(prev["rating100"], prev["o_counter"], vr=vr)},
                         after={"rating100": row["rating100"], "o_counter": row["o_counter"],
                                "tier": row["tier"]})
         self._quick_learn(sid, row)               # the other scenes' guesses move now, not at the retrain
         self._note_grade()
         self.record_verdict(sid, row["tier"], source=source)         # your answer, remembered
-        self._watch_path(sid, cur.get("path") or row.get("path"))   # follow the renamer's move
+        if not vr:                                # (VR has no tier tag: the renamer never moves it)
+            self._watch_path(sid, cur.get("path") or row.get("path"))   # follow the renamer's move
         return {"scene": row, "previous": prev,
                 "in_ingest": grade == "reject" and self._in_running_ingest(sid)}
 
@@ -6335,7 +6390,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         self._tier_training = True
         try:
             everything = self._catalogue_all()
-            rows = [r for r in everything if train_class(r["tier"]) and not r.get("no_learn")]
+            # VR has its own stars-only grades and its own look: the flat model never learns from it
+            rows = [r for r in everything if train_class(r["tier"]) and not r.get("no_learn") and not r.get("vr")]
             feats = self._scene_features(rows)
             self._remember_rejects(rows, feats)
             train = [r for r in rows if r["scene_id"] in feats]
@@ -6491,6 +6547,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
     def _tier_predictions_compute(self, rows: list[dict], st: dict, pics, key) -> dict[str, dict]:
         from ..tier_model import picture_features, quality_features, train_class, who_of
 
+        rows = [r for r in rows if not r.get("vr")]     # the flat model has nothing to say about VR
         feats = self._scene_features(rows)
         by_id = {r["scene_id"]: r for r in rows}
         m = st["model"]
@@ -6972,6 +7029,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         # one frame: the CPU is as quick (no CUDA context to set up) and never fights
         # a trial or Motion for GPU memory — a full GPU used to mean broken thumbnails
         sampler = FrameSampler(hwaccel=None)
+        sampler.vr_test = self.is_vr_path            # a VR frame: the left eye's centre
         img: Image.Image = sampler.grab_frame(path, time, width=size)
         img.thumbnail((size, size))
         buf = BytesIO()

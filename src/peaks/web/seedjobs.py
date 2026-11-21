@@ -504,7 +504,7 @@ class SeedJobsMixin:
             pass
         scope = (self.cfg.library.path or "").rstrip("/")
         for d in dests:
-            if scope and not (d == scope or d.startswith(scope + "/")):
+            if scope and not self._in_scope({"path": d.rstrip("/") + "/x"}):
                 out.append(f"Peaks only shows scenes under {scope} (PEAKS_LIBRARY_PATH) — scenes from {d} won't appear in Peaks")
         return out
 

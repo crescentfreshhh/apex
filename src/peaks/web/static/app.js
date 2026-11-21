@@ -1138,13 +1138,22 @@ const GRADE_HELP = {
   merveilleuse: "Kept, middling (being retired).",
   reject: "Would you notice it gone in a year? If not, let it go.",
 };
-function tierOf(rating100, o) {
+function tierOf(rating100, o, vr = false) {
   const r = +rating100 || 0;
   if (r <= 0) return "unreviewed";
   if (r <= 20) return "rejected";
+  if (vr) return r === 100 ? "legendaire" : r === 80 ? "exceptionnelle" : r <= 60 ? "unreviewed" : "anomaly";   // VR: stars only
   if (r < 100) return "unreviewed";
   const t = ({ 16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire" })[+o || 0] || "anomaly";
   return RETIRED.has(t) ? "anomaly" : t;
+}
+// VR is graded on its stars alone: no Merveilleuse, no O-count, no tier tag
+const VR_GRADE_OK = new Set(["exceptionnelle", "legendaire", "reject", "reject-nl"]);
+const VR_GRADE_DESC = { legendaire: "5★ · organized", exceptionnelle: "4★ · organized" };
+function vrGradeRefused(row, grade) {
+  if (!row || !row.vr || VR_GRADE_OK.has(grade)) return false;
+  toast(`VR scenes are graded ${TIER_NAMES.exceptionnelle} (4★) or ${TIER_NAMES.legendaire} (5★)`, true);
+  return true;
 }
 function gradeName(g) { return g === "reject" ? "Reject (1★)" : g === NO_LEARN ? "Reject, don't learn" : TIER_NAMES[g]; }
 // "Reject, don't learn": 1★ like any reject, but Peaks learns nothing from it — for
@@ -1184,10 +1193,12 @@ function applyTierState(st) {
     if (typeof renderCatChips === "function") try { renderCatChips(); } catch { /* not built yet */ }
   }
 }
-function tierBadge(rating100, o, { showUnreviewed = false } = {}) {
-  const t = tierOf(rating100, o);
-  if (t === "unreviewed" && !showUnreviewed) return "";
-  return `<span class="tier tier-${t}" title="${esc(TIER_NAMES[t])} · ${rating100 == null ? "unrated" : Math.round(rating100 / 20) + "★"} · O ${o ?? 0}">${esc(TIER_NAMES[t])}</span>`;
+function tierBadge(rating100, o, { showUnreviewed = false, vr = false } = {}) {
+  const t = tierOf(rating100, o, vr);
+  const vrChip = vr ? '<span class="vr-chip" title="VR — graded on its stars: 4★ Exceptionnelle, 5★ Légendaire">VR</span>' : "";
+  if (t === "unreviewed" && !showUnreviewed) return vrChip;
+  const stars = rating100 == null ? "unrated" : Math.round(rating100 / 20) + "★";
+  return `<span class="tier tier-${t}" title="${esc(TIER_NAMES[t])} · ${stars}${vr ? "" : ` · O ${o ?? 0}`}">${esc(TIER_NAMES[t])}</span>${vrChip ? " " + vrChip : ""}`;
 }
 loadTierNames();   // fetches the saved names + fills the Settings panel
 
@@ -1260,8 +1271,9 @@ document.addEventListener("DOMContentLoaded", () => laneWatch(document));
 // --- grades never make you wait: the screen moves on at once, and grades go to
 // Stash behind it, one at a time, in the order you gave them ------------------------
 const GRADE_RO = { legendaire: [100, 18], exceptionnelle: [100, 17], merveilleuse: [100, 16] };
-function gradeGuess(grade) {                 // what the row will say once Stash has it
+function gradeGuess(grade, vr = false) {     // what the row will say once Stash has it
   if (grade === "reject" || grade === NO_LEARN) return { rating100: 20, tier: "rejected", no_learn: grade === NO_LEARN };
+  if (vr) return { rating100: grade === "legendaire" ? 100 : 80, tier: grade, organized: true, no_learn: false };
   const [rating100, o_counter] = GRADE_RO[grade] || [100, 0];
   return { rating100, o_counter, tier: grade, organized: true, no_learn: false };
 }
@@ -1374,7 +1386,7 @@ function renderHits(hits, container, previewMax) {
         <div class="edit">
           <span class="rating" title="rating">${stars(h.rating100)}</span>
           <span class="ospacer"></span>
-          ${tierBadge(h.rating100, h.o_counter)}
+          ${tierBadge(h.rating100, h.o_counter, { vr: h.vr })}
           <button class="orgbtn ${h.organized ? "on" : ""}" title="organized">✓</button>
         </div>
       </div>
@@ -1608,7 +1620,7 @@ async function loadViewerMeta(sid) {
   $("#viewer-sub").textContent =
     [m.studio, perf, m.date, (m.tags || []).slice(0, 6).join(", ")].filter(Boolean).join("  ·  ") || "—";
   edit.innerHTML = `<span class="rating">${stars(m.rating100)}</span>
-    ${tierBadge(m.rating100, m.o_counter, { showUnreviewed: true })}
+    ${tierBadge(m.rating100, m.o_counter, { showUnreviewed: true, vr: m.vr })}
     <select class="grade-sel" title="Grade this scene (5★ + O-count) — Z undoes">
       <option value="">Grade…</option>
       ${GRADES.map((g) => `<option value="${g}">${esc(gradeName(g))}</option>`).join("")}
@@ -2939,7 +2951,7 @@ function renderHero(h) {
   const title = h.title || `scene ${h.scene_id ?? "?"}`;
   const who = (h.performers || []).slice(0, 2).join(", ");
   el.innerHTML = `<img src="${h.thumb}" alt="" onerror="this.style.opacity=.15" />
-    <div class="ov"><div class="row">${tierBadge(h.rating100, h.o_counter)}<span class="muted">${W.tasteBand(h.score, SCALE && SCALE.moment) ? esc(W.tasteBand(h.score, SCALE.moment)[1]) + " match" + fig(Math.round(h.score * 100) + "%") : Math.round(h.score * 100) + "% match"} · ${fmt(h.time)}</span></div>
+    <div class="ov"><div class="row">${tierBadge(h.rating100, h.o_counter, { vr: h.vr })}<span class="muted">${W.tasteBand(h.score, SCALE && SCALE.moment) ? esc(W.tasteBand(h.score, SCALE.moment)[1]) + " match" + fig(Math.round(h.score * 100) + "%") : Math.round(h.score * 100) + "% match"} · ${fmt(h.time)}</span></div>
       <h2>${esc(who ? who + " — " + title : title)}</h2>
       <div class="row"><button class="btn pri" data-hero="play">▶ Play</button><button class="btn" data-hero="similar">⟳ More like this</button>
         <button class="btn" data-hero="save">★ Save</button></div></div>`;
@@ -4584,7 +4596,7 @@ function tdShow() {
   ].filter(Boolean).join("");
   const cur = x.tier === "rejected" ? "reject" : x.tier;
   $("#td-body").innerHTML = `
-    <h2 class="td-title">${tierBadge(x.rating100, x.o_counter, { showUnreviewed: true })} ${esc(x.title || "scene " + x.scene_id)}</h2>
+    <h2 class="td-title">${tierBadge(x.rating100, x.o_counter, { showUnreviewed: true, vr: x.vr })} ${esc(x.title || "scene " + x.scene_id)}</h2>
     <div class="dim small">${esc(sub)}${x.duration ? " · " + fmt(x.duration) : ""}${x.size ? " · " + fmtBytes(x.size) : ""}</div>
     <div class="td-q">${esc(TD_QUESTION[x.job] || "What tier is it?")}</div>
     <div class="td-why">${why}</div>
@@ -6017,7 +6029,7 @@ function catCardHTML(r, i) {
   const p = r.pred;
   const sug = r.suggest ? r.suggest.grade : (p && r.tier === "unreviewed" ? p.tier : null);
   const short = { legendaire: "Lég", exceptionnelle: "Exc", merveilleuse: "Mer", reject: "Rej" };
-  const grades = GRADES.map((g, k) =>
+  const grades = GRADES.map((g, k) => r.vr && !VR_GRADE_OK.has(g) ? "" :
     `<button class="cat-g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(gradeName(g))} (key ${k + 1}) — ${esc(GRADE_HELP[g] || "")}"><b>${k + 1}</b><span>${short[g]}</span></button>`).join("")
     + `<button class="cat-g g-reject g-nl ${r.no_learn ? "cur" : ""}" data-g="${NO_LEARN}" title="${esc(NO_LEARN_TIP)}"><b>N</b><span>Rej ⊘</span></button>`;
   const predLine = p
@@ -6031,7 +6043,7 @@ function catCardHTML(r, i) {
     && (r.suggest || ["drain", "promote", "second", "saved", "trim", "passed"].includes(cat.view));
   const suggest = (r.suggest ? `<div class="cat-sug">Suggest <b>${esc(gradeName(r.suggest.grade))}</b> — ${textNum(r.suggest.why, r.suggest.detail)}</div>` : "")
     + (keepable && !r._graded ? `<button class="btn sm ghost cat-keep" data-keep="${esc(r.scene_id)}" title="It's right where it is — don't suggest it again unless something new happens">✓ Keep as is</button>` : "")
-    + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "")
+    + (["merveilleuse", "exceptionnelle", "legendaire"].includes(r.tier) && !r.vr ? `<button class="btn sm ghost cat-upg" title="Search Prowlarr for a better copy of this scene (nothing downloads until you Grab)">⬆ Better copy?</button>` : "")
     + (p && p.from !== "who" ? `<button class="btn sm ghost" data-why="${esc(r.scene_id)}" title="Why Peaks rates it this way — and, if you graded it, where it disagrees">Why?</button><div class="argue" hidden></div>` : "")
     + `<button class="btn sm ghost" data-timeline="${esc(r.scene_id)}" title="Everything about this scene: what Peaks suggested, what you decided, what changed in Stash — and why">🕘</button>`;
   const sel = cat.sel.has(r.scene_id);
@@ -6040,7 +6052,7 @@ function catCardHTML(r, i) {
     <div class="cat-coverwrap"><img class="cat-cover" data-lsrc="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" title="Watch" />
       ${r.duration ? `<span class="dur">${fmt(r.duration)}</span>` : ""}</div>
     <div class="cat-body">
-      <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
+      <div class="cat-title">${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true, vr: r.vr })} <span title="${esc(r.path)}">${esc(r.title)}</span></div>
       <div class="cat-who">${esc(who)}</div>
       <div class="qual">${qualityChips(r)}${picChipHTML(r.picture)}</div>
       ${sigLine(r)}${predLine}${whoLines(r)}${flag}${suggest}${tagLine(r)}
@@ -6206,9 +6218,10 @@ function catBumpCounts(from, to) {
 }
 async function gradeCat(i, grade) {
   const r = cat.items[i]; if (!r) return;
+  if (vrGradeRefused(r, grade)) return;
   // shown at once — stays in place (dimmed) so the list doesn't jump and Z still has context;
   // Stash gets it behind the screen, and the card takes Stash's answer when it comes
-  const guess = gradeGuess(grade);
+  const guess = gradeGuess(grade, r.vr);
   catBumpCounts(r.tier, guess.tier);
   cat.items[i] = { ...r, ...guess, _graded: true };
   renderCatCard(i);
@@ -6509,7 +6522,7 @@ function dupeCopyHTML(r, g) {
     <div class="dupe-media"><img class="cat-cover" data-lsrc="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
       <button class="dupe-play" title="Play this copy">▶</button></div>
     <div class="dupe-facts">
-      <div>${rec ? `<span class="dupe-rec" title="${esc(dupeRecTitle(g))}">★ Recommended${g.keep_by === "picture" ? " — best picture" : g.keep_by === "tie" ? " — pictures tie" : ""}</span> ` : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</div>
+      <div>${rec ? `<span class="dupe-rec" title="${esc(dupeRecTitle(g))}">★ Recommended${g.keep_by === "picture" ? " — best picture" : g.keep_by === "tie" ? " — pictures tie" : ""}</span> ` : ""}${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true, vr: r.vr })}</div>
       ${rec && g.keep_why ? `<div class="dupe-why dim">${esc(g.keep_why)}</div>` : ""}
       ${(g.picture || {})[r.scene_id] ? `<div>${picChipHTML(g.picture[r.scene_id], { long: true })}</div>` : measuring ? '<div class="faint small">picture not measured yet</div>' : ""}
       <div class="dupe-q"><b>${esc(q.res || "?")}</b>${q.w ? ` <span class="muted">${q.w}×${q.h}</span>` : ""} · <b>${q.mbps != null ? q.mbps + " Mbps" : "? Mbps"}</b> · ${esc((q.codec || "").toUpperCase())} ${q.fps ? Math.round(q.fps) + "fps" : ""}</div>
@@ -7331,7 +7344,9 @@ function renderReview() {
     return;
   }
   $("#rv-title").textContent = r.title;
-  $("#rv-sub").textContent = [r.performers.slice(0, 3).join(", "), r.studio, r.date].filter(Boolean).join(" · ");
+  $("#rv-sub").textContent = [r.vr ? "VR · showing the left eye" : "", r.performers.slice(0, 3).join(", "), r.studio, r.date]
+    .filter(Boolean).join(" · ");
+  $(".rv-player")?.classList.toggle("vr", !!r.vr);        // the left eye, cropped flat — no re-encode
   // a list's scenes: the ones here plus the ones the server still has past them
   const total = rv.source === "catalogue" ? rv.items.length + Math.max(0, (cat.total || 0) - catNextOffset()) : rv.items.length;
   $("#rv-pos").innerHTML = `<b>${esc(rv.label)}</b> · ${rv.i + 1} of ${total.toLocaleString()}`
@@ -7375,9 +7390,9 @@ function renderReview() {
   const cur = r.tier === "rejected" ? "reject" : r.tier;
   const probs = (r.pred || {}).probs || {};
   const sug = r.suggest ? r.suggest.grade : (r.pred ? r.pred.tier : null);
-  $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) =>
+  $("#rv-grades").innerHTML = RV_GRADES.map(([g, d], k) => r.vr && !VR_GRADE_OK.has(g) ? "" :
     `<button class="g g-${g} ${g === cur ? "cur" : ""} ${g === sug ? "sug" : ""}" data-g="${g}" title="${esc(GRADE_HELP[g] || "")}"><span class="k">${k + 1}</span>
-      <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${d}</span></button>`).join("")
+      <span class="n"><span class="nl">${esc(gradeName(g))}</span><span class="ns">${esc(shortGrade(g))}</span></span><span class="d">${r.vr ? (VR_GRADE_DESC[g] || d) : d}</span></button>`).join("")
     + `<button class="g g-reject g-nl ${r.no_learn ? "cur" : ""}" data-g="${NO_LEARN}" title="${esc(NO_LEARN_TIP)}"><span class="k">N</span>
       <span class="n"><span class="nl">Reject, don't learn</span><span class="ns">Rej ⊘</span></span><span class="d">1★ · Peaks learns nothing from it</span></button>`;
   const order = ["legendaire", "exceptionnelle", "merveilleuse", "reject"].filter(liveTier);
@@ -7405,7 +7420,7 @@ function renderReview() {
     + `<span>Quality</span><span>${esc(qualityLine(q))}${q.w ? ` <span class="faint">${q.w}×${q.h}</span>` : ""}</span>
     ${r.picture ? `<span>Picture</span><span>${picChipHTML(r.picture, { long: true })}</span>` : ""}
     <span>Size</span><span>${r.size ? fmtBytes(r.size) : "?"} · ${r.duration ? fmt(r.duration) : "?"}</span>
-    <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true })}</span>
+    <span>Grade</span><span>${tierBadge(r.rating100, r.o_counter, { showUnreviewed: true, vr: r.vr })}</span>
     ${r.tags && r.tags.length ? `<span>Tags</span><span>${esc(r.tags.slice(0, 8).join(", "))}</span>` : ""}
     <span>Path</span><span class="faint path" title="${esc(r.path)}">${esc(r.path)}</span>`;
   $("#rv-queue").innerHTML = rv.items.slice(rv.i + 1, rv.i + 7).map((x, k) => `<div class="qi" data-j="${rv.i + 1 + k}">
@@ -7432,8 +7447,9 @@ async function rvKeep() {
 }
 async function rvGrade(grade) {
   const r = rv.items[rv.i]; if (!r) return;
+  if (vrGradeRefused(r, grade)) return;
   // on to the next scene at once; Stash gets the grade behind the screen
-  const guess = gradeGuess(grade);
+  const guess = gradeGuess(grade, r.vr);
   const put = (row, from) => {                // into the player's list and the Catalogue's
     const k = rv.items.findIndex((x) => x.scene_id === r.scene_id);
     if (k >= 0) rv.items[k] = { ...rv.items[k], ...row, moments: r.moments, stream: r.stream, pred: r.pred };
@@ -8244,7 +8260,7 @@ function upgCardHTML(r) {
   const q = r.quality || {};
   const yours = `<div class="upg-yours">
       <img class="cat-cover" data-lsrc="/api/scene/${encodeURIComponent(r.scene_id)}/cover" onerror="this.style.visibility='hidden'" />
-      <div><div><b>${esc(r.title || "Scene " + r.scene_id)}</b> ${tierBadge(r.rating100, r.o_counter)}</div>
+      <div><div><b>${esc(r.title || "Scene " + r.scene_id)}</b> ${tierBadge(r.rating100, r.o_counter, { vr: r.vr })}</div>
         <div class="dim small">${esc(r.studio || "")}${r.date ? " · " + esc(r.date) : ""}</div>
         <div class="small">Yours: <b>${esc(q.res || "?")}</b> · ${q.mbps != null ? q.mbps + " Mbps · " : ""}${upgSize(r.size)}</div>
         ${r.picture ? `<div>${picChipHTML(r.picture, { long: true })}</div>` : ""}

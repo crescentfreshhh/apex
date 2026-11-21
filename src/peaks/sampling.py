@@ -193,8 +193,21 @@ def decode_threads_for(workers: int) -> int:
     return max(1, (os.cpu_count() or 2) // (2 * max(1, int(workers or 1))))
 
 
+# VR files are two fisheye eyes side by side. Peaks looks at the centre of the
+# left eye — roughly what you'd see facing forward — as fractions of the whole
+# frame: (x0, y0, width, height). For a 2:1 side-by-side file it's a square.
+VR_VIEW = (0.10, 0.20, 0.30, 0.60)
+
+
+def vr_crop_filter() -> str:
+    """The ffmpeg crop to the VR view (put it before any scaling)."""
+    x0, y0, w, h = VR_VIEW
+    return f"crop=iw*{w:g}:ih*{h:g}:iw*{x0:g}:ih*{y0:g}"
+
+
 def _sparse_extract_worker(
-    path: str, interval: float, resize_short: int, crop: int, out_path: str, threads: int = 0
+    path: str, interval: float, resize_short: int, crop: int, out_path: str, threads: int = 0,
+    vr: bool = False,
 ) -> None:
     """Runs in a CHILD process: sparse-decode `path` and save (times, frames)
     to `out_path` as an .npz. Kept at module level so it's importable by the
@@ -212,7 +225,7 @@ def _sparse_extract_worker(
         pass
 
     try:
-        _sparse_extract(path, interval, resize_short, crop, out_path, np, av, threads)
+        _sparse_extract(path, interval, resize_short, crop, out_path, np, av, threads, vr)
     except BaseException as exc:
         # The parent only sees our exit code; leave the actual reason next to the
         # output so it can be surfaced in the job log instead of "worker exit 1".
@@ -236,7 +249,7 @@ def _sparse_error_budget(duration: float, interval: float) -> int:
     return max(60, int(0.2 * expected))
 
 
-def _sparse_extract(path, interval, resize_short, crop, out_path, np, av, threads: int = 0) -> None:
+def _sparse_extract(path, interval, resize_short, crop, out_path, np, av, threads: int = 0, vr: bool = False) -> None:
     max_scene_hours = 12.0
 
     times: list[float] = []
@@ -293,15 +306,27 @@ def _sparse_extract(path, interval, resize_short, crop, out_path, np, av, thread
             last_pts = frame.pts
             ts = frame.time if frame.time is not None else target
 
-            scale = resize_short / min(frame.width, frame.height)
-            nw = max(crop, int(round(frame.width * scale)))
-            nh = max(crop, int(round(frame.height * scale)))
+            if vr:                                  # the left eye's centre is the picture
+                vx, vy, vw, vh = VR_VIEW
+                scale = resize_short / min(frame.width * vw, frame.height * vh)
+                nw = max(1, int(round(frame.width * scale)))
+                nh = max(1, int(round(frame.height * scale)))
+            else:
+                scale = resize_short / min(frame.width, frame.height)
+                nw = max(crop, int(round(frame.width * scale)))
+                nh = max(crop, int(round(frame.height * scale)))
             try:
                 out = frame.reformat(width=nw, height=nh, format="rgb24", **interp_kw)
             except TypeError:  # older PyAV without the interpolation kwarg
                 interp_kw = {}
                 out = frame.reformat(width=nw, height=nh, format="rgb24")
             arr = out.to_ndarray()
+            if vr:
+                arr = arr[int(nh * vy): int(nh * (vy + vh)), int(nw * vx): int(nw * (vx + vw))]
+                if min(arr.shape[0], arr.shape[1]) < crop:     # rounding: never short of the crop
+                    pad_h, pad_w = max(0, crop - arr.shape[0]), max(0, crop - arr.shape[1])
+                    arr = np.pad(arr, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+                nh, nw = arr.shape[0], arr.shape[1]
             y0 = (nh - crop) // 2
             x0 = (nw - crop) // 2
             frames.append(np.ascontiguousarray(arr[y0 : y0 + crop, x0 : x0 + crop]))
@@ -374,6 +399,14 @@ class FrameSampler:
         # decoder threads per scene for background jobs (0: the decoder's own
         # choice — every core); set from the job's worker count by embed_library
         self.decode_threads = 0
+        # vr_test(path) -> bool: VR files are sampled at the left eye's centre (VR_VIEW)
+        self.vr_test = None
+
+    def _is_vr(self, path: str) -> bool:
+        try:
+            return bool(self.vr_test and self.vr_test(path))
+        except Exception:  # noqa: BLE001 — a bad test never stops a scene
+            return False
 
     @property
     def interval_signature(self) -> float:
@@ -435,23 +468,27 @@ class FrameSampler:
             args += ["-threads", str(int(self.decode_threads))]
         return args
 
-    def _vf(self) -> str:
+    def _vf(self, vr: bool = False) -> str:
         """The ffmpeg filtergraph for the current mode."""
         if self.mode == "keyframes":
             parts = ["showinfo"]  # exact pts_time per emitted frame
         else:
             parts = [f"fps=1/{self.interval:g}"]
+        if vr:
+            parts.append(vr_crop_filter())
         scale = self._scale_filter()
         if scale:
             parts.append(scale)
         return ",".join(parts)
 
-    def _raw_vf(self, resize_short: int, crop: int) -> str:
+    def _raw_vf(self, resize_short: int, crop: int, vr: bool = False) -> str:
         """Filtergraph for the raw pipeline: sample, then reproduce the
         model's preprocessing in ffmpeg (bicubic short-side resize + center
-        crop), so frames arrive at exactly the network's input size."""
+        crop), so frames arrive at exactly the network's input size. A VR file
+        is first cropped to the left eye's centre."""
         return (
             f"fps=1/{self.interval:g},"
+            + (vr_crop_filter() + "," if vr else "") +
             f"scale=w={resize_short}:h={resize_short}"
             ":force_original_aspect_ratio=increase:flags=bicubic,"
             f"crop={crop}:{crop}"
@@ -476,7 +513,9 @@ class FrameSampler:
             "-ss", f"{time:g}",
             "-i", path,
             "-frames:v", "1",
-            *(["-vf", f"scale='min({int(width)},iw)':-2"] if width else []),
+            *(["-vf", ",".join([*([vr_crop_filter()] if self._is_vr(path) else []),
+                                *([f"scale='min({int(width)},iw)':-2"] if width else [])])]
+              if width or self._is_vr(path) else []),
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
             "-",
@@ -509,7 +548,8 @@ class FrameSampler:
         cmd = [
             self.ffmpeg, "-v", "error", *self._input_args(),
             "-ss", f"{max(0.0, start):g}", "-i", path, "-t", f"{duration:g}",
-            "-vf", ",".join([f"fps=1/{step:g}", *([scale] if scale else [])]),
+            "-vf", ",".join([f"fps=1/{step:g}", *([vr_crop_filter()] if self._is_vr(path) else []),
+                             *([scale] if scale else [])]),
             *(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"] if raw
               else ["-q:v", "3", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]),
         ]
@@ -576,6 +616,7 @@ class FrameSampler:
             scene_timeout=self.scene_timeout, signature=self.interval_signature,
         )
         fb.decode_threads = self.decode_threads
+        fb.vr_test = self.vr_test
         return fb
 
     def _iter_frames_sparse(self, path: str, *, resize_short: int, crop: int):
@@ -607,7 +648,8 @@ class FrameSampler:
         ctx = mp.get_context("spawn")  # fresh interpreter: no CUDA-fork hazards
         proc = ctx.Process(
             target=_sparse_extract_worker,
-            args=(path, self.interval, resize_short, crop, out_path, int(getattr(self, "decode_threads", 0) or 0)),
+            args=(path, self.interval, resize_short, crop, out_path, int(getattr(self, "decode_threads", 0) or 0),
+                  self._is_vr(path)),
         )
         try:
             proc.start()
@@ -668,7 +710,7 @@ class FrameSampler:
             "-v", "error",
             *self._input_args(),
             "-i", path,
-            "-vf", self._raw_vf(resize_short, crop),
+            "-vf", self._raw_vf(resize_short, crop, self._is_vr(path)),
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
             "-",
@@ -742,7 +784,7 @@ class FrameSampler:
             "-v", "error",
             *self._input_args(),
             "-i", path,
-            "-vf", self._vf(),
+            "-vf", self._vf(self._is_vr(path)),
             "-q:v", "3",
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
@@ -820,7 +862,7 @@ class FrameSampler:
                 "-nostats",
                 "-skip_frame", "nokey",  # CPU decoder skips non-key frames
                 "-i", path,
-                "-vf", self._vf(),
+                "-vf", self._vf(self._is_vr(path)),
                 "-fps_mode", "passthrough",
                 "-q:v", "3",
                 str(tmpdir / "f-%06d.jpg"),

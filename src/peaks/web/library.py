@@ -552,7 +552,8 @@ class LibraryMixin:
         tags, names = self.tier_tag_names(), self.tier_display_names()
         plans, needs_look, versions = [], [], []
         for sc in self.client().multi_file_scenes():
-            tier = tier_of(sc.get("rating100"), sc.get("o_counter"))
+            tier = tier_of(sc.get("rating100"), sc.get("o_counter"),
+                           vr=self.is_vr_path(((sc.get("files") or [{}])[0] or {}).get("path") or ""))
             homes = {fold(x) for x in (tags.get(tier), names.get(tier), tier) if x} if tier in tags else set()
             primary = sc["files"][0]["id"]
 
@@ -1101,7 +1102,8 @@ class LibraryMixin:
         rows = {s: self._cat_row(s, m) for s, m in fresh.items()}
         best, best_from = self.dupe_best_tier(list(rows.values()))
         order = ["merveilleuse", "exceptionnelle", "legendaire"]
-        kept_tier = tier_of(fresh[keep_id].get("rating100"), fresh[keep_id].get("o_counter"))
+        kept_tier = tier_of(fresh[keep_id].get("rating100"), fresh[keep_id].get("o_counter"),
+                            vr=self.is_vr_meta(fresh[keep_id]))
         kept_tags = (rows[keep_id].get("tag_state") or {}).get("present") or []
         carried = None
         # the winner takes the group's highest tier — from a grade or a tier tag —
@@ -1467,7 +1469,7 @@ class LibraryMixin:
                     new_paths = [m["path"] for m in client.scene_details(new).values() if m.get("path")]
                 except Exception:  # noqa: BLE001 — unknown paths: don't second-guess the scope
                     new_paths = []
-                if prefix and new_paths and not any(p == prefix or p.startswith(prefix + "/") for p in new_paths):
+                if prefix and new_paths and not any(self._in_scope({"path": p}) for p in new_paths):
                     stages["embed"] = (f"0 in scope — PEAKS_LIBRARY_PATH ({prefix}) excludes these files, "
                                        "so Peaks doesn't embed them")
                     log("4/5 embed: " + stages["embed"])

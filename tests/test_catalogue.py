@@ -199,7 +199,7 @@ def test_js_tier_rules_match_python():
     root = pathlib.Path(__file__).resolve().parents[1]
     app = (root / "src/peaks/web/static/app.js").read_text()
     mb = (root / "webapp/megaboard.js").read_text()
-    tier_fn = re.search(r"function tierOf\(rating100, o\) \{.*?\n\}", app, re.S).group(0)
+    tier_fn = re.search(r"function tierOf\(rating100, o, vr = false\) \{.*?\n\}", app, re.S).group(0)
     mb_fn = re.search(r"function tierKey\(rating100, o\) \{.*?\n\}", mb, re.S).group(0)
     cases = [(r, o) for r in (None, 0, 20, 40, 60, 80, 100) for o in (0, 1, 7, 15, 16, 17, 18, 19)]
     from peaks.tiers import set_retired
@@ -211,15 +211,16 @@ def test_js_tier_rules_match_python():
             + tier_fn + "\n" + mb_fn + "\n"
             f"const cases = {json.dumps(cases)};\n"
             "console.log(JSON.stringify(cases.map(([r, o]) => [tierOf(r, o),"
-            " tierKey(r, o)])));"
+            " tierKey(r, o), tierOf(r, o, true)])));"
         )
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True,
                                         text=True, check=True).stdout)
         set_retired(retired)
-        for (r, o), (js_app, js_mb) in zip(cases, out):
+        for (r, o), (js_app, js_mb, js_vr) in zip(cases, out):
             want = tier_of(r, o)
             assert js_app == want, (retired, r, o, js_app, want)
             assert js_mb == want, (retired, r, o, js_mb, want)
+            assert js_vr == tier_of(r, o, vr=True), (retired, r, o, js_vr)      # VR: stars alone
 
 
 # --- keeper triage through the service ---------------------------------------------

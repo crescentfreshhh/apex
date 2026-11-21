@@ -1359,3 +1359,11 @@ body.picks-off .pick-span { display: none !important; }
   .dcmp, #toast { animation: none !important; }
   .nav, .seg > span, .seg .cat-chip, .tab-b { transition: none !important; }
 }
+
+/* VR: graded on its stars alone. The Review player shows just the left eye of a
+   side-by-side file, cropped flat: the video is drawn twice the box's width and the
+   box clips it to the left half, the middle band of the eye. */
+.vr-chip { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; padding: 1px 5px;
+  border-radius: 4px; color: var(--accent2); border: 1px solid color-mix(in srgb, var(--accent2) 45%, transparent);
+  vertical-align: 1px; }
+.rv-player.vr video { width: 200%; max-width: none; object-fit: cover; object-position: 0 50%; }

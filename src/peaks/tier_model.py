@@ -548,7 +548,7 @@ def quality_floor(rows: list[dict], min_count: int = 5) -> dict:
     `min_count` such scenes to set a floor). Scenes under it are 'below every
     scene you've tiered at this resolution'."""
     keep = learned_tiers()
-    tiered = [r for r in rows if r.get("tier") in keep]
+    tiered = [r for r in rows if r.get("tier") in keep and not r.get("vr")]   # VR's resolutions aren't flat's
     floors: dict[str, dict] = {}
     for res in RES_CLASSES:
         mb = [r["quality"]["mbps"] for r in tiered
@@ -565,6 +565,8 @@ def quality_floor(rows: list[dict], min_count: int = 5) -> dict:
 def quality_flag(q: dict, floor: dict) -> str | None:
     """A one-line, plain-words reason when a scene falls under the learned floor,
     else None. `quality_flag_detail` gives the figures behind it."""
+    if q.get("vr"):                  # the flat floor says nothing about VR
+        return None
     res, mbps = q.get("res"), q.get("mbps")
     low = floor.get("lowest_res")
     if res and low and RES_CLASSES.index(res) < RES_CLASSES.index(low):

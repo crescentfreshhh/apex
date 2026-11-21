@@ -56,6 +56,12 @@ GRADES: dict[str, tuple[int, int | None]] = {
 
 _O_TIER = {16: "merveilleuse", 17: "exceptionnelle", 18: "legendaire"}
 
+# VR is graded on the stars alone — no O-count, no tier tags, no Merveilleuse:
+#   unrated / 2-3 stars → unreviewed · 1 star → rejected
+#   4 stars (80)        → exceptionnelle · 5 stars (100) → legendaire (both organized)
+VR_GRADES: dict[str, int] = {"legendaire": 100, "exceptionnelle": 80, "reject": 20}
+_VR_TIER = {100: "legendaire", 80: "exceptionnelle"}
+
 # keeper tiers that can be drained and retired (the top keeper never is)
 RETIRABLE: tuple[str, ...] = ("merveilleuse",)
 _RETIRED: set[str] = set()
@@ -97,9 +103,9 @@ def grades() -> dict[str, tuple[int, int | None]]:
 TIER_WEIGHT: dict[str, int] = {"merveilleuse": 1, "exceptionnelle": 2, "legendaire": 3}
 
 
-def tier_of(rating100, o_counter) -> str:
+def tier_of(rating100, o_counter, vr: bool = False) -> str:
     """The tier for a scene's Stash rating (0-100 scale, None = unrated) and
-    O-count."""
+    O-count — or, for VR (`vr=True`), its stars alone (see VR_GRADES)."""
     try:
         r = int(rating100) if rating100 is not None else 0
     except (TypeError, ValueError):
@@ -108,6 +114,10 @@ def tier_of(rating100, o_counter) -> str:
         return "unreviewed"
     if r <= 20:
         return "rejected"
+    if vr:
+        if r in _VR_TIER:
+            return _VR_TIER[r]
+        return "unreviewed" if r <= 60 else "anomaly"     # 2-3★ unreviewed; 4½★ etc. to revalidate
     if r < 100:
         return "unreviewed"
     try:
@@ -165,7 +175,8 @@ def retired_tags(overrides: dict | None = None) -> dict[str, str]:
 
 
 def tag_state(tier: str, tag_names: list[str], organized: bool,
-              tags: dict[str, str] | None = None, old: dict[str, str] | None = None) -> dict:
+              tags: dict[str, str] | None = None, old: dict[str, str] | None = None,
+              vr: bool = False) -> dict:
     """How a scene's tier tags line up with its grade.
 
     {present: [tiers whose tag it carries], conflict: str|None, needs_sync: bool}
@@ -184,6 +195,8 @@ def tag_state(tier: str, tag_names: list[str], organized: bool,
         conflict = "several tier tags"
     elif present and present[0] != tier:
         conflict = "tier tag disagrees with the grade"
+    if vr:                       # VR carries no tier tags: nothing to sync, nothing to disagree with
+        return {"present": present, "conflict": None, "needs_sync": False}
     needs_sync = (tier in tags and (present != [tier] or not organized)) or bool(retired)
     return {"present": present, "conflict": conflict, "needs_sync": needs_sync}
 
