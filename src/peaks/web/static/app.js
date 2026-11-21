@@ -1267,6 +1267,7 @@ function gradeGuess(grade) {                 // what the row will say once Stash
 }
 const gradeQ = { chain: Promise.resolve(), n: 0 };
 function queueGrade(sid, grade, undoKey, opts) {
+  catNoteGone(sid);                            // it may leave the loaded list: the next page starts earlier
   gradeQ.n++; gradeQNote();
   const p = gradeQ.chain.then(() => applyGrade(sid, grade, undoKey, opts));
   gradeQ.chain = p.catch(() => {}).finally(() => { gradeQ.n--; gradeQNote(); });
@@ -5395,6 +5396,19 @@ function catParams(offset, refresh) {
   if (refresh) qs.set("refresh", "true");
   return qs.toString();
 }
+// A scene you grade leaves a list like Unreviewed on the server, so the next page
+// starts that many earlier than the count shown here — asked for by position, it
+// used to skip them (and the shrunken total read as "no more"). Any overlap from
+// counting too many is dropped by id when a page is added.
+function catNextOffset() {
+  // where the last page ended on the server, minus the scenes graded since then
+  const base = cat.base ?? cat.items.length;
+  return Math.max(0, base - (cat.gone ? cat.gone.size : 0));
+}
+function catHasMore() { return (cat.total || 0) > catNextOffset(); }
+function catNoteGone(sid) {
+  if (cat.items.some((x) => x.scene_id === sid)) (cat.gone || (cat.gone = new Set())).add(sid);
+}
 async function openCatalogue({ append = false, refresh = false } = {}) {
   // only the latest click is drawn: a new list cancels the one still loading, and
   // a response that isn't the latest is dropped (it used to land under the new chip)
@@ -5402,13 +5416,13 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
   if (!append) cat.ctl?.abort();
   const ctl = cat.ctl = new AbortController(), seq = cat.seq = (cat.seq || 0) + 1;
   cat.busy = true;
-  const offset = append ? cat.items.length : 0;
+  const offset = append ? catNextOffset() : 0;
   $("#cat-status").textContent = refresh ? "re-reading grades from Stash…" : "loading…";
   if (!append) $("#cat-list").innerHTML = '<p class="dim">Reading your library…</p>';
   const path = "/api/catalogue?" + catParams(offset, refresh);
   const ahead = cat.ahead; cat.ahead = null;
   if (append && ahead && ahead.path === path && Date.now() - ahead.at < 300000 && seq === cat.seq) {
-    catDraw(ahead.d, true, false);                 // warmed while you were idle: no request, no wait
+    catDraw(ahead.d, true, false, false, offset);  // warmed while you were idle: no request, no wait
     cat.busy = false;
     return;
   }
@@ -5427,7 +5441,7 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
   try {
     const d = await api(path, { signal: ctl.signal });
     if (seq !== cat.seq) return;                // another section was picked meanwhile
-    catDraw(d, append, refresh, drewCached);         // after a cached draw: your place and selection stay
+    catDraw(d, append, refresh, drewCached, offset);  // after a cached draw: your place and selection stay
   } catch (e) {
     if (seq !== cat.seq || e.name === "AbortError") return;
     $("#cat-list").innerHTML = `<p class="dim">${esc(e.message)}</p>`;
@@ -5437,12 +5451,16 @@ async function openCatalogue({ append = false, refresh = false } = {}) {
     if (seq === cat.seq) cat.busy = false;
   }
 }
-function catDraw(d, append, refresh, keepPlace = false) {
+function catDraw(d, append, refresh, keepPlace = false, offset = 0) {
   {
+    cat.base = offset + (d.items || []).length; cat.gone = new Set();   // the next page starts here
     TIER_NAMES = { ...TIER_NAMES, ...(d.names || {}) };
     applyTierState(d.tier_state);
     const before = cat.items.length;
-    cat.items = append ? cat.items.concat(d.items) : d.items;
+    if (append) {
+      const have = new Set(cat.items.map((x) => x.scene_id));
+      cat.items = cat.items.concat(d.items.filter((x) => !have.has(x.scene_id)));   // an overlap, not twice
+    } else cat.items = d.items;
     cat.total = d.total; cat.counts = d.counts; cat.views = d.views || {}; cat.model = d.model; cat.drain = d.drain;
     cat.grace = d.grace || cat.grace;
     renderCatViewbar();
@@ -5461,7 +5479,7 @@ function catDraw(d, append, refresh, keepPlace = false) {
     renderCatChips(); renderCatTriage();
     if (append && before && $("#cat-list .cat-card")) {              // the new page only: no rebuild of 35k nodes
       $("#cat-list").insertAdjacentHTML("beforeend", cat.items.slice(before).map((r, k) => catCardHTML(r, before + k)).join(""));
-      $("#btn-cat-more").hidden = cat.items.length >= cat.total;
+      $("#btn-cat-more").hidden = !catHasMore();
       if (cat.view === "orphans") orphLoadAll();
       argueAutoOpen();
     } else renderCatList();
@@ -6048,7 +6066,7 @@ function renderCatList() {
   list.innerHTML = cat.items.length
     ? cat.items.map(catCardHTML).join("")
     : '<p class="dim">Nothing here with these filters.</p>';
-  $("#btn-cat-more").hidden = cat.items.length >= cat.total;
+  $("#btn-cat-more").hidden = !catHasMore();
   if (cat.view === "orphans") orphLoadAll();
   argueAutoOpen();
 }
@@ -6178,7 +6196,7 @@ function focusCat(i, scroll = true) {
   const el = $(`#cat-list .cat-card[data-i="${cat.focus}"]`);
   el?.classList.add("focus");
   if (scroll) el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  if (cat.focus >= cat.items.length - 3 && cat.items.length < cat.total) openCatalogue({ append: true });
+  if (cat.focus >= cat.items.length - 3 && catHasMore()) openCatalogue({ append: true });
 }
 function catBumpCounts(from, to) {
   if (from === to) return;
@@ -7314,7 +7332,8 @@ function renderReview() {
   }
   $("#rv-title").textContent = r.title;
   $("#rv-sub").textContent = [r.performers.slice(0, 3).join(", "), r.studio, r.date].filter(Boolean).join(" · ");
-  const total = rv.source === "catalogue" ? Math.max(cat.total || 0, rv.items.length) : rv.items.length;
+  // a list's scenes: the ones here plus the ones the server still has past them
+  const total = rv.source === "catalogue" ? rv.items.length + Math.max(0, (cat.total || 0) - catNextOffset()) : rv.items.length;
   $("#rv-pos").innerHTML = `<b>${esc(rv.label)}</b> · ${rv.i + 1} of ${total.toLocaleString()}`
     + (rv.note ? ` <span class="rv-note">↪ ${esc(rv.note)}</span>` : "");
   // player: start at the best moment, Peaks' picks marked on the timeline
@@ -7442,14 +7461,34 @@ function rvMove(d) {
   const n = rv.i + d;
   if (n < 0) return;
   rv.i = Math.min(n, rv.items.length);
-  const morePages = rv.source === "catalogue" && cat.items.length < cat.total;
+  const morePages = rv.source === "catalogue" && catHasMore();
   if (rv.i >= rv.items.length && !morePages) {
-    if (pr.active && rv.source === "catalogue") { prFinish(); return; }   // her scenes are done
-    if (rv.source === "catalogue") { renderReview(); return; }            // your list: its done screen
+    if (rv.source === "catalogue") { rvEndOfList(); return; }              // your list: check, then its done screen
     rvNextQueue(); return;                                                 // the plain queue carries on
   }
+  if (rv.i >= rv.items.length) { rvMoreFromCatalogue(); return; }       // past the loaded scenes: the next page first
   renderReview();
   if (morePages && rv.i >= rv.items.length - 3) rvMoreFromCatalogue();
+}
+// the end of a Catalogue list: before saying "done", read the list once more from the
+// top — scenes ingested meanwhile, or any a page missed, carry on the review
+async function rvEndOfList() {
+  if (rv.endChecking) return;
+  rv.endChecking = true;
+  let added = 0;
+  try {
+    const d = await api("/api/catalogue?" + catParams(0));
+    const have = new Set(rv.items.map((x) => x.scene_id));
+    for (const x of d.items || []) {
+      if (!have.has(x.scene_id) && !rv.graded.has(x.scene_id)) { rv.items.push(x); added++; }
+    }
+    cat.total = d.total; cat.counts = d.counts || cat.counts;
+  } catch { /* offline: the done screen as before */ }
+  finally { rv.endChecking = false; }
+  if (typeof refreshSidebar === "function") refreshSidebar(0);           // the counts, now — not 10 s later
+  if (added) { renderReview(); return; }
+  if (pr.active) { prFinish(); return; }                                  // her scenes are done
+  renderReview();
 }
 async function rvMoreFromCatalogue() {
   if (rv.loadingMore) return;
@@ -7458,8 +7497,9 @@ async function rvMoreFromCatalogue() {
     await openCatalogue({ append: true });
     const have = new Set(rv.items.map((x) => x.scene_id));
     cat.items.forEach((x) => { if (!have.has(x.scene_id)) rv.items.push(x); });
-    if (rv.i >= rv.items.length - 1 || !$("#rv").hidden) renderReview();
   } finally { rv.loadingMore = false; }
+  if (rv.i >= rv.items.length) { rvEndOfList(); return; }    // the page had nothing new: check before "done"
+  if (rv.i >= rv.items.length - 1 || !$("#rv").hidden) renderReview();
 }
 // leave Review: back to the list you came from, on the scene you were at
 function rvExit() {
@@ -8121,8 +8161,8 @@ async function idleWarm() {
   idle.busy = true;
   const stamp = idle.at;
   try {
-    if (view === "catalogue" && !cat.busy && cat.items.length < (cat.total || 0)) {
-      const path = "/api/catalogue?" + catParams(cat.items.length);
+    if (view === "catalogue" && !cat.busy && catHasMore()) {
+      const path = "/api/catalogue?" + catParams(catNextOffset());
       const d = await api(path);
       if (idle.at !== stamp) return;               // you came back meanwhile: leave it
       cat.ahead = { path, d, at: Date.now() };
