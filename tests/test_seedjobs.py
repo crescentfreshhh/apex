@@ -429,7 +429,10 @@ def test_destinations_stash_wont_scan_are_flagged(env):
     w = svc.seedjob_status()["warnings"]
     assert len(w) == 1 and w[0].startswith(f"Stash doesn't scan {lib / 'VR'}")
     svc.cfg.library.path = str(lib / "norating")
-    assert any("PEAKS_LIBRARY_PATH" in x for x in svc.seedjob_status()["warnings"])
+    assert not any("PEAKS_LIBRARY_PATH" in x for x in svc.seedjob_status()["warnings"])   # VR folders are in scope
+    svc.cfg.library.path = str(lib / "elsewhere")
+    w = [x for x in svc.seedjob_status()["warnings"] if "PEAKS_LIBRARY_PATH" in x]
+    assert len(w) == 1 and str(lib / "norating") in w[0]                                  # a flat one outside isn't
 
 
 def test_the_folder_watch_covers_the_pull_folders(env):
