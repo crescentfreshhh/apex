@@ -5325,15 +5325,16 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         threading.Thread(target=run, daemon=True, name="peaks-catalogue").start()
 
-    def _changed_in_stash_since(self, when: float | None) -> set[str]:
+    def _changed_in_stash_since(self, when: float | None) -> set[str] | None:
         """Scene ids Stash changed after `when` (a minute of slack for clocks). Empty
-        on the first check, or with a Stash that can't filter by update time."""
+        on the first check; None when Stash couldn't be asked (an older Stash
+        without the filter, or a blip) — then the window stays open for next time."""
         if not when:
             return set()
         try:
             return self.client().scene_ids_updated_since(when - 60)
-        except Exception:  # noqa: BLE001 — an older Stash, or a blip: new scenes only, as before
-            return set()
+        except Exception:  # noqa: BLE001 — new scenes only this time, as before
+            return None
 
     def _graded_outside(self, old: dict, new: dict) -> int:
         """1 when a VR scene's grade changed outside Peaks (HereSphere) — a grade
@@ -5394,8 +5395,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             # …and the scenes changed in Stash since the last check (a rating set in
             # HereSphere, a tag): one more light query, so outside edits arrive here too
             known = set(ids)
-            want += sorted(s for s in self._changed_in_stash_since(checked) if s in known and s in self._meta)
-        self._cat_checked_at = now
+            changed = self._changed_in_stash_since(checked)
+            if changed is None:                                # couldn't ask: the next check covers this window
+                now = checked
+            want += sorted(s for s in (changed or ()) if s in known and s in self._meta)
         if want:
             fetched = self._meta_client().scene_details(want)   # raises if Stash is down
             edited = self.__dict__.get("_cat_edited", {})
@@ -5417,6 +5420,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                     pass
             if not refresh:                                   # scope: only files under the library path
                 ids = [s for s in ids if self._in_scope(self._meta.get(s))]
+        # only after a successful read: a failed one leaves the window for the next check
+        self._cat_checked_at = now
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]
         self._sync_hidden_from_ratings(rows)
         new_ids = [r["scene_id"] for r in rows]

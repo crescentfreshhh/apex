@@ -290,3 +290,27 @@ def test_the_client_asks_for_scenes_updated_after_a_time():
     assert c.scene_ids_updated_since(1_800_000_000) == {"4"}
     assert "scene_filter: $f" in seen["q"]
     assert seen["v"] == {"f": {"updated_at": {"value": "2027-01-15T08:00:00Z", "modifier": "GREATER_THAN"}}}
+
+
+def test_a_failed_check_leaves_its_window_for_the_next_one(svc, stash):
+    import time
+
+    sid = _vr(stash, "2")
+    svc._catalogue_fetch()
+    svc._catalogue_fetch()
+    t0 = svc._cat_checked_at
+    stash.s[sid].update(rating100=80)                               # rated while Stash is struggling
+    stash.updated = {sid: time.time()}
+    real = stash.scene_details
+    stash.scene_details = lambda ids: (_ for _ in ()).throw(TimeoutError("Stash busy"))
+    with pytest.raises(TimeoutError):
+        svc._catalogue_fetch()
+    assert svc._cat_checked_at == t0                                # not moved on
+    stash.scene_details = real
+    real_upd = stash.scene_ids_updated_since
+    stash.scene_ids_updated_since = lambda when: (_ for _ in ()).throw(TimeoutError("blip"))
+    svc._catalogue_fetch()
+    assert svc._cat_checked_at == t0                                # couldn't ask: still not moved on
+    stash.scene_ids_updated_since = real_upd
+    rows = {r["scene_id"]: r for r in svc._catalogue_fetch()}
+    assert rows[sid]["tier"] == "exceptionnelle"                    # caught up
