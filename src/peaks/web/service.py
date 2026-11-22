@@ -5317,6 +5317,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         def run():
             try:
                 self._catalogue_fetch(refresh=full)
+                self.organize_vr_keepers()                # VR rated in HereSphere: organized, as your keepers are
             except Exception:  # noqa: BLE001 — Stash blip: keep serving the cache
                 pass
             finally:
@@ -5324,25 +5325,96 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
 
         threading.Thread(target=run, daemon=True, name="peaks-catalogue").start()
 
+    def _changed_in_stash_since(self, when: float | None) -> set[str]:
+        """Scene ids Stash changed after `when` (a minute of slack for clocks). Empty
+        on the first check, or with a Stash that can't filter by update time."""
+        if not when:
+            return set()
+        try:
+            return self.client().scene_ids_updated_since(when - 60)
+        except Exception:  # noqa: BLE001 — an older Stash, or a blip: new scenes only, as before
+            return set()
+
+    def _graded_outside(self, old: dict, new: dict) -> int:
+        """1 when a VR scene's grade changed outside Peaks (HereSphere) — a grade
+        the VR model learns from."""
+        from ..tiers import tier_of
+
+        if not self.is_vr_meta(new):
+            return 0
+        a = tier_of(old.get("rating100"), old.get("o_counter"), vr=True)
+        b = tier_of(new.get("rating100"), new.get("o_counter"), vr=True)
+        return int(a != b and b in ("exceptionnelle", "legendaire", "rejected"))
+
+    def organize_vr_keepers(self) -> int:
+        """VR rated 4★/5★ outside Peaks (HereSphere sets only the rating) is marked
+        organized, as your VR keepers are. Only `organized` is written; runs in the
+        background refresh and after an ingest, never inside a page request."""
+        cached = self.__dict__.get("_cat_cache")
+        if not cached:
+            return 0
+        todo = [r for r in cached[1] if r.get("vr") and r.get("tier") in ("exceptionnelle", "legendaire")
+                and not r.get("organized")]
+        if not todo:
+            return 0
+        client, done = self.client(), []
+        for r in todo:
+            try:
+                client.update_scene(r["scene_id"], organized=True)
+                done.append(r["scene_id"])
+            except Exception:  # noqa: BLE001 — the next check tries again
+                continue
+        try:
+            fresh = self._meta_client().scene_details(done)
+        except Exception:  # noqa: BLE001
+            fresh = {}
+        for sid in done:
+            row = self._cat_put_row(sid, fresh[sid]) if sid in fresh else next(r for r in todo if r["scene_id"] == sid)
+            self._log_scene("organize", row, source="vr",
+                            detail="marked organized — a VR keeper rated outside Peaks")
+        if done:
+            try:
+                self.action_log().append("vr-organize", detail=f"marked {len(done)} VR keeper(s) organized")
+            except Exception:  # noqa: BLE001
+                pass
+        return len(done)
+
     def _catalogue_fetch(self, refresh: bool = False) -> list[dict]:
         import time as _t
 
         started = self.__dict__.get("_cat_edit_seq", 0)
+        checked = self.__dict__.get("_cat_checked_at")
+        now = _t.time()
         if refresh:
             ids = [str(s.id) for s in self.scenes()]           # re-read grades: the full listing
             want = ids
         else:
             ids = self._scene_ids_light()                      # the 5-minute check: ids only (one call)
             want = [s for s in ids if s not in self._meta]
+            # …and the scenes changed in Stash since the last check (a rating set in
+            # HereSphere, a tag): one more light query, so outside edits arrive here too
+            known = set(ids)
+            want += sorted(s for s in self._changed_in_stash_since(checked) if s in known and s in self._meta)
+        self._cat_checked_at = now
         if want:
             fetched = self._meta_client().scene_details(want)   # raises if Stash is down
             edited = self.__dict__.get("_cat_edited", {})
+            outside = 0
             with self._meta_lock:
                 for sid in want:
                     if edited.get(sid, 0) > started:          # graded while this read: yours is newer
                         continue
                     if sid in fetched:
+                        old = self._meta.get(sid)
                         self._meta[sid] = fetched[sid]
+                        if old is not None and not refresh:
+                            outside += self._graded_outside(old, fetched[sid])
+            if outside:                                       # VR graded in HereSphere: it counts toward a retrain
+                self._grades_since_train = getattr(self, "_grades_since_train", 0) + outside
+                try:
+                    self._maybe_retrain()
+                except Exception:  # noqa: BLE001
+                    pass
             if not refresh:                                   # scope: only files under the library path
                 ids = [s for s in ids if self._in_scope(self._meta.get(s))]
         rows = [self._cat_row(sid, self._meta.get(sid, {})) for sid in ids]

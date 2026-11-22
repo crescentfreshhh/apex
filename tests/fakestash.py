@@ -208,6 +208,10 @@ class FakeStash:
     def all_scene_ids(self):
         return set(self.s)
 
+    # scenes changed "in Stash" (by a test) after a time: set `self.updated = {sid: epoch}`
+    def scene_ids_updated_since(self, when):
+        return {sid for sid, t in (getattr(self, "updated", None) or {}).items() if t > when}
+
     def config_defaults(self):
         return getattr(self, "defaults", {"scan": None, "identify": None, "autoTag": None})
 

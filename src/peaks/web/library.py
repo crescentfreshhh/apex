@@ -1539,6 +1539,9 @@ class LibraryMixin:
             n = self._tag_vr_folder_scenes(log, rows=self._catalogue_all(refresh=True))
             if n:
                 stages["vr tag"] = f"{n} tagged '{self.VR_TAG}'"
+            o = self.organize_vr_keepers()       # VR rated in HereSphere: organized, as your keepers are
+            if o:
+                stages["vr organized"] = f"{o} VR keeper(s) marked organized"
         except Exception as exc:  # noqa: BLE001 — never fail an ingest on this
             stages["vr tag"] = f"skipped: {exc}"
             log(f"VR tag skipped: {exc}")

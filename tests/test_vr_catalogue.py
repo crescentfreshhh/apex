@@ -242,3 +242,51 @@ def test_without_enough_vr_grades_the_model_says_what_it_needs(svc, stash):
     rep = svc.train_vr_model()
     assert not rep["trained"] and rep["needs"] == {"reject": 5, "exceptionnelle": 5, "legendaire": 5}
     assert svc.vr_model_status()["trained"] is False
+
+
+def test_a_rating_set_in_heresphere_arrives_with_the_next_routine_check(svc, stash):
+    import time
+
+    sid = _vr(stash, "2")
+    svc._catalogue_fetch()                                          # the first listing
+    svc._catalogue_fetch()                                          # a check: now it has a "last time"
+    stash.s[sid].update(rating100=100)                              # you rate it 5★ in HereSphere
+    stash.updated = {sid: time.time()}
+    before = getattr(svc, "_grades_since_train", 0)
+    rows = {r["scene_id"]: r for r in svc._catalogue_fetch()}
+    assert rows[sid]["tier"] == "legendaire"
+    assert svc._grades_since_train == before + 1                    # counts toward the next retrain
+
+
+def test_vr_keepers_rated_outside_peaks_are_marked_organized_and_nothing_else(svc, stash):
+    _vr(stash, "2", rating100=100, organized=False)                 # VR 5★ from HereSphere
+    stash.s["1"].update(rating100=100, o_counter=18, organized=False)   # a flat Légendaire: not ours to touch
+    stash.s.setdefault("3", {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False,
+                             "fingerprint": "fp3"})
+    stash.s["3"]["path"] = "/data/#VR/u.mp4"                        # VR unreviewed: left alone
+    svc._catalogue_all(refresh=True)
+    stash.calls.clear()
+    assert svc.organize_vr_keepers() == 1
+    assert [c for c in stash.calls if c[0] == "update"] == [("update", "2", {"organized": True})]
+    assert stash.s["2"]["organized"] and not stash.s["1"]["organized"] and not stash.s["3"]["organized"]
+    stash.calls.clear()
+    assert svc.organize_vr_keepers() == 0 and stash.calls == []    # done once
+
+
+def test_a_stash_without_the_update_filter_still_lists_new_scenes(svc, stash):
+    stash.scene_ids_updated_since = None                            # an older Stash: calling it fails
+    svc._catalogue_fetch()
+    svc._catalogue_fetch()
+    stash.s["9"] = {"rating100": None, "o_counter": 0, "tag_ids": [], "organized": False, "fingerprint": "fp9"}
+    assert "9" in {r["scene_id"] for r in svc._catalogue_fetch()}
+
+
+def test_the_client_asks_for_scenes_updated_after_a_time():
+    from peaks.stash_client import StashClient
+
+    c = StashClient(url="http://stash.invalid/graphql")
+    seen = {}
+    c.execute = lambda q, v=None: (seen.update(q=q, v=v), {"findScenes": {"scenes": [{"id": 4}]}})[1]
+    assert c.scene_ids_updated_since(1_800_000_000) == {"4"}
+    assert "scene_filter: $f" in seen["q"]
+    assert seen["v"] == {"f": {"updated_at": {"value": "2027-01-15T08:00:00Z", "modifier": "GREATER_THAN"}}}

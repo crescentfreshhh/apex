@@ -149,6 +149,12 @@ _ALL_SCENE_IDS_QUERY = """
 query AllSceneIds { findScenes(filter: {per_page: -1}) { scenes { id } } }
 """
 
+_SCENES_UPDATED_SINCE_QUERY = """
+query ScenesUpdatedSince($f: SceneFilterType) {
+  findScenes(scene_filter: $f, filter: {per_page: -1}) { scenes { id } }
+}
+"""
+
 _SCENES_EXIST_QUERY = """
 query ScenesExist($ids: [ID!]) {
   findScenes(ids: $ids, filter: {per_page: -1}) {
@@ -638,6 +644,16 @@ class StashClient:
 
     def all_scene_ids(self) -> set[str]:
         data = self.execute(_ALL_SCENE_IDS_QUERY)
+        return {str(s["id"]) for s in data["findScenes"]["scenes"]}
+
+    def scene_ids_updated_since(self, when: float) -> set[str]:
+        """Ids of scenes changed in Stash after `when` (epoch seconds) — a rating
+        set in HereSphere, a tag, a title: one light query, ids only."""
+        from datetime import datetime, timezone
+
+        iso = datetime.fromtimestamp(float(when), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = self.execute(_SCENES_UPDATED_SINCE_QUERY,
+                            {"f": {"updated_at": {"value": iso, "modifier": "GREATER_THAN"}}})
         return {str(s["id"]) for s in data["findScenes"]["scenes"]}
 
     def existing_scene_ids(self, ids: list[str]) -> set[str]:
