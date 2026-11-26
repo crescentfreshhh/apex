@@ -26,9 +26,9 @@ JOB_LABELS = {"embed": "Embedding", "ingest": "Ingest", "score": "Writing marker
               "library": "Updating Stash", "dupes": "Finding duplicates", "train": "Training taste",
               "taste-measure": "Measuring taste", "warmup": "Starting up", "backup": "Backing up",
               "restore": "Restoring", "perf-photos": "Performer photos", "hear": "Hearing", "motion": "Motion",
-              "zoom": "Moment zoom", "lab": "Model trial", "faces": "Faces", "discover": "Discover", "picture": "Picture quality",
+              "zoom": "Moment zoom", "pickmarkers": "Pick markers", "lab": "Model trial", "faces": "Faces", "discover": "Discover", "picture": "Picture quality",
               "picture-dupes": "Picture: duplicates", "upgrades": "Upgrades search", "seedbox": "Seedbox"}
-JOB_FAMILY = {"ingest": "ingest", "embed": "embed", "fix": "embed", "warmup": "embed", "hear": "hear",
+JOB_FAMILY = {"pickmarkers": "stash", "ingest": "ingest", "embed": "embed", "fix": "embed", "warmup": "embed", "hear": "hear",
               "motion": "motion", "zoom": "zoom", "faces": "picture", "discover": "upgrades", "lab": "zoom", "library": "stash", "dupes": "stash",
               "score": "stash", "sync": "sync", "backup": "sync", "restore": "sync", "train": "taste",
               "taste-measure": "taste", "playlist": "taste", "reel": "taste", "picture": "picture",
@@ -330,6 +330,8 @@ def create_app(cfg=None):
         if getattr(job, "paused_for", None) and job.kind in ("hear", "motion", "zoom"):
             service._retrain_owed = True             # its retrain was skipped: the resumed run does it
         _job_io(service, jobs, job)                  # the weekly health report: hours and disk per job
+        if job.kind in ("embed", "ingest", "fix", "train") and job.status == "done":
+            service.mark_pick_markers_dirty()        # new embeds or a new taste: the picks may have moved
         sched = getattr(app.state, "scheduler", None)
         if sched is not None:
             sched.wake("job finished")               # what was waiting for it can start
@@ -2366,6 +2368,26 @@ def create_app(cfg=None):
     def performer_uncredited(pid: str):
         return service.face_uncredited(pid)
 
+    @app.get("/api/pick-markers")
+    def pick_markers_get():
+        return service.pick_markers_settings()
+
+    @app.post("/api/pick-markers")
+    def pick_markers_set(body: dict = Body(...)):
+        out = service.save_pick_markers(body.get("on"))
+        sched = getattr(app.state, "scheduler", None)
+        if sched is not None:
+            sched.wake("pick markers")                 # write (or remove) them now, not at the next event
+        return out
+
+    @app.post("/api/pick-markers/remove")
+    def pick_markers_remove():
+        service.save_pick_markers(False)
+        try:
+            return jobs.start("pickmarkers", service.remove_pick_markers).as_dict(log_tail=1)
+        except RuntimeError:
+            raise HTTPException(409, "the pick markers job is running — try again when it's done")
+
     @app.post("/api/zoom/settings")
     def zoom_settings_save(body: dict = Body(...)):
         out = service.save_zoom_settings(on=body.get("on"), per_run=body.get("per_run"))
@@ -3517,6 +3539,18 @@ def _start_picture(service: Service, jobs: JobManager):
     return j
 
 
+def _start_pick_markers(service: Service, jobs: JobManager):
+    """Keep the "Peaks pick" markers in Stash in step with the picks — when the
+    setting is on and something changed, and nothing heavy is running."""
+    if (jobs.stopped_by_you("pickmarkers") or jobs.running("pickmarkers")
+            or any(jobs.running(k) for k in _PICTURE_WAIT_FOR) or not service.pick_markers_due()):
+        return None
+    try:
+        return jobs.start("pickmarkers", service.run_pick_markers)
+    except RuntimeError:
+        return None
+
+
 _ZOOM_WAIT_FOR = (*_PICTURE_WAIT_FOR, "zoom")
 _zoom_next = {"at": 0.0}
 
@@ -4001,6 +4035,7 @@ def _scheduler_steps(service: Service, jobs: JobManager, state: dict, _embed_the
         Step("embeds", lambda: _scheduled_embeds(service, jobs, state, secs(), _embed_then_sync), embeds_next),
         Step("resume", lambda: _resume_paused(service, jobs)),
         Step("picture", lambda: _start_picture(service, jobs)),
+        Step("pick-markers", lambda: _start_pick_markers(service, jobs)),
         Step("zoom", lambda: _start_zoom(service, jobs), sense_next(_zoom_next)),
         Step("hear", lambda: _start_hear(service, jobs), sense_next(_hear_next)),
         Step("motion", lambda: _start_motion(service, jobs), sense_next(_motion_next)),

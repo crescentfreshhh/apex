@@ -44,6 +44,7 @@ from .momentcheck import MomentCheckMixin
 from .trend import TrendMixin
 from .concepts import ConceptsMixin
 from .zoom import ZoomMixin
+from .pickmarkers import PickMarkersMixin
 from .lab import LabMixin
 from .settle import FAST_RETRAIN, SettleMixin
 from .hear import HearMixin
@@ -71,7 +72,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
               VerdictMixin, SeedboxMixin, PerfReviewMixin, FindMixin, StudiosMixin,
               PictureMixin, UpgradesMixin, SeedJobsMixin, OrphansMixin,
               ArbiterMixin, MomentCheckMixin, TrendMixin, ConceptsMixin, ZoomMixin, LabMixin, SettleMixin,
-              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin, TimelineMixin, CriteriaMixin):
+              HearMixin, MotionMixin, SenseExploreMixin, FacesMixin, DiscoverMixin, TimelineMixin, CriteriaMixin,
+              PickMarkersMixin):
     @property
     def gpu(self) -> GpuLease:
         """The GPU lease (peaks.gpu): who holds the card, batches, text-search borrows."""

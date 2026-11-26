@@ -357,7 +357,31 @@ $("#bk-upload")?.addEventListener("change", async (e) => {
   } catch (err) { toast(err.message, true); }
   e.target.value = "";
 });
+// Peaks's picks as Stash markers (opt-in): HereSphere and Stash's player show them on the timeline
+async function loadPickMarkers() {
+  const box = $("#chk-pick-markers"); if (!box) return;
+  try {
+    const s = await api("/api/pick-markers");
+    box.checked = s.on;
+    $("#pick-markers-status").textContent = s.on ? `on — ${s.written.toLocaleString()} scene(s) marked so far` : "off";
+  } catch (e) { $("#pick-markers-status").textContent = e.message; }
+}
+$("#chk-pick-markers")?.addEventListener("change", async (e) => {
+  try {
+    const s = await api("/api/pick-markers", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: e.target.checked }) });
+    toast(s.on ? "Peaks picks will be written to Stash in the background" : "Peaks pick markers will be removed from Stash");
+  } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+  loadPickMarkers();
+});
+$("#btn-pick-markers-remove")?.addEventListener("click", async () => {
+  if (!confirm("Delete every “Peaks pick” marker in Stash? Your saved moments are not touched.")) return;
+  try { await api("/api/pick-markers/remove", { method: "POST" }); toast("Removing Peaks pick markers…"); }
+  catch (err) { toast(err.message, true); }
+  loadPickMarkers();
+});
 function showSettingsSection(sec) {
+  if (sec === "playback") loadPickMarkers();
   if (sec === "backup") loadBackup();
   if (sec === "picture") loadPicSettings();
   if (sec === "upgrades") loadUpgSettings();

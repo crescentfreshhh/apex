@@ -29,7 +29,24 @@ class FakeStash:
             yield SimpleNamespace(id=sid)
 
     def iter_markers_by_tag(self, tag):
-        yield from self.markers
+        # markers without a "tag" are the taste tag's (saved moments), as before
+        for m in self.markers:
+            if m.get("tag") == tag or (m.get("tag") is None and tag != "Peaks pick"):
+                yield m
+
+    def create_scene_marker(self, scene_id, seconds, primary_tag_id, title="", end_seconds=None):
+        mid = str(5000 + len(self.markers) + len([c for c in self.calls if c[0] == "marker_create"]))
+        tag = self.tags.get(str(primary_tag_id))
+        self.markers.append({"marker_id": mid, "scene_id": str(scene_id), "seconds": seconds,
+                             "end_seconds": end_seconds, "title": title, "tag": tag})
+        self.calls.append(("marker_create", str(scene_id), round(float(seconds), 2), title))
+        return {"id": mid}
+
+    def destroy_scene_markers(self, marker_ids, chunk=100):
+        gone = {str(m) for m in marker_ids}
+        self.markers = [m for m in self.markers if str(m.get("marker_id")) not in gone]
+        self.calls.append(("marker_destroy", sorted(gone)))
+        return len(gone)
 
     def scene_details(self, ids):
         out = {}

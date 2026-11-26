@@ -721,6 +721,11 @@
           <div class="field"><div class="l"><b>Match on the whole peak</b><span>“find similar”</span></div>
             <label class="check" title="Match a moment by the mean of its frames instead of one midpoint frame. Query-time only.">
               <input type="checkbox" id="chk-peak-pool" /> average a moment's frames (steadier) — off = single frame</label></div>
+          <div class="field"><div class="l"><b>Peaks's picks in other players</b><span>HereSphere · Stash's player</span></div>
+            <div><label class="check" title="Each scene's top 3 moments as Stash markers under their own tag, “Peaks pick” — apart from your saved moments, which Peaks learns from">
+              <input type="checkbox" id="chk-pick-markers" /> write each scene's top 3 picks to Stash as markers (tag “Peaks pick”)</label>
+              <div class="row"><span id="pick-markers-status" class="faint small"></span>
+                <button id="btn-pick-markers-remove" class="btn sm ghost" title="Delete every “Peaks pick” marker in Stash — your saved moments are never touched">Remove all Peaks pick markers</button></div></div></div>
         </div>
         <div class="sec" data-sec="export" hidden>
           <h2>Export</h2>
