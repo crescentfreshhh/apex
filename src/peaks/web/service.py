@@ -5320,6 +5320,10 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
             try:
                 self._catalogue_fetch(refresh=full)
                 self.organize_vr_keepers()                # VR rated in HereSphere: organized, as your keepers are
+                try:
+                    self.sync_teach_tag()                 # the top VR "teach" scenes, tagged for HereSphere
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception:  # noqa: BLE001 — Stash blip: keep serving the cache
                 pass
             finally:
@@ -5348,6 +5352,93 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         a = tier_of(old.get("rating100"), old.get("o_counter"), vr=True)
         b = tier_of(new.get("rating100"), new.get("o_counter"), vr=True)
         return int(a != b and b in ("exceptionnelle", "legendaire", "rejected"))
+
+    # --- Teach Peaks (peaks.teach): the ungraded scenes that would teach the models most --------
+
+    TEACH_TAG = "Peaks · teach me"
+    TEACH_TAG_N = 20
+
+    def _vr_teach(self, rows: list[dict], cands: list[dict], limit: int | None = None) -> list[dict]:
+        """VR, ranked: from the VR model's guesses once it's trained, else by the
+        gaps it still has (likely rejects, unseen studios) — no index needed."""
+        from .. import teach
+        from ..vr_model import label_of
+
+        graded = [r for r in rows if r.get("vr") and label_of(r.get("tier"))]
+        names = self.tier_display_names()
+        st = self.vr_model_status()
+        if st["trained"]:
+            return teach.rank(cands, self._vr_predictions(rows), graded, names, limit=limit)
+        from ..vr_model import CLASSES as VR_CLASSES, MIN_PER_CLASS
+
+        have = {c: sum(label_of(r.get("tier")) == c for r in graded) for c in VR_CLASSES}
+        have["reject"] += len(self.store().map_all("vr_rejects"))          # remembered after deletion
+        needs = {c: MIN_PER_CLASS - n for c, n in have.items() if n < MIN_PER_CLASS}
+        try:
+            vrq = self.vr_quality()
+        except Exception:  # noqa: BLE001
+            vrq = {}
+        return teach.rank_vr_gaps(cands, vrq, graded, needs, names, limit=limit)
+
+    def teach_list(self, pool: list[dict], preds: dict, limit: int = 300) -> list[dict]:
+        """The "Teach Peaks" view: ungraded scenes, flat and VR taking turns, the
+        ones an answer would teach most first, each with its reason."""
+        from .. import teach
+        from ..tier_model import train_class
+
+        rows = self._catalogue_all()
+        flat_graded = [r for r in rows if not r.get("vr") and train_class(r["tier"])]
+        flat = [r for r in pool if r["tier"] == "unreviewed" and not r.get("vr")
+                and (preds.get(r["scene_id"]) or {}).get("from") not in ("vr",)]
+        vr = [r for r in pool if r["tier"] == "unreviewed" and r.get("vr")]
+        a = teach.rank(flat, preds, flat_graded, self.tier_display_names(), limit=limit) if flat else []
+        b = self._vr_teach(rows, vr, limit=limit) if vr else []
+        out = []
+        for i in range(max(len(a), len(b))):
+            out += [x for x in (a[i] if i < len(a) else None, b[i] if i < len(b) else None) if x]
+        return out[:limit]
+
+    def teach_tag_settings(self) -> dict:
+        return {"on": bool((self._settings().get("teach_tag") or {}).get("on", True)), "tag": self.TEACH_TAG,
+                "n": self.TEACH_TAG_N}
+
+    @_settings_saver
+    def save_teach_tag(self, on) -> dict:
+        from .inputs import as_bool
+
+        s = dict(self._settings())
+        s["teach_tag"] = {"on": as_bool(on, "on")}
+        self._save_settings_dict(s)
+        return self.teach_tag_settings()
+
+    def sync_teach_tag(self) -> dict:
+        """The top VR "teach" scenes carry the "Peaks · teach me" tag, so HereSphere
+        can filter by it; graded ones lose it at the next check. Off: the tag comes
+        off everywhere. Background only (the catalogue refresh), never in a request."""
+        rows = self._catalogue_all()                    # (a settings save drops the cached listing)
+        client = self.client()
+        tag = client.find_tag_by_name(self.TEACH_TAG)
+        tid = str(tag.id) if tag else None
+        have = {r["scene_id"]: r for r in rows if tid and tid in [str(t) for t in r.get("tag_ids") or []]}
+        want: set[str] = set()
+        if self.teach_tag_settings()["on"]:
+            cands = [r for r in rows if r.get("vr") and r["tier"] == "unreviewed"]
+            want = {r["scene_id"] for r in self._vr_teach(rows, cands, limit=self.TEACH_TAG_N)}
+        add = sorted(want - set(have))
+        drop = sorted(set(have) - want)
+        if add:
+            if tid is None:
+                tid = str(client.find_or_create_tag(self.TEACH_TAG).id)
+            client.add_scene_tags(add, [tid])
+        for sid in drop:
+            client.update_scene(sid, tag_ids=[t for t in have[sid].get("tag_ids") or [] if str(t) != tid])
+        if add or drop:
+            try:
+                for sid, m in self._meta_client().scene_details(add + drop).items():
+                    self._cat_put_row(sid, m)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"added": len(add), "removed": len(drop)}
 
     def organize_vr_keepers(self) -> int:
         """VR rated 4★/5★ outside Peaks (HereSphere sets only the rating) is marked
@@ -6903,7 +6994,7 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
                 "detail": f"{round(100 * share)}% {label}"}
 
     TRIAGE_VIEWS = ("likely", "quality", "drain", "promote", "second", "anomaly", "conflict", "saved", "trim",
-                    "passed", "orphans", "settle")
+                    "passed", "orphans", "settle", "teach")
     DRAIN_SURE = 0.8      # drain suggestions this sure are offered as one bulk grade per tier
     # tiers a saved moment promotes to Légendaire (a 1★ is your verdict — never)
     PROMOTABLE = ("unreviewed", "merveilleuse", "exceptionnelle", "anomaly")
@@ -7140,6 +7231,8 @@ class Service(LibraryMixin, PerformersMixin, TodayMixin, BackupMixin, WatchMixin
         signals = signals or {}
         if view == "settle":
             return self.settle_queue(pool, preds)
+        if view == "teach":
+            return self.teach_list(pool, preds)
         if view == "saved":
             # scenes you've saved moments in that aren't Légendaire yet — most saves first
             out = [r for r in pool if r["tier"] in self.PROMOTABLE

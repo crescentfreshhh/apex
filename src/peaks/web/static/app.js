@@ -366,6 +366,17 @@ async function loadPickMarkers() {
     $("#pick-markers-status").textContent = s.on ? `on — ${s.written.toLocaleString()} scene(s) marked so far` : "off";
   } catch (e) { $("#pick-markers-status").textContent = e.message; }
 }
+async function loadTeachTag() {
+  const box = $("#chk-teach-tag"); if (!box) return;
+  try { box.checked = (await api("/api/teach-tag")).on; } catch {}
+}
+$("#chk-teach-tag")?.addEventListener("change", async (e) => {
+  try {
+    const s = await api("/api/teach-tag", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: e.target.checked }) });
+    toast(s.on ? "The top VR “teach” scenes will be tagged for HereSphere" : "The “Peaks · teach me” tag comes off at the next check");
+  } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+});
 $("#chk-pick-markers")?.addEventListener("change", async (e) => {
   try {
     const s = await api("/api/pick-markers", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -381,7 +392,7 @@ $("#btn-pick-markers-remove")?.addEventListener("click", async () => {
   loadPickMarkers();
 });
 function showSettingsSection(sec) {
-  if (sec === "playback") loadPickMarkers();
+  if (sec === "playback") { loadPickMarkers(); loadTeachTag(); }
   if (sec === "backup") loadBackup();
   if (sec === "picture") loadPicSettings();
   if (sec === "upgrades") loadUpgSettings();
@@ -5178,6 +5189,7 @@ const cat = { tier: "unreviewed", view: "", items: [], total: 0, counts: {}, vie
               focus: 0, loaded: false, busy: false, sel: new Set(), anchor: null, bulkBusy: false,
               isNew: false, sortTouched: false, sortDir: "" };
 const CAT_VIEWS = [
+  ["teach", "Teach Peaks", "Ungraded scenes whose grade would teach Peaks the most — the ones it's torn on, or knows least about (a new studio or performer) — flat and VR taking turns. A few dozen from here sharpen the suggestions more than many in any other order."],
   ["settle", "Settle the library", "Graded scenes only: every grade Peaks' honest verdict disagrees with (surest first — keep yours or re-grade), and the scenes left in a retiring tier to place. Answer in Review."],
   ["likely", "Likely keepers", "Unreviewed scenes that look most like your best tiers"],
   ["quality", "Quality check", "Unreviewed scenes below the quality of everything you've tiered — quick reject candidates"],
@@ -6101,6 +6113,7 @@ function catCardHTML(r, i) {
       <div class="qual">${qualityChips(r)}${r.vr ? "" : picChipHTML(r.picture)}</div>${r.vr ? vrqHTML(r.vrq) : ""}
       ${sigLine(r)}${predLine}${whoLines(r)}${flag}${suggest}${tagLine(r)}
       ${cat.view === "orphans" ? `<div class="orph" data-sid="${esc(r.scene_id)}">${orphHTML(r.scene_id)}</div>` : ""}
+      ${cat.view === "teach" && r.teach ? `<div class="teach-why">🎓 ${esc(r.teach.why)}</div>` : ""}
     </div>
     <div class="cat-moments">${moments || '<span class="faint small">moments appear once embedded</span>'}</div>
     <div class="cat-grades">${grades}</div>

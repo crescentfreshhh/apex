@@ -2368,6 +2368,24 @@ def create_app(cfg=None):
     def performer_uncredited(pid: str):
         return service.face_uncredited(pid)
 
+    @app.get("/api/teach-tag")
+    def teach_tag_get():
+        return service.teach_tag_settings()
+
+    @app.post("/api/teach-tag")
+    def teach_tag_set(body: dict = Body(...)):
+        import threading
+
+        out = service.save_teach_tag(body.get("on"))
+
+        def _sync():
+            try:
+                service.sync_teach_tag()
+            except Exception:  # noqa: BLE001 — the next check tries again
+                pass
+        threading.Thread(target=_sync, daemon=True, name="peaks-teach-tag").start()   # now, not at the next check
+        return out
+
     @app.get("/api/pick-markers")
     def pick_markers_get():
         return service.pick_markers_settings()
